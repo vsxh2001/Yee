@@ -507,23 +507,30 @@ const MOM_002_Z0_REF: f64 = 50.0;
 /// impedance.
 ///
 /// **This is intentionally NOT the brief's `25 Ω` factor-of-two bound
-/// around 50 Ω.** The free-space [`yee_mom::PlanarMoM`] path does not
-/// see the substrate `ε_r = 4.4` or the ground plane, so the
-/// "microstrip" geometry behaves more like a free-space planar strip
-/// radiator. Empirically the placeholder produces `|Z_in| ≈ 1.2 kΩ`
-/// at 1 GHz on the `30 mm × 2.94 mm` strip — orders of magnitude
-/// above 50 Ω, but a valid non-degenerate solve. The wider bound
-/// admits the placeholder physics floor while still failing loudly
-/// on any genuine pipeline regression (mesh broken, port edges
-/// empty, LU residual exploding, etc.).
+/// around 50 Ω.** The path now routes through
+/// [`yee_mom::GreensSpec::Microstrip`], but the underlying kernel is
+/// still the one-image DCIM placeholder
+/// ([`yee_mom::MultilayerGreens`](yee_mom::multilayer), CLAUDE.md §10)
+/// with a collapsed TE / TM split — the substrate is only crudely
+/// reflected in the impedance, so the result remains
+/// orders-of-magnitude away from the Hammerstad-Jensen 50 Ω target.
+/// The wider bound admits this placeholder physics floor while still
+/// failing loudly on any genuine pipeline regression (mesh broken,
+/// port edges empty, LU residual exploding, etc.).
 const MOM_002_Z_MIN: f64 = 1.0;
-/// Loose upper bound on `|Z_in|` (Ω). Pinned at 10 kΩ: well above
-/// the ~1.2 kΩ free-space placeholder result, well below any
-/// numerically explosive failure mode. Phase 1.1.1 will replace this
-/// loose bracket with the published-benchmark ±3% Hammerstad-Jensen
-/// gate around 50 Ω once `PlanarMoM` routes through the real
-/// multilayer Green's function.
-const MOM_002_Z_MAX: f64 = 10_000.0;
+/// Loose upper bound on `|Z_in|` (Ω). Pinned at 100 kΩ: the Phase
+/// 1.1.x [`yee_mom::GreensSpec::Microstrip`] placeholder (a one-image
+/// DCIM with collapsed TE/TM split) produces `|Z_in| ≈ 14 kΩ` on the
+/// `30 mm × 2.94 mm` strip at 1 GHz — well above the ~1.2 kΩ
+/// free-space value but still far from a numerically explosive
+/// failure mode. Bumping the upper bound to 100 kΩ admits the
+/// multilayer placeholder result while still failing loudly on any
+/// genuine pipeline regression (mesh broken, port edges empty, LU
+/// residual exploding, etc.). Phase 1.1.1 will replace this loose
+/// bracket with the published-benchmark ±3% Hammerstad-Jensen gate
+/// around 50 Ω once `PlanarMoM` routes through the real multilayer
+/// Green's function.
+const MOM_002_Z_MAX: f64 = 100_000.0;
 
 /// Coarse frequency-sweep extent for the plot artifacts. 0.5 GHz to
 /// 1.5 GHz brackets the 1 GHz probe point on either side without
@@ -531,6 +538,18 @@ const MOM_002_Z_MAX: f64 = 10_000.0;
 const MOM_002_PLOT_F_MIN_HZ: f64 = 0.5e9;
 const MOM_002_PLOT_F_MAX_HZ: f64 = 1.5e9;
 const MOM_002_PLOT_N_POINTS: usize = 21;
+
+/// Substrate relative permittivity for the FR-4 microstrip case
+/// (Hammerstad-Jensen reference geometry). Passed into the
+/// `GreensSpec::Microstrip` placeholder so mom-002 exercises the
+/// multilayer code path rather than the free-space kernel. The
+/// one-image DCIM placeholder (CLAUDE.md §10) does not yet recover
+/// the closed-form Z₀ — Phase 1.1.1 Sommerfeld extraction is required
+/// for that. See `MOM_002_Z_MIN` / `MOM_002_Z_MAX` for the loose
+/// non-degeneracy bound that holds in the interim.
+const MOM_002_SUBSTRATE_EPS_R: f64 = 4.4;
+/// Substrate thickness `h` (m) for the FR-4 microstrip case.
+const MOM_002_SUBSTRATE_H_M: f64 = 1.6e-3;
 
 /// Build a rectangular strip mesh in the `z = 0` plane, length along
 /// `x ∈ [0, L]`, width along `y ∈ [-w/2, w/2]`.
@@ -596,19 +615,20 @@ fn mom_002_strip_mesh(
 ///
 /// Builds a rectangular strip mesh (length 30 mm, width 2.94 mm, the
 /// Hammerstad-Jensen 50 Ω geometry on FR-4 `h = 1.6 mm, ε_r = 4.4`),
-/// runs the free-space [`yee_mom::PlanarMoM`] sweep at 1 GHz, and
+/// runs the [`yee_mom::PlanarMoM`] sweep at 1 GHz through the
+/// [`yee_mom::GreensSpec::Microstrip`] placeholder kernel, and
 /// extracts `Z_in = Z₀(1 + S₁₁)/(1 − S₁₁)`. Passes iff
 /// `MOM_002_Z_MIN ≤ |Z_in| ≤ MOM_002_Z_MAX` — a deliberately wide
 /// non-degeneracy bound (1 Ω … 10 kΩ) chosen to admit the placeholder
 /// physics floor.
 ///
-/// **This is explicitly NOT a Hammerstad-Jensen ±3% gate.** The
-/// `MultilayerGreens` placeholder (CLAUDE.md §10) is a one-image DCIM
-/// approximation, and the current `PlanarMoM::run` always uses the
-/// free-space Green's function — the substrate ε_r = 4.4 and ground
-/// plane do not enter the numerics yet. The extracted impedance
-/// therefore reflects a strip *in free space*, not a real microstrip,
-/// and lands closer to a kilo-ohm radiating-strip value than to 50 Ω.
+/// **This is explicitly NOT a Hammerstad-Jensen ±3% gate.** The path
+/// now exercises [`yee_mom::MultilayerGreens`](yee_mom::multilayer) via
+/// `with_greens`, but the underlying kernel is still the Phase 1.1.0
+/// one-image DCIM approximation (CLAUDE.md §10) — the TE / TM split
+/// is collapsed and only a single real-axis image is fitted. The
+/// extracted impedance therefore reflects a coarse multilayer
+/// approximation, not a Hammerstad-Jensen-faithful microstrip.
 /// The bound here only checks "non-degenerate impedance was
 /// extracted" — i.e., it fails loudly if the end-to-end pipe
 /// (mesh → solver → S-parameters → plot artifacts) breaks, while
@@ -617,7 +637,7 @@ fn mom_002_strip_mesh(
 /// loose bracket with the ±3% Hammerstad-Jensen gate around 50 Ω.
 fn run_mom_002() -> CaseResult {
     use yee_core::{FreqRange, Solver};
-    use yee_mom::PlanarMoM;
+    use yee_mom::{GreensSpec, PlanarMoM};
 
     let t0 = Instant::now();
     let result: Result<Complex64, Error> = (|| -> Result<Complex64, Error> {
@@ -631,7 +651,15 @@ fn run_mom_002() -> CaseResult {
         // for a one-point evaluation (same convention as run_mom_001).
         let freq = FreqRange::new(MOM_002_F_HZ, MOM_002_F_HZ + 1.0, 1)
             .map_err(|e| Error::Solver(format!("FreqRange::new: {e}")))?;
-        let solver = PlanarMoM::default();
+        // Phase 1.1.x: route through MultilayerGreens. The one-image
+        // DCIM placeholder still does not recover Hammerstad-Jensen
+        // Z₀ ≈ 50 Ω — that gate unlocks with Phase 1.1.1 real
+        // Sommerfeld extraction — but the path now exercises the
+        // multilayer kernel rather than free space.
+        let solver = PlanarMoM::default().with_greens(GreensSpec::microstrip(
+            MOM_002_SUBSTRATE_EPS_R,
+            MOM_002_SUBSTRATE_H_M,
+        ));
         let s = solver
             .run(&mesh, freq)
             .map_err(|e| Error::Solver(format!("PlanarMoM::run: {e}")))?;
@@ -651,16 +679,17 @@ fn run_mom_002() -> CaseResult {
             };
             let notes = format!(
                 "Z_in = {:.3} + j{:.3} Ohm, |Z_in| = {:.3} Ohm at {:.3} GHz \
-                 (loose non-degeneracy bound [{:.1}, {:.0}] Ohm — placeholder \
-                 free-space Green's does not see FR-4 substrate or ground plane; \
-                 expected to diverge from the 50 Ohm Hammerstad-Jensen target). \
-                 Loose tolerance pending Phase 1.1.1 Sommerfeld — order-of-magnitude only",
+                 (loose non-degeneracy bound [{:.1}, {:.0}] Ohm — now exercises \
+                 MultilayerGreens placeholder via with_greens (eps_r={:.2}, h={:.2} mm); \
+                 real 50 Ohm measurement still gated on Phase 1.1.1 Sommerfeld extraction)",
                 z_in.re,
                 z_in.im,
                 z_mag,
                 MOM_002_F_HZ * 1e-9,
                 MOM_002_Z_MIN,
                 MOM_002_Z_MAX,
+                MOM_002_SUBSTRATE_EPS_R,
+                MOM_002_SUBSTRATE_H_M * 1e3,
             );
             (status, notes)
         }
@@ -705,7 +734,7 @@ fn run_mom_002() -> CaseResult {
 /// Failed.
 fn generate_mom_002_plots() -> Result<Vec<PathBuf>, Error> {
     use yee_core::{FreqRange, Solver};
-    use yee_mom::PlanarMoM;
+    use yee_mom::{GreensSpec, PlanarMoM};
     use yee_plotters::{PlotConfig, PlotFormat, plot_s11_db, plot_smith_chart};
 
     let mesh = mom_002_strip_mesh(
@@ -720,7 +749,13 @@ fn generate_mom_002_plots() -> Result<Vec<PathBuf>, Error> {
         MOM_002_PLOT_N_POINTS,
     )
     .map_err(|e| Error::Solver(format!("FreqRange::new (plot sweep): {e}")))?;
-    let solver = PlanarMoM::default();
+    // Phase 1.1.x: route plot sweep through MultilayerGreens so the
+    // generated PNGs reflect the same kernel as the headline gate
+    // result. See `run_mom_002` comment for the placeholder caveat.
+    let solver = PlanarMoM::default().with_greens(GreensSpec::microstrip(
+        MOM_002_SUBSTRATE_EPS_R,
+        MOM_002_SUBSTRATE_H_M,
+    ));
     let s = solver
         .run(&mesh, freq)
         .map_err(|e| Error::Solver(format!("PlanarMoM::run (plot sweep): {e}")))?;
@@ -741,7 +776,7 @@ fn generate_mom_002_plots() -> Result<Vec<PathBuf>, Error> {
         &PlotConfig {
             width_px: 800,
             height_px: 600,
-            title: "mom-002 |S11| dB (free-space placeholder, loose tolerance)".to_string(),
+            title: "mom-002 |S11| dB (MultilayerGreens placeholder, loose tolerance)".to_string(),
             format: PlotFormat::Png,
         },
     )
@@ -753,7 +788,7 @@ fn generate_mom_002_plots() -> Result<Vec<PathBuf>, Error> {
         &PlotConfig {
             width_px: 600,
             height_px: 600,
-            title: "mom-002 S11 Smith chart (free-space placeholder)".to_string(),
+            title: "mom-002 S11 Smith chart (MultilayerGreens placeholder)".to_string(),
             format: PlotFormat::Png,
         },
     )
