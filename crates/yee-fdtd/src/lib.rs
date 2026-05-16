@@ -39,13 +39,17 @@
 
 pub mod boundary;
 pub mod cpml;
+pub mod dispersive;
 pub mod grid;
+pub mod material;
 pub mod ntff;
 pub mod sources;
 pub mod update;
 
 pub use cpml::{CpmlParams, CpmlState};
+pub use dispersive::DispersiveState;
 pub use grid::YeeGrid;
+pub use material::{Material, MaterialMap};
 pub use ntff::{NtffParams, NtffState};
 
 /// FDTD-layer errors.
