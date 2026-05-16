@@ -154,8 +154,8 @@ pub fn plot_s11_db(
             )
         }
         PlotFormat::Svg => {
-            let root = SVGBackend::new(out_path, (config.width_px, config.height_px))
-                .into_drawing_area();
+            let root =
+                SVGBackend::new(out_path, (config.width_px, config.height_px)).into_drawing_area();
             draw_xy_line(
                 &root,
                 &config.title,
@@ -214,8 +214,8 @@ pub fn plot_s11_phase(
             )
         }
         PlotFormat::Svg => {
-            let root = SVGBackend::new(out_path, (config.width_px, config.height_px))
-                .into_drawing_area();
+            let root =
+                SVGBackend::new(out_path, (config.width_px, config.height_px)).into_drawing_area();
             draw_xy_line(
                 &root,
                 &config.title,
@@ -256,8 +256,8 @@ pub fn plot_smith_chart(
             draw_smith(&root, &config.title, s11)
         }
         PlotFormat::Svg => {
-            let root = SVGBackend::new(out_path, (config.width_px, config.height_px))
-                .into_drawing_area();
+            let root =
+                SVGBackend::new(out_path, (config.width_px, config.height_px)).into_drawing_area();
             draw_smith(&root, &config.title, s11)
         }
     }

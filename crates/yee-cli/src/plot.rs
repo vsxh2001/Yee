@@ -42,10 +42,7 @@ pub(crate) fn run_plot(args: PlotArgs) -> Result<ExitCode> {
 
     let n = file.n_ports;
     if args.port >= n {
-        anyhow::bail!(
-            "port index {} out of range (file has {n} ports)",
-            args.port
-        );
+        anyhow::bail!("port index {} out of range (file has {n} ports)", args.port);
     }
 
     // Diagonal entry S[port][port]. `file.data[k]` is row-major n×n.

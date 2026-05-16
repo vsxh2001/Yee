@@ -82,7 +82,10 @@ fn ntff_recovers_dipole_pattern_broadside() {
     eprintln!("|E_far(endfire,  θ=0)|         = {mag_end:.3e}");
     assert!(mag_broad.is_finite(), "broadside non-finite");
     assert!(mag_end.is_finite(), "endfire non-finite");
-    assert!(mag_broad > 0.0, "broadside is zero — no radiation captured?");
+    assert!(
+        mag_broad > 0.0,
+        "broadside is zero — no radiation captured?"
+    );
 
     let ratio = if mag_end > 0.0 {
         mag_broad / mag_end

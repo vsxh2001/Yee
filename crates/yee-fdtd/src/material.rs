@@ -90,7 +90,11 @@ impl Material {
     pub fn permittivity(&self, omega: f64) -> Complex64 {
         match *self {
             Material::Vacuum => Complex64::new(1.0, 0.0),
-            Material::Drude { eps_inf, omega_p, gamma } => {
+            Material::Drude {
+                eps_inf,
+                omega_p,
+                gamma,
+            } => {
                 // ε = ε∞ − ω_p² / (ω² − j γ ω)
                 let denom = Complex64::new(omega * omega, -gamma * omega);
                 Complex64::new(eps_inf, 0.0) - Complex64::new(omega_p * omega_p, 0.0) / denom
@@ -106,7 +110,11 @@ impl Material {
                 Complex64::new(eps_inf, 0.0)
                     + Complex64::new(delta_eps * omega_0 * omega_0, 0.0) / denom
             }
-            Material::Debye { eps_inf, delta_eps, tau } => {
+            Material::Debye {
+                eps_inf,
+                delta_eps,
+                tau,
+            } => {
                 // ε = ε∞ + Δε / (1 + j ω τ)
                 let denom = Complex64::new(1.0, omega * tau);
                 Complex64::new(eps_inf, 0.0) + Complex64::new(delta_eps, 0.0) / denom
@@ -220,7 +228,11 @@ mod tests {
         let e_lo = m.permittivity(2.0 * PI * 1e8);
         let e_hi = m.permittivity(2.0 * PI * 1e12);
         // Below plasma: negative real part.
-        assert!(e_lo.re < 0.0, "Drude eps below ω_p should be negative, got {}", e_lo.re);
+        assert!(
+            e_lo.re < 0.0,
+            "Drude eps below ω_p should be negative, got {}",
+            e_lo.re
+        );
         // Far above plasma: approaches eps_inf from below.
         assert!(e_hi.re > 0.0 && e_hi.re < 1.0);
     }
@@ -238,7 +250,11 @@ mod tests {
             gamma: 2.0 * PI * 1e8,
         };
         let e = m.permittivity(2.0 * PI * 1e10);
-        assert!(e.im < 0.0, "lossy Drude should have negative Im(ε), got {}", e.im);
+        assert!(
+            e.im < 0.0,
+            "lossy Drude should have negative Im(ε), got {}",
+            e.im
+        );
     }
 
     #[test]

@@ -138,11 +138,7 @@ impl DispersiveState {
     /// - [`Material::Drude`] → Taflove §9.4.3 ADE.
     /// - [`Material::Lorentz`] → Taflove §9.5.2 polarization ADE.
     /// - [`Material::Debye`] → Taflove §9.6.2 polarization ADE.
-    pub fn update_e_with_dispersion(
-        &mut self,
-        grid: &mut YeeGrid,
-        materials: &MaterialMap,
-    ) {
+    pub fn update_e_with_dispersion(&mut self, grid: &mut YeeGrid, materials: &MaterialMap) {
         let dt = grid.dt;
         let dx = grid.dx;
         let dy = grid.dy;
@@ -259,7 +255,11 @@ fn ade_step(
             let e_new = e_old + (dt / EPS0) * curl_h;
             (e_new, jp_old, jp_prev_old, p_old)
         }
-        Material::Drude { eps_inf, omega_p, gamma } => {
+        Material::Drude {
+            eps_inf,
+            omega_p,
+            gamma,
+        } => {
             // Taflove §9.4.3. Update J at the new half-step:
             //   J^{n+1/2} = α J^{n-1/2} + β E^n
             // where α and β below; then update E using the J average for
@@ -294,20 +294,21 @@ fn ade_step(
             let p_np1 = alpha_l * p_n + beta_l * p_nm1 + gamma_l * e_old;
             // E^{n+1} = E^n + (dt/(ε∞ ε₀)) · (curl_H − (P^{n+1} − P^n)/dt)
             //        = E^n + (dt/(ε∞ ε₀)) · curl_H − (1/(ε∞ ε₀))(P^{n+1} − P^n).
-            let e_new = e_old
-                + (dt / (eps_inf * EPS0)) * curl_h
-                - (p_np1 - p_n) / (eps_inf * EPS0);
+            let e_new = e_old + (dt / (eps_inf * EPS0)) * curl_h - (p_np1 - p_n) / (eps_inf * EPS0);
             (e_new, p_np1, p_n, p_old)
         }
-        Material::Debye { eps_inf, delta_eps, tau } => {
+        Material::Debye {
+            eps_inf,
+            delta_eps,
+            tau,
+        } => {
             // Taflove §9.6.2 first-order ADE on P:
             //   P^{n+1} = P^n + (dt/τ) · (ε₀ · Δε · E^n − P^n)
             // and
             //   E^{n+1} = E^n + (dt/(ε∞ ε₀)) · curl_H − (P^{n+1} − P^n)/(ε∞ ε₀)
             let p_new = p_old + (dt / tau) * (EPS0 * delta_eps * e_old - p_old);
-            let e_new = e_old
-                + (dt / (eps_inf * EPS0)) * curl_h
-                - (p_new - p_old) / (eps_inf * EPS0);
+            let e_new =
+                e_old + (dt / (eps_inf * EPS0)) * curl_h - (p_new - p_old) / (eps_inf * EPS0);
             (e_new, jp_old, jp_prev_old, p_new)
         }
     }

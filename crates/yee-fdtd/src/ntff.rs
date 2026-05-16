@@ -384,9 +384,8 @@ impl NtffState {
                         (j as f64) * self.dy,
                         (k as f64) * self.dz,
                     ];
-                    let r_dot = r_hat[0] * r_prime[0]
-                        + r_hat[1] * r_prime[1]
-                        + r_hat[2] * r_prime[2];
+                    let r_dot =
+                        r_hat[0] * r_prime[0] + r_hat[1] * r_prime[1] + r_hat[2] * r_prime[2];
                     let phase = Complex64::from_polar(1.0, k_wave * r_dot);
 
                     let flat = vi * n_u + ui;
@@ -435,8 +434,7 @@ impl NtffState {
             prefactor * outer[2],
         ];
 
-        let mag_sq =
-            e_far_vec[0].norm_sqr() + e_far_vec[1].norm_sqr() + e_far_vec[2].norm_sqr();
+        let mag_sq = e_far_vec[0].norm_sqr() + e_far_vec[1].norm_sqr() + e_far_vec[2].norm_sqr();
         if mag_sq == 0.0 {
             return Complex64::new(0.0, 0.0);
         }
@@ -445,9 +443,12 @@ impl NtffState {
             .iter()
             .enumerate()
             .map(|(i, c)| (i, c.norm_sqr()))
-            .fold((0usize, 0.0f64), |(bi, bm), (i, m)| {
-                if m > bm { (i, m) } else { (bi, bm) }
-            });
+            .fold(
+                (0usize, 0.0f64),
+                |(bi, bm), (i, m)| {
+                    if m > bm { (i, m) } else { (bi, bm) }
+                },
+            );
         let rep = e_far_vec[rep_idx];
         // Scale `rep` so its magnitude equals the full vector
         // magnitude — this gives a single Complex64 whose |.| is the
@@ -526,13 +527,7 @@ fn sample_h_at(grid: &YeeGrid, i: usize, j: usize, k: usize) -> (f64, f64, f64) 
 /// (`axis = 0, 1, 2`). The pair is `index − 1` and `index` on `axis`;
 /// other indices are clamped into range so boundary nodes degrade to
 /// one-sided samples without panicking.
-fn average_pair_axis(
-    arr: &ndarray::Array3<f64>,
-    axis: usize,
-    i: usize,
-    j: usize,
-    k: usize,
-) -> f64 {
+fn average_pair_axis(arr: &ndarray::Array3<f64>, axis: usize, i: usize, j: usize, k: usize) -> f64 {
     let dims = arr.shape();
     let cap = [dims[0], dims[1], dims[2]];
     let ijk = [i, j, k];

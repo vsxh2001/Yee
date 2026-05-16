@@ -255,10 +255,7 @@ mod imp {
     /// Used by [`crate::backend::Backend::cusolver_zgetrf`]; not part of
     /// the [`super::DenseLuComplex`] flow (which keeps everything on the
     /// device for repeat solves).
-    pub(crate) fn zgetrf_host(
-        a: &[Complex64],
-        n: usize,
-    ) -> Result<(Vec<Complex64>, Vec<i32>)> {
+    pub(crate) fn zgetrf_host(a: &[Complex64], n: usize) -> Result<(Vec<Complex64>, Vec<i32>)> {
         let inner = factorize(a, n)?;
         let lu_f64 = inner.stream.clone_dtoh(&inner.lu).map_err(drv)?;
         let pivots = inner.stream.clone_dtoh(&inner.pivots).map_err(drv)?;
@@ -392,10 +389,10 @@ pub(crate) fn zgetrs_host(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(not(feature = "cuda"))]
-    use super::*;
     #[cfg(feature = "cuda")]
     use super::DenseLuComplex;
+    #[cfg(not(feature = "cuda"))]
+    use super::*;
     use num_complex::Complex64;
 
     #[cfg(not(feature = "cuda"))]

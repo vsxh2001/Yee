@@ -214,11 +214,7 @@ fn plot_rejects_unknown_extension() {
     let tmp = TempDir::new();
     let input = tmp.path().join("in.s1p");
     let output = tmp.path().join("out.bmp");
-    std::fs::write(
-        &input,
-        "# Hz S RI R 50\n1.0e9 0.1 0.2\n2.0e9 0.2 0.3\n",
-    )
-    .unwrap();
+    std::fs::write(&input, "# Hz S RI R 50\n1.0e9 0.1 0.2\n2.0e9 0.2 0.3\n").unwrap();
 
     Command::cargo_bin("yee")
         .unwrap()

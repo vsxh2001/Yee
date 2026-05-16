@@ -30,12 +30,7 @@ fn relative_complex_diff(a: Complex64, b: Complex64) -> f64 {
 /// precision. This is the Phase 1.1 generic-impedance-matrix smoke test.
 #[test]
 fn multilayer_eps_r_one_matches_free_space() {
-    let mesh = fixtures::cylinder::thin_cylinder(
-        DIPOLE_LEN_M,
-        DIPOLE_RADIUS_M,
-        N_AXIAL,
-        N_AROUND,
-    );
+    let mesh = fixtures::cylinder::thin_cylinder(DIPOLE_LEN_M, DIPOLE_RADIUS_M, N_AXIAL, N_AROUND);
     let f0 = yee_core::units::C0 / 2.0; // dipole resonance, λ = 2 m
 
     // eps_r = 1.0, h = 100 mm — placeholder microstrip stack. With Γ = 0
@@ -69,12 +64,7 @@ fn multilayer_eps_r_one_matches_free_space() {
 /// of `multilayer_eps_r_one_matches_free_space`.
 #[test]
 fn multilayer_large_h_matches_free_space() {
-    let mesh = fixtures::cylinder::thin_cylinder(
-        DIPOLE_LEN_M,
-        DIPOLE_RADIUS_M,
-        N_AXIAL,
-        N_AROUND,
-    );
+    let mesh = fixtures::cylinder::thin_cylinder(DIPOLE_LEN_M, DIPOLE_RADIUS_M, N_AXIAL, N_AROUND);
     let f0 = yee_core::units::C0 / 2.0;
 
     // ε_r = 4.4 (typical FR-4), h = 1e10 m → image is ≈ 2e10 m below the
@@ -109,12 +99,7 @@ fn multilayer_large_h_matches_free_space() {
 /// future DCIM extraction that re-introduces approximation noise.
 #[test]
 fn multilayer_spec_bound_at_150_mhz() {
-    let mesh = fixtures::cylinder::thin_cylinder(
-        DIPOLE_LEN_M,
-        DIPOLE_RADIUS_M,
-        N_AXIAL,
-        N_AROUND,
-    );
+    let mesh = fixtures::cylinder::thin_cylinder(DIPOLE_LEN_M, DIPOLE_RADIUS_M, N_AXIAL, N_AROUND);
     let freq_hz = 150.0e6;
 
     let mg = MultilayerGreens::new_microstrip(freq_hz, 1.0, 100.0e-3);

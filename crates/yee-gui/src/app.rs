@@ -12,7 +12,7 @@
 //! `rfd`-based pickers out of scope through Phase 1.gui.1 — see README).
 
 use crate::plots::{show_s11_db_plot, show_smith_chart};
-use crate::viewport::{thin_cylinder, MeshCallback, ViewportState};
+use crate::viewport::{MeshCallback, ViewportState, thin_cylinder};
 use egui_dock::{DockArea, DockState, NodeIndex, Style};
 use yee_io::touchstone::{self, File as TsFile};
 
@@ -216,8 +216,7 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
                 }
                 Some(f) => {
                     // S11 lives at row-major slot 0 for any port count.
-                    let s11: Vec<num_complex::Complex64> =
-                        f.data.iter().map(|m| m[0]).collect();
+                    let s11: Vec<num_complex::Complex64> = f.data.iter().map(|m| m[0]).collect();
                     match tab {
                         TabKind::S11Db => show_s11_db_plot(ui, &f.freq_hz, &s11),
                         TabKind::Smith => show_smith_chart(ui, &s11),
@@ -246,8 +245,7 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
 ///   infinity.
 fn show_mesh_viewport(ui: &mut egui::Ui, state: &mut ViewportState) {
     let available = ui.available_size_before_wrap();
-    let (rect, response) =
-        ui.allocate_exact_size(available, egui::Sense::click_and_drag());
+    let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click_and_drag());
 
     // Orbit interaction: drag to rotate.
     if response.dragged() {

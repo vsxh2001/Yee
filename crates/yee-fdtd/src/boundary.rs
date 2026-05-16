@@ -24,7 +24,9 @@ use crate::grid::YeeGrid;
 /// `E_z`. On the `y = 0` and `y = ny` faces they are `E_x` and `E_z`. On the
 /// `z = 0` and `z = nz` faces they are `E_x` and `E_y`. Normal `E` and all
 /// `H` components are left untouched.
-#[deprecated(note = "use CpmlState for production; PEC is reflecting and only suitable for cavities")]
+#[deprecated(
+    note = "use CpmlState for production; PEC is reflecting and only suitable for cavities"
+)]
 pub fn apply_pec(grid: &mut YeeGrid) {
     let nx = grid.nx;
     let ny = grid.ny;

@@ -36,8 +36,7 @@ use num_complex::Complex64;
 use yee_core::units::C0;
 
 use yee_fdtd::{
-    CpmlParams, CpmlState, DispersiveState, Material, MaterialMap,
-    WalkingSkeletonSolver, YeeGrid,
+    CpmlParams, CpmlState, DispersiveState, Material, MaterialMap, WalkingSkeletonSolver, YeeGrid,
 };
 
 /// Run the simulation, returning the E_z trace at `probe` for `n_steps`.
@@ -158,7 +157,11 @@ fn drude_slab_reflects_per_fresnel() {
 
     // Material map: Drude slab in [50, 70) along x (20 cells thick).
     let mut materials = MaterialMap::vacuum(N, N, N);
-    let drude = Material::Drude { eps_inf, omega_p, gamma };
+    let drude = Material::Drude {
+        eps_inf,
+        omega_p,
+        gamma,
+    };
     materials.set_box(50, 70, 0, N + 1, 0, N + 1, drude);
     assert!(materials.dispersive_cell_count() > 0);
 
@@ -166,7 +169,17 @@ fn drude_slab_reflects_per_fresnel() {
     let trace_ref = run_trace(N, DX, NPML, N_STEPS, source, probe, t0, sigma, None);
 
     // ---- Run 2: Drude slab. ----
-    let trace_slab = run_trace(N, DX, NPML, N_STEPS, source, probe, t0, sigma, Some(&materials));
+    let trace_slab = run_trace(
+        N,
+        DX,
+        NPML,
+        N_STEPS,
+        source,
+        probe,
+        t0,
+        sigma,
+        Some(&materials),
+    );
 
     // Sanity check: both finite.
     assert!(
@@ -274,7 +287,17 @@ fn vacuum_map_propagates_like_pure_vacuum() {
     drop(grid_ref);
 
     let materials = MaterialMap::vacuum(N, N, N);
-    let trace_disp = run_trace(N, DX, NPML, N_STEPS, source, probe, t0, sigma, Some(&materials));
+    let trace_disp = run_trace(
+        N,
+        DX,
+        NPML,
+        N_STEPS,
+        source,
+        probe,
+        t0,
+        sigma,
+        Some(&materials),
+    );
     let trace_ref = run_trace(N, DX, NPML, N_STEPS, source, probe, t0, sigma, None);
 
     // The dispersive path (vacuum material) skips CPML for the E update
@@ -287,7 +310,11 @@ fn vacuum_map_propagates_like_pure_vacuum() {
     let rel = (peak_ref - peak_disp).abs() / peak_ref;
     eprintln!("peak_ref={peak_ref:.3e}  peak_disp={peak_disp:.3e}  rel={rel:.3}");
     // Tolerance: 10% — different boundary handling between the two paths.
-    assert!(rel < 0.10, "vacuum vs vacuum-MaterialMap diverged by {:.2}%", 100.0 * rel);
+    assert!(
+        rel < 0.10,
+        "vacuum vs vacuum-MaterialMap diverged by {:.2}%",
+        100.0 * rel
+    );
 }
 
 #[cfg(test)]
@@ -304,7 +331,10 @@ mod analytical {
         };
         let eps = drude.permittivity(2.0 * PI * 1.0e10);
         let gamma = fresnel_gamma(eps).norm();
-        assert!(gamma > 0.5 && gamma < 1.0, "Γ at ENZ should be ~0.5–1, got {gamma}");
+        assert!(
+            gamma > 0.5 && gamma < 1.0,
+            "Γ at ENZ should be ~0.5–1, got {gamma}"
+        );
     }
 
     #[test]

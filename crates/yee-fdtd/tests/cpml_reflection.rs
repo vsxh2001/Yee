@@ -151,8 +151,7 @@ fn cpml_attenuates_reflection_vs_pec() {
     // average; reflections oscillate).
     const REFLECTION_START: usize = 80;
     let late_cpml = &cpml_trace[REFLECTION_START..];
-    let static_floor =
-        late_cpml.iter().copied().sum::<f64>() / (late_cpml.len() as f64);
+    let static_floor = late_cpml.iter().copied().sum::<f64>() / (late_cpml.len() as f64);
     let cpml_reflection_peak = late_cpml
         .iter()
         .map(|x| (x - static_floor).abs())
@@ -177,7 +176,10 @@ fn cpml_attenuates_reflection_vs_pec() {
     eprintln!("CPML reflection reduction     = {reduction_db:.2} dB");
 
     assert!(peak_outgoing > 0.0, "no outgoing pulse seen");
-    assert!(pec_reflection_peak > 0.0, "PEC and CPML are identical (no reflection seen)");
+    assert!(
+        pec_reflection_peak > 0.0,
+        "PEC and CPML are identical (no reflection seen)"
+    );
     assert!(
         cpml_reflection_peak > 0.0,
         "CPML reflection peak is zero (test logic error)"
