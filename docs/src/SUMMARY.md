@@ -7,6 +7,7 @@
 - [Planar Method of Moments](theory/planar-mom.md)
 - [Finite-Difference Time-Domain](theory/fdtd.md)
 - [GP Surrogates and Bayesian Optimization](theory/surrogate-gp-bo.md)
+- [Multi-objective Optimization and Active Learning](theory/multi-objective-and-active-learning.md)
 
 # Tutorials
 
