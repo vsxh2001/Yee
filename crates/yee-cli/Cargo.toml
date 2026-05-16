@@ -29,6 +29,7 @@ yee-validation = { path = "../yee-validation", version = "0.0.0" }
 num-complex = { workspace = true }
 clap        = { workspace = true }
 clap_complete = "4"
+serde_json  = { workspace = true }
 anyhow      = { workspace = true }
 tracing     = { workspace = true }
 tracing-subscriber = { workspace = true }

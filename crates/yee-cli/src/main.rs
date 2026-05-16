@@ -135,6 +135,63 @@ enum Command {
         #[arg(last = true)]
         extra: Vec<String>,
     },
+    /// Run an FDTD simulation end-to-end and emit the radiation pattern as JSON.
+    ///
+    /// Composes [`yee_fdtd::FdtdDriver`] from a vacuum [`yee_fdtd::YeeGrid`]
+    /// with the supplied grid / source / NTFF parameters, runs the time
+    /// loop to completion, and writes the θ-cut of `|E_θ|` at `φ = 0` as
+    /// JSON to `--output` (or stdout when unset). The JSON shape is
+    /// `{"theta_deg": [...], "e_theta_phi0": [...]}` with both vectors of
+    /// equal length; angles span `[0°, 180°]` in 5° steps.
+    FdtdRun {
+        /// Grid dimensions (Nx, Ny, Nz) — `--grid 60 60 60`.
+        #[arg(long, num_args = 3, default_values_t = [60_usize, 60, 60])]
+        grid: Vec<usize>,
+        /// Cell size in meters.
+        #[arg(long, default_value_t = 5.0e-3)]
+        dx: f64,
+        /// Number of timesteps.
+        #[arg(long, default_value_t = 800)]
+        steps: usize,
+        /// Source center cell (i, j, k).
+        #[arg(long, num_args = 3, default_values_t = [30_usize, 30, 30])]
+        source: Vec<usize>,
+        /// Dipole length in cells.
+        #[arg(long, default_value_t = 5)]
+        dipole_length: usize,
+        /// Source frequency in Hz.
+        #[arg(long, default_value_t = 1.0e9)]
+        freq: f64,
+        /// NTFF surface pad in cells.
+        #[arg(long, default_value_t = 4)]
+        ntff_pad: usize,
+        /// CPML thickness in cells.
+        #[arg(long, default_value_t = 10)]
+        cpml: usize,
+        /// Output JSON path. If unset, write to stdout.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+}
+
+/// Arguments to [`run_fdtd`], mirroring the [`Command::FdtdRun`] variant.
+///
+/// Held in a struct so the handler signature stays manageable and so the
+/// `clap`-parsed variant can be passed through one field at a time. The
+/// skeleton commit doesn't read every field yet; `allow(dead_code)` keeps
+/// `cargo clippy -D warnings` green until the real handler lands.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct FdtdArgs {
+    grid: Vec<usize>,
+    dx: f64,
+    steps: usize,
+    source: Vec<usize>,
+    dipole_length: usize,
+    freq: f64,
+    ntff_pad: usize,
+    cpml: usize,
+    output: Option<PathBuf>,
 }
 
 /// Which `yee-bench` criterion target to invoke.
@@ -243,7 +300,36 @@ fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Bench { target, extra } => run_bench(target, extra),
+        Command::FdtdRun {
+            grid,
+            dx,
+            steps,
+            source,
+            dipole_length,
+            freq,
+            ntff_pad,
+            cpml,
+            output,
+        } => run_fdtd(FdtdArgs {
+            grid,
+            dx,
+            steps,
+            source,
+            dipole_length,
+            freq,
+            ntff_pad,
+            cpml,
+            output,
+        }),
     }
+}
+
+/// Stub handler for [`Command::FdtdRun`]. The real implementation lands in
+/// the follow-up commit; this skeleton exists so the new clap variant
+/// type-checks and the `--help` text is visible.
+fn run_fdtd(_args: FdtdArgs) -> Result<ExitCode> {
+    eprintln!("fdtd-run: handler not yet implemented");
+    Ok(ExitCode::from(2))
 }
 
 /// Shell out to `cargo bench -p yee-bench [--bench <name>] [-- <extra>...]`.
