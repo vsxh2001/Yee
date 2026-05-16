@@ -176,7 +176,6 @@ pub mod __internal {
     //! Test-helper surface. Not stable API; do not depend on it.
 
     use crate::fill::impedance_matrix;
-    use crate::greens::{FreeSpaceGreen, Greens};
     use crate::solve::delta_gap_rhs;
     use faer::linalg::solvers::{PartialPivLu, Solve};
     use num_complex::Complex64;
@@ -191,6 +190,11 @@ pub mod __internal {
     /// Public re-export of [`MultilayerGreens`] for the Phase 1.1
     /// integration tests. Not part of the stable API.
     pub use crate::multilayer::MultilayerGreens;
+
+    /// Public re-export of the `Greens` trait and `FreeSpaceGreen` struct
+    /// so `__internal` callers (the integration tests) can name them in
+    /// generic signatures. Not part of the stable API.
+    pub use crate::greens::{FreeSpaceGreen, Greens};
 
     /// Test-only constructor for [`RwgBasis`] — wraps the crate-private
     /// `from_mesh` so integration tests can build a basis without making

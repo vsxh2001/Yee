@@ -63,12 +63,22 @@ pub trait Greens {
     fn scalar_scalar_smooth(&self, r1: Vector3<f64>, r2: Vector3<f64>) -> Complex64;
 }
 
-pub(crate) struct FreeSpaceGreen {
+/// Free-space scalar Green's function kernel. The MPIE vector- and
+/// scalar-potential terms collapse onto a single `exp(-j k₀ R) / (4 π R)`
+/// here; see the [`Greens`] trait for the multilayer split.
+pub struct FreeSpaceGreen {
+    /// Background wave number `k₀ = ω / c` (real-valued for lossless free
+    /// space, but stored as `Complex64` so the same arithmetic kernels can
+    /// drive lossy / multilayer extensions).
     pub k0: Complex64,
+    /// Free-space wave impedance √(μ₀/ε₀) in ohms.
     pub eta0: f64,
 }
 
 impl FreeSpaceGreen {
+    /// Construct the free-space kernel at `freq_hz`, computing
+    /// `k₀ = 2 π f / c₀` and pulling the canonical `η₀` from
+    /// [`yee_core::units`].
     pub fn new(freq_hz: f64) -> Self {
         let omega = std::f64::consts::TAU * freq_hz;
         let k0 = Complex64::new(omega / C0, 0.0);
