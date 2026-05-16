@@ -6383,6 +6383,7 @@ dependencies = [
  "yee-fdtd",
  "yee-mesh",
  "yee-mom",
+ "yee-surrogate",
 ]
 
 [[package]]
