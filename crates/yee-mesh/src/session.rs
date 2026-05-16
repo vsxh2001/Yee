@@ -126,6 +126,51 @@ impl Session {
         }
     }
 
+    /// Add an OCC box primitive directly to the model. Useful for tests and
+    /// callers that want to construct geometry without round-tripping through
+    /// a STEP fixture.
+    ///
+    /// `(x, y, z)` is the lower corner; `(dx, dy, dz)` are positive extents.
+    /// Returns the integer tag of the created box (assigned by Gmsh). The
+    /// caller must call [`Session::synchronize`] before meshing.
+    ///
+    /// Without the `gmsh` feature this returns [`Error::NotEnabled`].
+    pub fn add_occ_box(
+        &mut self,
+        _x: f64,
+        _y: f64,
+        _z: f64,
+        _dx: f64,
+        _dy: f64,
+        _dz: f64,
+    ) -> Result<i32> {
+        #[cfg(not(feature = "gmsh"))]
+        {
+            Err(Error::NotEnabled)
+        }
+        #[cfg(feature = "gmsh")]
+        {
+            let mut ierr: ffi::c_int = 0;
+            // SAFETY: scalar args by value; `ierr` is a valid mutable pointer.
+            let tag = unsafe {
+                ffi::gmshModelOccAddBox(
+                    _x,
+                    _y,
+                    _z,
+                    _dx,
+                    _dy,
+                    _dz,
+                    /* tag = */ -1, // -1 ⇒ Gmsh assigns
+                    &mut ierr,
+                )
+            };
+            if ierr != 0 {
+                return Err(Error::Gmsh(ierr as i32));
+            }
+            Ok(tag as i32)
+        }
+    }
+
     /// Synchronize the OCC kernel representation with the Gmsh model.
     /// Required after OCC geometry edits (import, primitives, booleans)
     /// before meshing.
