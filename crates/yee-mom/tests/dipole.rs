@@ -48,6 +48,52 @@ fn dipole_z_at_resonance() {
     );
 }
 
+/// Phase 1 diagnostic: always-on, never asserts. Prints port edge count,
+/// port edge lengths, total RWG count, Z_in, |Z_in|/arg, and LU residual.
+/// The numbers are read manually from `--nocapture` output to triangulate
+/// where the residual ~19 % error in `dipole_z_at_resonance` is coming
+/// from.
+#[test]
+fn dipole_z_diagnostics() {
+    let mesh = fixtures::cylinder::thin_cylinder(1.0, 0.005, 24, 24);
+    let basis = yee_mom::__internal::build_basis(&mesh).expect("basis");
+    let f0 = yee_core::units::C0 / 2.0;
+
+    let port_indices: Vec<usize> = basis.port_basis_indices(1).collect();
+    let port_lengths: Vec<f64> = port_indices
+        .iter()
+        .map(|&k| basis.edges[k].length)
+        .collect();
+    let total_port_length: f64 = port_lengths.iter().sum();
+
+    eprintln!("Port edge count       = {}", port_indices.len());
+    eprintln!(
+        "Port edge length min  = {:.6e} m",
+        port_lengths.iter().copied().fold(f64::INFINITY, f64::min)
+    );
+    eprintln!(
+        "Port edge length max  = {:.6e} m",
+        port_lengths.iter().copied().fold(0.0, f64::max)
+    );
+    eprintln!(
+        "Sum of port lengths   = {:.6e} m (expected 2π·r = {:.6e})",
+        total_port_length,
+        std::f64::consts::TAU * 0.005
+    );
+    eprintln!("Total RWG count       = {}", basis.n_basis());
+
+    let (z_in, lu_residual_norm) =
+        yee_mom::__internal::z_in_and_residual_at_freq(&mesh, 1, f0, 50.0).expect("solve");
+    eprintln!("Z_in   = {:.4} + j{:.4} Ω", z_in.re, z_in.im);
+    eprintln!(
+        "|Z|    = {:.4} Ω, arg(Z) = {:.4} rad",
+        z_in.norm(),
+        z_in.arg()
+    );
+    eprintln!("Reference: 73 + j42 Ω (|Z|=84.20, arg=0.522)");
+    eprintln!("LU residual ||Zi - b|| / ||b|| = {lu_residual_norm:.3e}");
+}
+
 #[test]
 fn condition_number_within_bound() {
     use yee_mom::__internal::condition_number_at_freq;

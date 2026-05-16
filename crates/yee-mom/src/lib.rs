@@ -174,11 +174,25 @@ mod tests {
 pub mod __internal {
     //! Test-helper surface. Not stable API; do not depend on it.
 
-    use crate::basis::RwgBasis;
     use crate::fill::impedance_matrix;
     use crate::greens::FreeSpaceGreen;
+    use crate::solve::delta_gap_rhs;
+    use faer::linalg::solvers::{PartialPivLu, Solve};
+    use num_complex::Complex64;
     use yee_core::Error;
     use yee_mesh::TriMesh;
+
+    /// Public re-export of the crate-private RWG basis type so integration
+    /// tests can inspect port edges, lengths, and counts without forcing the
+    /// real `basis` module to be `pub`.
+    pub use crate::basis::RwgBasis;
+
+    /// Test-only constructor for [`RwgBasis`] — wraps the crate-private
+    /// `from_mesh` so integration tests can build a basis without making
+    /// `basis::RwgBasis::from_mesh` itself public.
+    pub fn build_basis(mesh: &TriMesh) -> Result<RwgBasis, Error> {
+        RwgBasis::from_mesh(mesh.clone())
+    }
 
     /// Build the impedance matrix and return its condition number via
     /// `cond = sigma_max / sigma_min`. Helper for the condition-number
@@ -221,5 +235,62 @@ pub mod __internal {
             return Err(Error::Numerical("Z is singular".into()));
         }
         Ok(max_s / min_s)
+    }
+
+    /// Diagnostic helper: solve `Z·i = b` at `freq_hz` and return both
+    /// `Z_in = V_port / I_port` and the relative LU residual
+    /// `||Z·i - b||_2 / ||b||_2`. A clean LU should produce a residual
+    /// well below `1e-10` on this geometry; anything larger indicates the
+    /// solve itself is broken rather than the formulation.
+    ///
+    /// This mirrors `solve::s_parameters_at_freq` but exposes `Z_in`
+    /// directly (instead of `S11`) and the LU residual instead of
+    /// swallowing it. It is intentionally a separate helper rather than a
+    /// public surface change on `solve` because the residual diagnostic
+    /// is not something callers should depend on long term.
+    pub fn z_in_and_residual_at_freq(
+        mesh: &TriMesh,
+        port_tag: u32,
+        freq_hz: f64,
+        _z0_ref: f64,
+    ) -> Result<(Complex64, f64), Error> {
+        let basis = RwgBasis::from_mesh(mesh.clone())?;
+        let green = FreeSpaceGreen::new(freq_hz);
+        let z = impedance_matrix(&basis, &green);
+        let b = delta_gap_rhs(&basis, port_tag);
+
+        let lu = PartialPivLu::new(z.as_ref());
+        let i = lu.solve(b.as_ref());
+
+        // Residual norm: ||Z·i - b||_2 / ||b||_2. faer's Mat does not have a
+        // direct `*` operator producing a Mat (it uses MatRef × MatRef on the
+        // generic level), so we hand-roll the matvec to keep this self-
+        // contained — n is small enough (~1k) that the cost is irrelevant.
+        let n = z.nrows();
+        let mut residual_sq = 0.0_f64;
+        let mut b_norm_sq = 0.0_f64;
+        for m in 0..n {
+            let mut zi_m = Complex64::new(0.0, 0.0);
+            for k in 0..n {
+                zi_m += z[(m, k)] * i[(k, 0)];
+            }
+            let diff = zi_m - b[(m, 0)];
+            residual_sq += diff.norm_sqr();
+            b_norm_sq += b[(m, 0)].norm_sqr();
+        }
+        let rel_residual = (residual_sq / b_norm_sq.max(f64::MIN_POSITIVE)).sqrt();
+
+        let mut i_port = Complex64::new(0.0, 0.0);
+        for k in basis.port_basis_indices(port_tag) {
+            i_port += b[(k, 0)] * i[(k, 0)];
+        }
+        if i_port.norm() < 1e-30 {
+            return Err(Error::Numerical(
+                "port current vanished; check port tagging".into(),
+            ));
+        }
+        let v_port = Complex64::new(1.0, 0.0);
+        let z_in = v_port / i_port;
+        Ok((z_in, rel_residual))
     }
 }

@@ -40,39 +40,45 @@ use yee_mesh::TriMesh;
 /// touches this shared edge — it carries no geometric meaning. The
 /// `eval`/`div` sign conventions ensure the basis function is well-defined
 /// regardless of which side is called `+`.
+// NOTE: visibility is `pub` (not `pub(crate)`) only to allow the
+// doc-hidden `lib::__internal` test-helper surface to re-export `RwgEdge`
+// and `RwgBasis` for diagnostic integration tests. The type is **not** part
+// of the stable API — depending on it from downstream crates is unsupported.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct RwgEdge {
+pub struct RwgEdge {
     /// Lower-indexed shared-edge vertex (vertex index into the mesh).
-    pub(crate) v0: u32,
+    pub v0: u32,
     /// Higher-indexed shared-edge vertex (vertex index into the mesh).
-    pub(crate) v1: u32,
+    pub v1: u32,
     /// Triangle index of the "+" adjacent triangle. See struct-level note:
     /// the `+`/`-` labeling is enumeration-order, not geometric.
-    pub(crate) tri_plus: u32,
+    pub tri_plus: u32,
     /// Triangle index of the "-" adjacent triangle. See struct-level note:
     /// the `+`/`-` labeling is enumeration-order, not geometric.
-    pub(crate) tri_minus: u32,
+    pub tri_minus: u32,
     /// Free (non-shared) vertex index of the "+" triangle.
-    pub(crate) free_plus: u32,
+    pub free_plus: u32,
     /// Free (non-shared) vertex index of the "-" triangle.
-    pub(crate) free_minus: u32,
+    pub free_minus: u32,
     /// Edge length (meters).
-    pub(crate) length: f64,
+    pub length: f64,
     /// Non-zero when the two adjacent triangles carry DIFFERENT non-zero
     /// tags (the edge straddles the boundary between two tagged regions —
     /// convention for delta-gap port placement). Set to `0` otherwise.
-    pub(crate) port_tag: u32,
+    pub port_tag: u32,
 }
 
 /// Geometric and topological summary of an [`RwgEdge`] enumeration on a
 /// [`TriMesh`]: per-triangle centroids/normals/areas plus the deduplicated
 /// edge list.
+// NOTE: visibility is `pub` only for the doc-hidden `__internal` test-helper
+// surface. See the `RwgEdge` comment for the stability stance.
 #[derive(Debug, Clone)]
-pub(crate) struct RwgBasis {
+pub struct RwgBasis {
     /// The underlying mesh. Owned so basis indices remain stable.
     pub(crate) mesh: TriMesh,
     /// Deduplicated interior edges. One entry per RWG basis function.
-    pub(crate) edges: Vec<RwgEdge>,
+    pub edges: Vec<RwgEdge>,
     /// Triangle centroids `(a + b + c) / 3`.
     pub(crate) centroids: Vec<Vector3<f64>>,
     /// Triangle outward normals (right-hand rule from the vertex winding).
@@ -91,7 +97,7 @@ impl RwgBasis {
     ///
     /// Boundary edges (touched by exactly one triangle) are silently dropped
     /// — they do not carry an RWG basis function.
-    pub(crate) fn from_mesh(mesh: TriMesh) -> Result<Self, yee_core::Error> {
+    pub fn from_mesh(mesh: TriMesh) -> Result<Self, yee_core::Error> {
         let n_tris = mesh.n_tris();
 
         let mut centroids = Vec::with_capacity(n_tris);
@@ -201,7 +207,7 @@ impl RwgBasis {
     }
 
     /// Number of RWG basis functions (one per interior edge).
-    pub(crate) fn n_basis(&self) -> usize {
+    pub fn n_basis(&self) -> usize {
         self.edges.len()
     }
 
@@ -213,7 +219,7 @@ impl RwgBasis {
     /// Iterate the basis-function indices whose edge carries the given
     /// non-zero `port_tag`. With `port_tag == 0` no basis is selected (the
     /// "no port" sentinel is intentionally not iterable).
-    pub(crate) fn port_basis_indices(
+    pub fn port_basis_indices(
         &self,
         port_tag: u32,
     ) -> impl Iterator<Item = usize> + '_ {
