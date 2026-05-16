@@ -53,6 +53,7 @@ pub use driver::{FdtdDriver, FdtdDriverConfig, RadiationPattern};
 pub use grid::YeeGrid;
 pub use material::{Material, MaterialMap};
 pub use ntff::{NtffParams, NtffState};
+pub use sources::{PlaneWaveDirection, PlaneWaveSource};
 
 /// FDTD-layer errors.
 #[derive(Debug, thiserror::Error)]
