@@ -144,7 +144,9 @@ mod tests {
         let solver = PlanarMoM::default();
         let mesh = TriMesh::default();
         let freq = FreqRange::new(1.0e9, 2.0e9, 3).expect("valid FreqRange");
-        let err = solver.run(&mesh, freq).expect_err("run must return Err in Phase 0");
+        let err = solver
+            .run(&mesh, freq)
+            .expect_err("run must return Err in Phase 0");
         match err {
             yee_core::Error::Unimplemented(msg) => {
                 assert_eq!(msg, "PlanarMoM::run not implemented in phase 0");

@@ -95,13 +95,7 @@ fn mesh_without_gmsh_feature_exits_2() {
 fn export_hdf5_exits_2() {
     Command::cargo_bin("yee")
         .unwrap()
-        .args([
-            "export",
-            "/tmp/in.s1p",
-            "--format",
-            "hdf5",
-            "/tmp/out.h5",
-        ])
+        .args(["export", "/tmp/in.s1p", "--format", "hdf5", "/tmp/out.h5"])
         .assert()
         .failure()
         .code(2)

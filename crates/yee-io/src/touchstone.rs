@@ -368,9 +368,7 @@ fn parse_option_line(line_no: usize, body: &str) -> Result<(FreqUnit, Format, f6
             return Err(Error::TouchstoneParse {
                 line: line_no,
                 col: 1,
-                msg: format!(
-                    "parameter type `{param_tok}` not supported in Phase 0 (S only)"
-                ),
+                msg: format!("parameter type `{param_tok}` not supported in Phase 0 (S only)"),
             });
         }
         other => {
@@ -409,13 +407,11 @@ fn parse_option_line(line_no: usize, body: &str) -> Result<(FreqUnit, Format, f6
                 col: 1,
                 msg: "`R` token not followed by an impedance value".into(),
             })?;
-            val_tok
-                .parse::<f64>()
-                .map_err(|_| Error::TouchstoneParse {
-                    line: line_no,
-                    col: 1,
-                    msg: format!("reference impedance `{val_tok}` is not a valid float"),
-                })?
+            val_tok.parse::<f64>().map_err(|_| Error::TouchstoneParse {
+                line: line_no,
+                col: 1,
+                msg: format!("reference impedance `{val_tok}` is not a valid float"),
+            })?
         }
     };
 

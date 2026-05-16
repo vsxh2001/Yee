@@ -53,8 +53,8 @@ fn assert_files_close(lhs: &touchstone::File, rhs: &touchstone::File, rel: f64) 
 
 fn roundtrip(fixture_name: &str) {
     let src = fixtures_dir().join(fixture_name);
-    let parsed = touchstone::read(&src)
-        .unwrap_or_else(|e| panic!("read({fixture_name}) failed: {e}"));
+    let parsed =
+        touchstone::read(&src).unwrap_or_else(|e| panic!("read({fixture_name}) failed: {e}"));
 
     // Round-trip through a temp file with the same extension.
     let tmp_dir = std::env::temp_dir();
@@ -129,8 +129,7 @@ fn comments_are_preserved_through_roundtrip() {
 
 #[test]
 fn nonpassive_fixture_is_rejected() {
-    let err =
-        touchstone::read(&fixtures_dir().join("2port_nonpassive.s2p")).unwrap_err();
+    let err = touchstone::read(&fixtures_dir().join("2port_nonpassive.s2p")).unwrap_err();
     let msg = format!("{err}");
     assert!(
         msg.contains("passivity"),
@@ -141,15 +140,8 @@ fn nonpassive_fixture_is_rejected() {
 #[test]
 fn malformed_option_line_is_rejected() {
     // Wrong parameter type (Y instead of S).
-    let tmp = std::env::temp_dir().join(format!(
-        "yee_io_malformed_{}.s2p",
-        std::process::id()
-    ));
-    std::fs::write(
-        &tmp,
-        "! malformed\n# GHz Y RI R 50\n1.0 0 0 0 0 0 0 0 0\n",
-    )
-    .unwrap();
+    let tmp = std::env::temp_dir().join(format!("yee_io_malformed_{}.s2p", std::process::id()));
+    std::fs::write(&tmp, "! malformed\n# GHz Y RI R 50\n1.0 0 0 0 0 0 0 0 0\n").unwrap();
     let err = touchstone::read(&tmp).unwrap_err();
     let msg = format!("{err}");
     assert!(
@@ -168,10 +160,7 @@ fn malformed_option_line_is_rejected() {
 #[test]
 fn malformed_column_count_is_rejected() {
     // 2-port file needs 1 + 2*4 = 9 floats per frequency; supply only 5.
-    let tmp = std::env::temp_dir().join(format!(
-        "yee_io_short_{}.s2p",
-        std::process::id()
-    ));
+    let tmp = std::env::temp_dir().join(format!("yee_io_short_{}.s2p", std::process::id()));
     std::fs::write(&tmp, "# GHz S RI R 50\n1.0 0.0 0.0 0.0 0.0\n").unwrap();
     let err = touchstone::read(&tmp).unwrap_err();
     let msg = format!("{err}");
@@ -246,10 +235,7 @@ fn s4p_roundtrip_synthetic() {
 
 #[test]
 fn rejects_bogus_extension() {
-    let tmp = std::env::temp_dir().join(format!(
-        "yee_io_bogus_{}.s9p",
-        std::process::id()
-    ));
+    let tmp = std::env::temp_dir().join(format!("yee_io_bogus_{}.s9p", std::process::id()));
     std::fs::write(&tmp, "# GHz S RI R 50\n").unwrap();
     let err = touchstone::read(&tmp).unwrap_err();
     let msg = format!("{err}");

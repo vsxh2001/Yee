@@ -79,12 +79,10 @@ impl Backend for CudarcBackend {
         // not fit. All realistic compute caps fit in u8 (Hopper is 9.0) and
         // 64-bit hosts widen `usize` to `u64` losslessly, but defending here
         // keeps the pattern uniform across the backend surface.
-        let major = u8::try_from(major).map_err(|_| {
-            Error::Driver(format!("compute capability major {major} overflows u8"))
-        })?;
-        let minor = u8::try_from(minor).map_err(|_| {
-            Error::Driver(format!("compute capability minor {minor} overflows u8"))
-        })?;
+        let major = u8::try_from(major)
+            .map_err(|_| Error::Driver(format!("compute capability major {major} overflows u8")))?;
+        let minor = u8::try_from(minor)
+            .map_err(|_| Error::Driver(format!("compute capability minor {minor} overflows u8")))?;
         let mem = u64::try_from(mem)
             .map_err(|_| Error::Driver(format!("total_mem {mem} overflows u64")))?;
 
