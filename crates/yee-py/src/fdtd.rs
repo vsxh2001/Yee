@@ -12,6 +12,7 @@
 //! `self`. As a result a `PyFdtdDriver` can be `.run()` multiple times,
 //! each call returning an independent [`PyRadiationPattern`].
 
+use numpy::{IntoPyArray, PyArray1};
 use pyo3::prelude::*;
 use yee_fdtd::FdtdDriverConfig as RustCfg;
 
@@ -120,10 +121,29 @@ impl PyFdtdDriverConfig {
 /// normalized so that `max e_theta_phi0 == 1.0`.
 #[pyclass(name = "FdtdRadiationPattern", module = "yee._yee")]
 pub struct PyRadiationPattern {
-    #[allow(dead_code)]
     pub(crate) theta_deg: Vec<f64>,
-    #[allow(dead_code)]
     pub(crate) e_theta_phi0: Vec<f64>,
+}
+
+#[pymethods]
+impl PyRadiationPattern {
+    /// Polar angles in **degrees**, sampled from 0 to 180 inclusive in
+    /// 5° steps (37 points total).
+    #[getter]
+    fn theta_deg<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.theta_deg.clone().into_pyarray(py)
+    }
+
+    /// `|E_θ|` at each `theta_deg[i]` at `φ = 0`, normalized so the
+    /// maximum across the cut equals `1.0`.
+    #[getter]
+    fn e_theta_phi0<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.e_theta_phi0.clone().into_pyarray(py)
+    }
+
+    fn __repr__(&self) -> String {
+        format!("FdtdRadiationPattern(n_points={})", self.theta_deg.len())
+    }
 }
 
 /// Python wrapper for [`yee_fdtd::FdtdDriver`].
