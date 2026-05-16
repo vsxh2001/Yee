@@ -1,6 +1,9 @@
 """Yee electromagnetic simulation — Python bindings."""
 
 from yee._yee import (
+    FdtdDriver,
+    FdtdDriverConfig,
+    FdtdRadiationPattern,
     FreqRange,
     GaussianProcess,
     PlanarMoM,
@@ -14,6 +17,9 @@ from yee._yee import (
 )
 
 __all__ = [
+    "FdtdDriver",
+    "FdtdDriverConfig",
+    "FdtdRadiationPattern",
     "FreqRange",
     "GaussianProcess",
     "PlanarMoM",
