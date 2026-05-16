@@ -7,6 +7,7 @@
 
 use pyo3::prelude::*;
 
+mod al;
 mod bo;
 mod errors;
 mod fdtd;
@@ -36,6 +37,9 @@ fn _yee(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<nsga2::PyNsga2Config>()?;
     m.add_class::<nsga2::PyNsga2Result>()?;
     m.add_function(wrap_pyfunction!(nsga2::nsga2_minimize, m)?)?;
+    m.add_class::<al::PyAlConfig>()?;
+    m.add_class::<al::PyAlResult>()?;
+    m.add_function(wrap_pyfunction!(al::active_learn, m)?)?;
     m.add_function(wrap_pyfunction!(helpers::s11_db, m)?)?;
     m.add_function(wrap_pyfunction!(helpers::s11_phase, m)?)?;
     m.add_function(wrap_pyfunction!(helpers::smith_xy, m)?)?;
