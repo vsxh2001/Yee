@@ -21,3 +21,28 @@ fn mom_001_passes_through_aggregator() {
         mom_001.notes
     );
 }
+
+/// Assert mom-001 emits non-trivial plot artifacts under
+/// `validation/results/`. Ignored alongside the impedance gate
+/// because it invokes the full aggregator (fine-mesh ~8 min +
+/// coarse-mesh plot sweep ~3.5 min on top).
+#[test]
+#[ignore = "slow: invokes the real aggregator (mom-001 ~8 min)"]
+fn mom_001_emits_plot_artifacts() {
+    let report = yee_validation::Report::run_all();
+    let mom_001 = report.cases.iter().find(|c| c.id == "mom-001").unwrap();
+    assert!(
+        !mom_001.plot_paths.is_empty(),
+        "mom-001 should emit plot artifacts"
+    );
+    for p in &mom_001.plot_paths {
+        assert!(p.exists(), "plot path missing: {}", p.display());
+        let size = std::fs::metadata(p).unwrap().len();
+        assert!(
+            size > 1024,
+            "plot {} too small ({} bytes)",
+            p.display(),
+            size
+        );
+    }
+}
