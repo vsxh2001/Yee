@@ -30,20 +30,33 @@
 //!    ```
 //! 3. After the time loop, [`NtffState::far_field`] projects the
 //!    accumulated currents to one (θ, φ) direction using the far-zone
-//!    Stratton–Chu kernel (added in the next commit).
+//!    Stratton–Chu kernel:
+//!
+//!    ```text
+//!    E_far(r̂) ∝ (jk / 4π) · r̂ × [ L(r̂) + η₀ · (r̂ × N(r̂)) ]
+//!    N(r̂)     = ∫∫_S J(r') · e^{+jk r̂·r'} dS
+//!    L(r̂)     = ∫∫_S M(r') · e^{+jk r̂·r'} dS
+//!    ```
+//!
+//!    (Taflove eq. 8.35 with the standard far-zone simplification; the
+//!    distance-independent `e^{−jkr}/r` envelope is dropped — re-apply
+//!    it externally for a specific observation radius).
 //!
 //! ## Out of scope for Phase 2.fdtd.2
 //!
 //! - Multi-frequency probe (one `f_probe` only).
-//! - Full θ/φ sweep (single observation direction; [`NtffState::far_field_at`]
-//!   in the follow-up commit allows additional directions after one solve).
+//! - Full θ/φ sweep (single observation direction;
+//!   [`NtffState::far_field_at`] does allow extra directions after one
+//!   solve so callers can sweep cheaply post-hoc).
 //! - Stored-then-projected time-domain currents (we use the running-DFT
 //!   approach, which is the standard FDTD trick for narrow-band patterns).
 
-use std::f64::consts::TAU;
+use std::f64::consts::{PI, TAU};
 
 use ndarray::Array2;
 use num_complex::Complex64;
+
+use yee_core::units::{C0, ETA0};
 
 use crate::grid::YeeGrid;
 
@@ -103,16 +116,8 @@ pub struct NtffState {
     /// Cached parameters.
     params: NtffParams,
     /// Cached grid geometry.
-    nx: usize,
-    ny: usize,
-    nz: usize,
-    // dx, dy, dz are unused until `far_field()` lands in the next
-    // commit; keep them so the layout is stable.
-    #[allow(dead_code)]
     dx: f64,
-    #[allow(dead_code)]
     dy: f64,
-    #[allow(dead_code)]
     dz: f64,
     dt: f64,
     /// Integer cell index of the box face on each axis: `(i_min, i_max,
@@ -212,9 +217,6 @@ impl NtffState {
 
         Self {
             params,
-            nx,
-            ny,
-            nz,
             dx: grid.dx,
             dy: grid.dy,
             dz: grid.dz,
@@ -315,20 +317,169 @@ impl NtffState {
     }
 
     /// Project the accumulated currents to the single observation
-    /// direction `(params.theta_rad, params.phi_rad)`.
-    ///
-    /// **Stub for this commit**: implemented in the follow-up
-    /// "yee-fdtd: far_field() — Stratton-Chu single-direction projection"
-    /// commit.
+    /// direction `(params.theta_rad, params.phi_rad)` using the
+    /// far-zone Stratton–Chu kernel. Returns the complex E-field
+    /// pattern amplitude.
     pub fn far_field(&self) -> Complex64 {
-        let _ = (&self.j_face, &self.m_face, &self.nx, &self.ny, &self.nz);
-        Complex64::new(0.0, 0.0)
+        self.far_field_at(self.params.theta_rad, self.params.phi_rad)
+    }
+
+    /// Project the accumulated currents to an arbitrary observation
+    /// direction `(theta, phi)`. Useful for sweeping after one solve.
+    ///
+    /// Computes the far-zone radiation integrals (Taflove eq. 8.34):
+    ///
+    /// ```text
+    /// N(r̂) = ∫∫_S J(r') · e^{+jk r̂·r'} dS
+    /// L(r̂) = ∫∫_S M(r') · e^{+jk r̂·r'} dS
+    /// ```
+    ///
+    /// and forms the far-field electric vector (Taflove eq. 8.35a/b
+    /// with the `e^{−jkr}/r` envelope dropped):
+    ///
+    /// ```text
+    /// E_far = (jk / 4π) · r̂ × ( L + η₀ · (r̂ × N) )
+    /// ```
+    ///
+    /// The returned `Complex64` is scalar with magnitude
+    /// `|E_far| = √(|E_far,x|² + |E_far,y|² + |E_far,z|²)` and phase
+    /// taken from the dominant Cartesian component (largest by
+    /// magnitude). For pattern-ratio tests only the magnitude matters,
+    /// but exposing a meaningful phase lets future code do coherent
+    /// post-processing.
+    pub fn far_field_at(&self, theta: f64, phi: f64) -> Complex64 {
+        let k_wave = TAU * self.params.f_probe / C0;
+        let r_hat = [
+            theta.sin() * phi.cos(),
+            theta.sin() * phi.sin(),
+            theta.cos(),
+        ];
+
+        // Accumulate N and L over all six faces.
+        let mut n_vec = [Complex64::new(0.0, 0.0); 3];
+        let mut l_vec = [Complex64::new(0.0, 0.0); 3];
+
+        for f in 0..NUM_FACES {
+            let (u_axis, v_axis, n_u, n_v, plane) = face_axes(f, self.bounds);
+            let n_axis = normal_axis(f);
+            let (i_min, _i_max, j_min, _j_max, k_min, _k_max) = self.bounds;
+            let mins = [i_min, j_min, k_min];
+            let ds = self.face_ds(f);
+
+            for vi in 0..n_v {
+                for ui in 0..n_u {
+                    let mut ijk = [0usize; 3];
+                    ijk[n_axis] = plane;
+                    ijk[u_axis] = mins[u_axis] + ui;
+                    ijk[v_axis] = mins[v_axis] + vi;
+                    let (i, j, k) = (ijk[0], ijk[1], ijk[2]);
+
+                    // Position of this sample point in metres relative
+                    // to the grid origin. Only differences in the
+                    // phase factor between faces matter for the
+                    // pattern shape; an overall e^{+jk r̂·r₀}
+                    // multiplies the whole result uniformly.
+                    let r_prime = [
+                        (i as f64) * self.dx,
+                        (j as f64) * self.dy,
+                        (k as f64) * self.dz,
+                    ];
+                    let r_dot = r_hat[0] * r_prime[0]
+                        + r_hat[1] * r_prime[1]
+                        + r_hat[2] * r_prime[2];
+                    let phase = Complex64::from_polar(1.0, k_wave * r_dot);
+
+                    let flat = vi * n_u + ui;
+                    let j_u = self.j_face[f][(flat, 0)];
+                    let j_v = self.j_face[f][(flat, 1)];
+                    let m_u = self.m_face[f][(flat, 0)];
+                    let m_v = self.m_face[f][(flat, 1)];
+
+                    // Expand the (u, v) tangential J and M back into
+                    // 3-D Cartesian components for the integrals.
+                    let mut j_xyz = [Complex64::new(0.0, 0.0); 3];
+                    let mut m_xyz = [Complex64::new(0.0, 0.0); 3];
+                    j_xyz[u_axis] = j_u;
+                    j_xyz[v_axis] = j_v;
+                    m_xyz[u_axis] = m_u;
+                    m_xyz[v_axis] = m_v;
+
+                    let weight = phase * ds;
+                    for a in 0..3 {
+                        n_vec[a] += weight * j_xyz[a];
+                        l_vec[a] += weight * m_xyz[a];
+                    }
+                }
+            }
+        }
+
+        // E_far = (jk / 4π) · r̂ × ( L + η₀ · (r̂ × N) ).
+        let r_hat_c = [
+            Complex64::new(r_hat[0], 0.0),
+            Complex64::new(r_hat[1], 0.0),
+            Complex64::new(r_hat[2], 0.0),
+        ];
+        let eta = Complex64::new(ETA0, 0.0);
+        let rxn = cross_c(r_hat_c, n_vec);
+        let inner = [
+            l_vec[0] + eta * rxn[0],
+            l_vec[1] + eta * rxn[1],
+            l_vec[2] + eta * rxn[2],
+        ];
+        let outer = cross_c(r_hat_c, inner);
+        let prefactor = Complex64::new(0.0, k_wave / (4.0 * PI));
+
+        let e_far_vec = [
+            prefactor * outer[0],
+            prefactor * outer[1],
+            prefactor * outer[2],
+        ];
+
+        let mag_sq =
+            e_far_vec[0].norm_sqr() + e_far_vec[1].norm_sqr() + e_far_vec[2].norm_sqr();
+        if mag_sq == 0.0 {
+            return Complex64::new(0.0, 0.0);
+        }
+        // Pick the dominant Cartesian component for the returned phase.
+        let (rep_idx, _) = e_far_vec
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (i, c.norm_sqr()))
+            .fold((0usize, 0.0f64), |(bi, bm), (i, m)| {
+                if m > bm { (i, m) } else { (bi, bm) }
+            });
+        let rep = e_far_vec[rep_idx];
+        // Scale `rep` so its magnitude equals the full vector
+        // magnitude — this gives a single Complex64 whose |.| is the
+        // correct |E_far|.
+        let scale = mag_sq.sqrt() / rep.norm();
+        rep * scale
+    }
+
+    /// Area of a single face cell (dA) for face `f`.
+    fn face_ds(&self, f: usize) -> f64 {
+        match f {
+            0 | 1 => self.dy * self.dz, // ±x face
+            2 | 3 => self.dx * self.dz, // ±y face
+            4 | 5 => self.dx * self.dy, // ±z face
+            _ => unreachable!(),
+        }
     }
 }
 
 /// Real 3-D vector cross product.
 #[inline]
 fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+/// Complex 3-D vector cross product (used for r̂ × ⟨complex⟩).
+#[inline]
+fn cross_c(a: [Complex64; 3], b: [Complex64; 3]) -> [Complex64; 3] {
     [
         a[1] * b[2] - a[2] * b[1],
         a[2] * b[0] - a[0] * b[2],
@@ -486,6 +637,20 @@ mod tests {
         assert_eq!(cross([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), [0.0, 0.0, 1.0]);
         assert_eq!(cross([0.0, 1.0, 0.0], [0.0, 0.0, 1.0]), [1.0, 0.0, 0.0]);
         assert_eq!(cross([0.0, 0.0, 1.0], [1.0, 0.0, 0.0]), [0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn empty_far_field_is_zero() {
+        let grid = YeeGrid::vacuum(40, 40, 40, 1.0e-3);
+        let params = NtffParams {
+            f_probe: 15.0e9,
+            box_margin_cells: 12,
+            theta_rad: std::f64::consts::FRAC_PI_2,
+            phi_rad: 0.0,
+        };
+        let state = NtffState::new(&grid, params);
+        let e = state.far_field();
+        assert_eq!(e.norm(), 0.0);
     }
 
     #[test]
