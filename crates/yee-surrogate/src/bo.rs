@@ -230,7 +230,11 @@ where
 /// For each dimension, splits `[0, 1]` into `n` equal strata, draws one
 /// uniform point per stratum, then independently permutes the strata across
 /// dimensions and scales to the requested bounds.
-fn latin_hypercube(n: usize, bounds: &[(f64, f64)], rng: &mut Xorshift64) -> Vec<DVector<f64>> {
+pub(crate) fn latin_hypercube(
+    n: usize,
+    bounds: &[(f64, f64)],
+    rng: &mut Xorshift64,
+) -> Vec<DVector<f64>> {
     let d = bounds.len();
     // Unit-cube LHS values: lhs_unit[i][j] is the i-th sample's j-th coord in [0, 1].
     let mut lhs_unit = vec![vec![0.0_f64; d]; n];
