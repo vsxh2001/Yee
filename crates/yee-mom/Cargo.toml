@@ -9,17 +9,18 @@ description  = "Yee planar Method of Moments solver. CPU reference via faer, GPU
 
 [features]
 default = []
-cuda    = ["yee-cuda/cuda"]
+cuda    = ["dep:yee-cuda", "yee-cuda/cuda"]
 
 [dependencies]
 yee-core    = { workspace = true }
 yee-mesh    = { workspace = true }
-yee-cuda    = { workspace = true }
 yee-io      = { workspace = true }
-faer        = { workspace = true }
-nalgebra    = { workspace = true }
+# Optional: only pulled in when the `cuda` feature is on. Phase 0 CPU code
+# does not touch yee-cuda, so leaving it unconditional would force a CUDA
+# toolchain on every CPU-only build. faer / nalgebra / ndarray will return
+# here in Phase 1 as the dense LU solver and basis-function machinery land.
+yee-cuda    = { workspace = true, optional = true }
 num-complex = { workspace = true }
-ndarray     = { workspace = true }
 thiserror   = { workspace = true }
 tracing     = { workspace = true }
 

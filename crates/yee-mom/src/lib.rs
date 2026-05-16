@@ -16,31 +16,12 @@ use num_complex::Complex64;
 use yee_core::{FreqRange, Solver};
 use yee_mesh::TriMesh;
 
-/// MoM-layer errors.
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    /// Mesh did not pass validation.
-    #[error("mesh invalid: {0}")]
-    BadMesh(String),
-    /// Numerical failure during fill or solve.
-    #[error("numerical: {0}")]
-    Numerical(String),
-    /// Phase 0 placeholder.
-    #[error("not yet implemented in this phase: {0}")]
-    Unimplemented(&'static str),
-}
-
-/// MoM-layer result alias.
-pub type Result<T> = core::result::Result<T, Error>;
-
 /// Boundary mapping: any failure surfaced by `yee_io` while writing a
 /// Touchstone file is rendered into `yee_core::Error::Io` so callers higher
 /// in the stack (the CLI, solver drivers, etc.) only need to match a single
 /// crate-wide error surface. The full `yee_io::Error` message text — line
 /// and column hints included — is preserved verbatim inside the wrapped
-/// string. The `yee-mom` crate's local [`Error`] is intentionally *not*
-/// used here because the entry point ([`SParameters::write_touchstone`])
-/// returns `yee_core::Result`, matching the [`yee_core::Solver`] convention.
+/// string.
 fn io_to_core(e: yee_io::Error) -> yee_core::Error {
     yee_core::Error::Io(e.to_string())
 }
@@ -70,13 +51,38 @@ impl SParameters {
         }
     }
 
-    /// Build a [`yee_io::touchstone::File`] from `self`, tagging it with the
-    /// supplied reference impedance, on-disk numeric format, and frequency
-    /// unit. Comments are intentionally left empty — this constructor exists
-    /// for the simulation → file path where there is no source commentary
-    /// to preserve. Callers that need to attach commentary should build the
-    /// [`yee_io::touchstone::File`] manually after calling this.
-    pub fn to_touchstone(
+    /// Build a [`yee_io::touchstone::File`] from `self` using the Phase 0
+    /// defaults: `Format::RealImag` numeric encoding and `FreqUnit::Hz` for
+    /// frequencies.
+    ///
+    /// `FreqUnit::Hz` is hard-coded because [`SParameters::freq_hz`] is the
+    /// canonical SI Hz representation — writing under any other unit would
+    /// silently misinterpret the values (e.g. emitting 1e9 Hz as 1 GHz numerically
+    /// is fine, but as "1e9 GHz" in the option line is a unit-mismatch bug).
+    /// Callers that need a non-Hz on-disk unit or a non-RI numeric format
+    /// must use [`SParameters::to_touchstone_with`] explicitly.
+    ///
+    /// Comments are intentionally left empty — this constructor exists for
+    /// the simulation → file path where there is no source commentary to
+    /// preserve.
+    pub fn to_touchstone(&self, z0: f64) -> yee_io::touchstone::File {
+        self.to_touchstone_with(
+            z0,
+            yee_io::touchstone::Format::RealImag,
+            yee_io::touchstone::FreqUnit::Hz,
+        )
+    }
+
+    /// Advanced-caller form of [`SParameters::to_touchstone`] that exposes
+    /// the on-disk numeric format and frequency unit. Most callers want
+    /// the spec-default [`SParameters::to_touchstone`] instead; reach for
+    /// this only when emitting a file targeting a specific consumer's
+    /// expectations (e.g. a GHz-MA legacy tool).
+    ///
+    /// Note: the in-memory `freq_hz` is always Hz; choosing `freq_unit`
+    /// here only affects how those numbers are rendered on disk — the
+    /// writer divides by the unit's multiplier when emitting.
+    pub fn to_touchstone_with(
         &self,
         z0: f64,
         format: yee_io::touchstone::Format,
@@ -93,19 +99,13 @@ impl SParameters {
         }
     }
 
-    /// Write `self` to `path` as a Touchstone v1.1 file.
-    ///
-    /// Defaults: `Format::RealImag` numeric encoding, `FreqUnit::Hz` for
-    /// frequencies (matches the canonical SI representation already stored
-    /// in [`SParameters::freq_hz`]). Errors from `yee_io` are mapped to
+    /// Write `self` to `path` as a Touchstone v1.1 file using the same
+    /// defaults as [`SParameters::to_touchstone`]: `Format::RealImag` and
+    /// `FreqUnit::Hz`. Errors from `yee_io` are mapped to
     /// [`yee_core::Error::Io`] via the boundary helper documented at module
     /// level.
     pub fn write_touchstone(&self, path: &std::path::Path, z0: f64) -> yee_core::Result<()> {
-        let file = self.to_touchstone(
-            z0,
-            yee_io::touchstone::Format::RealImag,
-            yee_io::touchstone::FreqUnit::Hz,
-        );
+        let file = self.to_touchstone(z0);
         yee_io::touchstone::write(path, &file).map_err(io_to_core)
     }
 }
