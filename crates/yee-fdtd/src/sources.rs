@@ -7,6 +7,10 @@
 //!
 //! Hard sources, modal sources, and lumped ports remain Phase 2.1+ work.
 
+use std::f64::consts::TAU;
+
+use yee_core::units::{EPS0, MU0};
+
 use crate::grid::YeeGrid;
 
 /// Cardinal-axis propagation direction for [`PlaneWaveSource`].
@@ -50,7 +54,7 @@ pub enum PlaneWaveDirection {
 ///
 /// Taflove & Hagness, *Computational Electrodynamics* (3rd ed.) §6 and §14.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Fields populated in this commit, consumed by follow-up commits.
+#[allow(dead_code)] // i0..k1 are pub fields; correction kernels use them in the next commit.
 pub struct PlaneWaveSource {
     /// TF region lower x cell index (inclusive).
     pub i0: usize,
@@ -87,6 +91,14 @@ pub struct PlaneWaveSource {
     dt: f64,
     /// 1-D incident grid step counter.
     step: usize,
+    /// Previous-step value of `inc_e[N - 1]` (far-end cell), used by the
+    /// first-order Mur ABC on the 1-D grid.
+    mur_prev_end: f64,
+    /// Previous-step value of `inc_e[N - 2]` (cell just inside the
+    /// far end), used by the first-order Mur ABC.
+    mur_prev_inner: f64,
+    /// Mur ABC coefficient `(c·dt - dx)/(c·dt + dx)`, cached.
+    mur_coeff: f64,
 }
 
 impl PlaneWaveSource {
@@ -142,6 +154,9 @@ impl PlaneWaveSource {
         let inc_e = vec![0.0; inc_n_cells];
         let inc_h = vec![0.0; inc_n_cells - 1];
 
+        let c0 = yee_core::units::C0;
+        let mur_coeff = (c0 * dt - dx) / (c0 * dt + dx);
+
         Self {
             i0,
             i1,
@@ -158,22 +173,81 @@ impl PlaneWaveSource {
             dx,
             dt,
             step: 0,
+            mur_prev_end: 0.0,
+            mur_prev_inner: 0.0,
+            mur_coeff,
         }
     }
 
-    /// Advance `H_inc` by one time step. Stub in this commit; actual
-    /// 1-D leapfrog kernel lands in the follow-up "1-D incident-grid"
-    /// commit.
-    pub fn step_incident_h(&mut self) {
-        // Intentionally a no-op in the skeleton.
+    /// Hanning (raised-cosine) ramp factor for a sinusoidal source.
+    ///
+    /// Returns `0.5 * (1 - cos(π · n / ramp_steps))` for `n < ramp_steps`
+    /// and `1.0` afterwards. Tapering the carrier on with a Hann window
+    /// suppresses the broadband click an unramped sinusoid would inject.
+    fn ramp(&self) -> f64 {
+        if self.ramp_steps == 0 || self.step >= self.ramp_steps {
+            1.0
+        } else {
+            0.5 * (1.0 - (std::f64::consts::PI * self.step as f64 / self.ramp_steps as f64).cos())
+        }
     }
 
-    /// Advance `E_inc` by one time step (also injects the source and
-    /// applies the far-end ABC). Stub in this commit.
+    /// Drive value of the source at the current 1-D-grid step: a sinusoid
+    /// `sin(2π f n dt)` modulated by the Hann ramp.
+    fn source_value(&self) -> f64 {
+        let t = self.step as f64 * self.dt;
+        self.ramp() * (TAU * self.frequency * t).sin()
+    }
+
+    /// Advance `H_inc` by one time step.
+    ///
+    /// Standard 1-D Yee H-update:
+    /// ```text
+    /// H_inc_y[m+1/2] += (Δt/(μ₀ Δx)) · (E_inc_z[m+1] - E_inc_z[m])
+    /// ```
+    /// matches the sign convention of [`crate::update::update_h`] on
+    /// the 3D grid (∂H_y/∂t = +(1/μ) ∂E_z/∂x).
+    pub fn step_incident_h(&mut self) {
+        let coeff = self.dt / (MU0 * self.dx);
+        for m in 0..self.inc_h.len() {
+            self.inc_h[m] += coeff * (self.inc_e[m + 1] - self.inc_e[m]);
+        }
+    }
+
+    /// Update `E_inc`, inject the analytic source at the near end, and
+    /// apply a first-order Mur ABC at the far end. See
+    /// [`Self::step_incident_h`].
+    ///
+    /// The leapfrog body is:
+    /// ```text
+    /// E_inc_z[m]   += (Δt/(ε₀ Δx)) · (H_inc_y[m+1/2] - H_inc_y[m-1/2])
+    /// E_inc_z[0]   = ramp(n)·sin(2π f n Δt)              (hard source)
+    /// E_inc_z[N-1] = E_inc[N-2]^old + κ·(E_inc[N-2]^new - E_inc[N-1]^old)
+    /// ```
+    /// where κ = (c·Δt - Δx)/(c·Δt + Δx) is the Mur first-order ABC
+    /// coefficient.
     pub fn step_incident_e(&mut self) {
-        // Stub: just advance the step counter so callers see a
-        // monotonically increasing "wall clock" on the 1-D grid.
+        let coeff = self.dt / (EPS0 * self.dx);
+        let n = self.inc_e.len();
+
+        let prev_end = self.mur_prev_end;
+        let prev_inner = self.mur_prev_inner;
+
+        // Update E_inc[m] for m ∈ [1, n-1) using the freshly-stepped H_inc.
+        for m in 1..n - 1 {
+            self.inc_e[m] += coeff * (self.inc_h[m] - self.inc_h[m - 1]);
+        }
+        // Hard source at m=0.
         self.step += 1;
+        self.inc_e[0] = self.source_value();
+
+        // First-order Mur ABC at far end for outgoing +x waves.
+        let inner_new = self.inc_e[n - 2];
+        self.inc_e[n - 1] = prev_inner + self.mur_coeff * (inner_new - prev_end);
+
+        // Save state for next call.
+        self.mur_prev_end = self.inc_e[n - 1];
+        self.mur_prev_inner = inner_new;
     }
 
     /// Apply TF/SF corrections to the magnetic field on the box faces.
