@@ -37,24 +37,61 @@ pub enum PlaneWaveDirection {
 
 /// Total-field / scattered-field (TF/SF) plane-wave source.
 ///
-/// Skeleton struct for Phase 2.fdtd.5: holds the TF region bounds, the
-/// propagation direction, the source-pulse shape parameters, and an
-/// auxiliary 1-D incident-field grid that will propagate the analytical
-/// plane wave with the same numerical dispersion the 3D scheme sees on
-/// the propagation axis.
+/// Injects a normally-incident plane wave (Phase 2.fdtd.5 only supports
+/// `+x` direction with `E_z` polarization and `H_y` carrier) into the
+/// total-field region defined by an axis-aligned box of cell indices
+/// `[i0..=i1, j0..=j1, k0..=k1]`.
 ///
-/// This commit lands only the data layout and a stubbed [`Self::correct_h`]
-/// / [`Self::correct_e`] / [`Self::step_incident_h`] /
-/// [`Self::step_incident_e`] API surface so callers can wire up
-/// [`crate::WalkingSkeletonSolver::step_with_plane_wave`] later in this
-/// phase. The actual 1-D kernel and TF/SF coupling-correction math land
-/// in follow-up commits.
+/// # Field convention
+///
+/// - Inside the TF box, stored `E` and `H` are **total** fields.
+/// - Outside the TF box, stored `E` and `H` are **scattered** fields.
+///
+/// Coupling between the regions is implemented as discrete corrections
+/// on the `i = i0` and `i = i1` faces, derived from an auxiliary 1-D
+/// FDTD incident-field grid that propagates the analytical plane wave
+/// with the same numerical dispersion the 3D scheme sees along the
+/// propagation axis.
+///
+/// # Polarization and supported geometry (Phase 2.fdtd.5)
+///
+/// For `+x` propagation, `E_z` polarized, only the `H_y` component is
+/// excited. Phase 2.fdtd.5 implements **only the front (`i = i0`) and
+/// back (`i = i1`) face corrections**. The tangential faces (`j0`,
+/// `j1`, `k0`, `k1`) of the TF box are not handled here; for a fully
+/// finite TF/SF *box* one would need additional side-face corrections
+/// to account for the `H_x` / `H_z` discontinuities the discrete
+/// scheme creates at the transverse jumps in `E_z`.
+///
+/// In practice this means **the caller should pick the TF region as
+/// a slab spanning the full transverse extent of the grid** (e.g.
+/// `j0 = 0`, `j1 = ny`, `k0 = 0`, `k1 = nz`) and absorb the
+/// transverse boundaries with the outer CPML. Choosing a 3D
+/// finite-box TF region with a non-trivial Phase 2.fdtd.5 build is
+/// not currently a supported configuration; the test under
+/// `tests/plane_wave_propagation.rs` documents the supported slab
+/// geometry.
 ///
 /// # Reference
 ///
 /// Taflove & Hagness, *Computational Electrodynamics* (3rd ed.) §6 and §14.
+///
+/// # Phase 2.fdtd.5 limitations
+///
+/// - Only `PlusX` direction with `E_z` polarization is implemented;
+///   other [`PlaneWaveDirection`] variants `unimplemented!()` in the
+///   correction kernels.
+/// - Only the `i0` / `i1` faces apply corrections (slab geometry);
+///   side-face corrections for a finite TF box land in a later phase.
+/// - The 1-D auxiliary grid uses the same `dx` and `dt` as the 3D grid;
+///   for normal incidence this is exact in the limit of the 3D cubic
+///   Yee dispersion relation on-axis, but introduces a small mismatch
+///   at finite resolution that is well within the `> 10×` TF/SF
+///   contrast gate.
+/// - The 1-D far-end uses a first-order Mur ABC, sufficient for runs
+///   of several hundred steps without spurious 1-D reflections
+///   leaking back into the TF region.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // i0..k1 are pub fields; correction kernels use them in the next commit.
 pub struct PlaneWaveSource {
     /// TF region lower x cell index (inclusive).
     pub i0: usize,
@@ -251,11 +288,17 @@ impl PlaneWaveSource {
     }
 
     /// Apply TF/SF corrections to the magnetic field on the box faces.
-    /// Stub in this commit; per-face math lands in the "TF/SF corrections"
-    /// commit.
-    pub fn correct_h(&self, _grid: &mut YeeGrid) {
+    /// Call **after** [`crate::update::update_h`] and **after**
+    /// [`Self::step_incident_h`] (which advances `H_inc` from the
+    /// current `E_inc`).
+    ///
+    /// # Phase 2.fdtd.5 scope
+    ///
+    /// Implements `+x` propagation, `E_z` polarized only. Other variants
+    /// of [`PlaneWaveDirection`] call `unimplemented!()`.
+    pub fn correct_h(&self, grid: &mut YeeGrid) {
         match self.direction {
-            PlaneWaveDirection::PlusX => { /* stub */ }
+            PlaneWaveDirection::PlusX => self.correct_h_plus_x(grid),
             _ => unimplemented!(
                 "PlaneWaveDirection::{:?} is not implemented in Phase 2.fdtd.5",
                 self.direction
@@ -264,14 +307,120 @@ impl PlaneWaveSource {
     }
 
     /// Apply TF/SF corrections to the electric field on the box faces.
-    /// Stub in this commit.
-    pub fn correct_e(&self, _grid: &mut YeeGrid) {
+    /// Call **after** [`crate::update::update_e`] and **after**
+    /// [`Self::step_incident_e`].
+    ///
+    /// # Phase 2.fdtd.5 scope
+    ///
+    /// Implements `+x` propagation, `E_z` polarized only. Other variants
+    /// of [`PlaneWaveDirection`] call `unimplemented!()`.
+    pub fn correct_e(&self, grid: &mut YeeGrid) {
         match self.direction {
-            PlaneWaveDirection::PlusX => { /* stub */ }
+            PlaneWaveDirection::PlusX => self.correct_e_plus_x(grid),
             _ => unimplemented!(
                 "PlaneWaveDirection::{:?} is not implemented in Phase 2.fdtd.5",
                 self.direction
             ),
+        }
+    }
+
+    /// Map a 3D x-index `i` to a 1-D incident-grid `E_inc` index.
+    #[inline]
+    fn e_idx(&self, i: usize) -> usize {
+        i - self.i0 + self.pad
+    }
+
+    /// Map a 3D H_y i-index to a 1-D incident-grid `H_inc` index.
+    /// `H_y[i, *, *]` lives at the half-cell `(i + 1/2, *, *)`, so its
+    /// 1-D counterpart is `H_inc[i - i0 + pad]`.
+    #[inline]
+    fn h_idx(&self, i_h: usize) -> usize {
+        i_h - self.i0 + self.pad
+    }
+
+    // ----------------------------------------------------------------
+    // +x propagation, E_z polarization (Phase 2.fdtd.5)
+    //
+    // Derivation (Taflove & Hagness §14):
+    //
+    // For a +x plane wave with E along z and H along y, the only
+    // nontrivial corrections at normal incidence are on the i = i0 and
+    // i = i1 faces. Side faces (j0, j1, k0, k1) carry tangential field
+    // components that would correct H_x / H_z; those are zero for an
+    // E_z-polarized +x wave at normal incidence and require no
+    // correction in Phase 2.fdtd.5 (cf. the limitation in the struct
+    // docstring about slab vs. finite-box geometry).
+    //
+    // Front (i = i0):
+    //   H_y[i0-1, j, k] is SF (between SF E_z[i0-1] and TF E_z[i0]).
+    //   Standard update_h read E_z[i0] (TF) thinking it was SF;
+    //   correction: subtract (dt/(μ₀·dx)) · E_inc_z[at i0]  from H_y[i0-1].
+    //
+    //   E_z[i0, j, k] is TF, but standard update_e read
+    //   H_y[i0-1, j, k] (SF) thinking it was TF; correction:
+    //   subtract (dt/(ε₀·dx)) · H_inc_y[at i0-1]  from E_z[i0].
+    //
+    // Back (i = i1):
+    //   H_y[i1, j, k] is SF (between TF E_z[i1] and SF E_z[i1+1]).
+    //   Standard update_h read E_z[i1] (TF) thinking it was SF;
+    //   correction: add (dt/(μ₀·dx)) · E_inc_z[at i1]  to H_y[i1].
+    //
+    //   E_z[i1, j, k] is TF, but standard update_e read
+    //   H_y[i1, j, k] (SF) thinking it was TF; correction:
+    //   add (dt/(ε₀·dx)) · H_inc_y[at i1]  to E_z[i1].
+    // ----------------------------------------------------------------
+
+    fn correct_h_plus_x(&self, grid: &mut YeeGrid) {
+        let coeff = self.dt / (MU0 * self.dx);
+        let einc_front = self.inc_e[self.e_idx(self.i0)];
+        let einc_back = self.inc_e[self.e_idx(self.i1)];
+
+        // Bounds-check: H_y has shape [nx, ny+1, nz]. Need i0 ≥ 1
+        // (so i0-1 is valid) and i1 ≤ nx-1.
+        assert!(
+            self.i0 >= 1,
+            "PlaneWaveSource (+x): i0 must be ≥ 1 (got {})",
+            self.i0
+        );
+        assert!(
+            self.i1 < grid.nx,
+            "PlaneWaveSource (+x): i1 ({}) must be < grid.nx ({})",
+            self.i1,
+            grid.nx
+        );
+
+        let k_hi = self.k1.min(grid.nz);
+        for j in self.j0..=self.j1 {
+            for k in self.k0..k_hi {
+                grid.hy[(self.i0 - 1, j, k)] -= coeff * einc_front;
+            }
+        }
+        for j in self.j0..=self.j1 {
+            for k in self.k0..k_hi {
+                grid.hy[(self.i1, j, k)] += coeff * einc_back;
+            }
+        }
+    }
+
+    fn correct_e_plus_x(&self, grid: &mut YeeGrid) {
+        let coeff = self.dt / (EPS0 * self.dx);
+        assert!(
+            self.h_idx(self.i0 - 1) < self.inc_h.len(),
+            "PlaneWaveSource (+x): h_idx out of range (logic bug, please report)"
+        );
+        let hinc_front = self.inc_h[self.h_idx(self.i0 - 1)];
+        let hinc_back = self.inc_h[self.h_idx(self.i1)];
+
+        let k_hi = self.k1.min(grid.nz);
+        for j in self.j0..=self.j1 {
+            for k in self.k0..k_hi {
+                grid.ez[(self.i0, j, k)] -= coeff * hinc_front;
+            }
+        }
+        for j in self.j0..=self.j1 {
+            for k in self.k0..k_hi {
+                grid.ez[(self.i1, j, k)] += coeff * hinc_back;
+            }
         }
     }
 
