@@ -126,10 +126,10 @@ impl Solver for PlanarMoM {
     type Geometry = TriMesh;
     type Output = SParameters;
 
-    fn run(&self, _geometry: &Self::Geometry, _freq: FreqRange) -> yee_core::Result<Self::Output> {
-        Err(yee_core::Error::Unimplemented(
-            "PlanarMoM::run not implemented in phase 0",
-        ))
+    fn run(&self, geometry: &Self::Geometry, freq: FreqRange) -> yee_core::Result<Self::Output> {
+        let basis = basis::RwgBasis::from_mesh(geometry.clone())?;
+        let file = solve::s_parameters_sweep(&basis, 1, freq, 50.0)?;
+        Ok(SParameters::from_touchstone(&file))
     }
 }
 
@@ -144,20 +144,28 @@ mod tests {
     }
 
     #[test]
-    fn run_returns_unimplemented_with_exact_message() {
-        // The Phase 0 contract is that `run` returns the variant
-        // `yee_core::Error::Unimplemented` with this exact static message.
-        let solver = PlanarMoM::default();
-        let mesh = TriMesh::default();
-        let freq = FreqRange::new(1.0e9, 2.0e9, 3).expect("valid FreqRange");
-        let err = solver
-            .run(&mesh, freq)
-            .expect_err("run must return Err in Phase 0");
-        match err {
-            yee_core::Error::Unimplemented(msg) => {
-                assert_eq!(msg, "PlanarMoM::run not implemented in phase 0");
+    fn run_without_port_tags_returns_numerical_error() {
+        use nalgebra::Vector3;
+        use yee_mesh::TriMesh;
+
+        let mesh = TriMesh::new(
+            vec![
+                Vector3::new(0.0, 0.0, 0.0),
+                Vector3::new(0.1, 0.0, 0.0),
+                Vector3::new(0.1, 0.1, 0.0),
+                Vector3::new(0.0, 0.1, 0.0),
+            ],
+            vec![[0u32, 1, 2], [0u32, 2, 3]],
+            vec![0u32, 0u32], // no port tags → port edges empty → port current vanishes
+        )
+        .unwrap();
+        let freq = FreqRange::new(1.0e9, 2.0e9, 2).unwrap();
+        let result = PlanarMoM::default().run(&mesh, freq);
+        match result {
+            Err(yee_core::Error::Numerical(msg)) => {
+                assert!(msg.contains("port current"), "got: {msg}");
             }
-            other => panic!("expected Unimplemented, got: {other:?}"),
+            other => panic!("expected Numerical error, got {other:?}"),
         }
     }
 }
