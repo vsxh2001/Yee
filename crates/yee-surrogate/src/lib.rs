@@ -10,6 +10,9 @@
 //!   closest sample by Euclidean distance in parameter space.
 //! - `GaussianProcess`: RBF-kernel Gaussian-process regressor with calibrated
 //!   posterior variance.
+//! - `bo::minimize`: Bayesian-optimization loop using `GaussianProcess` +
+//!   Expected Improvement to minimize a black-box scalar objective over a
+//!   bounded hyper-rectangle.
 //!
 //! Phase 3.1+ will add MLP and Fourier neural operator backends behind the
 //! same `Surrogate` trait.
@@ -17,8 +20,10 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod bo;
 pub mod gp;
 
+pub use bo::{BoConfig, BoResult, ei, minimize};
 pub use gp::{GaussianProcess, GpSurrogate, MlFitConfig};
 
 use num_complex::Complex64;
