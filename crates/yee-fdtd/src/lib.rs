@@ -53,6 +53,7 @@ pub use driver::{FdtdDriver, FdtdDriverConfig, RadiationPattern};
 pub use grid::YeeGrid;
 pub use material::{Material, MaterialMap};
 pub use ntff::{NtffParams, NtffState};
+pub use sources::{PlaneWaveDirection, PlaneWaveSource};
 
 /// FDTD-layer errors.
 #[derive(Debug, thiserror::Error)]
@@ -241,6 +242,64 @@ impl WalkingSkeletonSolver {
         self.step_with_source(i, j, k, t0, sigma);
         let t_after = self.current_time();
         ntff.sample(&self.grid, t_after);
+    }
+
+    /// Advance one Yee step, driving the grid with a TF/SF plane-wave
+    /// source. See [`sources::PlaneWaveSource`].
+    ///
+    /// The composite step is:
+    ///
+    /// 1. Update the 1-D auxiliary `H_inc` grid.
+    /// 2. 3D `update_h`.
+    /// 3. Apply TF/SF corrections to `H` on the box faces.
+    /// 4. CPML / PEC boundary update on `H` (outer faces).
+    /// 5. 3D `update_e`.
+    /// 6. Update the 1-D auxiliary `E_inc` grid (also injects the source
+    ///    and applies the far-end Mur ABC).
+    /// 7. Apply TF/SF corrections to `E` on the box faces.
+    /// 8. CPML / PEC boundary update on `E`.
+    /// 9. Advance the step counter.
+    ///
+    /// This is the entry point used by
+    /// `tests/plane_wave_propagation.rs`.
+    pub fn step_with_plane_wave(&mut self, pw: &mut sources::PlaneWaveSource) {
+        // 1. Advance H_inc using current E_inc (E_inc at t = n).
+        pw.step_incident_h();
+
+        // 2. Standard H update.
+        update::update_h(&mut self.grid);
+
+        // 3. TF/SF correction on H (uses E_inc at t = n).
+        pw.correct_h(&mut self.grid);
+
+        // 4. Outer-boundary update.
+        if let Some(cpml) = self.cpml.as_mut() {
+            cpml.update_h(&mut self.grid);
+        } else {
+            #[allow(deprecated)]
+            boundary::apply_pec(&mut self.grid);
+        }
+
+        // 5. Standard E update.
+        update::update_e(&mut self.grid);
+
+        // 6. Advance E_inc and inject the source (E_inc now at t = n+1,
+        //    H_inc at t = n+1/2).
+        pw.step_incident_e();
+
+        // 7. TF/SF correction on E (uses H_inc at t = n+1/2).
+        pw.correct_e(&mut self.grid);
+
+        // 8. Outer-boundary update.
+        if let Some(cpml) = self.cpml.as_mut() {
+            cpml.update_e(&mut self.grid);
+        } else {
+            #[allow(deprecated)]
+            boundary::apply_pec(&mut self.grid);
+        }
+
+        // 9. Advance the wall-clock.
+        self.step += 1;
     }
 }
 
