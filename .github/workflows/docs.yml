@@ -1,0 +1,66 @@
+# mdBook docs build + GitHub Pages deploy.
+#
+# Builds the `docs/` mdBook on every push to main and deploys it to GitHub
+# Pages.
+#
+# Requirements:
+# 1. In the repository Settings → Pages, set the source to "GitHub Actions".
+# 2. The `docs/book.toml` mdBook configuration must exist (it does).
+#
+# The deploy job uses the standard GitHub Pages deployment pattern with the
+# `pages` environment and `actions/deploy-pages@v4`.
+
+name: Docs
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build mdBook
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88"
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install mdbook
+        run: cargo install mdbook --locked
+
+      - name: Build mdBook
+        run: mdbook build docs/
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/book
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
