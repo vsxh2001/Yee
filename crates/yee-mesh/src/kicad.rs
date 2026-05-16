@@ -15,10 +15,54 @@
 //! recursive-descent walker over the resulting tree to keep `yee-mesh`'s
 //! dependency footprint minimal.
 
-// The tokenizer + tree builder land before the domain extractor that consumes
-// them; the `dead_code` allowance is dropped in the follow-up commit that
-// wires `KiCadBoard::parse` to them.
-#![allow(dead_code)]
+use std::path::Path;
+
+/// In-memory representation of a parsed `.kicad_pcb` file.
+#[derive(Debug, Clone)]
+pub struct KiCadBoard {
+    /// Total board thickness in millimetres (from `(general (thickness ...))`).
+    pub thickness_mm: f64,
+    /// Ordered list of layers declared in the `(layers ...)` block.
+    pub layers: Vec<LayerInfo>,
+    /// Copper trace segments.
+    pub segments: Vec<Segment>,
+    /// Copper-fill zones with their polygon outline.
+    pub zones: Vec<Zone>,
+}
+
+/// One entry from the top-level `(layers ...)` block.
+#[derive(Debug, Clone)]
+pub struct LayerInfo {
+    /// Numeric ordinal (e.g. `0` for `F.Cu`, `31` for `B.Cu`).
+    pub ordinal: u32,
+    /// Human-readable name (e.g. `"F.Cu"`).
+    pub name: String,
+    /// Layer kind (e.g. `"signal"`, `"power"`, `"mixed"`, `"user"`).
+    pub kind: String,
+}
+
+/// A copper trace segment.
+#[derive(Debug, Clone)]
+pub struct Segment {
+    /// Start point in millimetres (KiCad-native units).
+    pub start: (f64, f64),
+    /// End point in millimetres.
+    pub end: (f64, f64),
+    /// Trace width in millimetres.
+    pub width_mm: f64,
+    /// Layer name the segment lives on.
+    pub layer: String,
+}
+
+/// A copper-fill zone. We currently capture only the outline polygon; the
+/// hatched fill pattern is reconstructed downstream.
+#[derive(Debug, Clone)]
+pub struct Zone {
+    /// Layer the zone lives on.
+    pub layer: String,
+    /// Outline polygon as `(x, y)` vertices in millimetres.
+    pub polygon: Vec<(f64, f64)>,
+}
 
 /// Errors produced while reading or parsing a `.kicad_pcb` file.
 #[derive(Debug, thiserror::Error)]
@@ -229,5 +273,271 @@ fn parse_list(tok: &mut Tokenizer<'_>, open_byte: usize) -> Result<Sexp, KiCadEr
             Some((_, Token::RParen)) => return Ok(Sexp::List(items)),
             Some((_, Token::Atom(s))) => items.push(Sexp::Atom(s)),
         }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Domain extraction
+// -----------------------------------------------------------------------------
+
+fn atom_to_f64(s: &Sexp) -> Result<f64, KiCadError> {
+    match s {
+        Sexp::Atom(a) => a.parse::<f64>().map_err(|_| KiCadError::Parse {
+            byte: 0,
+            msg: format!("expected number, got `{a}`"),
+        }),
+        Sexp::List(_) => Err(KiCadError::Parse {
+            byte: 0,
+            msg: "expected number, got list".into(),
+        }),
+    }
+}
+
+fn atom_to_u32(s: &Sexp) -> Result<u32, KiCadError> {
+    match s {
+        Sexp::Atom(a) => a.parse::<u32>().map_err(|_| KiCadError::Parse {
+            byte: 0,
+            msg: format!("expected unsigned int, got `{a}`"),
+        }),
+        Sexp::List(_) => Err(KiCadError::Parse {
+            byte: 0,
+            msg: "expected unsigned int, got list".into(),
+        }),
+    }
+}
+
+fn atom_to_string(s: &Sexp) -> Result<String, KiCadError> {
+    match s {
+        Sexp::Atom(a) => Ok(a.clone()),
+        Sexp::List(_) => Err(KiCadError::Parse {
+            byte: 0,
+            msg: "expected atom, got list".into(),
+        }),
+    }
+}
+
+/// Find the first child list whose head atom equals `key`. Returns `None` if
+/// no such child exists.
+fn find_child<'a>(items: &'a [Sexp], key: &str) -> Option<&'a [Sexp]> {
+    for item in items {
+        if let Sexp::List(inner) = item {
+            if let Some(Sexp::Atom(head)) = inner.first() {
+                if head == key {
+                    return Some(&inner[1..]);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn extract_general_thickness(general_tail: &[Sexp]) -> Result<f64, KiCadError> {
+    let thickness = find_child(general_tail, "thickness").ok_or_else(|| KiCadError::Parse {
+        byte: 0,
+        msg: "missing (thickness ...) in (general ...)".into(),
+    })?;
+    let v = thickness.first().ok_or_else(|| KiCadError::Parse {
+        byte: 0,
+        msg: "empty (thickness ...) form".into(),
+    })?;
+    atom_to_f64(v)
+}
+
+fn extract_layers(layers_tail: &[Sexp]) -> Result<Vec<LayerInfo>, KiCadError> {
+    let mut out = Vec::new();
+    for item in layers_tail {
+        let inner = match item.as_list() {
+            Some(v) => v,
+            None => continue,
+        };
+        // Each layer is `(N "Name" kind [maybe more])` — head is the ordinal,
+        // not an atom keyword.
+        if inner.len() < 3 {
+            continue;
+        }
+        let ordinal = atom_to_u32(&inner[0])?;
+        let name = atom_to_string(&inner[1])?;
+        let kind = atom_to_string(&inner[2])?;
+        out.push(LayerInfo {
+            ordinal,
+            name,
+            kind,
+        });
+    }
+    Ok(out)
+}
+
+fn extract_xy_pair(form: &[Sexp]) -> Result<(f64, f64), KiCadError> {
+    if form.len() < 2 {
+        return Err(KiCadError::Parse {
+            byte: 0,
+            msg: "expected at least 2 coordinates".into(),
+        });
+    }
+    let x = atom_to_f64(&form[0])?;
+    let y = atom_to_f64(&form[1])?;
+    Ok((x, y))
+}
+
+fn extract_segment(tail: &[Sexp]) -> Result<Segment, KiCadError> {
+    let start = find_child(tail, "start").ok_or_else(|| KiCadError::Parse {
+        byte: 0,
+        msg: "segment missing (start ...)".into(),
+    })?;
+    let end = find_child(tail, "end").ok_or_else(|| KiCadError::Parse {
+        byte: 0,
+        msg: "segment missing (end ...)".into(),
+    })?;
+    let width = find_child(tail, "width").ok_or_else(|| KiCadError::Parse {
+        byte: 0,
+        msg: "segment missing (width ...)".into(),
+    })?;
+    let layer = find_child(tail, "layer").ok_or_else(|| KiCadError::Parse {
+        byte: 0,
+        msg: "segment missing (layer ...)".into(),
+    })?;
+
+    let start_xy = extract_xy_pair(start)?;
+    let end_xy = extract_xy_pair(end)?;
+    let width_mm = atom_to_f64(width.first().ok_or_else(|| KiCadError::Parse {
+        byte: 0,
+        msg: "empty (width ...) form".into(),
+    })?)?;
+    let layer_name = atom_to_string(layer.first().ok_or_else(|| KiCadError::Parse {
+        byte: 0,
+        msg: "empty (layer ...) form".into(),
+    })?)?;
+
+    Ok(Segment {
+        start: start_xy,
+        end: end_xy,
+        width_mm,
+        layer: layer_name,
+    })
+}
+
+/// Recursively search for the first `(polygon (pts (xy x y) ...))` form and
+/// return its vertex list.
+fn extract_zone_polygon(node: &Sexp) -> Option<Vec<(f64, f64)>> {
+    let items = node.as_list()?;
+    if let Some(Sexp::Atom(head)) = items.first() {
+        if head == "polygon" {
+            // Look for the (pts ...) child.
+            let pts = find_child(&items[1..], "pts")?;
+            let mut verts = Vec::new();
+            for xy in pts {
+                if let Sexp::List(inner) = xy {
+                    if let Some(Sexp::Atom(h)) = inner.first() {
+                        if h == "xy" && inner.len() >= 3 {
+                            let x = inner[1].as_atom()?.parse::<f64>().ok()?;
+                            let y = inner[2].as_atom()?.parse::<f64>().ok()?;
+                            verts.push((x, y));
+                        }
+                    }
+                }
+            }
+            return Some(verts);
+        }
+    }
+    for child in &items[1..] {
+        if let Some(v) = extract_zone_polygon(child) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn extract_zone(tail: &[Sexp]) -> Result<Option<Zone>, KiCadError> {
+    let layer = find_child(tail, "layer").ok_or_else(|| KiCadError::Parse {
+        byte: 0,
+        msg: "zone missing (layer ...)".into(),
+    })?;
+    let layer_name = atom_to_string(layer.first().ok_or_else(|| KiCadError::Parse {
+        byte: 0,
+        msg: "empty (layer ...) form".into(),
+    })?)?;
+
+    // Walk every child of the zone looking for the first (polygon ...).
+    for item in tail {
+        if let Some(verts) = extract_zone_polygon(item) {
+            return Ok(Some(Zone {
+                layer: layer_name,
+                polygon: verts,
+            }));
+        }
+    }
+    // Zone without a polygon: silently skip — KiCad emits these for empty
+    // unfilled zones.
+    Ok(None)
+}
+
+// -----------------------------------------------------------------------------
+// Public API
+// -----------------------------------------------------------------------------
+
+impl KiCadBoard {
+    /// Read and parse a `.kicad_pcb` file from disk.
+    pub fn read(path: &Path) -> Result<Self, KiCadError> {
+        let bytes = std::fs::read(path).map_err(|e| KiCadError::Io(e.to_string()))?;
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|e| KiCadError::Io(format!("non-utf8 file: {e}")))?;
+        Self::parse(text)
+    }
+
+    /// Parse a `.kicad_pcb` document already loaded into memory.
+    pub fn parse(text: &str) -> Result<Self, KiCadError> {
+        let tree = parse_tree(text)?;
+        let items = tree
+            .as_list()
+            .ok_or_else(|| KiCadError::Unsupported("root sexp is not a list".into()))?;
+        let head = items
+            .first()
+            .and_then(|s| s.as_atom())
+            .ok_or_else(|| KiCadError::Unsupported("root list has no head atom".into()))?;
+        if head != "kicad_pcb" {
+            return Err(KiCadError::Unsupported(format!(
+                "root form is `{head}`, expected `kicad_pcb`"
+            )));
+        }
+        let tail = &items[1..];
+
+        let mut thickness_mm = 0.0;
+        let mut layers = Vec::new();
+        let mut segments = Vec::new();
+        let mut zones = Vec::new();
+
+        for item in tail {
+            let (head, body) = match item.head_tail() {
+                Some(v) => v,
+                None => continue,
+            };
+            match head {
+                "general" => {
+                    thickness_mm = extract_general_thickness(body)?;
+                }
+                "layers" => {
+                    layers = extract_layers(body)?;
+                }
+                "segment" => {
+                    segments.push(extract_segment(body)?);
+                }
+                "zone" => {
+                    if let Some(z) = extract_zone(body)? {
+                        zones.push(z);
+                    }
+                }
+                _ => {
+                    // Skip everything else (footprints, gr_*, vias, net, etc.)
+                    // per Phase 1.mesh.1 scope.
+                }
+            }
+        }
+
+        Ok(Self {
+            thickness_mm,
+            layers,
+            segments,
+            zones,
+        })
     }
 }
