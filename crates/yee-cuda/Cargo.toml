@@ -18,3 +18,9 @@ cuda    = ["dep:cudarc"]
 cudarc      = { workspace = true, optional = true }
 num-complex = { workspace = true }
 thiserror   = { workspace = true }
+
+[dev-dependencies]
+# Random RHS / matrix synthesis for hardware-gated cuSOLVER tests. Pinned
+# to the version cudarc already pulls in to avoid duplicating the
+# dependency tree.
+rand = "0.9"

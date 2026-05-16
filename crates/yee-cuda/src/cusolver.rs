@@ -394,7 +394,8 @@ pub(crate) fn zgetrs_host(
 mod tests {
     #[cfg(not(feature = "cuda"))]
     use super::*;
-    #[cfg(not(feature = "cuda"))]
+    #[cfg(feature = "cuda")]
+    use super::DenseLuComplex;
     use num_complex::Complex64;
 
     #[cfg(not(feature = "cuda"))]
@@ -406,5 +407,96 @@ mod tests {
             Err(other) => panic!("expected NotEnabled, got {other:?}"),
             Ok(_) => panic!("expected NotEnabled, got Ok(DenseLuComplex)"),
         }
+    }
+
+    /// Smoke test against the identity. `#[ignore]`-d because it needs a
+    /// reachable CUDA driver; run with `cargo test -- --ignored` on a
+    /// GPU host.
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore]
+    fn factorize_and_solve_2x2_identity() {
+        // A = I_2 (column-major), b = [2+3j, 4+5j]. Expect x == b.
+        let a = vec![
+            Complex64::new(1.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(1.0, 0.0),
+        ];
+        let b = vec![Complex64::new(2.0, 3.0), Complex64::new(4.0, 5.0)];
+        let lu = DenseLuComplex::factorize(&a, 2).expect("factorize");
+        let x = lu.solve(&b, 1).expect("solve");
+        assert!(
+            (x[0] - b[0]).norm() < 1e-12,
+            "x[0]={:?} vs b[0]={:?}",
+            x[0],
+            b[0]
+        );
+        assert!(
+            (x[1] - b[1]).norm() < 1e-12,
+            "x[1]={:?} vs b[1]={:?}",
+            x[1],
+            b[1]
+        );
+    }
+
+    /// 64×64 random Hermitian positive-definite solve.
+    ///
+    /// Build `A = M^H M + I` (HPD ⇒ non-singular), draw a random `b`,
+    /// solve `A x = b`, and verify `||A x − b|| / ||b|| < 1e-10`.
+    /// `#[ignore]`-d for the same reason as the 2×2 case.
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore]
+    fn factorize_and_solve_random_64() {
+        use rand::{Rng, SeedableRng, rngs::StdRng};
+
+        const N: usize = 64;
+        let mut rng = StdRng::seed_from_u64(0xfeed_f00d);
+
+        // Random M (column-major n×n).
+        let mut m = vec![Complex64::new(0.0, 0.0); N * N];
+        for v in &mut m {
+            *v = Complex64::new(rng.random_range(-1.0..1.0), rng.random_range(-1.0..1.0));
+        }
+
+        // A = M^H * M + I (column-major).
+        let mut a = vec![Complex64::new(0.0, 0.0); N * N];
+        for j in 0..N {
+            for i in 0..N {
+                // A[i,j] = sum_k conj(M[k,i]) * M[k,j]
+                let mut acc = Complex64::new(0.0, 0.0);
+                for k in 0..N {
+                    acc += m[k + i * N].conj() * m[k + j * N];
+                }
+                a[i + j * N] = acc;
+                if i == j {
+                    a[i + j * N] += Complex64::new(1.0, 0.0);
+                }
+            }
+        }
+
+        // Random b.
+        let mut b = vec![Complex64::new(0.0, 0.0); N];
+        for v in &mut b {
+            *v = Complex64::new(rng.random_range(-1.0..1.0), rng.random_range(-1.0..1.0));
+        }
+
+        let lu = DenseLuComplex::factorize(&a, N).expect("factorize");
+        let x = lu.solve(&b, 1).expect("solve");
+
+        // residual = A x − b (host).
+        let mut residual = vec![Complex64::new(0.0, 0.0); N];
+        for i in 0..N {
+            let mut acc = Complex64::new(0.0, 0.0);
+            for j in 0..N {
+                acc += a[i + j * N] * x[j];
+            }
+            residual[i] = acc - b[i];
+        }
+        let nr: f64 = residual.iter().map(|c| c.norm_sqr()).sum::<f64>().sqrt();
+        let nb: f64 = b.iter().map(|c| c.norm_sqr()).sum::<f64>().sqrt();
+        let rel = nr / nb;
+        assert!(rel < 1e-10, "relative residual {rel} >= 1e-10");
     }
 }
