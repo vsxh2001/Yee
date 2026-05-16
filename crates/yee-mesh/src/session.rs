@@ -8,7 +8,12 @@
 
 use std::path::Path;
 
-use crate::{Error, Result, TriMesh};
+// `Error` is only referenced by the no-feature stubs (which return
+// `Error::NotEnabled`). When the `gmsh` feature is on, every method body
+// is `todo!()` and never names `Error`, so importing it would be unused.
+#[cfg(not(feature = "gmsh"))]
+use crate::Error;
+use crate::{Result, TriMesh};
 
 /// Owns a single Gmsh API session. Dropping the session releases Gmsh's
 /// global state.
