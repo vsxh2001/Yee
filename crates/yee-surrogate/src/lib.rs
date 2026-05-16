@@ -8,12 +8,18 @@
 //! - `Surrogate` trait: `train(dataset)` + `predict(params)`.
 //! - `NearestNeighbor`: trivial baseline surrogate. Returns the output of the
 //!   closest sample by Euclidean distance in parameter space.
+//! - `GaussianProcess`: RBF-kernel Gaussian-process regressor with calibrated
+//!   posterior variance.
 //!
-//! Phase 3.1+ will add Gaussian-process, MLP, and Fourier neural operator
-//! backends behind the same `Surrogate` trait.
+//! Phase 3.1+ will add MLP and Fourier neural operator backends behind the
+//! same `Surrogate` trait.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+
+pub mod gp;
+
+pub use gp::{GaussianProcess, GpSurrogate};
 
 use num_complex::Complex64;
 
@@ -74,7 +80,14 @@ pub enum Error {
         /// Output length of the offending sample.
         got: usize,
     },
+    /// Surrogate fit failed (e.g., non-PSD Gram matrix → Cholesky failure).
+    #[error("surrogate fit failed: {0}")]
+    FitFailed(String),
 }
+
+/// Alias kept for compatibility with external callers that expect a
+/// `SurrogateError` type name.
+pub type SurrogateError = Error;
 
 /// Convenience `Result` alias for surrogate operations.
 pub type Result<T> = core::result::Result<T, Error>;
