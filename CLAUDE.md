@@ -37,7 +37,7 @@ docs/             — mdBook (theory + tutorials) + superpowers/specs + superpow
 .github/workflows/ — CI + GPU nightly + wheels + docs deploy
 ```
 
-Other root files worth knowing: `ROADMAP.md`, `TECH_STACK.md`, `CONTRIBUTING.md`, `THIRD_PARTY_LICENSES.md`, `rust-toolchain.toml` (pins 1.88), `rustfmt.toml`, `Cargo.toml` (workspace).
+Other root files worth knowing: `ROADMAP.md`, `TECH_STACK.md`, `CONTRIBUTING.md`, `THIRD_PARTY_LICENSES.md`, `rust-toolchain.toml` (pins 1.92), `rustfmt.toml`, `Cargo.toml` (workspace).
 
 A `yee-surrogate` crate is on the Phase-3 roadmap but **has not landed** as of the current `main` (`33e28db`). Do not assume it exists.
 
@@ -45,7 +45,7 @@ A `yee-surrogate` crate is on the Phase-3 roadmap but **has not landed** as of t
 
 ## 3. Conventions
 
-- **Rust 1.88+**, pinned in `rust-toolchain.toml`. Do not bump casually — see Phase 1.gui.3 note in §10.
+- **Rust 1.92+**, pinned in `rust-toolchain.toml`. Bumped from 1.88 in Phase 1.gui.3 (2026-05-17) alongside egui 0.34 / wgpu 29; do not bump casually beyond this.
 - **All public items documented.** Each crate sets `#![warn(missing_docs)]`.
 - **`#![forbid(unsafe_code)]` is the default.** It is relaxed only inside FFI submodules with an explicit `#[allow(unsafe_code)]` comment:
   - `yee-mesh` — Gmsh C-API FFI
@@ -152,8 +152,8 @@ Silently editing out-of-lane is the failure mode this section exists to prevent.
 Pre-flight installs called out in implementation plans. None of these are auto-detected; if a feature gate is being exercised, install the dependency first.
 
 ```bash
-# Rust 1.88 (pinned in rust-toolchain.toml)
-curl -sSf https://sh.rustup.rs | sh -s -- --default-toolchain 1.88
+# Rust 1.92 (pinned in rust-toolchain.toml)
+curl -sSf https://sh.rustup.rs | sh -s -- --default-toolchain 1.92
 
 # Faster rebuilds across worktrees
 cargo install sccache --locked
@@ -178,7 +178,7 @@ Optional, feature-gated:
 
 ## 8. CI/CD layout
 
-- `.github/workflows/ci.yml` — Rust workspace lint + test on Linux + Rust 1.88. The default-features matrix runs `cargo check`, `cargo clippy -- -D warnings`, `cargo fmt --check`, `cargo test --workspace`, and `cargo doc --no-deps`. Includes a `python-bindings` job that runs `maturin develop` and `pytest` against `yee-py`. Installs `libfontconfig1-dev` and `pkg-config` so the plotters-backed crates build.
+- `.github/workflows/ci.yml` — Rust workspace lint + test on Linux + Rust 1.92. The default-features matrix runs `cargo check`, `cargo clippy -- -D warnings`, `cargo fmt --check`, `cargo test --workspace`, and `cargo doc --no-deps`. Includes a `python-bindings` job that runs `maturin develop` and `pytest` against `yee-py`. Installs `libfontconfig1-dev` and `pkg-config` so the plotters-backed crates build.
 - `.github/workflows/gpu-nightly.yml` — self-hosted GPU runner. **Gated by repo variable `YEE_GPU_RUNNER_ENABLED`**; the workflow no-ops if the variable is unset, so a fork without GPU hardware will not see red nightly runs. This is where `--features cuda -- --include-ignored` tests actually execute.
 - `.github/workflows/publish-wheels.yml` — builds Python wheels on tag push (`v*`) via `maturin` with `manylinux_2_28`. PyPI publish step is **commented out** until the maintainer adds a `PYPI_API_TOKEN` repo secret; uncomment when releasing.
 - `.github/workflows/docs.yml` — builds the mdBook with `mdbook build docs/` and deploys to GitHub Pages on every push to `main`. **Requires the repo's Pages settings to have Source: GitHub Actions**; otherwise the deploy step fails with `404 Not Found`. This is the single most common "first time setting up the repo" failure.
@@ -206,7 +206,7 @@ When in doubt, read these first — they answer 80% of questions about what's al
 - **faer** — pure-Rust dense LA with good performance, used as the CPU-side LU reference and a swap point if `nalgebra-lapack` or `ndarray-linalg` becomes preferable later.
 - **Gmsh** (FFI) — best-in-class free mesher; the `rgmsh` crate is unmaintained, so we generate fresh `bindgen` bindings against Gmsh 4.15+.
 - **PyO3 0.28** — `abi3-py310` lets one wheel work across Python 3.10+; pairs with `maturin 1.10` for `manylinux_2_28`.
-- **egui 0.32 + eframe + wgpu 25** — immediate-mode UI with embedded GPU viewport. Pinned versions are forced by the Rust 1.88 floor; see §10.
+- **egui 0.34 + eframe 0.34 + egui_plot 0.35 + egui_dock 0.19 + wgpu 29** — immediate-mode UI with embedded GPU viewport. egui_plot and egui_dock minor versions track the highest release that pins egui ^0.34 (0.35 / 0.19 at time of bump); wgpu landed on 29 because egui-wgpu 0.34 hard-requires it.
 - **plotters** — server-side / headless plot generation for CI artifacts and notebook helpers. Requires `libfontconfig1-dev` on Linux.
 - **Touchstone v1.1** — the de-facto S-parameter file format. Our `yee-io` round-trips `.s1p` through generic `.sNp`.
 
