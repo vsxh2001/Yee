@@ -44,6 +44,7 @@ Standalone Jupyter notebooks that exercise the `yee` Python bindings end-to-end 
 | [`python/bo_monopole.ipynb`](python/bo_monopole.ipynb) | Bayesian optimization (`yee.bo_minimize`) on a synthetic monopole-length VSWR objective. Closed-form mock objective; converges to L ≈ λ/4 in 30 evaluations. |
 | [`python/nsga2_pareto.ipynb`](python/nsga2_pareto.ipynb) | Multi-objective Pareto front via NSGA-II (`yee.nsga2_minimize`) on Schaffer N1; recovers the analytic front x ∈ [0, 2]. |
 | [`python/al_dipole_surrogate.ipynb`](python/al_dipole_surrogate.ipynb) | Active learning (`yee.active_learn`) building a sin(x) GP surrogate; compares AL vs random sampling RMSE. |
+| [`python/surrogate_workflow.ipynb`](python/surrogate_workflow.ipynb) | Full AL → GP → BO pipeline on a synthetic monopole. |
 
 To run:
 
