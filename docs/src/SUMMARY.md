@@ -21,3 +21,7 @@
 - [ADR-0004: egui pinned 0.32](decisions/0004-egui-pinned-to-0.32.md)
 - [ADR-0005: NEC-4 vs Balanis mom-001](decisions/0005-nec4-vs-balanis-mom-001.md)
 - [ADR-0006: cudarc pre-alpha pin](decisions/0006-cudarc-prealpha-pin.md)
+- [ADR-0007: yee-bench criterion benches](decisions/0007-yee-bench-criterion.md)
+- [ADR-0008: validation aggregator JSON + PNG](decisions/0008-validation-aggregator-json-and-png.md)
+- [ADR-0009: hand-rolled Gaussian process surrogate](decisions/0009-gaussian-process-surrogate.md)
+- [ADR-0010: BO Expected Improvement before NSGA-II](decisions/0010-bayesian-optimization-ei-first.md)
