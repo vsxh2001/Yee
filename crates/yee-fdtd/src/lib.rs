@@ -4,7 +4,7 @@
 //! walking skeleton**: a CPU-only, single-threaded, scalar (FP64) Yee solver
 //! that demonstrates leapfrog propagation in vacuum on a uniform grid.
 //!
-//! ## What is included (Phase 2.0 + 2.1)
+//! ## What is included (Phase 2.0 + 2.1 + 2.2)
 //!
 //! - `YeeGrid` with vacuum constructor, Courant stability limit
 //! - Scalar `update_e` / `update_h` kernels (Taflove & Hagness §3)
@@ -12,16 +12,22 @@
 //! - **CPML absorbing boundary on all six outer faces (Roden & Gedney 2000)**
 //!   via [`CpmlState`] / [`CpmlParams`]
 //! - Hard PEC fallback in [`boundary::apply_pec`] for cavity-style problems
+//! - **Near-to-far-field (NTFF) transformation (Taflove §8, Yee 1992)**
+//!   via [`NtffState`] / [`NtffParams`] — single probe frequency,
+//!   single observation direction (Phase 2.fdtd.2 walking skeleton)
 //! - [`WalkingSkeletonSolver`]: a tiny [`FdtdSolver`] impl that wires it all
 //!   together; choose absorbing vs reflecting boundaries via
-//!   [`WalkingSkeletonSolver::with_cpml`] / [`WalkingSkeletonSolver::new`]
+//!   [`WalkingSkeletonSolver::with_cpml`] / [`WalkingSkeletonSolver::new`],
+//!   and accumulate NTFF currents via
+//!   [`WalkingSkeletonSolver::step_with_source_and_ntff`]
 //!
 //! ## What is NOT included
 //!
 //! - No GPU kernels, no multi-GPU domain decomposition.
 //! - No subgridding, no dispersive materials (Drude / Lorentz / Debye).
 //! - No conformal (Dey-Mittra) treatment of curved geometry.
-//! - No NTFF, no lumped ports, no waveguide ports.
+//! - No multi-frequency / full θ-φ NTFF sweep (Phase 2.fdtd.2.1),
+//!   no lumped ports, no waveguide ports.
 //!
 //! These omissions are intentional. The walking skeleton exists so the rest of
 //! the workspace (mesh, I/O, CLI, Python bindings) can integrate against a
