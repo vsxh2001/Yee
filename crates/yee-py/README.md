@@ -123,6 +123,38 @@ touchstone round-trip: n_ports=1, z0=50.0 Ω, data shape=(3, 1, 1), dtype=comple
 
 ---
 
+## Notebook helpers
+
+Three numpy-friendly convenience functions for plotting S-parameters
+straight from a notebook. Each accepts a 1-D `complex128` array (typically
+one S₁₁ trace over frequency) and returns a numpy array:
+
+| Function | Returns |
+|----------|---------|
+| `yee.s11_db(s)` | `float64[N]` — 20·log₁₀(\|S\|), clamped to −200 dB at exact zero. |
+| `yee.s11_phase(s)` | `float64[N]` — phase angle in degrees, in (−180, 180]. |
+| `yee.smith_xy(s)` | `float64[N, 2]` — Cartesian (Re, Im) for Smith-chart plotting. |
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+import yee
+
+freq_hz = np.linspace(1.0e9, 2.0e9, 101)
+# `s11` would normally come from `solver.run(...).data[:, 0, 0]`
+s11 = 0.3 * np.exp(-1j * 2 * np.pi * freq_hz / 1.5e9)
+
+fig, (ax_db, ax_smith) = plt.subplots(1, 2, figsize=(10, 4))
+ax_db.plot(freq_hz / 1e9, yee.s11_db(s11))
+ax_db.set_xlabel("Frequency (GHz)"); ax_db.set_ylabel("|S₁₁| (dB)")
+
+xy = yee.smith_xy(s11)
+ax_smith.plot(xy[:, 0], xy[:, 1])
+ax_smith.set_aspect("equal"); ax_smith.set_title("Smith")
+```
+
+---
+
 ## Public API at a glance
 
 | Symbol | Description |
