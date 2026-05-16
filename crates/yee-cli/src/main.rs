@@ -17,6 +17,10 @@
 //!   is picked from the output file extension).
 //! - `yee completions <shell>` — emits a shell completion script to stdout
 //!   (`bash`, `zsh`, `fish`).
+//! - `yee bench <target> [-- <criterion-args>]` — shells out to
+//!   `cargo bench -p yee-bench` for the chosen benchmark binary (or all of
+//!   them with `all`). Stdout/stderr are inherited so criterion's live
+//!   progress output is preserved.
 //! - `yee run <project>` — Phase 0 stub from the scaffold.
 
 use std::io;
@@ -115,6 +119,41 @@ enum Command {
         /// Target shell (`bash`, `zsh`, `fish`, ...).
         shell: Shell,
     },
+    /// Run a yee-bench criterion benchmark.
+    ///
+    /// Shells out to `cargo bench -p yee-bench [--bench <name>]` and
+    /// inherits stdout/stderr so criterion's progress and statistics
+    /// display live. Extra arguments after `--` are forwarded as
+    /// criterion CLI flags (e.g. `yee bench bo -- --warm-up-time 1`).
+    Bench {
+        /// Which bench to run.
+        #[arg(value_enum)]
+        target: BenchTarget,
+        /// Pass through extra `--bench` args to cargo (e.g. `--baseline=foo`).
+        #[arg(last = true)]
+        extra: Vec<String>,
+    },
+}
+
+/// Which `yee-bench` criterion target to invoke.
+///
+/// Each variant maps to a `[[bench]]` entry in `crates/yee-bench/Cargo.toml`;
+/// see [`run_bench`] for the variant → `--bench <name>` translation.
+/// `All` runs every bench by omitting the `--bench` flag entirely.
+#[derive(ValueEnum, Clone, Debug)]
+enum BenchTarget {
+    /// MoM solve on dipole 8×8 single freq.
+    Mom,
+    /// FDTD step on 50³ vacuum grid.
+    Fdtd,
+    /// GMRES vs direct LU at 128×128.
+    Gmres,
+    /// Gaussian-process fit + fit_ml.
+    Gp,
+    /// Full Bayesian-optimization run.
+    Bo,
+    /// Run all yee-bench benches.
+    All,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -195,7 +234,52 @@ fn run(cli: Cli) -> Result<ExitCode> {
             generate(shell, &mut cmd, bin_name, &mut io::stdout());
             Ok(ExitCode::SUCCESS)
         }
+        Command::Bench { target, extra } => run_bench(target, extra),
     }
+}
+
+/// Shell out to `cargo bench -p yee-bench [--bench <name>] [-- <extra>...]`.
+///
+/// Stdout/stderr are inherited (not captured) so users see criterion's
+/// live progress, the warmup countdown, and the per-bench summary tables
+/// as they're emitted. The function maps the [`BenchTarget`] variant to a
+/// concrete `--bench` argument; `BenchTarget::All` deliberately omits the
+/// flag so cargo runs every `[[bench]]` entry in `crates/yee-bench`.
+///
+/// Returns [`ExitCode::SUCCESS`] iff `cargo` exits zero. A non-zero exit
+/// (failed bench, missing target, criterion arg error) is surfaced as
+/// [`ExitCode::FAILURE`] without further interpretation.
+fn run_bench(target: BenchTarget, extra: Vec<String>) -> Result<ExitCode> {
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.args(["bench", "-p", "yee-bench"]);
+    match target {
+        BenchTarget::Mom => {
+            cmd.args(["--bench", "mom_solve"]);
+        }
+        BenchTarget::Fdtd => {
+            cmd.args(["--bench", "fdtd_step"]);
+        }
+        BenchTarget::Gmres => {
+            cmd.args(["--bench", "gmres_vs_direct"]);
+        }
+        BenchTarget::Gp => {
+            cmd.args(["--bench", "gp_fit"]);
+        }
+        BenchTarget::Bo => {
+            cmd.args(["--bench", "bo_step"]);
+        }
+        BenchTarget::All => {}
+    }
+    if !extra.is_empty() {
+        cmd.arg("--");
+        cmd.args(&extra);
+    }
+    let status = cmd.status()?;
+    Ok(if status.success() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
 }
 
 fn run_export(
