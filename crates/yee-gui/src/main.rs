@@ -1,14 +1,15 @@
-//! `yee-gui` — the Phase 1.gui.1 walking-skeleton studio shell.
+//! `yee-gui` binary entry — the Phase 1.gui.1 walking-skeleton studio shell.
 //!
-//! See [`crate::app`] for the application state and tab layout,
-//! [`crate::plots`] for the math helpers behind the dB and Smith plots, and
-//! [`crate::viewport`] for the wgpu-backed 3D mesh viewport.
+//! See [`yee_gui::app`] for the application state and tab layout,
+//! [`yee_gui::plots`] for the math helpers behind the dB and Smith plots,
+//! [`yee_gui::viewport`] for the wgpu-backed 3D mesh viewport, and
+//! [`yee_gui::validation`] for the validation aggregator panel.
 //!
 //! Architectural notes:
 //!
 //! - The shell hosts a menu bar, a metadata + viewport-controls side panel,
-//!   two `egui_plot` tabs, and a third `egui_wgpu`-backed 3D viewport tab —
-//!   all hosted by `egui_dock`.
+//!   two `egui_plot` tabs, an `egui_wgpu`-backed 3D viewport tab, and a
+//!   validation aggregator tab — all hosted by `egui_dock`.
 //! - File ingestion is driven by a `--file <path>` CLI flag at startup; the
 //!   menu entry for `Open .s1p…` is surfaced for discoverability but defers
 //!   to that workflow. A real file picker (`rfd`) is a Phase 1.gui.2+ task.
@@ -20,11 +21,7 @@
 
 use std::path::PathBuf;
 
-mod app;
-mod plots;
-mod viewport;
-
-use crate::app::YeeApp;
+use yee_gui::app::YeeApp;
 
 fn main() -> anyhow::Result<()> {
     // Initialise tracing so library logs (yee-io etc.) reach stderr.

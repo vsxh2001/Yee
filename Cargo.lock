@@ -6459,6 +6459,7 @@ dependencies = [
  "wgpu",
  "yee-core",
  "yee-io",
+ "yee-validation",
 ]
 
 [[package]]
@@ -6524,6 +6525,7 @@ dependencies = [
  "yee-mesh",
  "yee-mom",
  "yee-surrogate",
+ "yee-validation",
 ]
 
 [[package]]

@@ -12,8 +12,9 @@ name = "yee-gui"
 path = "src/main.rs"
 
 [dependencies]
-yee-core    = { workspace = true }
-yee-io      = { workspace = true }
+yee-core       = { workspace = true }
+yee-io         = { workspace = true }
+yee-validation = { workspace = true }
 egui        = { workspace = true }
 eframe      = { workspace = true, features = ["wgpu"] }
 egui_plot   = { workspace = true }
