@@ -12,6 +12,7 @@ members = [
     "crates/yee-plotters",
     "crates/yee-py",
     "crates/yee-surrogate",
+    "crates/yee-validation",
     "examples/half-wave-dipole",
     "examples/microstrip-line",
     "examples/patch-2g4",
@@ -96,6 +97,10 @@ tracing            = "0.1"
 tracing-subscriber = "0.3"
 thiserror          = "1"
 anyhow             = "1"
+
+# Serialization
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
