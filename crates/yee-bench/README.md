@@ -56,3 +56,8 @@ optimisation actually moved the needle. Conversely, do not add benches
 "just in case" — every bench is wall-time on every `cargo bench` run, and
 the criterion baseline data has to be re-recorded after any meaningful
 change to the surrounding code.
+
+## ML benches
+
+- `gp_fit` — GP fit + fit_ml across n = 10, 25, 50 (+ 100 for plain fit).
+- `bo_step` — full 25-eval BO minimize on the 1-D deceptive objective.
