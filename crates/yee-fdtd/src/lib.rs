@@ -34,11 +34,13 @@
 pub mod boundary;
 pub mod cpml;
 pub mod grid;
+pub mod ntff;
 pub mod sources;
 pub mod update;
 
 pub use cpml::{CpmlParams, CpmlState};
 pub use grid::YeeGrid;
+pub use ntff::{NtffParams, NtffState};
 
 /// FDTD-layer errors.
 #[derive(Debug, thiserror::Error)]
@@ -168,6 +170,7 @@ impl WalkingSkeletonSolver {
         }
         self.step += 1;
     }
+
 }
 
 impl FdtdSolver for WalkingSkeletonSolver {
