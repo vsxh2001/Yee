@@ -37,7 +37,9 @@
 //! BO does not need cryptographic randomness; this module ships a small
 //! xorshift64 PRNG inline. Seed via [`BoConfig::seed`] for reproducibility.
 
-use nalgebra::DVector;
+use nalgebra::{DMatrix, DVector};
+
+use crate::{GaussianProcess, MlFitConfig};
 
 /// Configuration for [`minimize`].
 #[derive(Debug, Clone)]
@@ -130,12 +132,107 @@ fn erf_as(x: f64) -> f64 {
     sign * y
 }
 
+/// Minimize a black-box scalar objective over a hyper-rectangle via Bayesian
+/// optimization with Expected Improvement. See the module docs for the
+/// algorithm.
+///
+/// `bounds` is a `(lo, hi)` pair per dimension. The objective is called
+/// `n_initial + n_iters` times in total. The returned [`BoResult::history`]
+/// records every evaluation in chronological order; `x_best` / `y_best`
+/// reflect the lowest `y` seen.
+///
+/// Panics if `bounds` is empty, any `(lo, hi)` has `hi <= lo`, or if any GP
+/// refit fails. The small-n regime normally does not trip the GP, but a
+/// pathological objective could; in that case the caller should widen the
+/// initial `sigma_n` in [`MlFitConfig`] and retry.
+pub fn minimize<F>(objective: F, bounds: Vec<(f64, f64)>, cfg: BoConfig) -> BoResult
+where
+    F: Fn(&DVector<f64>) -> f64,
+{
+    assert!(!bounds.is_empty(), "minimize: bounds must be non-empty");
+    for (i, (lo, hi)) in bounds.iter().enumerate() {
+        assert!(
+            hi > lo,
+            "minimize: bounds[{i}] has hi ({hi}) <= lo ({lo})"
+        );
+    }
+    assert!(
+        cfg.n_initial >= 2,
+        "minimize: n_initial must be ≥ 2 (got {}); GP needs ≥ 2 distinct training points",
+        cfg.n_initial
+    );
+
+    let d = bounds.len();
+    let mut rng = Xorshift64::new(cfg.seed);
+
+    // Initial Latin-hypercube design.
+    let initial = latin_hypercube(cfg.n_initial, &bounds, &mut rng);
+    let mut history: Vec<(DVector<f64>, f64)> = Vec::with_capacity(cfg.n_initial + cfg.n_iters);
+    for x in initial {
+        let y = objective(&x);
+        history.push((x, y));
+    }
+
+    for _ in 0..cfg.n_iters {
+        // Refit the GP on the current history.
+        let n = history.len();
+        let mut x_train = DMatrix::<f64>::zeros(n, d);
+        let mut y_train = DVector::<f64>::zeros(n);
+        for (i, (x, y)) in history.iter().enumerate() {
+            for j in 0..d {
+                x_train[(i, j)] = x[j];
+            }
+            y_train[i] = *y;
+        }
+
+        let gp = GaussianProcess::fit_ml(x_train, y_train, MlFitConfig::default())
+            .expect("BO: GP refit failed; consider widening initial sigma_n");
+
+        let f_best = history
+            .iter()
+            .map(|(_, y)| *y)
+            .fold(f64::INFINITY, f64::min);
+
+        // Score n_candidates uniform random points, pick the EI maximizer.
+        let mut best_x = uniform_in_bounds(&bounds, &mut rng);
+        let (best_mean, best_var) = gp.predict(&best_x);
+        let mut best_ei = ei(best_mean, best_var.sqrt(), f_best, cfg.xi);
+        for _ in 1..cfg.n_candidates {
+            let cand = uniform_in_bounds(&bounds, &mut rng);
+            let (mean, var) = gp.predict(&cand);
+            let v = ei(mean, var.sqrt(), f_best, cfg.xi);
+            if v > best_ei {
+                best_ei = v;
+                best_x = cand;
+            }
+        }
+
+        let y_new = objective(&best_x);
+        history.push((best_x, y_new));
+    }
+
+    // Find best.
+    let mut idx_best = 0;
+    let mut y_best = history[0].1;
+    for (i, (_, y)) in history.iter().enumerate().skip(1) {
+        if *y < y_best {
+            y_best = *y;
+            idx_best = i;
+        }
+    }
+    let x_best = history[idx_best].0.clone();
+    BoResult {
+        x_best,
+        y_best,
+        history,
+    }
+}
+
 /// Latin-hypercube sample of `n` points in `bounds`.
 ///
 /// For each dimension, splits `[0, 1]` into `n` equal strata, draws one
 /// uniform point per stratum, then independently permutes the strata across
 /// dimensions and scales to the requested bounds.
-#[allow(dead_code)] // wired up by `minimize` in the next commit
 fn latin_hypercube(n: usize, bounds: &[(f64, f64)], rng: &mut Xorshift64) -> Vec<DVector<f64>> {
     let d = bounds.len();
     // Unit-cube LHS values: lhs_unit[i][j] is the i-th sample's j-th coord in [0, 1].
@@ -169,7 +266,6 @@ fn latin_hypercube(n: usize, bounds: &[(f64, f64)], rng: &mut Xorshift64) -> Vec
 }
 
 /// One uniform sample in the hyper-rectangle `bounds`.
-#[allow(dead_code)] // wired up by `minimize` in the next commit
 fn uniform_in_bounds(bounds: &[(f64, f64)], rng: &mut Xorshift64) -> DVector<f64> {
     let mut x = DVector::<f64>::zeros(bounds.len());
     for (j, &(lo, hi)) in bounds.iter().enumerate() {
@@ -183,12 +279,10 @@ fn uniform_in_bounds(bounds: &[(f64, f64)], rng: &mut Xorshift64) -> DVector<f64
 /// This is deliberately not exposed in the public API; BO callers control
 /// randomness via [`BoConfig::seed`] only.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // wired up by `minimize` in the next commit
 pub(crate) struct Xorshift64 {
     state: u64,
 }
 
-#[allow(dead_code)] // wired up by `minimize` in the next commit
 impl Xorshift64 {
     /// Construct a new PRNG. A zero seed is replaced by a non-zero constant so
     /// the recurrence does not collapse to `state = 0`.
