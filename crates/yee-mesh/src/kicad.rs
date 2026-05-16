@@ -541,3 +541,63 @@ impl KiCadBoard {
         })
     }
 }
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MINI: &str = r#"(kicad_pcb (version 20221018) (generator pcbnew)
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (segment (start 10 10) (end 50 10) (width 0.25) (layer "F.Cu") (net 1))
+  (segment (start 50 10) (end 50 50) (width 0.25) (layer "F.Cu") (net 1))
+  (zone (net 0) (net_name "GND") (layer "B.Cu")
+    (polygon (pts (xy 0 0) (xy 100 0) (xy 100 100) (xy 0 100)))
+  )
+)"#;
+
+    #[test]
+    fn parse_thickness() {
+        let board = KiCadBoard::parse(MINI).unwrap();
+        assert!((board.thickness_mm - 1.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_two_layers() {
+        let board = KiCadBoard::parse(MINI).unwrap();
+        assert_eq!(board.layers.len(), 2);
+        assert_eq!(board.layers[0].name, "F.Cu");
+        assert_eq!(board.layers[1].name, "B.Cu");
+    }
+
+    #[test]
+    fn parse_two_segments() {
+        let board = KiCadBoard::parse(MINI).unwrap();
+        assert_eq!(board.segments.len(), 2);
+        assert!((board.segments[0].width_mm - 0.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_one_zone_with_four_corners() {
+        let board = KiCadBoard::parse(MINI).unwrap();
+        assert_eq!(board.zones.len(), 1);
+        assert_eq!(board.zones[0].layer, "B.Cu");
+        assert_eq!(board.zones[0].polygon.len(), 4);
+    }
+
+    #[test]
+    fn malformed_input_rejected() {
+        let bad = "(kicad_pcb (general";
+        assert!(matches!(
+            KiCadBoard::parse(bad),
+            Err(KiCadError::Parse { .. })
+        ));
+    }
+}
