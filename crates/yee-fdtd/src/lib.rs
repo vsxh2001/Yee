@@ -4,13 +4,17 @@
 //! **Phase 2 walking skeleton**: a CPU-only, single-threaded, scalar (FP64)
 //! Yee solver.
 //!
-//! This commit adds the scalar `update_e` / `update_h` kernels on top of the
-//! grid. Sources, boundaries, and the solver wrapper follow.
+//! This commit adds the Gaussian point source and the hard PEC outer
+//! boundary. CPML (the *real* absorbing boundary) is **Phase 2.1+ work** —
+//! see [`boundary`] for the limitation. The solver wrapper follows in the
+//! next commit.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod boundary;
 pub mod grid;
+pub mod sources;
 pub mod update;
 
 pub use grid::YeeGrid;
