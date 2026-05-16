@@ -9,6 +9,9 @@
 //!   `gmsh` feature this exits with code 2 and a guidance message.
 //! - `yee export <input> --format <touchstone|hdf5> <output>` — reads/writes
 //!   Touchstone via `yee-io`. `hdf5` is not yet enabled and exits with code 2.
+//! - `yee plot <input> --kind <db|smith|phase> --output <out>` — reads a
+//!   Touchstone file and emits a PNG/SVG plot via `yee-plotters` (the format
+//!   is picked from the output file extension).
 //! - `yee completions <shell>` — emits a shell completion script to stdout
 //!   (`bash`, `zsh`, `fish`).
 //! - `yee run <project>` — Phase 0 stub from the scaffold.
@@ -20,6 +23,8 @@ use std::process::ExitCode;
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
+
+mod plot;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -60,6 +65,33 @@ enum Command {
         /// Output file path.
         output: PathBuf,
     },
+    /// Plot S-parameters from a Touchstone file.
+    ///
+    /// The output format (PNG vs SVG) is chosen from the `--output` file
+    /// extension; `.png` and `.svg` are accepted (no extension defaults to
+    /// PNG).
+    Plot {
+        /// Input Touchstone path (.s1p, .s2p, etc.).
+        input: PathBuf,
+        /// What to plot.
+        #[arg(long, value_enum, default_value_t = PlotKind::Db)]
+        kind: PlotKind,
+        /// Output file path; extension picks PNG vs SVG.
+        #[arg(long, short)]
+        output: PathBuf,
+        /// Width in pixels.
+        #[arg(long, default_value_t = 800)]
+        width: u32,
+        /// Height in pixels.
+        #[arg(long, default_value_t = 600)]
+        height: u32,
+        /// Plot title; defaults to the input file stem.
+        #[arg(long)]
+        title: Option<String>,
+        /// Which port (index into the S-matrix, 0-based). Default 0 (S₁₁).
+        #[arg(long, default_value_t = 0)]
+        port: usize,
+    },
     /// Generate a shell completion script on stdout.
     ///
     /// Pre-generated scripts live in `crates/yee-cli/completions/`.
@@ -75,6 +107,17 @@ enum ExportFormat {
     Touchstone,
     /// HDF5 (not yet enabled).
     Hdf5,
+}
+
+/// What `yee plot` should draw from the S-parameter sweep.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum PlotKind {
+    /// `|S|` in dB vs frequency.
+    Db,
+    /// `S` on the Smith chart.
+    Smith,
+    /// `phase(S)` in degrees vs frequency.
+    Phase,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -116,6 +159,23 @@ fn run(cli: Cli) -> Result<ExitCode> {
             format,
             output,
         } => run_export(&input, format, &output),
+        Command::Plot {
+            input,
+            kind,
+            output,
+            width,
+            height,
+            title,
+            port,
+        } => plot::run_plot(plot::PlotArgs {
+            input,
+            kind,
+            output,
+            width,
+            height,
+            title,
+            port,
+        }),
         Command::Completions { shell } => {
             let mut cmd = Cli::command();
             let bin_name = cmd.get_name().to_string();
