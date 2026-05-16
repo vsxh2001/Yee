@@ -306,6 +306,31 @@ returned `AlResult` exposes `history_x` (`float64[n_evals, d]`),
 
 ---
 
+## Validation aggregator
+
+`yee.run_validation()` wraps `yee_validation::Report::run_all`: every
+registered validation case (mom-001 dipole gate, mom-002 microstrip
+placeholder, plus the Phase-deferred FDTD entries) runs in sequence
+and the structured result is handed back as a `ValidationReport`.
+
+```python
+import yee
+
+report = yee.run_validation()           # WARNING: ~8 min (real mom-001 solve)
+print("failures:", report.has_failures())
+for case in report.cases:
+    print(f"{case.id:>16}  {case.status:8}  {case.wall_time_seconds:6.2f}s")
+print(report.to_json())                 # pretty-printed JSON for archives
+```
+
+`ValidationCase` exposes `.id`, `.status` (`"Passed"` / `"Failed"` /
+`"Skipped"`), `.notes`, `.wall_time_seconds`, and `.plot_paths`.
+`ValidationReport` exposes `.cases`, `.has_failures()`, and
+`.to_json()`. Intended for offline / notebook use — the mom-001 case
+alone takes ~7-8 min wall time in release builds.
+
+---
+
 ## Public API at a glance
 
 | Symbol | Description |
