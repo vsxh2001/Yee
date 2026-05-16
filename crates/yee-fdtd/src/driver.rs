@@ -149,13 +149,31 @@ impl FdtdDriver {
             step_with_dipole(&mut self.solver, &mut self.ntff, ci, cj, &z_indices, drive);
         }
 
-        // Angular sweep over the accumulated NTFF currents lands in the
-        // next commit. For now return the empty shape so the skeleton's
-        // output contract stays intact.
+        // Sweep θ ∈ [0°, 180°] in 5° steps at φ = 0. NtffState::far_field_at
+        // is cheap (it re-projects the already-accumulated DFT-bin
+        // currents) so 37 calls cost a negligible fraction of the total
+        // run time.
         const STEP_DEG: f64 = 5.0;
         let n = (180.0 / STEP_DEG) as usize + 1;
-        let theta_deg: Vec<f64> = (0..n).map(|i| (i as f64) * STEP_DEG).collect();
-        let e_theta_phi0 = vec![0.0; n];
+        let mut theta_deg = Vec::with_capacity(n);
+        let mut mags = Vec::with_capacity(n);
+        for i in 0..n {
+            let deg = (i as f64) * STEP_DEG;
+            let theta_rad = deg.to_radians();
+            let e = self.ntff.far_field_at(theta_rad, 0.0);
+            theta_deg.push(deg);
+            mags.push(e.norm());
+        }
+
+        // Normalize to max so callers can compare against any analytic
+        // pattern (e.g. sin θ) that is also normalized to its maximum.
+        let m = mags.iter().cloned().fold(0.0f64, f64::max);
+        let e_theta_phi0 = if m > 0.0 {
+            mags.iter().map(|v| v / m).collect()
+        } else {
+            mags
+        };
+
         RadiationPattern {
             theta_deg,
             e_theta_phi0,
