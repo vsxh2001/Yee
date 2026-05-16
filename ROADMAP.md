@@ -8,6 +8,37 @@ Conventions used below:
 - ✅ **Validation** — benchmark cases that must pass before the phase is called "done"
 - ⚠️ **Risks / dependencies** — what could derail this phase
 
+## Status snapshot (2026-05-17)
+
+**Shipped:**
+- Phase 0 walking skeleton (`phase-0-done` tag)
+- Phase 1.0 free-space MoM dipole, NEC-4 87+j41 Ω reference passing (`phase-1-0-mom-dipole` tag)
+- Phase 1.1.0 multilayer Greens placeholder (one-image DCIM); Phase 1.1.1 Sommerfeld extraction still pending
+- Phase 1.3.0 wave-port skeleton (matches delta-gap); Phase 1.3.1 cross-section eigenmode still pending
+- Phase 1.4 surface roughness (Hammerstad-Jensen, Groiss, Huray)
+- Phase 1.5 cuSOLVER LU (hardware-gated)
+- Phase 1.6 GMRES iterative
+- Phase 1.gui.0/1/2/3 (egui shell, wgpu viewport, S11 + Smith plots, rust-1.92 + egui-0.34 + wgpu-29 toolchain bump)
+- Phase 1.mesh.0/1 (Gmsh + KiCad import)
+- Phase 1.plotting.0 (yee-plotters)
+- Phase 1.validation.0/1/2 (aggregator + JSON Report + PNG artifacts via CI upload)
+- Phase 1.bench yee-bench (criterion benches: MoM solve, FDTD step, GMRES vs LU, GP fit, BO, TF/SF, lumped)
+- Phase 1.cli.1 `yee validate`, `yee bench`
+- Phase 1.examples.0/2/4 (Rust examples, BO notebook, NSGA-II + AL notebooks)
+- Phase 1.frontend.0/1/2/3 (yee-py: GP, FdtdDriver, BO, NSGA-II + AL, validation aggregator)
+- Phase 2.fdtd.0..6 (walking skeleton, CPML, NTFF, dispersive ADE, end-to-end driver, TF/SF slab, lumped RLC)
+- Phase 3.gp.0/1 (GP regression + ML hyperparameter fit)
+- Phase 3.bo.0/1 (Expected-Improvement BO, NSGA-II multi-objective)
+- Phase 3.al.0 (variance-acquisition active learning)
+
+**Pending (high priority):**
+- Phase 1.1.1 real Sommerfeld / multi-image DCIM extraction
+- Phase 1.3.1 wave-port cross-section eigenmode solver
+- Phase 2.fdtd.5.1/5.2/5.3 finite-box / oblique / multi-polarization TF/SF
+- Phase 2.fdtd.7 subgridding (roadmap-deferred)
+- Phase 3.nl.0 NL design surface (LLM)
+- Phase 4 FEM / eigenmode
+
 ---
 
 ## Phase 0 — Foundation (Months 0–6)
