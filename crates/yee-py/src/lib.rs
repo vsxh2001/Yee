@@ -9,6 +9,7 @@ use pyo3::prelude::*;
 
 mod errors;
 mod freq;
+mod solver;
 mod sparams;
 mod trimesh;
 
@@ -18,5 +19,6 @@ fn _yee(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<trimesh::PyTriMesh>()?;
     m.add_class::<freq::PyFreqRange>()?;
     m.add_class::<sparams::PySParameters>()?;
+    m.add_class::<solver::PyPlanarMoM>()?;
     Ok(())
 }
