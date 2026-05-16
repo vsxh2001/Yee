@@ -6,6 +6,7 @@
 use crate::basis::RwgBasis;
 use crate::fill::impedance_matrix;
 use crate::greens::FreeSpaceGreen;
+use crate::iterative::{GmresParams, gmres_jacobi};
 use crate::ports::{DeltaGapPort, Port};
 use crate::roughness::{RoughnessModel, SIGMA_COPPER};
 use faer::Mat;
@@ -13,6 +14,22 @@ use faer::linalg::solvers::{PartialPivLu, Solve};
 use num_complex::Complex64;
 use yee_core::{Error, FreqRange};
 use yee_io::touchstone::{File as TouchstoneFile, Format, FreqUnit};
+
+/// Selector for the linear solver used by [`s_parameters_at_freq_with_solver`].
+///
+/// The default ([`LinearSolver::Direct`]) is the dense partial-pivot LU
+/// path used since Phase 1.0 — appropriate for `n ≲ 10⁴`. For large
+/// problems (`n ≥ 5 × 10⁴` is the rough crossover where dense LU exceeds
+/// 32 GB of GPU memory) use [`LinearSolver::GmresJacobi`].
+#[derive(Debug, Clone, Copy, Default)]
+pub enum LinearSolver {
+    /// Dense partial-pivot LU via `faer::linalg::solvers::PartialPivLu`.
+    #[default]
+    Direct,
+    /// Restarted GMRES(m) with diagonal Jacobi preconditioning. See
+    /// [`crate::iterative::gmres_jacobi`].
+    GmresJacobi(GmresParams),
+}
 
 /// Apply a frequency-dependent surface-roughness loss multiplier to the
 /// impedance matrix in-place.
@@ -75,6 +92,32 @@ pub(crate) fn s_parameters_at_freq(
     z0_ref: f64,
     roughness: Option<&RoughnessModel>,
 ) -> Result<Complex64, Error> {
+    s_parameters_at_freq_with_solver(
+        basis,
+        port,
+        freq_hz,
+        z0_ref,
+        roughness,
+        LinearSolver::Direct,
+    )
+}
+
+/// Same numerics as [`s_parameters_at_freq`] but with an explicit solver
+/// selection. The direct LU path is the canonical Phase 1.0 numerics and
+/// remains the default for callers that don't care; the GMRES path is
+/// intended for `n ≥ 50k` where dense LU overflows GPU memory.
+///
+/// Returns [`Error::Numerical`] for both the pathological-port case and
+/// for GMRES non-convergence (the iterative path surfaces the final
+/// relative residual in the error message).
+pub(crate) fn s_parameters_at_freq_with_solver(
+    basis: &RwgBasis,
+    port: &dyn Port,
+    freq_hz: f64,
+    z0_ref: f64,
+    roughness: Option<&RoughnessModel>,
+    solver: LinearSolver,
+) -> Result<Complex64, Error> {
     let green = FreeSpaceGreen::new(freq_hz);
     let mut z = impedance_matrix(basis, &green);
     if let Some(rough) = roughness {
@@ -82,11 +125,26 @@ pub(crate) fn s_parameters_at_freq(
     }
     let b = port.rhs(basis, freq_hz);
 
-    // Partial-pivot LU is the canonical dense solver for the (non-Hermitian
-    // but symmetric) MPIE impedance matrix; full pivoting is overkill and
-    // QR would needlessly inflate the constant factor on the O(N^3) work.
-    let lu = PartialPivLu::new(z.as_ref());
-    let i = lu.solve(b.as_ref());
+    let i = match solver {
+        LinearSolver::Direct => {
+            // Partial-pivot LU is the canonical dense solver for the
+            // (non-Hermitian but symmetric) MPIE impedance matrix; full
+            // pivoting is overkill and QR would needlessly inflate the
+            // constant factor on the O(N^3) work.
+            let lu = PartialPivLu::new(z.as_ref());
+            lu.solve(b.as_ref())
+        }
+        LinearSolver::GmresJacobi(params) => {
+            let res = gmres_jacobi(z.as_ref(), b.as_ref(), params);
+            if !res.converged {
+                return Err(Error::Numerical(format!(
+                    "GMRES failed to converge: final residual {:.3e} after {} iterations",
+                    res.final_residual, res.iterations
+                )));
+            }
+            res.x
+        }
+    };
 
     let i_port = port.port_current(basis, &i);
 

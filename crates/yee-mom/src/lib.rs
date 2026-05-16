@@ -15,12 +15,14 @@
 pub(crate) mod basis;
 pub(crate) mod fill;
 pub(crate) mod greens;
+pub mod iterative;
 pub(crate) mod multilayer;
 pub(crate) mod ports;
 pub(crate) mod quadrature;
 pub mod roughness;
 pub(crate) mod solve;
 
+pub use iterative::{GmresParams, GmresResult, gmres_jacobi};
 pub use roughness::{RoughnessModel, SIGMA_COPPER};
 
 use num_complex::Complex64;
