@@ -15,14 +15,13 @@ cuda    = ["dep:yee-cuda", "yee-cuda/cuda"]
 yee-core    = { workspace = true }
 yee-mesh    = { workspace = true }
 yee-io      = { workspace = true }
-# Optional: only pulled in when the `cuda` feature is on. Phase 0 CPU code
-# does not touch yee-cuda, so leaving it unconditional would force a CUDA
-# toolchain on every CPU-only build. faer / nalgebra / ndarray will return
-# here in Phase 1 as the dense LU solver and basis-function machinery land.
 yee-cuda    = { workspace = true, optional = true }
 num-complex = { workspace = true }
 thiserror   = { workspace = true }
 tracing     = { workspace = true }
+nalgebra    = { workspace = true }
+faer        = { workspace = true }
+rayon       = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -46,6 +46,7 @@ nalgebra    = "0.34"
 ndarray     = "0.17"
 sprs        = "0.11"
 num-complex = "0.4"
+rayon       = "1"
 
 # Geometry
 glam        = "0.30"

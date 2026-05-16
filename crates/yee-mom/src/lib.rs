@@ -12,6 +12,12 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub(crate) mod basis;
+pub(crate) mod fill;
+pub(crate) mod greens;
+pub(crate) mod quadrature;
+pub(crate) mod solve;
+
 use num_complex::Complex64;
 use yee_core::{FreqRange, Solver};
 use yee_mesh::TriMesh;
