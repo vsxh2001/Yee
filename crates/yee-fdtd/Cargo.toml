@@ -1,0 +1,22 @@
+[package]
+name         = "yee-fdtd"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "Yee 3D FDTD solver on CUDA. Phase-2 deliverable; Phase 0 is a stub."
+
+[features]
+default = []
+cuda    = ["yee-cuda/cuda"]
+
+[dependencies]
+yee-core    = { workspace = true }
+yee-mesh    = { workspace = true }
+yee-cuda    = { workspace = true }
+ndarray     = { workspace = true }
+nalgebra    = { workspace = true }
+num-complex = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }

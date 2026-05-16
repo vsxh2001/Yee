@@ -1,0 +1,27 @@
+[package]
+name         = "yee-mesh"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "Yee meshing layer: in-tree bindgen FFI to Gmsh + safe Rust wrapper."
+
+[features]
+default = []
+# Off by default so contributors without Gmsh SDK installed can still build.
+gmsh    = []
+
+[dependencies]
+yee-core  = { workspace = true }
+nalgebra  = { workspace = true }
+parry3d   = { workspace = true }
+thiserror = { workspace = true }
+tracing   = { workspace = true }
+
+[build-dependencies]
+# Only used when feature `gmsh` is enabled; build.rs handles the gating.
+bindgen = { version = "0.71", optional = true }
+
+[package.metadata.docs.rs]
+no-default-features = true

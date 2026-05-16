@@ -1,0 +1,23 @@
+[package]
+name         = "yee-mom"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "Yee planar Method of Moments solver. CPU reference via faer, GPU hot path via yee-cuda."
+
+[features]
+default = []
+cuda    = ["yee-cuda/cuda"]
+
+[dependencies]
+yee-core    = { workspace = true }
+yee-mesh    = { workspace = true }
+yee-cuda    = { workspace = true }
+faer        = { workspace = true }
+nalgebra    = { workspace = true }
+num-complex = { workspace = true }
+ndarray     = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }

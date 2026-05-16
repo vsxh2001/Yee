@@ -1,0 +1,18 @@
+[package]
+name         = "yee-core"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "Yee core: shared types, traits, errors, and units for the electromagnetic simulation studio."
+
+[lints.rust]
+unsafe_code   = "forbid"
+missing_docs  = "warn"
+
+[dependencies]
+nalgebra    = { workspace = true }
+num-complex = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }

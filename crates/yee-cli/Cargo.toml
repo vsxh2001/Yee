@@ -1,0 +1,30 @@
+[package]
+name         = "yee-cli"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "Yee command-line tool: yee validate | mesh | run | export."
+default-run  = "yee"
+
+[[bin]]
+name = "yee"
+path = "src/main.rs"
+
+[features]
+default = []
+cuda    = ["yee-mom/cuda", "yee-fdtd/cuda", "yee-cuda/cuda"]
+gmsh    = ["yee-mesh/gmsh"]
+
+[dependencies]
+yee-core    = { workspace = true }
+yee-mesh    = { workspace = true }
+yee-mom     = { workspace = true }
+yee-fdtd    = { workspace = true }
+yee-cuda    = { workspace = true }
+yee-io      = { workspace = true }
+clap        = { workspace = true }
+anyhow      = { workspace = true }
+tracing     = { workspace = true }
+tracing-subscriber = { workspace = true }

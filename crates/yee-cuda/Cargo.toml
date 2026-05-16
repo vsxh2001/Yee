@@ -1,0 +1,19 @@
+[package]
+name         = "yee-cuda"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "Yee CUDA layer: thin safe wrapper over cudarc + NVRTC kernel loader."
+
+[features]
+default = []
+# Off by default so CI on non-CUDA hosts still builds.
+cuda    = []
+
+[dependencies]
+yee-core = { workspace = true }
+cudarc   = { workspace = true }
+thiserror = { workspace = true }
+tracing   = { workspace = true }

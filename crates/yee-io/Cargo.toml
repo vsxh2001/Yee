@@ -1,0 +1,20 @@
+[package]
+name         = "yee-io"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "Yee I/O: Touchstone, CAD (STEP/IGES/KiCad via OpenCascade), HDF5 / Arrow field arrays."
+
+[features]
+default     = ["touchstone"]
+touchstone  = []
+opencascade = ["dep:opencascade"]
+
+[dependencies]
+yee-core     = { workspace = true }
+num-complex  = { workspace = true }
+opencascade  = { workspace = true, optional = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }

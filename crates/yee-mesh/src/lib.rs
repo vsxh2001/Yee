@@ -1,0 +1,49 @@
+//! # yee-mesh
+//!
+//! Meshing for Yee. The `gmsh` feature enables in-tree bindgen-generated FFI against
+//! the upstream `gmshc.h` (Gmsh 4.15+). Without the feature this crate exposes only
+//! the safe data structures (triangle mesh, hex grid) so downstream crates compile
+//! on hosts without a Gmsh SDK.
+//!
+//! The pre-existing `rgmsh` crate is unmaintained since 2019 and targets Gmsh 4.4.1;
+//! we generate fresh bindings (see `build.rs` in Phase 0).
+
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
+
+use nalgebra::Vector3;
+
+/// Meshing errors.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// Built without the `gmsh` feature.
+    #[error("yee-mesh built without the `gmsh` feature; rebuild with --features gmsh")]
+    NotEnabled,
+    /// Gmsh returned a non-zero status from its C API.
+    #[error("gmsh error code {0}")]
+    Gmsh(i32),
+    /// Geometry validation failed before meshing.
+    #[error("invalid geometry: {0}")]
+    Invalid(String),
+}
+
+/// Mesh-layer result alias.
+pub type Result<T> = core::result::Result<T, Error>;
+
+/// A planar triangle mesh — the primary input to `yee-mom`.
+#[derive(Debug, Default, Clone)]
+pub struct TriMesh {
+    /// Vertices in world coordinates.
+    pub vertices: Vec<Vector3<f64>>,
+    /// Triangle indices into `vertices`, 3 per face.
+    pub triangles: Vec<[u32; 3]>,
+    /// Per-triangle physical-group tag (used to map ports, materials).
+    pub tags: Vec<u32>,
+}
+
+impl TriMesh {
+    /// Number of triangles.
+    pub fn n_tris(&self) -> usize {
+        self.triangles.len()
+    }
+}

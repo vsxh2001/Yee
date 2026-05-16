@@ -1,0 +1,89 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/yee-core",
+    "crates/yee-cuda",
+    "crates/yee-mesh",
+    "crates/yee-mom",
+    "crates/yee-fdtd",
+    "crates/yee-io",
+    "crates/yee-cli",
+]
+
+[workspace.package]
+version       = "0.0.0"
+edition       = "2024"
+rust-version  = "1.85"
+license       = "GPL-3.0-or-later"
+authors       = ["The Yee Authors"]
+repository    = "https://github.com/yee-em/yee"
+homepage      = "https://github.com/yee-em/yee"
+readme        = "README.md"
+keywords      = ["electromagnetic", "simulation", "rf", "antenna", "cuda"]
+categories    = ["science", "simulation"]
+
+[workspace.dependencies]
+# Internal crates
+yee-core  = { path = "crates/yee-core",  version = "0.0.0" }
+yee-cuda  = { path = "crates/yee-cuda",  version = "0.0.0" }
+yee-mesh  = { path = "crates/yee-mesh",  version = "0.0.0" }
+yee-mom   = { path = "crates/yee-mom",   version = "0.0.0" }
+yee-fdtd  = { path = "crates/yee-fdtd",  version = "0.0.0" }
+yee-io    = { path = "crates/yee-io",    version = "0.0.0" }
+
+# CUDA (one binding for the whole project)
+cudarc = { version = "0.19", default-features = false, features = [
+    "std", "driver", "nvrtc",
+    "cublas", "cublaslt", "cusolver", "cusparse", "cufft", "curand",
+    "f16",
+    "cuda-version-from-build-system",
+    "dynamic-loading",
+] }
+
+# Linear algebra
+faer        = "0.23"
+nalgebra    = "0.34"
+ndarray     = "0.17"
+sprs        = "0.11"
+num-complex = "0.4"
+
+# Geometry
+glam        = "0.30"
+parry3d     = "0.22"
+geo         = "0.30"
+i_overlay   = "4"
+
+# CAD / Meshing
+opencascade     = "0.2"
+opencascade-sys = "0.2"
+
+# GUI / Viz
+egui      = "0.34"
+eframe    = "0.34"
+egui_plot = "0.34"
+egui_dock = "0.18"
+wgpu      = "26"
+rerun     = { version = "0.31", default-features = false, features = ["sdk"] }
+plotters  = "0.3"
+
+# Python bindings
+pyo3  = { version = "0.28", features = ["abi3-py310", "extension-module"] }
+numpy = "0.28"
+
+# Diagnostics
+tracing            = "0.1"
+tracing-subscriber = "0.3"
+thiserror          = "1"
+anyhow             = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+opt-level     = 3
+lto           = "thin"
+codegen-units = 1
+debug         = "line-tables-only"
+
+[profile.dev]
+opt-level = 1
