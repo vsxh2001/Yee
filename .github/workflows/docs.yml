@@ -37,7 +37,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.88"
+          toolchain: "1.92"
 
       - name: Cache cargo build artifacts
         uses: Swatinem/rust-cache@v2
