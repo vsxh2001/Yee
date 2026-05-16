@@ -127,8 +127,10 @@ mod tests {
             Vector3::new(0.0, 0.1, 0.0),
         ];
         let triangles = vec![[0u32, 1, 2], [0u32, 2, 3]];
-        // Both triangles share tag 1 → shared edge is the port edge.
-        let tags = vec![1u32, 1u32];
+        // Different non-zero tags → shared diagonal edge is the port edge
+        // under the "boundary between two tagged regions" port rule.
+        // `port_basis_indices(1)` matches because `min(1, 2) == 1`.
+        let tags = vec![1u32, 2u32];
         TriMesh::new(vertices, triangles, tags).unwrap()
     }
 

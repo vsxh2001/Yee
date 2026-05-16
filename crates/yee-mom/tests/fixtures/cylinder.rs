@@ -13,8 +13,12 @@ use yee_mesh::TriMesh;
 /// Two triangles are produced per `(axial × around)` cell, so the total
 /// triangle count is `2 * n_axial * n_around`.
 ///
-/// The central axial-edge ring (between `z = 0⁻` and `z = 0⁺`) is tagged
-/// with `port_tag = 1`. All other triangle tags are `0`.
+/// The two axial rings flanking the centre plane carry DIFFERENT non-zero
+/// tags: the ring immediately below `z = 0` is tagged `1`, the ring
+/// immediately above is tagged `2`, all others `0`. The single
+/// circumferential edge ring at `z = 0` therefore lies on the boundary
+/// between the two tagged regions and is picked up as the delta-gap port
+/// by `RwgBasis::from_mesh`'s "different non-zero tags" port convention.
 pub fn thin_cylinder(length_m: f64, radius_m: f64, n_axial: usize, n_around: usize) -> TriMesh {
     assert!(n_axial >= 2 && n_axial.is_multiple_of(2), "n_axial must be even and >= 2");
     assert!(n_around >= 3, "n_around must be >= 3");
@@ -45,7 +49,13 @@ pub fn thin_cylinder(length_m: f64, radius_m: f64, n_axial: usize, n_around: usi
             let d = ((i + 1) * n_around + j) as u32;
             triangles.push([a, b, c]);
             triangles.push([a, c, d]);
-            let tag = if i == central_ring - 1 || i == central_ring { 1 } else { 0 };
+            let tag = if i == central_ring - 1 {
+                1
+            } else if i == central_ring {
+                2
+            } else {
+                0
+            };
             tags.push(tag);
             tags.push(tag);
         }
@@ -71,9 +81,12 @@ mod tests {
     }
 
     #[test]
-    fn central_ring_tag_count() {
+    fn central_ring_tag_counts() {
         let mesh = thin_cylinder(1.0, 0.005, 24, 24);
-        let tagged = mesh.tags.iter().filter(|&&t| t == 1).count();
-        assert_eq!(tagged, 4 * 24);
+        let tagged_1 = mesh.tags.iter().filter(|&&t| t == 1).count();
+        let tagged_2 = mesh.tags.iter().filter(|&&t| t == 2).count();
+        // Each ring has n_around cells × 2 triangles = 48 triangles.
+        assert_eq!(tagged_1, 2 * 24);
+        assert_eq!(tagged_2, 2 * 24);
     }
 }

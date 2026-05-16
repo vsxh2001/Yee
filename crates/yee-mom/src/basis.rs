@@ -32,8 +32,9 @@ use yee_mesh::TriMesh;
 /// once when enumerating. `tri_plus`/`tri_minus` index into [`TriMesh::triangles`];
 /// `free_plus`/`free_minus` are the *vertex* indices (into
 /// [`TriMesh::vertices`]) of the free (non-shared) vertex on each adjacent
-/// triangle. `port_tag` is non-zero only when both adjacent triangles carry
-/// the same non-zero mesh tag.
+/// triangle. `port_tag` is non-zero only when the two adjacent triangles
+/// carry DIFFERENT non-zero mesh tags (the edge sits on the boundary
+/// between two tagged regions, the delta-gap port convention).
 ///
 /// Note: `tri_plus` is the first triangle in mesh-iteration order that
 /// touches this shared edge — it carries no geometric meaning. The
@@ -57,8 +58,9 @@ pub(crate) struct RwgEdge {
     pub(crate) free_minus: u32,
     /// Edge length (meters).
     pub(crate) length: f64,
-    /// Port tag inherited from the adjacent triangles when both share the
-    /// same non-zero tag, else `0`.
+    /// Non-zero when the two adjacent triangles carry DIFFERENT non-zero
+    /// tags (the edge straddles the boundary between two tagged regions —
+    /// convention for delta-gap port placement). Set to `0` otherwise.
     pub(crate) port_tag: u32,
 }
 
@@ -158,13 +160,17 @@ impl RwgBasis {
                     let length = (p0 - p1).norm();
                     let tag_plus = mesh.tags[tri_plus as usize];
                     let tag_minus = mesh.tags[tri_minus as usize];
-                    // Port tag is only inherited when both adjacent
-                    // triangles share the same non-zero tag — a mismatch or
-                    // a zero tag both fall back to "not a port edge".
-                    let port_tag = if tag_plus != 0 && tag_plus == tag_minus {
-                        tag_plus
-                    } else {
-                        0
+                    // Delta-gap port convention: an edge is a port edge iff
+                    // its two adjacent triangles carry DIFFERENT non-zero
+                    // tags (the edge straddles the boundary between two
+                    // tagged regions). The earlier "same non-zero tag" rule
+                    // mis-tagged every interior edge of a uniformly tagged
+                    // region as a port edge — see the dipole-gate diagnosis
+                    // in the Phase 1.0 Task 11 report. Both-zero, one-zero,
+                    // and equal non-zero pairs all yield `port_tag = 0`.
+                    let port_tag = match (tag_plus, tag_minus) {
+                        (a, b) if a != 0 && b != 0 && a != b => a.min(b),
+                        _ => 0,
                     };
                     edges.push(RwgEdge {
                         v0: v_lo,
@@ -396,6 +402,58 @@ mod tests {
         assert!(
             v.norm() < 1e-12,
             "RWG basis must vanish at the free vertex, got {v:?}"
+        );
+    }
+
+    #[test]
+    fn port_tag_marks_boundary_between_tagged_regions() {
+        // 4-tri mesh: two adjacent cells with different non-zero tags.
+        // Tags [1, 1, 2, 2] → edge between cell 1 (tag 1) and cell 2 (tag 2)
+        // is the port edge; other edges have either same tag or untagged.
+        let vertices = vec![
+            nalgebra::Vector3::new(0.0, 0.0, 0.0),
+            nalgebra::Vector3::new(1.0, 0.0, 0.0),
+            nalgebra::Vector3::new(1.0, 1.0, 0.0),
+            nalgebra::Vector3::new(0.0, 1.0, 0.0),
+            nalgebra::Vector3::new(2.0, 0.0, 0.0),
+            nalgebra::Vector3::new(2.0, 1.0, 0.0),
+        ];
+        let triangles = vec![
+            [0u32, 1, 2],
+            [0u32, 2, 3], // left cell, tag 1
+            [1u32, 4, 5],
+            [1u32, 5, 2], // right cell, tag 2
+        ];
+        let tags = vec![1u32, 1, 2, 2];
+        let mesh = yee_mesh::TriMesh::new(vertices, triangles, tags).unwrap();
+        let basis = RwgBasis::from_mesh(mesh).unwrap();
+        let port_count = basis.port_basis_indices(1).count();
+        assert!(
+            port_count >= 1,
+            "expected at least one boundary edge tagged as port"
+        );
+        // Within-cell edges (same-tag pair) should NOT be port.
+        let within_tagged = basis
+            .edges
+            .iter()
+            .filter(|e| {
+                let t0 = basis.mesh.tags[e.tri_plus as usize];
+                let t1 = basis.mesh.tags[e.tri_minus as usize];
+                t0 == t1 && t0 != 0
+            })
+            .count();
+        let port_with_same_tag = basis
+            .edges
+            .iter()
+            .filter(|e| {
+                let t0 = basis.mesh.tags[e.tri_plus as usize];
+                let t1 = basis.mesh.tags[e.tri_minus as usize];
+                t0 == t1 && t0 != 0 && e.port_tag != 0
+            })
+            .count();
+        assert_eq!(
+            port_with_same_tag, 0,
+            "same-tag edges must not be port edges (found {port_with_same_tag} of {within_tagged})"
         );
     }
 }
