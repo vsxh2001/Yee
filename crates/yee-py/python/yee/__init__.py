@@ -1,6 +1,8 @@
 """Yee electromagnetic simulation — Python bindings."""
 
 from yee._yee import (
+    BoConfig,
+    BoResult,
     FdtdDriver,
     FdtdDriverConfig,
     FdtdRadiationPattern,
@@ -15,8 +17,11 @@ from yee._yee import (
     smith_xy,
     touchstone,
 )
+from yee._yee import minimize as bo_minimize
 
 __all__ = [
+    "BoConfig",
+    "BoResult",
     "FdtdDriver",
     "FdtdDriverConfig",
     "FdtdRadiationPattern",
@@ -26,6 +31,7 @@ __all__ = [
     "SParameters",
     "TriMesh",
     "__version__",
+    "bo_minimize",
     "s11_db",
     "s11_phase",
     "smith_xy",

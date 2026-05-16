@@ -7,6 +7,7 @@
 
 use pyo3::prelude::*;
 
+mod bo;
 mod errors;
 mod fdtd;
 mod freq;
@@ -28,6 +29,9 @@ fn _yee(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<fdtd::PyFdtdDriverConfig>()?;
     m.add_class::<fdtd::PyFdtdDriver>()?;
     m.add_class::<fdtd::PyRadiationPattern>()?;
+    m.add_class::<bo::PyBoConfig>()?;
+    m.add_class::<bo::PyBoResult>()?;
+    m.add_function(wrap_pyfunction!(bo::minimize, m)?)?;
     m.add_function(wrap_pyfunction!(helpers::s11_db, m)?)?;
     m.add_function(wrap_pyfunction!(helpers::s11_phase, m)?)?;
     m.add_function(wrap_pyfunction!(helpers::smith_xy, m)?)?;
