@@ -176,7 +176,10 @@ mod tests {
         let mut ds = Dataset::new();
         ds.push(sample(vec![1.0, 2.0], vec![Complex64::new(0.5, 0.0)]));
         surr.train(&ds).unwrap();
-        assert!(matches!(surr.predict(&[1.0]), Err(Error::DimMismatch { .. })));
+        assert!(matches!(
+            surr.predict(&[1.0]),
+            Err(Error::DimMismatch { .. })
+        ));
     }
 
     #[test]

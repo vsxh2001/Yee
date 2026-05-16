@@ -24,11 +24,7 @@ use yee_io::touchstone::{File as TouchstoneFile, Format, FreqUnit};
 /// coarse approximation — see the limitation documented in
 /// [`crate::roughness`]. Conductivity is hard-coded to copper here;
 /// Phase 1.4.1 will plumb a material-aware sigma through the basis.
-pub(crate) fn apply_roughness(
-    z: &mut Mat<Complex64>,
-    roughness: &RoughnessModel,
-    freq_hz: f64,
-) {
+pub(crate) fn apply_roughness(z: &mut Mat<Complex64>, roughness: &RoughnessModel, freq_hz: f64) {
     let k = roughness.loss_multiplier(freq_hz, SIGMA_COPPER);
     let scale = Complex64::new(k, 0.0);
     let (nrows, ncols) = (z.nrows(), z.ncols());
