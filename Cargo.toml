@@ -75,7 +75,13 @@ egui      = "0.32"
 eframe    = "0.32"
 egui_plot = "0.33"
 egui_dock = "0.17"
-wgpu      = "26"
+# NOTE: egui-wgpu 0.32 / eframe 0.32 pin wgpu 25; running workspace wgpu 26
+# alongside causes a naga 26 build break against codespan-reporting/termcolor
+# transitive resolution. Pin wgpu to 25 to match egui's ecosystem. Bumping
+# back to 26 is a Phase 1.gui.2+ task tied to egui 0.33+.
+egui-wgpu = "0.32"
+wgpu      = "25"
+bytemuck  = { version = "1", features = ["derive"] }
 rerun     = { version = "0.31", default-features = false, features = ["sdk"] }
 plotters  = "0.3"
 
