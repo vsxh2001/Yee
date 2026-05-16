@@ -234,11 +234,52 @@ fn run(cli: Cli) -> Result<ExitCode> {
             generate(shell, &mut cmd, bin_name, &mut io::stdout());
             Ok(ExitCode::SUCCESS)
         }
-        Command::Bench { .. } => {
-            // Handler wired in the next commit.
-            unimplemented!("yee bench handler arrives in run_bench (next commit)")
-        }
+        Command::Bench { target, extra } => run_bench(target, extra),
     }
+}
+
+/// Shell out to `cargo bench -p yee-bench [--bench <name>] [-- <extra>...]`.
+///
+/// Stdout/stderr are inherited (not captured) so users see criterion's
+/// live progress, the warmup countdown, and the per-bench summary tables
+/// as they're emitted. The function maps the [`BenchTarget`] variant to a
+/// concrete `--bench` argument; `BenchTarget::All` deliberately omits the
+/// flag so cargo runs every `[[bench]]` entry in `crates/yee-bench`.
+///
+/// Returns [`ExitCode::SUCCESS`] iff `cargo` exits zero. A non-zero exit
+/// (failed bench, missing target, criterion arg error) is surfaced as
+/// [`ExitCode::FAILURE`] without further interpretation.
+fn run_bench(target: BenchTarget, extra: Vec<String>) -> Result<ExitCode> {
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.args(["bench", "-p", "yee-bench"]);
+    match target {
+        BenchTarget::Mom => {
+            cmd.args(["--bench", "mom_solve"]);
+        }
+        BenchTarget::Fdtd => {
+            cmd.args(["--bench", "fdtd_step"]);
+        }
+        BenchTarget::Gmres => {
+            cmd.args(["--bench", "gmres_vs_direct"]);
+        }
+        BenchTarget::Gp => {
+            cmd.args(["--bench", "gp_fit"]);
+        }
+        BenchTarget::Bo => {
+            cmd.args(["--bench", "bo_step"]);
+        }
+        BenchTarget::All => {}
+    }
+    if !extra.is_empty() {
+        cmd.arg("--");
+        cmd.args(&extra);
+    }
+    let status = cmd.status()?;
+    Ok(if status.success() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
 }
 
 fn run_export(
