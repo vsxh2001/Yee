@@ -247,9 +247,12 @@ fn parse(text: &str, n_ports: usize) -> Result<File> {
     for (line_no, payload) in &data_lines {
         let mut col = 1usize;
         for tok in payload.split_whitespace() {
-            // Find the column of this token within the payload.
-            // We approximate column by cumulative character position within
-            // the payload; good enough for error messages.
+            // Column is approximate when the source uses multi-character
+            // whitespace between tokens: we advance `col` past the previous
+            // token and `find` the next non-whitespace match in the
+            // remaining slice, so a tab- or multi-space-separated layout
+            // yields the column of the first byte of the token rather than
+            // a precise visual column.
             let pos = payload[col - 1..].find(tok).map(|p| col + p).unwrap_or(col);
             let val: f64 = tok.parse().map_err(|_| Error::TouchstoneParse {
                 line: *line_no,
@@ -465,39 +468,40 @@ fn encode_complex(format: Format, z: Complex64) -> (f64, f64) {
 
 fn render(file: &File) -> Result<String> {
     if !(1..=4).contains(&file.n_ports) {
-        return Err(Error::TouchstoneParse {
-            line: 0,
-            col: 0,
-            msg: format!(
-                "n_ports = {} is outside the Phase 0 range (1..=4)",
-                file.n_ports
-            ),
-        });
+        return Err(Error::InvalidFile(format!(
+            "n_ports = {} is outside the Phase 0 range (1..=4)",
+            file.n_ports
+        )));
     }
     if file.freq_hz.len() != file.data.len() {
-        return Err(Error::TouchstoneParse {
-            line: 0,
-            col: 0,
-            msg: format!(
-                "freq_hz.len() = {} != data.len() = {}",
-                file.freq_hz.len(),
-                file.data.len()
-            ),
-        });
+        return Err(Error::InvalidFile(format!(
+            "freq_hz.len() = {} != data.len() = {}",
+            file.freq_hz.len(),
+            file.data.len()
+        )));
     }
     let n = file.n_ports;
     for (i, mat) in file.data.iter().enumerate() {
         if mat.len() != n * n {
-            return Err(Error::TouchstoneParse {
-                line: 0,
-                col: 0,
-                msg: format!(
-                    "S-matrix at index {i} has length {} but expected {} for an {}-port file",
-                    mat.len(),
-                    n * n,
-                    n
-                ),
-            });
+            return Err(Error::InvalidFile(format!(
+                "S-matrix at index {i} has length {} but expected {} for an {}-port file",
+                mat.len(),
+                n * n,
+                n
+            )));
+        }
+    }
+    if !file.z0.is_finite() {
+        return Err(Error::InvalidFile(format!(
+            "reference impedance Z0 = {} is not finite",
+            file.z0
+        )));
+    }
+    for (k, f) in file.freq_hz.iter().enumerate() {
+        if !f.is_finite() {
+            return Err(Error::InvalidFile(format!(
+                "frequency at index {k} = {f} is not finite"
+            )));
         }
     }
 
@@ -521,8 +525,21 @@ fn render(file: &File) -> Result<String> {
         let on_disk = row_major_to_on_disk(n, &file.data[k]);
         let mut line = String::new();
         line.push_str(&format_g(f_in_unit));
-        for z in &on_disk {
+        // S-parameter cell indices are 0-based in row-major math order;
+        // for n=2 we already swapped to on-disk order above, but the
+        // diagnostic below refers to the on-disk slot order so a user can
+        // locate the offending value in the emitted file.
+        for (slot, z) in on_disk.iter().enumerate() {
             let (a, b) = encode_complex(file.format, *z);
+            if !a.is_finite() || !b.is_finite() {
+                return Err(Error::InvalidFile(format!(
+                    "S-matrix entry at freq index {k} (slot {slot}) produced \
+                     a non-finite value ({a}, {b}) under format {:?}; use a \
+                     finite dB floor (e.g. -200 dB) for zero-magnitude entries \
+                     when emitting `DB` files",
+                    file.format,
+                )));
+            }
             line.push(' ');
             line.push_str(&format_g(a));
             line.push(' ');
@@ -535,15 +552,13 @@ fn render(file: &File) -> Result<String> {
     Ok(out)
 }
 
-/// Render an `f64` with enough precision to losslessly round-trip a finite
-/// value (`{:.17e}` for non-integers, integer form for integral values), then
-/// strip redundant trailing zeros — analogous to C's `%g`.
+/// Render an `f64` in Rust's shortest-decimal form, which losslessly
+/// round-trips any finite value since Rust 1.55. Analogous to C's `%g`
+/// for finite inputs. Returns `"inf"` / `"-inf"` / `"NaN"` for non-finite
+/// inputs — callers are responsible for validating finiteness before
+/// passing values to this function (see the finite-value checks at the
+/// top of [`render`]).
 fn format_g(x: f64) -> String {
-    if !x.is_finite() {
-        return format!("{x}");
-    }
-    // Use full precision; Rust's default `{}` formatter for f64 already
-    // chooses the shortest representation that round-trips since 1.55.
     format!("{x}")
 }
 
@@ -572,10 +587,21 @@ fn check_passivity(file: &File) -> Result<()> {
 
 /// Largest eigenvalue of the Hermitian PSD matrix `S† S` via power
 /// iteration. `mat` is row-major `n×n`. Sufficient for n ≤ 4.
+///
+/// Starting-vector caveat: we use the all-ones vector, which has non-zero
+/// projection onto the dominant eigenvector for every physical S-matrix
+/// that arises in Phase 0 (`n ≤ 4`, finite reciprocal networks). A
+/// pathological input perfectly orthogonal to that eigenvector (for
+/// example a strictly antisymmetric matrix whose dominant eigenvector
+/// sits in the antisymmetric subspace) would leave `lambda` at 0.0 and
+/// silently miss the passivity violation. Phase 1 should swap this for a
+/// proper Hermitian eigensolver (e.g. `nalgebra::SymmetricEigen`) once
+/// the workspace tolerates a heavier linear-algebra dep here.
 fn max_eig_s_dagger_s(n: usize, mat: &[Complex64]) -> f64 {
     // Compute M = S† S (n×n Hermitian PSD), row-major real-imag.
     let m = compute_s_dagger_s(n, mat);
-    // Start with all-ones vector.
+    // Start with all-ones vector. See the function doc-comment for the
+    // caveat on antisymmetric edge cases.
     let mut v: Vec<Complex64> = vec![Complex64::new(1.0, 0.0); n];
     // Normalise.
     normalise(&mut v);
@@ -761,5 +787,68 @@ mod tests {
         let err = check_passivity(&file).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("passivity"), "{msg}");
+    }
+
+    #[test]
+    fn render_rejects_zero_magnitude_under_db_format() {
+        // DB encoding of a zero S-parameter would emit -inf dB, which is
+        // not representable in Touchstone. render() must surface this as
+        // Error::InvalidFile so the file is never written.
+        let file = File {
+            n_ports: 1,
+            z0: 50.0,
+            freq_unit: FreqUnit::GHz,
+            format: Format::DecibelAngle,
+            freq_hz: vec![1.0e9],
+            data: vec![vec![Complex64::new(0.0, 0.0)]],
+            comments: vec![],
+        };
+        let err = render(&file).unwrap_err();
+        match &err {
+            Error::InvalidFile(msg) => {
+                assert!(
+                    msg.contains("non-finite") && msg.contains("-200 dB"),
+                    "expected dB-floor guidance, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidFile, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_accepts_zero_magnitude_under_ri_format() {
+        // The same zero S-parameter under RI must succeed — only DB fails.
+        let file = File {
+            n_ports: 1,
+            z0: 50.0,
+            freq_unit: FreqUnit::GHz,
+            format: Format::RealImag,
+            freq_hz: vec![1.0e9],
+            data: vec![vec![Complex64::new(0.0, 0.0)]],
+            comments: vec![],
+        };
+        let s = render(&file).expect("render should succeed for RI zero entry");
+        assert!(s.contains("# GHz S RI R 50"));
+        assert!(s.contains("0 0"), "expected `0 0` data row, got: {s}");
+    }
+
+    #[test]
+    fn render_rejects_non_finite_z0() {
+        let file = File {
+            n_ports: 1,
+            z0: f64::INFINITY,
+            freq_unit: FreqUnit::GHz,
+            format: Format::RealImag,
+            freq_hz: vec![1.0e9],
+            data: vec![vec![Complex64::new(0.0, 0.0)]],
+            comments: vec![],
+        };
+        let err = render(&file).unwrap_err();
+        match err {
+            Error::InvalidFile(msg) => {
+                assert!(msg.contains("Z0"), "{msg}");
+            }
+            other => panic!("expected InvalidFile, got: {other:?}"),
+        }
     }
 }

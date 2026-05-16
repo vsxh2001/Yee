@@ -27,7 +27,8 @@ pub enum Error {
     /// Underlying OS / file-system error.
     #[error("io error: {0}")]
     Io(String),
-    /// Touchstone file failed parsing or validation.
+    /// Touchstone file failed parsing or read-time validation (including
+    /// passivity).
     ///
     /// `line` and `col` are 1-based; `col = 0` means "column unknown / N/A".
     #[error("touchstone parse error at line {line}, col {col}: {msg}")]
@@ -39,6 +40,14 @@ pub enum Error {
         /// Human-readable explanation of the failure.
         msg: String,
     },
+    /// In-memory file structure failed validation before writing.
+    ///
+    /// Used by write-side checks where there is no source line to point at —
+    /// e.g. `n_ports` / S-matrix length mismatch, or a numeric encoding
+    /// failure such as a `-inf` dB magnitude that Touchstone cannot
+    /// represent.
+    #[error("invalid touchstone file: {0}")]
+    InvalidFile(String),
     /// Feature flag not enabled in this build.
     #[error("io feature `{0}` not enabled; rebuild with that feature on")]
     NotEnabled(&'static str),
