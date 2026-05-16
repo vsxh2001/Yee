@@ -333,8 +333,11 @@ impl MeshRenderResources {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("yee-gui.viewport.pl"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            // wgpu 29 renamed `push_constant_ranges` to `immediate_size`
+            // (and changed semantics: bytes of immediate data, not ranges).
+            // No immediate data is used by this pipeline.
+            immediate_size: 0,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -369,7 +372,9 @@ impl MeshRenderResources {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            // wgpu 29 renamed `multiview: Option<NonZeroU32>` to
+            // `multiview_mask: Option<NonZeroU32>`; same semantics, new name.
+            multiview_mask: None,
             cache: None,
         });
 
