@@ -11,6 +11,7 @@ members = [
     "crates/yee-gui",
     "crates/yee-plotters",
     "crates/yee-py",
+    "crates/yee-surrogate",
     "examples/half-wave-dipole",
     "examples/microstrip-line",
     "examples/patch-2g4",
