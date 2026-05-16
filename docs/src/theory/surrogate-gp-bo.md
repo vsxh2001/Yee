@@ -199,3 +199,124 @@ let gp = GaussianProcess::fit_ml(x, y, cfg)?;
 let (mean, var) = gp.predict(&DVector::from_row_slice(&[x_star]));
 ```
 
+## 5. Bayesian optimization
+
+`bo::minimize` is a single-objective BO loop on top of `GaussianProcess`.
+The problem statement is
+
+$$
+\min_{x \in \mathcal{X}} \; f(x), \qquad \mathcal{X} = \prod_{i=1}^d [\text{lo}_i, \text{hi}_i],
+$$
+
+where $f$ is a deterministic but expensive black-box scalar — for Yee,
+it is a closure that runs a solver and returns a scalar figure of merit
+(say, $\lvert S_{11} \rvert$ at the design frequency). The loop is:
+
+1. Draw `n_initial` Latin-hypercube points; evaluate $f$ at each.
+2. Repeat `n_iters` times:
+   1. Refit a GP via `fit_ml` on the current evaluation history.
+   2. Score `n_candidates` uniform random points by Expected Improvement.
+   3. Evaluate $f$ at the maximizer; append to history.
+3. Return the lowest-$y$ point and full evaluation history.
+
+The acquisition function is *Expected Improvement* (EI). For a
+minimization problem with current best $f_\text{best}$, predictive mean
+$\mu$, predictive stddev $\sigma$, and exploration parameter $\xi$,
+
+$$
+\mathrm{EI}(x) = (f_\text{best} - \mu - \xi)\,\Phi(z) + \sigma\,\phi(z),
+\quad
+z = \frac{f_\text{best} - \mu - \xi}{\sigma},
+$$
+
+where $\Phi$ and $\phi$ are the standard normal CDF and PDF. Two limits
+make the formula intuitive. Where the GP is *confident* ($\sigma \to 0$)
+EI degenerates to $\max(f_\text{best} - \mu - \xi, 0)$ — pure
+exploitation of the predicted mean. Where the GP is *uncertain*
+($\sigma$ large) the second term dominates and EI grows roughly
+linearly in $\sigma$ — pure exploration of unknown territory.
+
+The exploration parameter $\xi$ tilts the balance. Setting $\xi = 0$
+gives "classical" EI that converges fast on smooth objectives but can
+stall in local minima; raising $\xi$ inflates the effective best-so-far
+and biases acquisitions toward higher-variance regions. The default
+$\xi = 0.01$ is a mild exploration prior that works well across the
+`bo_synthetic.rs` test suite. If BO converges too eagerly in a real
+sweep, raise it; if the budget is exhausted without finding a strong
+candidate, lower it.
+
+`n_candidates` is *not* an optimization budget — the candidates are
+scored on the cheap GP, not the expensive solver. Each BO iteration
+spends one $f$ call no matter how many candidates it scores. Raising
+`n_candidates` (default 1024) widens the EI search and is essentially
+free up to dimensionality limits; lowering it only matters once you
+hit the curse of dimensionality at $d \gtrsim 10$, at which point a
+proper continuous optimizer over EI (L-BFGS-B with random restarts)
+would be the upgrade path.
+
+```rust,ignore
+use nalgebra::DVector;
+use yee_surrogate::{minimize, BoConfig};
+
+let objective = |x: &DVector<f64>| (x[0] - 3.0).powi(2) + (5.0 * x[0]).sin();
+let bounds = vec![(0.0, 6.0)];
+let cfg = BoConfig { n_initial: 5, n_iters: 20, ..Default::default() };
+let res = minimize(objective, bounds, cfg);
+// res.x_best, res.y_best, res.history
+```
+
+## 6. Multi-objective extension
+
+NSGA-II (Phase 3.bo.1) shares the GP-surrogate machinery but applies it
+to a Pareto front rather than a single best point. The acquisition
+becomes Expected Hypervolume Improvement (EHVI) over the dominated
+hypervolume of the front, and the loop maintains a non-dominated archive
+rather than a scalar best. See `crates/yee-surrogate/src/nsga2.rs` for
+the implementation when it lands. The single-objective EI loop
+documented above is the strict special case where the front collapses
+to a single point.
+
+## 7. What's not in this chapter
+
+The v1.0 surrogate trades breadth for a working walking skeleton. The
+following are *explicitly* out of scope and should be added behind
+their own ADRs if the need arises:
+
+- **Sparse / inducing-point GPs** (Hensman 2013, *Gaussian Processes
+  for Big Data*). The $O(n^3)$ Cholesky becomes a wall at
+  $n \sim 10^3$; inducing-point methods reduce it to $O(n m^2)$ where
+  $m$ is the inducing-set size. Tracked as a future Phase 3.x ADR.
+- **Trust-region BO** (TuRBO, Eriksson et al. 2019). Replaces the
+  global EI search with a sequence of local trust regions, which
+  scales BO into $d \gtrsim 20$. Out of scope for v1.0; flagged in
+  TECH_STACK §future.
+- **Hamiltonian Monte Carlo over GP hyperparameters.** Our `fit_ml`
+  returns a point estimate of $\theta$; full Bayesian marginalisation
+  via HMC (Murray & Adams 2010) integrates the predictions over
+  posterior $\theta$ samples. Better at small $n$, but adds a
+  several-hundred-LOC sampler.
+- **Acquisition functions other than EI** — Probability of Improvement
+  (PI), Upper Confidence Bound (UCB), Knowledge Gradient (KG),
+  Entropy Search / Predictive Entropy Search (ES / PES). Each has a
+  defensible regime; none are necessary for the Phase 3 walking
+  skeleton. Add behind a per-acquisition ADR if a real sweep motivates
+  one.
+
+## 8. References
+
+- C. E. Rasmussen and C. K. I. Williams, *Gaussian Processes for
+  Machine Learning*, MIT Press (2006). Free PDF at
+  <http://www.gaussianprocess.org/gpml/>. Chapters 2 and 5 cover GP
+  regression and hyperparameter optimization respectively; this
+  chapter's notation mirrors theirs.
+- J. Mockus, *Bayesian Approach to Global Optimization*, Kluwer (1989).
+  The origin of EI as an acquisition.
+- J. Snoek, H. Larochelle, R. P. Adams, "Practical Bayesian
+  Optimization of Machine Learning Algorithms", *NeurIPS* 25 (2012).
+  The modern BO formulation with GP surrogate + EI; introduced log-
+  space hyperparameter handling and the per-iteration `fit_ml` refit
+  pattern this implementation follows.
+- P. I. Frazier, "A Tutorial on Bayesian Optimization",
+  *arXiv:1807.02811* (2018). The cleanest single-document
+  presentation of the loop; readers who find this chapter terse should
+  start here.
