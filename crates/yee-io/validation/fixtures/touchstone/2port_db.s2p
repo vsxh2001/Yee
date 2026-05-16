@@ -1,0 +1,11 @@
+! 2-port synthetic Touchstone v1.1 fixture, DB format
+! Same physical network as 2port.s2p: ideal 50-ohm matched 6 dB attenuator.
+! S11 = S22 = -infinity dB (perfect match) -- represented as a large
+! negative number (-200 dB ~ 1e-10 linear) since true -inf is not standard
+! Touchstone. S21 = S12 = -6 dB at 0 deg.
+! Z0 = 50 ohm; frequencies in MHz to exercise the unit-dispatch path.
+# MHz S DB R 50
+1000.0 -200.0 0.0 -6.0 0.0 -6.0 0.0 -200.0 0.0
+2000.0 -200.0 0.0 -6.0 0.0 -6.0 0.0 -200.0 0.0
+5000.0 -200.0 0.0 -6.0 0.0 -6.0 0.0 -200.0 0.0
+10000.0 -200.0 0.0 -6.0 0.0 -6.0 0.0 -200.0 0.0

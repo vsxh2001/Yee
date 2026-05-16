@@ -2275,8 +2275,6 @@ dependencies = [
  "num-complex",
  "opencascade",
  "thiserror 1.0.69",
- "tracing",
- "yee-core",
 ]
 
 [[package]]
