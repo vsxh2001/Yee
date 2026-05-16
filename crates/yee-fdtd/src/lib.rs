@@ -4,13 +4,14 @@
 //! **Phase 2 walking skeleton**: a CPU-only, single-threaded, scalar (FP64)
 //! Yee solver.
 //!
-//! This commit lands the grid + Courant stability machinery. Update kernels,
-//! sources, and the solver wrapper follow in subsequent commits.
+//! This commit adds the scalar `update_e` / `update_h` kernels on top of the
+//! grid. Sources, boundaries, and the solver wrapper follow.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod grid;
+pub mod update;
 
 pub use grid::YeeGrid;
 
