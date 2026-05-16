@@ -155,6 +155,30 @@ ax_smith.set_aspect("equal"); ax_smith.set_title("Smith")
 
 ---
 
+## Gaussian process surrogate
+
+`yee.GaussianProcess` wraps the RBF-kernel Gaussian-process regressor from
+`yee-surrogate`. Use it to interpolate a small batch of scalar-valued
+simulation outputs (e.g. resonant frequency vs. patch length) without
+re-running the full MoM/FDTD solver every time.
+
+```python
+import numpy as np
+import yee
+
+x = np.linspace(0.0, 2 * np.pi, 25).reshape(-1, 1)
+y = np.sin(x).flatten()
+gp = yee.GaussianProcess.fit_ml(x, y)              # ML-optimized hyperparams
+mean, var = gp.predict(np.array([1.7]))            # posterior at x* = 1.7
+```
+
+Use `GaussianProcess.fit(x, y, length_scale=..., sigma_f=..., sigma_n=...)`
+when you want to pin hyperparameters explicitly. `predict_mean(x_star)`
+returns the posterior mean alone; `log_marginal_likelihood()` returns the
+training-data log marginal likelihood for model comparison.
+
+---
+
 ## Public API at a glance
 
 | Symbol | Description |
@@ -163,6 +187,7 @@ ax_smith.set_aspect("equal"); ax_smith.set_title("Smith")
 | `yee.FreqRange(start_hz, stop_hz, n_points)` | Validate and iterate a linear frequency sweep. Raises `ValueError` on bad inputs. |
 | `yee.PlanarMoM().run(mesh, freq)` | Solve planar MoM; returns `SParameters`. Currently raises `RuntimeError("unimplemented: ...")` until Phase 1.0 physics land. |
 | `yee.SParameters` | Container: `.n_ports` (int), `.freq_hz` (`float64[F]`), `.data` (`complex128[F, N, N]`), `.write_touchstone(path, z0)`. |
+| `yee.GaussianProcess.fit(x, y, length_scale, sigma_f, sigma_n)` | Fit a scalar RBF-kernel GP with explicit hyperparameters; `.fit_ml(x, y, …)` instead maximizes the log marginal likelihood. |
 | `yee.touchstone.read(path)` | Read a Touchstone v1.1 file; returns a dict with keys `z0`, `freq_unit`, `format`, `n_ports`, `freq_hz`, `data`, `comments`. |
 | `yee.touchstone.write(path, file_dict)` | Write a Touchstone v1.1 file from the same dict schema. |
 

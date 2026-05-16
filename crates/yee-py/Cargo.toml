@@ -12,10 +12,11 @@ name       = "yee"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-yee-core    = { workspace = true }
-yee-mesh    = { workspace = true }
-yee-mom     = { workspace = true }
-yee-io      = { workspace = true }
+yee-core      = { workspace = true }
+yee-mesh      = { workspace = true }
+yee-mom       = { workspace = true }
+yee-io        = { workspace = true }
+yee-surrogate = { workspace = true }
 pyo3        = { workspace = true }
 numpy       = { workspace = true }
 num-complex = { workspace = true }

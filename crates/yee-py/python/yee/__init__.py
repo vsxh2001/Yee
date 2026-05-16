@@ -2,6 +2,7 @@
 
 from yee._yee import (
     FreqRange,
+    GaussianProcess,
     PlanarMoM,
     SParameters,
     TriMesh,
@@ -14,6 +15,7 @@ from yee._yee import (
 
 __all__ = [
     "FreqRange",
+    "GaussianProcess",
     "PlanarMoM",
     "SParameters",
     "TriMesh",
