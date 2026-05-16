@@ -61,3 +61,8 @@ change to the surrounding code.
 
 - `gp_fit` — GP fit + fit_ml across n = 10, 25, 50 (+ 100 for plain fit).
 - `bo_step` — full 25-eval BO minimize on the 1-D deceptive objective.
+
+## FDTD specialty benches
+
+- `plane_wave_step` — TF/SF 1-D incident-grid advance (one step).
+- `lumped_resistor` — LumpedRlcPort `correct_e` at a single cell.
