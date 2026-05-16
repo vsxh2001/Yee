@@ -79,3 +79,4 @@ tmp/
 .envrc
 .direnv/
 *.local.toml
+worktrees/
