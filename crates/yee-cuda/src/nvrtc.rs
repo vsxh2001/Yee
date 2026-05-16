@@ -30,8 +30,12 @@ pub fn compile(src: &str, name: &str) -> Result<Vec<u8>> {
             name: Some(name.to_string()),
             ..Default::default()
         };
+        // Use `Display` to match the formatter convention in `backend.rs`.
+        // cudarc's `CompileError` Display impl currently delegates to Debug,
+        // so this loses no diagnostic detail (it just keeps the surface
+        // uniform across the crate).
         let ptx = compile_ptx_with_opts(src, opts)
-            .map_err(|e| Error::Driver(format!("nvrtc compile failed: {e:?}")))?;
+            .map_err(|e| Error::Driver(format!("nvrtc compile failed: {e}")))?;
         // `Ptx::as_bytes` returns `Some` for image-kind Ptx produced by the
         // compile path. We copy into an owned `Vec<u8>` so the caller does not
         // depend on cudarc types in its signature.
