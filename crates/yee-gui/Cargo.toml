@@ -1,0 +1,24 @@
+[package]
+name         = "yee-gui"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "Yee egui desktop shell — Phase 1.gui.0 walking skeleton."
+
+[[bin]]
+name = "yee-gui"
+path = "src/main.rs"
+
+[dependencies]
+yee-core    = { workspace = true }
+yee-io      = { workspace = true }
+egui        = { workspace = true }
+eframe      = { workspace = true }
+egui_plot   = { workspace = true }
+egui_dock   = { workspace = true }
+num-complex = { workspace = true }
+anyhow      = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
