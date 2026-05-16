@@ -25,9 +25,116 @@ pub(crate) mod solve;
 pub use iterative::{GmresParams, GmresResult, gmres_jacobi};
 pub use roughness::{RoughnessModel, SIGMA_COPPER};
 
+/// Public re-export of the [`Greens`] trait — the abstraction over
+/// MPIE Green's-function kernels. Phase 1.1 promoted this from
+/// `__internal` to the stable surface so callers (including
+/// `yee-validation`) can name it in [`GreensSpec`] documentation
+/// without reaching through the test-only module.
+pub use crate::greens::{FreeSpaceGreen, Greens};
+
+/// Public re-export of the multilayer placeholder Green's function.
+/// Promoted from `__internal` alongside [`Greens`] so that
+/// [`GreensSpec::Microstrip`] can be documented in terms of the
+/// concrete kernel it builds.
+pub use crate::multilayer::MultilayerGreens;
+
 use num_complex::Complex64;
 use yee_core::{FreqRange, Solver};
 use yee_mesh::TriMesh;
+
+/// Frequency-agnostic specification of the MPIE Green's-function kernel
+/// to use in [`PlanarMoM::run`].
+///
+/// The MPIE assembly in [`crate::fill::impedance_matrix`] is generic over
+/// the [`crate::greens::Greens`] trait, but every concrete `Greens`
+/// instance is **constructed at a specific frequency** (the wave number
+/// `k₀ = ω / c` is baked in). [`PlanarMoM::run`] sweeps across an
+/// entire [`FreqRange`], so what it stores cannot be a single `Greens`
+/// — it must be a freq-agnostic *spec* that the sweep can re-evaluate
+/// at each point.
+///
+/// This is the spec type. It is intentionally a small enum rather than
+/// a `Box<dyn GreensFactory>` trait object so callers can construct it
+/// inline without naming a separate factory type, and so the variant
+/// list captures the supported kernels at the type-system level.
+///
+/// New kernels (Phase 1.1.1 multi-image / Sommerfeld DCIM, future
+/// stratified-media spec) extend this enum; do not introduce a parallel
+/// trait-object hierarchy.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum GreensSpec {
+    /// Free-space scalar Green's function — `exp(-j k₀ R) / (4 π R)`,
+    /// identical for vector and scalar potentials. The Phase 1.0
+    /// default, used by mom-001 (free-space half-wave dipole).
+    #[default]
+    FreeSpace,
+    /// Phase 1.1.0 multilayer placeholder: substrate slab of relative
+    /// permittivity `eps_r` and thickness `h_m` over a PEC ground
+    /// plane, evaluated with the one-image DCIM approximation in
+    /// [`crate::multilayer::MultilayerGreens`]. The TE / TM split is
+    /// collapsed; real Sommerfeld extraction lands in Phase 1.1.1.
+    Microstrip {
+        /// Relative permittivity of the substrate slab.
+        eps_r: f64,
+        /// Substrate thickness in metres; PEC ground at `z = -h_m`.
+        h_m: f64,
+    },
+}
+
+impl GreensSpec {
+    /// Convenience constructor for the microstrip placeholder. Mirrors
+    /// [`MultilayerGreens::new_microstrip`]'s parameter order minus the
+    /// frequency, which the sweep supplies at evaluation time.
+    pub fn microstrip(eps_r: f64, h_m: f64) -> Self {
+        Self::Microstrip { eps_r, h_m }
+    }
+
+    /// Build a concrete [`Greens`] kernel at `freq_hz`. Used by the
+    /// per-frequency hot loop inside `s_parameters_sweep`.
+    pub(crate) fn build(&self, freq_hz: f64) -> Box<dyn Greens + Send + Sync> {
+        match *self {
+            Self::FreeSpace => Box::new(FreeSpaceGreen::new(freq_hz)),
+            Self::Microstrip { eps_r, h_m } => {
+                Box::new(MultilayerGreens::new_microstrip(freq_hz, eps_r, h_m))
+            }
+        }
+    }
+}
+
+// Boxed Greens satisfies the Greens trait by forwarding through the
+// pointer. `impedance_matrix` requires `G: Greens + Sync`, and
+// `Box<dyn Greens + Send + Sync>` is both `Sync` (because the inner trait
+// object is `Sync`) and `Greens` (via this blanket impl). The blanket is
+// gated on `?Sized` so it covers both sized boxes and trait-object
+// boxes.
+impl<T: Greens + ?Sized> Greens for Box<T> {
+    fn k0(&self) -> Complex64 {
+        (**self).k0()
+    }
+    fn eta0(&self) -> f64 {
+        (**self).eta0()
+    }
+    fn scalar_vector(&self, r1: nalgebra::Vector3<f64>, r2: nalgebra::Vector3<f64>) -> Complex64 {
+        (**self).scalar_vector(r1, r2)
+    }
+    fn scalar_scalar(&self, r1: nalgebra::Vector3<f64>, r2: nalgebra::Vector3<f64>) -> Complex64 {
+        (**self).scalar_scalar(r1, r2)
+    }
+    fn scalar_vector_smooth(
+        &self,
+        r1: nalgebra::Vector3<f64>,
+        r2: nalgebra::Vector3<f64>,
+    ) -> Complex64 {
+        (**self).scalar_vector_smooth(r1, r2)
+    }
+    fn scalar_scalar_smooth(
+        &self,
+        r1: nalgebra::Vector3<f64>,
+        r2: nalgebra::Vector3<f64>,
+    ) -> Complex64 {
+        (**self).scalar_scalar_smooth(r1, r2)
+    }
+}
 
 /// Boundary mapping: any failure surfaced by `yee_io` while writing a
 /// Touchstone file is rendered into `yee_core::Error::Io` so callers higher
@@ -123,10 +230,35 @@ impl SParameters {
     }
 }
 
-/// The planar MoM solver. Phase 0: empty shell.
+/// The planar MoM solver.
+///
+/// Holds the Green's-function spec used during impedance-matrix
+/// assembly. The default is [`GreensSpec::FreeSpace`], which preserves
+/// the mom-001 (free-space half-wave dipole) numerics bit-for-bit.
+/// Switch to a multilayer kernel via [`PlanarMoM::with_greens`].
 #[derive(Debug, Default)]
 pub struct PlanarMoM {
-    // TODO(phase-0): mesh, ports, Green's function evaluator, GPU context.
+    /// The Green's-function spec to use when filling the impedance
+    /// matrix at each frequency. Defaults to [`GreensSpec::FreeSpace`].
+    greens: GreensSpec,
+    // TODO(phase-0): mesh, ports, GPU context.
+}
+
+impl PlanarMoM {
+    /// Replace the default [`GreensSpec::FreeSpace`] kernel with the
+    /// supplied spec. The Greens kernel is rebuilt per frequency inside
+    /// the sweep, so the spec itself remains frequency-agnostic — see
+    /// [`GreensSpec`] for the rationale.
+    ///
+    /// This is the entry point Phase 1.1.1 (real Sommerfeld extraction)
+    /// will exercise once the production multilayer kernel lands; in
+    /// Phase 1.1.0 it routes through the one-image DCIM placeholder
+    /// documented at the [`MultilayerGreens`](crate::multilayer::MultilayerGreens)
+    /// level.
+    pub fn with_greens(mut self, greens: GreensSpec) -> Self {
+        self.greens = greens;
+        self
+    }
 }
 
 impl Solver for PlanarMoM {
@@ -143,7 +275,7 @@ impl Solver for PlanarMoM {
             tag: 1,
             voltage: Complex64::new(1.0, 0.0),
         };
-        let file = solve::s_parameters_sweep(&basis, &port, freq, 50.0, None)?;
+        let file = solve::s_parameters_sweep(&basis, &port, freq, 50.0, None, &self.greens)?;
         Ok(SParameters::from_touchstone(&file))
     }
 }
