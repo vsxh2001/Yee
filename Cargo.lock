@@ -6158,6 +6158,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "clap_complete",
+ "num-complex",
  "predicates",
  "tracing",
  "tracing-subscriber",
@@ -6167,6 +6168,7 @@ dependencies = [
  "yee-io",
  "yee-mesh",
  "yee-mom",
+ "yee-plotters",
 ]
 
 [[package]]
