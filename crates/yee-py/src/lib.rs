@@ -19,6 +19,7 @@ mod sparams;
 mod surrogate;
 mod touchstone;
 mod trimesh;
+mod validation;
 
 #[pymodule]
 fn _yee(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -43,6 +44,9 @@ fn _yee(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(helpers::s11_db, m)?)?;
     m.add_function(wrap_pyfunction!(helpers::s11_phase, m)?)?;
     m.add_function(wrap_pyfunction!(helpers::smith_xy, m)?)?;
+    m.add_class::<validation::PyValidationCase>()?;
+    m.add_class::<validation::PyValidationReport>()?;
+    m.add_function(wrap_pyfunction!(validation::run_validation, m)?)?;
     let ts_mod = PyModule::new(py, "touchstone")?;
     touchstone::register(&ts_mod)?;
     m.add_submodule(&ts_mod)?;
