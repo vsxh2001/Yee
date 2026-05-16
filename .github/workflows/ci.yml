@@ -22,6 +22,11 @@ jobs:
           toolchain: "1.88"
           components: rustfmt, clippy
 
+      - name: Install system deps (fontconfig for plotters)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev pkg-config
+
       - name: Cache cargo build artifacts
         uses: Swatinem/rust-cache@v2
 
@@ -49,6 +54,10 @@ jobs:
         with:
           toolchain: "1.88"
           components: rustfmt, clippy
+      - name: Install system deps (fontconfig for plotters)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev pkg-config
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-python@v5
         with:
