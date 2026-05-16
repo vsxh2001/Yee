@@ -8,7 +8,11 @@
 //! The pre-existing `rgmsh` crate is unmaintained since 2019 and targets Gmsh 4.4.1;
 //! we generate fresh bindings (see `build.rs` in Phase 0).
 
-#![forbid(unsafe_code)]
+// Phase 0 forbade `unsafe_code` crate-wide. Phase 1.mesh.0 must call into
+// the Gmsh C API via `bindgen`, which is inherently `unsafe`. We narrow the
+// forbid to the no-feature build (where the crate is pure data structures)
+// and rely on localized `#[allow(unsafe_code)]` inside the FFI submodule.
+#![cfg_attr(not(feature = "gmsh"), forbid(unsafe_code))]
 #![warn(missing_docs)]
 
 use nalgebra::Vector3;
