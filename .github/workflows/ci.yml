@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+jobs:
+  lint-test:
+    name: Lint & test (Rust 1.88, no-default-features)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88"
+          components: rustfmt, clippy
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo check (gate 1)
+        run: cargo check --workspace --no-default-features
+
+      - name: cargo fmt --check --all
+        run: cargo fmt --check --all
+
+      - name: cargo clippy (workspace, no-default-features)
+        run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+
+      - name: cargo test (workspace, no-default-features)
+        run: cargo test --workspace --no-default-features
+
+      - name: cargo doc (workspace, no-default-features, no-deps)
+        run: cargo doc --workspace --no-default-features --no-deps
