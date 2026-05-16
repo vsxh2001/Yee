@@ -1650,7 +1650,6 @@ dependencies = [
  "tracing",
  "yee-core",
  "yee-cuda",
- "yee-mesh",
 ]
 
 [[package]]
