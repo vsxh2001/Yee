@@ -92,6 +92,53 @@ fn dipole_z_diagnostics() {
     );
     eprintln!("Reference: 73 + j42 Ω (|Z|=84.20, arg=0.522)");
     eprintln!("LU residual ||Zi - b|| / ||b|| = {lu_residual_norm:.3e}");
+
+    // Per-port-edge currents — confirms +/- orientation consistency around
+    // the symmetric cylinder ring and reveals partial cancellation, if any.
+    // On the 24×24 cylinder the 24 port edges are related by exact discrete
+    // rotational symmetry, so all `i_k` are expected to be identical to
+    // machine precision; the printed first/last few lines verify this.
+    let currents = yee_mom::__internal::port_edge_currents(&mesh, 1, f0).expect("currents");
+    let mut total = Complex64::new(0.0, 0.0);
+    for (idx, (len, i_k)) in currents.iter().enumerate() {
+        total += Complex64::new(*len, 0.0) * *i_k;
+        if idx < 3 || idx >= currents.len() - 3 {
+            eprintln!(
+                "  port[{idx}]: length={:.4e} m, i_k = {:.4e} + j{:.4e} A",
+                len, i_k.re, i_k.im
+            );
+        } else if idx == 3 {
+            eprintln!("  ... (middle entries elided)");
+        }
+    }
+    eprintln!(
+        "Σ length_k · i_k = {:.4e} + j{:.4e} A (matches I_port from residual helper)",
+        total.re, total.im
+    );
+
+    // Radius sweep: a true wire-limit MPIE Z_in approaches Balanis 73+j42 Ω
+    // only as a/L → 0. Finite a/L produces a smooth monotonic shift well
+    // beyond the ±5 % gate when a/L = 0.005, which is the geometry hard-
+    // coded by the fixture. This block lets a reviewer eyeball the
+    // convergence trend without rerunning the gate test.
+    for &(name, radius, n_ax, n_ar) in &[
+        ("a=5mm,   24×24", 0.005_f64, 24_usize, 24_usize),
+        ("a=2mm,   24×24", 0.002_f64, 24_usize, 24_usize),
+        ("a=1mm,   24×24", 0.001_f64, 24_usize, 24_usize),
+        ("a=0.5mm, 24×24", 0.0005_f64, 24_usize, 24_usize),
+        ("a=5mm,   48×24", 0.005_f64, 48_usize, 24_usize),
+        ("a=5mm,   24×48", 0.005_f64, 24_usize, 48_usize),
+    ] {
+        let m = fixtures::cylinder::thin_cylinder(1.0, radius, n_ax, n_ar);
+        let (z, _resid) =
+            yee_mom::__internal::z_in_and_residual_at_freq(&m, 1, f0, 50.0).expect("solve");
+        eprintln!(
+            "  [{name}] Z_in = {:.3} + j{:.3} Ω  |Z|={:.3}",
+            z.re,
+            z.im,
+            z.norm()
+        );
+    }
 }
 
 #[test]

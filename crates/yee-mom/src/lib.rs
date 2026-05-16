@@ -293,4 +293,26 @@ pub mod __internal {
         let z_in = v_port / i_port;
         Ok((z_in, rel_residual))
     }
+
+    /// Diagnostic: return per-port-edge `(length_k, i_k)` pairs at `freq_hz`.
+    /// Used to check whether the RWG +/- orientation around the cylinder
+    /// port ring is consistent (all `i_k` same sign and magnitude on a
+    /// symmetric mesh) or whether some port edges are flipped and partially
+    /// cancelling in the `Σ b_k · i_k` sum.
+    pub fn port_edge_currents(
+        mesh: &TriMesh,
+        port_tag: u32,
+        freq_hz: f64,
+    ) -> Result<Vec<(f64, Complex64)>, Error> {
+        let basis = RwgBasis::from_mesh(mesh.clone())?;
+        let green = FreeSpaceGreen::new(freq_hz);
+        let z = impedance_matrix(&basis, &green);
+        let b = delta_gap_rhs(&basis, port_tag);
+        let lu = PartialPivLu::new(z.as_ref());
+        let i = lu.solve(b.as_ref());
+        Ok(basis
+            .port_basis_indices(port_tag)
+            .map(|k| (basis.edges[k].length, i[(k, 0)]))
+            .collect())
+    }
 }
