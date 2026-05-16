@@ -320,12 +320,11 @@ fn atom_to_string(s: &Sexp) -> Result<String, KiCadError> {
 /// no such child exists.
 fn find_child<'a>(items: &'a [Sexp], key: &str) -> Option<&'a [Sexp]> {
     for item in items {
-        if let Sexp::List(inner) = item {
-            if let Some(Sexp::Atom(head)) = inner.first() {
-                if head == key {
-                    return Some(&inner[1..]);
-                }
-            }
+        if let Sexp::List(inner) = item
+            && let Some(Sexp::Atom(head)) = inner.first()
+            && head == key
+        {
+            return Some(&inner[1..]);
         }
     }
     None
@@ -420,24 +419,24 @@ fn extract_segment(tail: &[Sexp]) -> Result<Segment, KiCadError> {
 /// return its vertex list.
 fn extract_zone_polygon(node: &Sexp) -> Option<Vec<(f64, f64)>> {
     let items = node.as_list()?;
-    if let Some(Sexp::Atom(head)) = items.first() {
-        if head == "polygon" {
-            // Look for the (pts ...) child.
-            let pts = find_child(&items[1..], "pts")?;
-            let mut verts = Vec::new();
-            for xy in pts {
-                if let Sexp::List(inner) = xy {
-                    if let Some(Sexp::Atom(h)) = inner.first() {
-                        if h == "xy" && inner.len() >= 3 {
-                            let x = inner[1].as_atom()?.parse::<f64>().ok()?;
-                            let y = inner[2].as_atom()?.parse::<f64>().ok()?;
-                            verts.push((x, y));
-                        }
-                    }
-                }
+    if let Some(Sexp::Atom(head)) = items.first()
+        && head == "polygon"
+    {
+        // Look for the (pts ...) child.
+        let pts = find_child(&items[1..], "pts")?;
+        let mut verts = Vec::new();
+        for xy in pts {
+            if let Sexp::List(inner) = xy
+                && let Some(Sexp::Atom(h)) = inner.first()
+                && h == "xy"
+                && inner.len() >= 3
+            {
+                let x = inner[1].as_atom()?.parse::<f64>().ok()?;
+                let y = inner[2].as_atom()?.parse::<f64>().ok()?;
+                verts.push((x, y));
             }
-            return Some(verts);
         }
+        return Some(verts);
     }
     for child in &items[1..] {
         if let Some(v) = extract_zone_polygon(child) {
