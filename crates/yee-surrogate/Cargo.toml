@@ -1,0 +1,16 @@
+[package]
+name         = "yee-surrogate"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "ML surrogate models for parameterized EM simulation outputs."
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+num-complex = { workspace = true }
+nalgebra    = { workspace = true }
+thiserror   = { workspace = true }
