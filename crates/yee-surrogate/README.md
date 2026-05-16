@@ -177,9 +177,35 @@ In:
 
 Out (Phase 3.bo.1+):
 - L-BFGS / multi-start gradient acquisition optimization.
-- Multi-objective Pareto fronts (NSGA-II).
 - Constrained optimization.
 - Batch BO.
+
+## Multi-objective optimization (NSGA-II)
+
+`nsga2::minimize` (re-exported as `nsga2_minimize`) runs a textbook
+NSGA-II loop (Deb et al. 2002) on top of a Latin-hypercube initial design,
+binary tournament selection over `(rank, crowding distance)`, simulated
+binary crossover (SBX), and polynomial mutation. The return contains the
+final population, its objective vectors, and the indices that lie on the
+non-dominated front.
+
+```rust,ignore
+use nalgebra::DVector;
+use yee_surrogate::{Nsga2Config, nsga2_minimize};
+
+let d = 30;
+let zdt1 = |x: &DVector<f64>| -> Vec<f64> {
+    let f1 = x[0];
+    let g = 1.0 + 9.0 / (d as f64 - 1.0) * x.iter().skip(1).sum::<f64>();
+    vec![f1, g * (1.0 - (f1 / g).sqrt())]
+};
+let result = nsga2_minimize(zdt1, vec![(0.0, 1.0); d], 2, Nsga2Config::default());
+```
+
+`tests/nsga2_zdt1.rs` validates the implementation on the canonical ZDT1
+30-variable two-objective benchmark and asserts the Inverted Generational
+Distance against the analytic Pareto front `f2 = 1 - sqrt(f1)` is below
+`0.05`; the canonical NSGA-II paper reports IGD ≈ 0.005 at 250 generations.
 
 ## Future direction (Phase 3.1+)
 
