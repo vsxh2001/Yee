@@ -4,10 +4,10 @@
 //! addition to the default lossless vacuum. Conventions follow Taflove &
 //! Hagness, *Computational Electrodynamics*, 3rd ed., §9.4–9.6:
 //!
-//! - **Drude**:    `eps(ω) = eps_inf − ω_p² / (ω² − j γ ω)`         (Taflove eq. 9.7)
+//! - **Drude**:    `eps(ω) = eps_inf − ω_p² / (ω² − j γ ω)`  (Taflove eq. 9.7)
 //! - **Lorentz**:  `eps(ω) = eps_inf + Δε · ω₀² / (ω₀² − ω² + 2 j δ ω)`
-//!                                                                   (Taflove eq. 9.8)
-//! - **Debye**:    `eps(ω) = eps_inf + Δε / (1 + j ω τ)`              (Taflove eq. 9.6)
+//!   (Taflove eq. 9.8)
+//! - **Debye**:    `eps(ω) = eps_inf + Δε / (1 + j ω τ)`  (Taflove eq. 9.6)
 //!
 //! These are the *complex relative* permittivities; the corresponding ADE
 //! update kernels live in [`crate::dispersive`].
@@ -155,6 +155,7 @@ impl MaterialMap {
     /// Indices are clamped to the underlying [`Self::cells`] extent; out-of-range
     /// boxes are silently truncated rather than panicking — this matches how
     /// CAD-derived geometry often spills slightly past the simulation domain.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_box(
         &mut self,
         i0: usize,
