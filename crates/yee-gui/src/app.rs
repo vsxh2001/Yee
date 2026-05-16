@@ -1,10 +1,11 @@
 //! Application state, dock layout, and top-level UI for the Yee studio shell.
 //!
-//! The shell hosts three tabs inside an `egui_dock::DockArea`:
+//! The shell hosts four tabs inside an `egui_dock::DockArea`:
 //!
-//! - `S11Db`   — `20·log10|S11|` vs frequency
-//! - `Smith`   — `S11` trajectory on a Smith-chart canvas (unit circle reference)
-//! - `Mesh3D`  — wgpu-rendered 3D triangle mesh (Phase 1.gui.1)
+//! - `S11Db`       — `20·log10|S11|` vs frequency
+//! - `Smith`       — `S11` trajectory on a Smith-chart canvas (unit circle reference)
+//! - `Mesh3D`      — wgpu-rendered 3D triangle mesh (Phase 1.gui.1)
+//! - `Validation`  — yee-validation aggregator runner + sortable result table
 //!
 //! A left side panel exposes loaded-file metadata + the 3D-viewport controls
 //! (wireframe toggle, camera readout). The menu bar provides `File → Quit`.
@@ -12,6 +13,7 @@
 //! `rfd`-based pickers out of scope through Phase 1.gui.1 — see README).
 
 use crate::plots::{show_s11_db_plot, show_smith_chart};
+use crate::validation::ValidationPanel;
 use crate::viewport::{MeshCallback, ViewportState, thin_cylinder};
 use egui_dock::{DockArea, DockState, NodeIndex, Style};
 use yee_io::touchstone::{self, File as TsFile};
@@ -25,6 +27,8 @@ pub enum TabKind {
     Smith,
     /// Wgpu-rendered 3D triangle mesh viewport.
     Mesh3D,
+    /// yee-validation aggregator runner + sortable result table.
+    Validation,
 }
 
 impl TabKind {
@@ -33,6 +37,7 @@ impl TabKind {
             TabKind::S11Db => "S11 magnitude (dB)",
             TabKind::Smith => "Smith chart",
             TabKind::Mesh3D => "Mesh 3D",
+            TabKind::Validation => "Validation",
         }
     }
 }
@@ -47,6 +52,8 @@ pub struct YeeApp {
     dock: DockState<TabKind>,
     /// 3D viewport state (orbit camera + active mesh + wireframe toggle).
     viewport_state: ViewportState,
+    /// Validation aggregator panel (background runner + sortable table).
+    validation_panel: ValidationPanel,
 }
 
 impl YeeApp {
@@ -55,16 +62,23 @@ impl YeeApp {
     /// The dock layout starts with the two plot tabs at the top of the central
     /// region and the Mesh 3D tab split off below. This keeps the Phase 1.gui.0
     /// plot workflow visually identical while making the new viewport
-    /// immediately discoverable.
+    /// immediately discoverable. The Validation tab is stacked on top of the
+    /// Mesh 3D tab so it shares the lower pane without consuming an extra
+    /// split — switching between them is a single click.
     pub fn new(initial_file: Option<std::path::PathBuf>) -> Self {
         let mut dock = DockState::new(vec![TabKind::S11Db]);
         {
             let surface = dock.main_surface_mut();
             // Plot pair lives in the root node.
             surface.split_right(NodeIndex::root(), 0.5, vec![TabKind::Smith]);
-            // Drop the 3D viewport below the plots so all three tabs are
-            // visible at once in the default layout.
-            surface.split_below(NodeIndex::root(), 0.55, vec![TabKind::Mesh3D]);
+            // Drop the 3D viewport and the Validation panel below the plots
+            // so all four tabs are visible at once in the default layout
+            // (Mesh 3D / Validation stack as siblings).
+            surface.split_below(
+                NodeIndex::root(),
+                0.55,
+                vec![TabKind::Mesh3D, TabKind::Validation],
+            );
         }
 
         // Walking-skeleton mesh: a 0.5 m × 5 mm thin cylinder, tessellated
@@ -77,6 +91,7 @@ impl YeeApp {
             load_error: None,
             dock,
             viewport_state,
+            validation_panel: ValidationPanel::default(),
         };
         if let Some(path) = initial_file {
             app.load_file(&path);
@@ -181,11 +196,12 @@ impl eframe::App for YeeApp {
             self.metadata_panel(ui);
         });
 
-        // Central dock area with the three tabs.
+        // Central dock area with the four tabs.
         egui::CentralPanel::default().show_inside(ui, |ui| {
             let mut viewer = TabViewer {
                 file: self.file.as_ref(),
                 viewport_state: &mut self.viewport_state,
+                validation_panel: &mut self.validation_panel,
             };
             DockArea::new(&mut self.dock)
                 .style(Style::from_egui(ui.style().as_ref()))
@@ -194,11 +210,13 @@ impl eframe::App for YeeApp {
     }
 }
 
-/// `egui_dock` tab viewer. Borrows the loaded file (for the plot tabs) and the
-/// viewport state (for the Mesh 3D tab) so each tab can render its content.
+/// `egui_dock` tab viewer. Borrows the loaded file (for the plot tabs), the
+/// viewport state (for the Mesh 3D tab) and the validation panel (for the
+/// Validation tab) so each tab can render its content.
 struct TabViewer<'a> {
     file: Option<&'a TsFile>,
     viewport_state: &'a mut ViewportState,
+    validation_panel: &'a mut ValidationPanel,
 }
 
 impl<'a> egui_dock::TabViewer for TabViewer<'a> {
@@ -222,12 +240,15 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
                     match tab {
                         TabKind::S11Db => show_s11_db_plot(ui, &f.freq_hz, &s11),
                         TabKind::Smith => show_smith_chart(ui, &s11),
-                        TabKind::Mesh3D => unreachable!(),
+                        TabKind::Mesh3D | TabKind::Validation => unreachable!(),
                     }
                 }
             },
             TabKind::Mesh3D => {
                 show_mesh_viewport(ui, self.viewport_state);
+            }
+            TabKind::Validation => {
+                self.validation_panel.ui(ui);
             }
         }
     }

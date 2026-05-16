@@ -149,9 +149,7 @@ impl ValidationPanel {
             ui.horizontal(|ui| {
                 ui.label(format!("Total cases: {}", report.cases.len()));
                 ui.label(format!("Has failures: {}", report.has_failures()));
-                if !matches!(self.sort, SortState::None)
-                    && ui.button("Reset sort").clicked()
-                {
+                if !matches!(self.sort, SortState::None) && ui.button("Reset sort").clicked() {
                     self.sort = SortState::None;
                 }
             });
@@ -161,12 +159,12 @@ impl ValidationPanel {
             let mut order: Vec<usize> = (0..report.cases.len()).collect();
             match self.sort {
                 SortState::None => {}
-                SortState::IdAsc => order.sort_by(|&a, &b| {
-                    report.cases[a].id.cmp(&report.cases[b].id)
-                }),
-                SortState::IdDesc => order.sort_by(|&a, &b| {
-                    report.cases[b].id.cmp(&report.cases[a].id)
-                }),
+                SortState::IdAsc => {
+                    order.sort_by(|&a, &b| report.cases[a].id.cmp(&report.cases[b].id))
+                }
+                SortState::IdDesc => {
+                    order.sort_by(|&a, &b| report.cases[b].id.cmp(&report.cases[a].id))
+                }
                 SortState::WallAsc => order.sort_by(|&a, &b| {
                     report.cases[a]
                         .wall_time_seconds
@@ -196,11 +194,7 @@ impl ValidationPanel {
                         }
                         ui.strong("Status");
                         if ui
-                            .button(sort_header_label(
-                                "Wall time (s)",
-                                self.sort,
-                                SortDim::Wall,
-                            ))
+                            .button(sort_header_label("Wall time (s)", self.sort, SortDim::Wall))
                             .clicked()
                         {
                             self.sort = next_sort(self.sort, SortDim::Wall);
