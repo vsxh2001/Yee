@@ -2,7 +2,8 @@
 //!
 //! Each known validation case (`mom-001`, `cpml-001`, `ntff-001`, ...) is
 //! registered here. The [`run_all`] entry point executes them and produces
-//! a structured [`Report`].
+//! a structured [`Report`] that can be serialized to JSON or rendered as
+//! Markdown for CI artifacts.
 //!
 //! # Phase 1.validation.0 walking-skeleton scope
 //!
@@ -15,8 +16,9 @@
 //!
 //! The aggregator's value in Phase 1.validation.0 is:
 //!
-//! 1. Providing the report **schema** that future phases will populate.
-//! 2. Demonstrating the [`run_all`] entry point.
+//! 1. Providing the JSON / Markdown report **schema** that future phases
+//!    will populate.
+//! 2. Demonstrating the [`run_all`] entry point and its `Report` shape.
 //! 3. Documenting the "private test code can't be reached from a sibling
 //!    crate" friction so Phase 1.validation.1 can either (a) move the
 //!    test fixtures into public APIs of `yee-mom` / `yee-fdtd`, or
@@ -70,7 +72,47 @@ pub struct Report {
     pub cases: Vec<CaseResult>,
 }
 
+impl Report {
+    /// Render the report as a GitHub-flavoured Markdown table.
+    ///
+    /// Intended for the CI artifact step: drop the output into a job
+    /// summary or a Markdown file for reviewers.
+    pub fn to_markdown(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&format!(
+            "# Yee Validation Report\n\nGenerated: {}\n\n",
+            self.generated_at
+        ));
+        if let Some(sha) = &self.git_sha {
+            out.push_str(&format!("Git SHA: `{sha}`\n\n"));
+        }
+        out.push_str("| ID | Status | Wall time | Message |\n");
+        out.push_str("|----|--------|-----------|---------|\n");
+        for c in &self.cases {
+            let icon = match c.status {
+                CaseStatus::Passed => "PASS",
+                CaseStatus::Failed => "FAIL",
+                CaseStatus::Skipped => "SKIP",
+            };
+            out.push_str(&format!(
+                "| `{}` | {} {:?} | {:.2}s | {} |\n",
+                c.id, icon, c.status, c.wall_time_seconds, c.message
+            ));
+        }
+        out
+    }
+
+    /// Pretty-print the report as JSON. Intended for machine consumers
+    /// (CI annotations, dashboards, regression bots).
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+}
+
 /// Error type used by case bodies when their setup or solve step fails.
+///
+/// Each `run_<case>` body returns a `Result<_, Error>` internally; the
+/// outer [`CaseResult`] folds that into a [`CaseStatus`] + message.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// I/O failure (mesh fixture missing, etc.).
@@ -83,11 +125,11 @@ pub enum Error {
 
 /// Run all known validation cases and return a structured report.
 ///
-/// Phase 1.validation.0 walking-skeleton scope: every case currently
-/// reports [`CaseStatus::Skipped`] with an explanatory `message`. The
-/// full `mom-001` 24x176 gate (~7-8 min) and the `dipole_full_sweep`
-/// continue to live in their respective `cargo test --release` paths
-/// and are exercised by workspace CI.
+/// Phase 1.validation.0 walking-skeleton scope: see crate-level docs.
+/// Every case currently reports [`CaseStatus::Skipped`] with an
+/// explanatory `message`. The full `mom-001` 24x176 gate (~7-8 min)
+/// and the `dipole_full_sweep` continue to live in their respective
+/// `cargo test --release` paths and are exercised by workspace CI.
 pub fn run_all() -> Report {
     let cases = vec![
         run_mom_001_fast(),
@@ -112,6 +154,10 @@ fn chrono_iso_now() -> String {
     // Naive ISO-ish stamp; full `chrono` dep is overkill for this crate.
     format!("epoch+{secs}s")
 }
+
+// Each `run_<case>` builds a small mesh and asserts a single property,
+// returning a CaseResult. Phase 1.validation.0 placeholders return
+// `Skipped` with a documented Phase 1.validation.1 deferral message.
 
 fn run_mom_001_fast() -> CaseResult {
     let t0 = Instant::now();
@@ -185,5 +231,45 @@ fn run_dispersive_001() -> CaseResult {
              aggregator integration deferred to Phase 1.validation.1"
                 .into(),
         wall_time_seconds: 0.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_all_produces_report() {
+        let r = run_all();
+        assert!(!r.cases.is_empty());
+    }
+
+    #[test]
+    fn report_renders_markdown() {
+        let r = run_all();
+        let md = r.to_markdown();
+        assert!(md.starts_with("# Yee Validation Report"));
+        assert!(md.contains("mom-001-fast"));
+    }
+
+    #[test]
+    fn report_serializes_to_json() {
+        let r = run_all();
+        let j = r.to_json().expect("json");
+        assert!(j.contains("\"cases\""));
+    }
+
+    #[test]
+    fn skipped_cases_carry_explanatory_message() {
+        let r = run_all();
+        for c in &r.cases {
+            if c.status == CaseStatus::Skipped {
+                assert!(
+                    !c.message.is_empty(),
+                    "skipped case {} has empty message",
+                    c.id
+                );
+            }
+        }
     }
 }
