@@ -4,7 +4,7 @@
 //! walking skeleton**: a CPU-only, single-threaded, scalar (FP64) Yee solver
 //! that demonstrates leapfrog propagation in vacuum on a uniform grid.
 //!
-//! ## What is included (Phase 2.0 + 2.1)
+//! ## What is included (Phase 2.0 + 2.1 + 2.2)
 //!
 //! - `YeeGrid` with vacuum constructor, Courant stability limit
 //! - Scalar `update_e` / `update_h` kernels (Taflove & Hagness §3)
@@ -12,16 +12,22 @@
 //! - **CPML absorbing boundary on all six outer faces (Roden & Gedney 2000)**
 //!   via [`CpmlState`] / [`CpmlParams`]
 //! - Hard PEC fallback in [`boundary::apply_pec`] for cavity-style problems
+//! - **Near-to-far-field (NTFF) transformation (Taflove §8, Yee 1992)**
+//!   via [`NtffState`] / [`NtffParams`] — single probe frequency,
+//!   single observation direction (Phase 2.fdtd.2 walking skeleton)
 //! - [`WalkingSkeletonSolver`]: a tiny [`FdtdSolver`] impl that wires it all
 //!   together; choose absorbing vs reflecting boundaries via
-//!   [`WalkingSkeletonSolver::with_cpml`] / [`WalkingSkeletonSolver::new`]
+//!   [`WalkingSkeletonSolver::with_cpml`] / [`WalkingSkeletonSolver::new`],
+//!   and accumulate NTFF currents via
+//!   [`WalkingSkeletonSolver::step_with_source_and_ntff`]
 //!
 //! ## What is NOT included
 //!
 //! - No GPU kernels, no multi-GPU domain decomposition.
 //! - No subgridding, no dispersive materials (Drude / Lorentz / Debye).
 //! - No conformal (Dey-Mittra) treatment of curved geometry.
-//! - No NTFF, no lumped ports, no waveguide ports.
+//! - No multi-frequency / full θ-φ NTFF sweep (Phase 2.fdtd.2.1),
+//!   no lumped ports, no waveguide ports.
 //!
 //! These omissions are intentional. The walking skeleton exists so the rest of
 //! the workspace (mesh, I/O, CLI, Python bindings) can integrate against a
@@ -34,11 +40,13 @@
 pub mod boundary;
 pub mod cpml;
 pub mod grid;
+pub mod ntff;
 pub mod sources;
 pub mod update;
 
 pub use cpml::{CpmlParams, CpmlState};
 pub use grid::YeeGrid;
+pub use ntff::{NtffParams, NtffState};
 
 /// FDTD-layer errors.
 #[derive(Debug, thiserror::Error)]
@@ -167,6 +175,38 @@ impl WalkingSkeletonSolver {
             boundary::apply_pec(&mut self.grid);
         }
         self.step += 1;
+    }
+
+    /// Like [`Self::step_with_source`], but additionally feeds the
+    /// post-step fields into a [`crate::ntff::NtffState`] DFT
+    /// accumulator.
+    ///
+    /// After the E and H updates (and CPML / source) have completed,
+    /// the solver calls `ntff.sample(grid, t_after)` with the simulation
+    /// time at the *end* of the step. The accumulator records one bin
+    /// of the discrete-time Fourier transform at `ntff.params().f_probe`.
+    ///
+    /// Call this in a loop:
+    ///
+    /// ```ignore
+    /// let mut ntff = NtffState::new(solver.grid(), params);
+    /// for _ in 0..n_steps {
+    ///     solver.step_with_source_and_ntff(i, j, k, t0, sigma, &mut ntff);
+    /// }
+    /// let e_far = ntff.far_field();
+    /// ```
+    pub fn step_with_source_and_ntff(
+        &mut self,
+        i: usize,
+        j: usize,
+        k: usize,
+        t0: f64,
+        sigma: f64,
+        ntff: &mut ntff::NtffState,
+    ) {
+        self.step_with_source(i, j, k, t0, sigma);
+        let t_after = self.current_time();
+        ntff.sample(&self.grid, t_after);
     }
 }
 
