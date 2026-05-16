@@ -53,36 +53,57 @@ pub enum PlaneWaveDirection {
 /// with the same numerical dispersion the 3D scheme sees along the
 /// propagation axis.
 ///
-/// # Polarization and supported geometry (Phase 2.fdtd.5)
+/// # Polarization and supported geometry (Phase 2.fdtd.5 / 2.fdtd.5.1)
 ///
-/// For `+x` propagation, `E_z` polarized, only the `H_y` component is
-/// excited. Phase 2.fdtd.5 implements **only the front (`i = i0`) and
-/// back (`i = i1`) face corrections**. The tangential faces (`j0`,
-/// `j1`, `k0`, `k1`) of the TF box are not handled here; for a fully
-/// finite TF/SF *box* one would need additional side-face corrections
-/// to account for the `H_x` / `H_z` discontinuities the discrete
-/// scheme creates at the transverse jumps in `E_z`.
+/// For `+x` propagation, `E_z` polarized, the only non-zero incident
+/// field components are `E_inc_z(x, t)` and `H_inc_y(x, t)` — incident
+/// `H_x`, `H_z`, `E_x`, `E_y` are all identically zero. The discrete
+/// Yee stencils that pick up a non-zero incident contribution across
+/// the TF/SF boundary are therefore only:
 ///
-/// In practice this means **the caller should pick the TF region as
-/// a slab spanning the full transverse extent of the grid** (e.g.
-/// `j0 = 0`, `j1 = ny`, `k0 = 0`, `k1 = nz`) and absorb the
-/// transverse boundaries with the outer CPML. Choosing a 3D
-/// finite-box TF region with a non-trivial Phase 2.fdtd.5 build is
-/// not currently a supported configuration; the test under
-/// `tests/plane_wave_propagation.rs` documents the supported slab
-/// geometry.
+/// - `E_z` update at `i = i0` and `i = i1` — uses `H_inc_y` across
+///   the `i`-face in `∂H_y/∂x`. **Correction applied here.**
+/// - `H_y` update at `i = i0 - 1` and `i = i1` — uses `E_inc_z`
+///   across the `i`-face in `∂E_z/∂x`. **Correction applied here.**
+///
+/// j-face and k-face stencils that *also* cross the TF/SF boundary
+/// involve only `H_inc_x` / `H_inc_z` / `E_inc_x` / `E_inc_y`, all of
+/// which are zero — so there is no "incident contribution" the
+/// correction kernel needs to subtract.
+///
+/// **However**, the j- and k-face `E_z` discontinuities (TF inside,
+/// SF outside) drive the discrete `H_x` / `H_z` updates at those
+/// faces and produce a *scattered* field that leaks into the SF
+/// region. For slab geometry (`j0 = 0`, `j1 = ny`, `k0 = 0`,
+/// `k1 = nz`) those faces sit in CPML and the leakage is absorbed
+/// (slab contrast ≈ 2676×, ~68 dB). For a **finite** TF box
+/// (smaller than the grid in `y` and / or `z`), those faces are
+/// interior and the leakage shows up in the SF region as ~15 dB of
+/// residual amplitude (finite-box contrast ≈ 6×). See
+/// `tests/plane_wave_finite_box.rs` for the empirical pin.
+///
+/// **Recommendation:** for high-fidelity TF/SF runs, use slab
+/// geometry (the j and k faces in CPML). Finite-box TF/SF for `+x`
+/// `E_z` polarization is supported by the existing kernel but with
+/// the degraded contrast above; the missing j/k-face *scattered-field*
+/// corrections land in Phase 2.fdtd.5.2 / 2.fdtd.5.3 along with
+/// oblique-incidence and arbitrary-polarization support.
 ///
 /// # Reference
 ///
 /// Taflove & Hagness, *Computational Electrodynamics* (3rd ed.) §6 and §14.
 ///
-/// # Phase 2.fdtd.5 limitations
+/// # Phase 2.fdtd.5 / 2.fdtd.5.1 limitations
 ///
 /// - Only `PlusX` direction with `E_z` polarization is implemented;
 ///   other [`PlaneWaveDirection`] variants `unimplemented!()` in the
 ///   correction kernels.
-/// - Only the `i0` / `i1` faces apply corrections (slab geometry);
-///   side-face corrections for a finite TF box land in a later phase.
+/// - Only the `i0` / `i1` faces apply corrections. The j- and k-face
+///   scattered-field leakage (described above) limits finite-box
+///   contrast to ~6× vs the slab's ~2676×. Use slab geometry
+///   (`j0 = 0`, `j1 = ny`, `k0 = 0`, `k1 = nz`) for high-fidelity
+///   runs; the proper j/k face corrections land in
+///   Phase 2.fdtd.5.2 / 2.fdtd.5.3.
 /// - The 1-D auxiliary grid uses the same `dx` and `dt` as the 3D grid;
 ///   for normal incidence this is exact in the limit of the 3D cubic
 ///   Yee dispersion relation on-axis, but introduces a small mismatch
@@ -339,17 +360,25 @@ impl PlaneWaveSource {
     }
 
     // ----------------------------------------------------------------
-    // +x propagation, E_z polarization (Phase 2.fdtd.5)
+    // +x propagation, E_z polarization (Phase 2.fdtd.5 / 2.fdtd.5.1)
     //
     // Derivation (Taflove & Hagness §14):
     //
-    // For a +x plane wave with E along z and H along y, the only
-    // nontrivial corrections at normal incidence are on the i = i0 and
-    // i = i1 faces. Side faces (j0, j1, k0, k1) carry tangential field
-    // components that would correct H_x / H_z; those are zero for an
-    // E_z-polarized +x wave at normal incidence and require no
-    // correction in Phase 2.fdtd.5 (cf. the limitation in the struct
-    // docstring about slab vs. finite-box geometry).
+    // For a +x plane wave with E along z and H along y, the incident
+    // field has only E_inc_z and H_inc_y non-zero. The only Yee
+    // stencils that pick up a non-zero *incident* contribution across
+    // the TF/SF boundary are:
+    //   - E_z update at i = i0 / i1   (uses H_inc_y across the i-face)
+    //   - H_y update at i = i0-1 / i1 (uses E_inc_z across the i-face)
+    //
+    // The j- and k-face stencils only see zero incident components, so
+    // no incident-correction is needed there. They DO, however, see the
+    // E_z TF/SF discontinuity and emit a spurious scattered field —
+    // see the struct docstring's "Polarization and supported geometry"
+    // section and `tests/plane_wave_finite_box.rs` for the empirical
+    // measurement (~6× contrast for finite-box vs ~2676× for slab).
+    // The j/k scattered-field corrections that recover full contrast
+    // are deferred to Phase 2.fdtd.5.2.
     //
     // Front (i = i0):
     //   H_y[i0-1, j, k] is SF (between SF E_z[i0-1] and TF E_z[i0]).
