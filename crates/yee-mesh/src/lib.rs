@@ -17,8 +17,10 @@
 
 use nalgebra::Vector3;
 
+pub mod kicad;
 mod session;
 
+pub use kicad::KiCadError;
 pub use session::Session;
 
 /// Meshing errors.
