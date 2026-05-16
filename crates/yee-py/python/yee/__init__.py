@@ -6,6 +6,9 @@ from yee._yee import (
     SParameters,
     TriMesh,
     __version__,
+    s11_db,
+    s11_phase,
+    smith_xy,
     touchstone,
 )
 
@@ -15,5 +18,8 @@ __all__ = [
     "SParameters",
     "TriMesh",
     "__version__",
+    "s11_db",
+    "s11_phase",
+    "smith_xy",
     "touchstone",
 ]

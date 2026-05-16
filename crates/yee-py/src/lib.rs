@@ -9,6 +9,7 @@ use pyo3::prelude::*;
 
 mod errors;
 mod freq;
+mod helpers;
 mod solver;
 mod sparams;
 mod touchstone;
@@ -21,6 +22,9 @@ fn _yee(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<freq::PyFreqRange>()?;
     m.add_class::<sparams::PySParameters>()?;
     m.add_class::<solver::PyPlanarMoM>()?;
+    m.add_function(wrap_pyfunction!(helpers::s11_db, m)?)?;
+    m.add_function(wrap_pyfunction!(helpers::s11_phase, m)?)?;
+    m.add_function(wrap_pyfunction!(helpers::smith_xy, m)?)?;
     let ts_mod = PyModule::new(py, "touchstone")?;
     touchstone::register(&ts_mod)?;
     m.add_submodule(&ts_mod)?;
