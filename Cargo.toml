@@ -69,22 +69,17 @@ opencascade     = "0.2"
 opencascade-sys = "0.2"
 
 # GUI / Viz
-# NOTE: egui 0.34 (the version called out by TECH_STACK / Phase 1.gui.0)
-# requires rustc 1.92, but the workspace toolchain is pinned to 1.88 (see
-# rust-toolchain.toml). egui_dock 0.17 and egui_plot 0.33 both peg
-# themselves to egui 0.32, so the whole egui ecosystem here is held back
-# to 0.32 patches that compile on 1.88. Bumping the workspace toolchain to
-# 1.92 and returning to egui 0.34 / egui_dock 0.18 is a Phase 1.gui.1+ task.
-egui      = "0.32"
-eframe    = "0.32"
-egui_plot = "0.33"
-egui_dock = "0.17"
-# NOTE: egui-wgpu 0.32 / eframe 0.32 pin wgpu 25; running workspace wgpu 26
-# alongside causes a naga 26 build break against codespan-reporting/termcolor
-# transitive resolution. Pin wgpu to 25 to match egui's ecosystem. Bumping
-# back to 26 is a Phase 1.gui.2+ task tied to egui 0.33+.
-egui-wgpu = "0.32"
-wgpu      = "25"
+# NOTE: egui_plot 0.34 and egui_dock 0.18 still pin egui ^0.33; the first
+# releases that depend on egui ^0.34 are egui_plot 0.35 and egui_dock 0.19.
+# Bumping these together is the only way to keep a single egui crate version
+# in the dep graph. egui-wgpu 0.34 / eframe 0.34 pull in wgpu 29, so the
+# workspace wgpu must match.
+egui      = "0.34"
+eframe    = "0.34"
+egui_plot = "0.35"
+egui_dock = "0.19"
+egui-wgpu = "0.34"
+wgpu      = "29"
 bytemuck  = { version = "1", features = ["derive"] }
 rerun     = { version = "0.31", default-features = false, features = ["sdk"] }
 plotters  = "0.3"
