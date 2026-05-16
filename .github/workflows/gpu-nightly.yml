@@ -1,0 +1,43 @@
+name: GPU nightly
+
+# Nightly cron at 04:00 UTC. This workflow is intentionally disabled (`if:
+# false`) until a self-hosted GPU runner is registered. To enable it:
+#
+#   1. Provision a self-hosted runner with an NVIDIA GPU and the CUDA Toolkit
+#      installed (CUDA 12.4+ matches the workspace `cudarc` feature flags).
+#   2. Register the runner with this repository under the label
+#      `self-hosted-gpu-placeholder` (or rename `runs-on` below to a label of
+#      your choosing and update this comment).
+#   3. Remove the `if: false` guard on the `gpu-validate` job below so the
+#      cron trigger actually dispatches work.
+#
+# Until those three steps are done, the workflow is parsed by GitHub Actions
+# but never executes a job.
+
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+jobs:
+  gpu-validate:
+    name: GPU validation (placeholder — disabled until runner exists)
+    if: false
+    runs-on: self-hosted-gpu-placeholder
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88"
+          components: rustfmt, clippy
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # Real GPU validation steps go here once a runner is registered. For
+      # example:
+      #   - run: cargo test --workspace --features cuda
+      #   - run: cargo run --bin yee --features cuda -- validate all

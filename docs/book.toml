@@ -1,0 +1,11 @@
+[book]
+title = "Yee"
+authors = ["The Yee Authors"]
+src = "src"
+language = "en"
+# Note: the `multilingual` key was removed in mdBook 0.5; the book is
+# single-language by default, which matches the original brief's
+# `multilingual = false` intent.
+
+[output.html]
+default-theme = "ayu"

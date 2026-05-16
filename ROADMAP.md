@@ -23,11 +23,18 @@ Conventions used below:
 - `yee` CLI for `validate`, `mesh`, `run`, `export`.
 - Initial documentation site (mdBook) and contributing guide.
 
-✅ **Validation milestones.**
-- **Closed-form half-wave dipole impedance**: 50 Ω microstrip-fed, reproduce Z ≈ 73 + j42 Ω within 5%.
-- **50 Ω microstrip line on FR-4**: characteristic impedance within ±3% of TX-LINE / Hammerstad-Jensen.
-- **2.4 GHz rectangular microstrip patch on FR-4** (29.2 × 38.0 mm, h = 1.6 mm, εr = 4.4, lossless): resonance within ±2% of published value; |S11| < −10 dB at resonance. (FDTD comparison case to be added in Phase 2.)
-- All validation cases reproducible via `cargo test --features validation` or `python -m yee.validation`.
+✅ **Validation milestones.** Phase 0 is a *walking skeleton*: every pipe between the workspace crates, the CLI, the documentation pipeline, and CI is connected end-to-end. The gates below are pure-build, not physical-accuracy:
+
+1. `cargo check --workspace --no-default-features` exits 0
+2. `cargo test --workspace --no-default-features` exits 0
+3. `cargo clippy --workspace --all-targets --no-default-features -- -D warnings` exits 0
+4. `cargo fmt --check --all` exits 0
+5. `cargo doc --workspace --no-default-features --no-deps` exits 0
+6. `cargo run --bin yee -- --help` exits 0 and lists every subcommand
+7. `cargo run --bin yee -- validate all` exits 0
+8. `mdbook build docs/` exits 0
+9. `THIRD_PARTY_LICENSES.md` documents Gmsh, OCCT, and NVIDIA CUDA proprietary dynamic-link posture
+10. CI workflow runs gates 1–9 on Linux + Rust 1.88 and exits green
 
 ⚠️ **Risks / dependencies.**
 - `cudarc` self-describes as "pre-alpha"; it has historically shipped breaking minor releases (notably 0.13 → 0.14). **Mitigation:** pin to exact minor version; introduce a thin internal `yee_cuda::backend` abstraction so we can swap if needed.
@@ -51,6 +58,9 @@ Conventions used below:
 - **`rerun` SDK** integration as an optional structured-logging sink for solver internals (mesh evolution, current densities per frequency, convergence traces).
 
 ✅ **Validation milestones.**
+- **Closed-form half-wave dipole impedance**[^phase0-reclassified]: 50 Ω microstrip-fed, reproduce Z ≈ 73 + j42 Ω within 5%.
+- **50 Ω microstrip line on FR-4**[^phase0-reclassified]: characteristic impedance within ±3% of TX-LINE / Hammerstad-Jensen.
+- **2.4 GHz rectangular microstrip patch on FR-4**[^phase0-reclassified] (29.2 × 38.0 mm, h = 1.6 mm, εr = 4.4, lossless): resonance within ±2% of published value; |S11| < −10 dB at resonance. (FDTD comparison case to be added in Phase 2.)
 - **Swanson 5-pole hairpin BPF** (RT/Duroid 6006, εr = 6.15, h = 1.27 mm, ~2.0 GHz): reproduce S-parameter response within ±1 dB of Sonnet reference up to 4 GHz; resonant frequencies within ±0.5%.
 - **Parallel-coupled-line BPF** (Hong & Lancaster Ch. 5): reproduce passband ripple, return loss, and stopband rejection within ±1 dB.
 - **Wilkinson divider at 2 GHz**: three-port S-parameters within ±0.5 dB of closed-form / Pozar reference.
@@ -58,6 +68,8 @@ Conventions used below:
 - **Cross-validation against openEMS** on every microstrip and patch case (FDTD vs MoM should agree within 3% at resonance).
 - **Inset-fed patch antenna on RO4003C** (matched 50 Ω): published-paper figure-for-figure match.
 - All validation runs scripted; results pushed to `validation/results/` and regenerated in CI nightly.
+
+[^phase0-reclassified]: Originally listed under Phase 0; reclassified as Phase 1 in the 2026-05-16 Phase 0 walking-skeleton design (`docs/superpowers/specs/2026-05-16-phase-0-multi-agent-execution-design.md`).
 
 ⚠️ **Risks / dependencies.**
 - DCIM accuracy across wide frequency ranges is finicky; expect to ship multiple Green's-function evaluators (DCIM + direct Sommerfeld + rational fit) and switch adaptively.
