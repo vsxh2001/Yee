@@ -8,6 +8,7 @@
 use pyo3::prelude::*;
 
 mod errors;
+mod fdtd;
 mod freq;
 mod helpers;
 mod solver;
@@ -24,6 +25,9 @@ fn _yee(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<sparams::PySParameters>()?;
     m.add_class::<solver::PyPlanarMoM>()?;
     m.add_class::<surrogate::PyGaussianProcess>()?;
+    m.add_class::<fdtd::PyFdtdDriverConfig>()?;
+    m.add_class::<fdtd::PyFdtdDriver>()?;
+    m.add_class::<fdtd::PyRadiationPattern>()?;
     m.add_function(wrap_pyfunction!(helpers::s11_db, m)?)?;
     m.add_function(wrap_pyfunction!(helpers::s11_phase, m)?)?;
     m.add_function(wrap_pyfunction!(helpers::smith_xy, m)?)?;
