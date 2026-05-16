@@ -19,7 +19,12 @@ use crate::{Error, Result, TriMesh};
 /// build script writes an empty stub there — feature-gated builds on hosts
 /// without the SDK will compile this module but fail to link any FFI call.
 #[cfg(feature = "gmsh")]
-#[allow(unsafe_code, non_upper_case_globals, non_camel_case_types, non_snake_case)]
+#[allow(
+    unsafe_code,
+    non_upper_case_globals,
+    non_camel_case_types,
+    non_snake_case
+)]
 #[allow(dead_code)]
 pub(crate) mod ffi {
     pub use std::os::raw::{c_int, c_void};
@@ -154,13 +159,7 @@ impl Session {
             // SAFETY: scalar args by value; `ierr` is a valid mutable pointer.
             let tag = unsafe {
                 ffi::gmshModelOccAddBox(
-                    _x,
-                    _y,
-                    _z,
-                    _dx,
-                    _dy,
-                    _dz,
-                    /* tag = */ -1, // -1 ⇒ Gmsh assigns
+                    _x, _y, _z, _dx, _dy, _dz, /* tag = */ -1, // -1 ⇒ Gmsh assigns
                     &mut ierr,
                 )
             };

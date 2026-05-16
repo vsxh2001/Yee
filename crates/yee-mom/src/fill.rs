@@ -88,7 +88,7 @@ fn pair_contribution(
 
     // k0 = ω/c real for free space. η0 stored on Green struct.
     let k0 = green.k0.re;
-    let omega_mu0 = Complex64::new(0.0, 1.0) * Complex64::new(k0 * green.eta0, 0.0);     // j k0 η0
+    let omega_mu0 = Complex64::new(0.0, 1.0) * Complex64::new(k0 * green.eta0, 0.0); // j k0 η0
     let inv_omega_eps0 = Complex64::new(0.0, -1.0) * Complex64::new(green.eta0 / k0, 0.0); // -j η0/k0
 
     let topology = topology_of(basis, t_outer, t_inner);

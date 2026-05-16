@@ -27,9 +27,7 @@ fn pulse_propagates_outward() {
     let center_energy: f64 = solver.grid().ez[(25, 25, 25)].powi(2);
     // Probe one cell inside the y = 0 PEC wall; the wall itself is clamped
     // to zero each step, so we sample the layer just interior to it.
-    let edge_energy: f64 = (0..50)
-        .map(|i| solver.grid().ez[(i, 1, 25)].powi(2))
-        .sum();
+    let edge_energy: f64 = (0..50).map(|i| solver.grid().ez[(i, 1, 25)].powi(2)).sum();
 
     println!("center energy: {center_energy:.3e}");
     println!("edge energy:   {edge_energy:.3e}");
@@ -52,6 +50,14 @@ fn pulse_propagates_outward() {
 fn courant_limit_is_positive() {
     let grid = YeeGrid::vacuum(10, 10, 10, 1.0e-3);
     let cfl = grid.courant_limit();
-    assert!(cfl > 0.0 && cfl.is_finite(), "Courant limit must be finite > 0, got {cfl}");
-    assert!(grid.dt < cfl, "dt = {} should be below CFL = {}", grid.dt, cfl);
+    assert!(
+        cfl > 0.0 && cfl.is_finite(),
+        "Courant limit must be finite > 0, got {cfl}"
+    );
+    assert!(
+        grid.dt < cfl,
+        "dt = {} should be below CFL = {}",
+        grid.dt,
+        cfl
+    );
 }

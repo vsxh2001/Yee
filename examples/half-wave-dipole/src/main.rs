@@ -47,10 +47,10 @@ fn build_dipole_mesh() -> Result<TriMesh> {
     // around the feed.)
     let quarter_wave = yee_core::units::C0 / (4.0 * F0_HZ);
     let vertices = vec![
-        Vector3::new(0.0, -quarter_wave, 0.0), // v0: lower arm tip
-        Vector3::new(0.0, 0.0, 0.0),           // v1: port edge — lower endpoint
-        Vector3::new(0.0, quarter_wave, 0.0),  // v2: port edge — upper endpoint
-        Vector3::new(0.001, quarter_wave, 0.0), // v3: thin width to give triangles area
+        Vector3::new(0.0, -quarter_wave, 0.0),   // v0: lower arm tip
+        Vector3::new(0.0, 0.0, 0.0),             // v1: port edge — lower endpoint
+        Vector3::new(0.0, quarter_wave, 0.0),    // v2: port edge — upper endpoint
+        Vector3::new(0.001, quarter_wave, 0.0),  // v3: thin width to give triangles area
         Vector3::new(0.001, -quarter_wave, 0.0), // v4: same, lower side
     ];
     let triangles = vec![
@@ -81,9 +81,8 @@ fn write_placeholder(out_path: &std::path::Path) -> Result<()> {
             .with_context(|| format!("creating output directory {}", parent.display()))?;
     }
     let mut file = placeholder_s1p().to_touchstone(Z0_OHMS);
-    file.comments.push(
-        " Phase 0 placeholder S-parameters from examples/half-wave-dipole.".to_string(),
-    );
+    file.comments
+        .push(" Phase 0 placeholder S-parameters from examples/half-wave-dipole.".to_string());
     file.comments
         .push(" Real values land once yee-mom Phase 1.0 ships.".to_string());
     touchstone::write(out_path, &file)
@@ -121,8 +120,7 @@ fn main() -> Result<()> {
                 sparams.freq_hz.len(),
                 sparams.n_ports
             );
-            let out =
-                std::path::PathBuf::from("target/example-output/dipole.s1p");
+            let out = std::path::PathBuf::from("target/example-output/dipole.s1p");
             sparams
                 .write_touchstone(&out, Z0_OHMS)
                 .map_err(|e| anyhow::anyhow!("writing Touchstone: {e}"))?;
@@ -130,9 +128,7 @@ fn main() -> Result<()> {
         }
         Err(yee_core::Error::Unimplemented(msg)) => {
             println!("half-wave-dipole: PlanarMoM::run is a Phase 0 stub ({msg}).");
-            println!(
-                "half-wave-dipole: writing placeholder S-parameters until Track A merges."
-            );
+            println!("half-wave-dipole: writing placeholder S-parameters until Track A merges.");
             let out = std::path::PathBuf::from("target/example-output/dipole.s1p");
             write_placeholder(&out)?;
             println!("half-wave-dipole: wrote {}", out.display());

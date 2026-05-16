@@ -20,7 +20,10 @@ use yee_mesh::TriMesh;
 /// between the two tagged regions and is picked up as the delta-gap port
 /// by `RwgBasis::from_mesh`'s "different non-zero tags" port convention.
 pub fn thin_cylinder(length_m: f64, radius_m: f64, n_axial: usize, n_around: usize) -> TriMesh {
-    assert!(n_axial >= 2 && n_axial.is_multiple_of(2), "n_axial must be even and >= 2");
+    assert!(
+        n_axial >= 2 && n_axial.is_multiple_of(2),
+        "n_axial must be even and >= 2"
+    );
     assert!(n_around >= 3, "n_around must be >= 3");
 
     let mut vertices: Vec<Vector3<f64>> = Vec::with_capacity((n_axial + 1) * n_around);
@@ -32,7 +35,11 @@ pub fn thin_cylinder(length_m: f64, radius_m: f64, n_axial: usize, n_around: usi
         let z = z0 + (i as f64) * dz;
         for j in 0..n_around {
             let theta = (j as f64) * dtheta;
-            vertices.push(Vector3::new(radius_m * theta.cos(), radius_m * theta.sin(), z));
+            vertices.push(Vector3::new(
+                radius_m * theta.cos(),
+                radius_m * theta.sin(),
+                z,
+            ));
         }
     }
 

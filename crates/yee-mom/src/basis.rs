@@ -117,10 +117,7 @@ impl RwgBasis {
             // input here prevents NaN/Inf propagation downstream. We check
             // via `partial_cmp` to robustly catch NaN — `area <= 0.0` would
             // miss it because every NaN comparison is `false`.
-            if !matches!(
-                area.partial_cmp(&0.0),
-                Some(std::cmp::Ordering::Greater)
-            ) {
+            if !matches!(area.partial_cmp(&0.0), Some(std::cmp::Ordering::Greater)) {
                 return Err(yee_core::Error::Invalid(format!(
                     "triangle {t} has non-positive area {area}"
                 )));
@@ -219,10 +216,7 @@ impl RwgBasis {
     /// Iterate the basis-function indices whose edge carries the given
     /// non-zero `port_tag`. With `port_tag == 0` no basis is selected (the
     /// "no port" sentinel is intentionally not iterable).
-    pub fn port_basis_indices(
-        &self,
-        port_tag: u32,
-    ) -> impl Iterator<Item = usize> + '_ {
+    pub fn port_basis_indices(&self, port_tag: u32) -> impl Iterator<Item = usize> + '_ {
         // `port_tag == 0` means "not a port" inside `RwgEdge`, so iterating
         // it would spuriously return every boundary-mismatched edge — guard
         // it out instead of trusting the caller.

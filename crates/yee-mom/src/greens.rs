@@ -33,7 +33,10 @@ impl FreeSpaceGreen {
     /// singularity-subtracted form valid at R = 0.
     pub fn scalar(&self, r1: Vector3<f64>, r2: Vector3<f64>) -> Complex64 {
         let r = (r1 - r2).norm();
-        assert!(r > 0.0, "scalar Green's function singular at r1 == r2; use scalar_smooth");
+        assert!(
+            r > 0.0,
+            "scalar Green's function singular at r1 == r2; use scalar_smooth"
+        );
         let k0 = self.k0.re;
         Complex64::from_polar(1.0 / (4.0 * std::f64::consts::PI * r), -k0 * r)
     }

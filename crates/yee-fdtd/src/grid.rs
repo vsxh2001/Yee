@@ -112,9 +112,8 @@ impl YeeGrid {
     ///
     /// (Taflove & Hagness eq. 4.60.)
     pub fn courant_limit(&self) -> f64 {
-        let inv_sq = 1.0 / (self.dx * self.dx)
-            + 1.0 / (self.dy * self.dy)
-            + 1.0 / (self.dz * self.dz);
+        let inv_sq =
+            1.0 / (self.dx * self.dx) + 1.0 / (self.dy * self.dy) + 1.0 / (self.dz * self.dz);
         1.0 / (C0 * inv_sq.sqrt())
     }
 }

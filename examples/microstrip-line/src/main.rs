@@ -65,12 +65,8 @@ fn main() -> Result<()> {
                 .import_step(&step)
                 .map_err(|e| anyhow::anyhow!("import_step: {e}"))?;
             println!("microstrip-line: meshing surface (dim = 2)");
-            session
-                .mesh(2)
-                .map_err(|e| anyhow::anyhow!("mesh: {e}"))?;
-            let tris = session
-                .tris()
-                .map_err(|e| anyhow::anyhow!("tris: {e}"))?;
+            session.mesh(2).map_err(|e| anyhow::anyhow!("mesh: {e}"))?;
+            let tris = session.tris().map_err(|e| anyhow::anyhow!("tris: {e}"))?;
             println!(
                 "microstrip-line: mesh has {} vertices, {} triangles",
                 tris.vertices.len(),
