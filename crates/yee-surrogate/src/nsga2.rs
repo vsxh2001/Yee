@@ -201,6 +201,146 @@ pub(crate) fn crowding_distance(front: &[usize], objectives: &[DVector<f64>]) ->
     dist
 }
 
+/// Binary tournament selection by `(rank, crowding distance)` lexicographic
+/// order: prefer lower rank; on ties prefer larger crowding distance; further
+/// ties broken by coin flip.
+///
+/// `rank[i]` is the front index of population member `i` (0 = Pareto-best).
+/// `crowding[i]` is the crowding distance of member `i` within its front.
+///
+/// Returns the index of the tournament winner.
+pub(crate) fn tournament_select(
+    rank: &[usize],
+    crowding: &[f64],
+    rng: &mut Xorshift64,
+) -> usize {
+    let n = rank.len();
+    debug_assert_eq!(n, crowding.len());
+    debug_assert!(n >= 2);
+    let i = (rng.next_u64() as usize) % n;
+    let mut j = (rng.next_u64() as usize) % n;
+    while j == i && n > 1 {
+        j = (rng.next_u64() as usize) % n;
+    }
+    if rank[i] < rank[j] {
+        i
+    } else if rank[j] < rank[i] {
+        j
+    } else if crowding[i] > crowding[j] {
+        i
+    } else if crowding[j] > crowding[i] {
+        j
+    } else if rng.next_f64() < 0.5 {
+        i
+    } else {
+        j
+    }
+}
+
+/// Simulated Binary Crossover (Deb & Agrawal 1995).
+///
+/// Generates two children from two parents per gene with probability `0.5`
+/// (otherwise the gene is copied straight through). The SBX β factor is
+/// sampled from the distribution
+///
+/// ```text
+/// β = (2u)^(1/(η+1))                   if u ≤ 0.5
+///   = (1/(2(1-u)))^(1/(η+1))           otherwise
+/// ```
+///
+/// where `u ∈ [0, 1)` is uniform and `η = crossover_eta`. Children are
+/// clamped to the per-dimension bounds.
+pub(crate) fn sbx_crossover(
+    parent_a: &DVector<f64>,
+    parent_b: &DVector<f64>,
+    bounds: &[(f64, f64)],
+    eta_c: f64,
+    rng: &mut Xorshift64,
+) -> (DVector<f64>, DVector<f64>) {
+    let d = parent_a.len();
+    debug_assert_eq!(d, parent_b.len());
+    debug_assert_eq!(d, bounds.len());
+    let mut child_a = parent_a.clone();
+    let mut child_b = parent_b.clone();
+    for i in 0..d {
+        if rng.next_f64() > 0.5 {
+            // Half the genes are copied straight through, per the original
+            // SBX formulation.
+            continue;
+        }
+        let a = parent_a[i];
+        let b = parent_b[i];
+        if (a - b).abs() < 1e-14 {
+            // Identical parents in this gene → identical children.
+            continue;
+        }
+        let u = rng.next_f64();
+        let beta = if u <= 0.5 {
+            (2.0 * u).powf(1.0 / (eta_c + 1.0))
+        } else {
+            (1.0 / (2.0 * (1.0 - u))).powf(1.0 / (eta_c + 1.0))
+        };
+        let (lo, hi) = bounds[i];
+        let mean = 0.5 * (a + b);
+        let half_diff = 0.5 * (b - a).abs();
+        let mut c1 = mean - beta * half_diff;
+        let mut c2 = mean + beta * half_diff;
+        c1 = c1.clamp(lo, hi);
+        c2 = c2.clamp(lo, hi);
+        child_a[i] = c1;
+        child_b[i] = c2;
+    }
+    (child_a, child_b)
+}
+
+/// Polynomial mutation (Deb & Goyal 1996, popularized in Deb 2002).
+///
+/// For each gene with probability `mutation_probability`, draw `u ∈ [0, 1)`
+/// uniform, compute
+///
+/// ```text
+/// δ_L = -((x - lo) / (hi - lo))                  (normalized lower slack)
+/// δ_R = +((hi - x) / (hi - lo))                  (normalized upper slack)
+/// δ_q = (2u + (1 - 2u)(1 + δ_L)^(η+1))^(1/(η+1)) - 1     if u ≤ 0.5
+/// δ_q = 1 - (2(1 - u) + (2u - 1)(1 - δ_R)^(η+1))^(1/(η+1))  if u > 0.5
+/// ```
+///
+/// and shift the gene by `δ_q · (hi - lo)`. The result is clamped to
+/// `[lo, hi]` to guard against floating-point drift at the boundaries.
+pub(crate) fn polynomial_mutation(
+    x: &mut DVector<f64>,
+    bounds: &[(f64, f64)],
+    eta_m: f64,
+    p_mut: f64,
+    rng: &mut Xorshift64,
+) {
+    let d = x.len();
+    debug_assert_eq!(d, bounds.len());
+    for i in 0..d {
+        if rng.next_f64() >= p_mut {
+            continue;
+        }
+        let (lo, hi) = bounds[i];
+        let range = hi - lo;
+        if range <= 0.0 {
+            continue;
+        }
+        let u = rng.next_f64();
+        let delta_l = (x[i] - lo) / range;
+        let delta_r = (hi - x[i]) / range;
+        let mut_pow = 1.0 / (eta_m + 1.0);
+        let delta_q = if u <= 0.5 {
+            let val = 2.0 * u + (1.0 - 2.0 * u) * (1.0 - delta_l).powf(eta_m + 1.0);
+            val.powf(mut_pow) - 1.0
+        } else {
+            let val = 2.0 * (1.0 - u) + (2.0 * u - 1.0) * (1.0 - delta_r).powf(eta_m + 1.0);
+            1.0 - val.powf(mut_pow)
+        };
+        let new_val = x[i] + delta_q * range;
+        x[i] = new_val.clamp(lo, hi);
+    }
+}
+
 /// Stub entry point. The full NSGA-II pipeline lands in follow-up commits;
 /// for now this only validates the inputs so the public API compiles.
 pub fn minimize<F>(
@@ -293,5 +433,60 @@ mod tests {
         let objs = vec![dv(&[0.0, 1.0]), dv(&[1.0, 0.0])];
         let cd = crowding_distance(&[0, 1], &objs);
         assert!(cd.iter().all(|d| d.is_infinite()));
+    }
+
+    #[test]
+    fn tournament_select_prefers_lower_rank() {
+        // Construct a population where index 0 dominates index 1 by rank.
+        let rank = vec![0_usize, 5];
+        let crowding = vec![0.0_f64, 100.0];
+        let mut rng = Xorshift64::new(1);
+        for _ in 0..32 {
+            let winner = tournament_select(&rank, &crowding, &mut rng);
+            assert_eq!(
+                winner, 0,
+                "lower rank must win regardless of crowding distance"
+            );
+        }
+    }
+
+    #[test]
+    fn tournament_select_breaks_rank_ties_by_crowding() {
+        let rank = vec![0_usize, 0];
+        let crowding = vec![10.0_f64, 1.0];
+        let mut rng = Xorshift64::new(2);
+        for _ in 0..32 {
+            let winner = tournament_select(&rank, &crowding, &mut rng);
+            assert_eq!(winner, 0, "rank tie should prefer larger crowding distance");
+        }
+    }
+
+    #[test]
+    fn sbx_crossover_respects_bounds() {
+        let bounds = vec![(0.0, 1.0); 4];
+        let pa = DVector::from_row_slice(&[0.1, 0.3, 0.5, 0.7]);
+        let pb = DVector::from_row_slice(&[0.9, 0.6, 0.2, 0.4]);
+        let mut rng = Xorshift64::new(11);
+        for _ in 0..50 {
+            let (ca, cb) = sbx_crossover(&pa, &pb, &bounds, 20.0, &mut rng);
+            for i in 0..4 {
+                assert!(ca[i] >= 0.0 && ca[i] <= 1.0);
+                assert!(cb[i] >= 0.0 && cb[i] <= 1.0);
+            }
+        }
+    }
+
+    #[test]
+    fn polynomial_mutation_respects_bounds() {
+        let bounds = vec![(0.0, 1.0); 5];
+        let mut rng = Xorshift64::new(13);
+        // Mutate at p = 1.0 to make every gene move.
+        for _ in 0..64 {
+            let mut x = DVector::from_row_slice(&[0.1, 0.5, 0.9, 0.0, 1.0]);
+            polynomial_mutation(&mut x, &bounds, 20.0, 1.0, &mut rng);
+            for i in 0..5 {
+                assert!(x[i] >= 0.0 && x[i] <= 1.0, "gene {i} out of bounds: {}", x[i]);
+            }
+        }
     }
 }
