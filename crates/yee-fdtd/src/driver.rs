@@ -24,10 +24,12 @@
 //! the result normalized so that `max |E_θ| = 1`. For a z-polarized
 //! short dipole the expected analytic pattern is `|E_θ| ∝ sin θ`.
 
+use std::f64::consts::TAU;
+
 use crate::cpml::CpmlParams;
 use crate::grid::YeeGrid;
 use crate::ntff::{NtffParams, NtffState};
-use crate::WalkingSkeletonSolver;
+use crate::{FdtdSolver, WalkingSkeletonSolver, update};
 
 /// User-facing configuration for [`FdtdDriver`].
 ///
@@ -60,11 +62,8 @@ pub struct FdtdDriverConfig {
 /// the simulation to completion and return the far-field
 /// [`RadiationPattern`].
 pub struct FdtdDriver {
-    #[allow(dead_code)]
     solver: WalkingSkeletonSolver,
-    #[allow(dead_code)]
     ntff: NtffState,
-    #[allow(dead_code)]
     cfg: FdtdDriverConfig,
 }
 
@@ -125,11 +124,34 @@ impl FdtdDriver {
     ///
     /// Returns the per-θ magnitude of `E_θ` normalized so the maximum
     /// equals `1.0`.
-    ///
-    /// **Skeleton stub**: the time loop and angular sweep are filled in
-    /// by follow-up commits. The current implementation only initializes
-    /// the result vectors so callers see the expected output shape.
-    pub fn run(self) -> RadiationPattern {
+    pub fn run(mut self) -> RadiationPattern {
+        let omega = TAU * self.cfg.source_freq_hz;
+        let period = 1.0 / self.cfg.source_freq_hz;
+        // Hann window over the first 3 periods so the source ramps on
+        // smoothly. After the ramp the source is a steady sinusoid.
+        let ramp_duration = 3.0 * period;
+
+        let (ci, cj, ck) = self.cfg.dipole_center_cells;
+        let len = self.cfg.dipole_length_cells;
+        // Build the z-indices covered by the dipole, centred on ck.
+        // For odd length we get a symmetric range [ck − (len−1)/2, …,
+        // ck + (len−1)/2]; for even length the centre falls between two
+        // cells and we bias up.
+        let half = len / 2;
+        let k_lo = ck.saturating_sub(half);
+        let k_hi = (ck + (len - half)).min(self.solver.grid().nz);
+        let z_indices: Vec<usize> = (k_lo..k_hi).collect();
+
+        for _ in 0..self.cfg.n_steps {
+            let t = self.solver.current_time();
+            let window = hann_ramp(t, ramp_duration);
+            let drive = window * (omega * t).sin();
+            step_with_dipole(&mut self.solver, &mut self.ntff, ci, cj, &z_indices, drive);
+        }
+
+        // Angular sweep over the accumulated NTFF currents lands in the
+        // next commit. For now return the empty shape so the skeleton's
+        // output contract stays intact.
         const STEP_DEG: f64 = 5.0;
         let n = (180.0 / STEP_DEG) as usize + 1;
         let theta_deg: Vec<f64> = (0..n).map(|i| (i as f64) * STEP_DEG).collect();
@@ -141,9 +163,101 @@ impl FdtdDriver {
     }
 }
 
+/// Take one FDTD step on `solver` while injecting `drive` onto every
+/// `E_z(i, j, k)` whose `k` is listed in `z_indices`. The dipole occupies
+/// a short line of `E_z` cells along z.
+///
+/// Mirrors the structure of
+/// [`crate::WalkingSkeletonSolver::step_with_source_and_ntff`] but injects
+/// a custom z-line current rather than a Gaussian point source. The
+/// source is added between the H and E updates so the next E update
+/// sees it through the standard leapfrog timing.
+fn step_with_dipole(
+    solver: &mut WalkingSkeletonSolver,
+    ntff: &mut NtffState,
+    i: usize,
+    j: usize,
+    z_indices: &[usize],
+    drive: f64,
+) {
+    // 1. H update.
+    {
+        let (grid, _) = solver.grid_and_cpml_mut();
+        update::update_h(grid);
+    }
+    // 2. CPML correction for H (or PEC fallback if no CPML).
+    {
+        let (grid, cpml) = solver.grid_and_cpml_mut();
+        if let Some(cpml) = cpml {
+            cpml.update_h(grid);
+        } else {
+            #[allow(deprecated)]
+            crate::boundary::apply_pec(grid);
+        }
+    }
+
+    // 3. Inject J_z across the dipole cells (soft current source on E_z,
+    // applied between H and E updates so the next E update sees it).
+    {
+        let (grid, _) = solver.grid_and_cpml_mut();
+        for &k in z_indices {
+            grid.ez[(i, j, k)] += drive;
+        }
+    }
+
+    // 4. E update.
+    {
+        let (grid, _) = solver.grid_and_cpml_mut();
+        update::update_e(grid);
+    }
+    // 5. CPML correction for E.
+    {
+        let (grid, cpml) = solver.grid_and_cpml_mut();
+        if let Some(cpml) = cpml {
+            cpml.update_e(grid);
+        } else {
+            #[allow(deprecated)]
+            crate::boundary::apply_pec(grid);
+        }
+    }
+
+    // 6. Advance clock + sample NTFF at the end-of-step time.
+    solver.advance_clock();
+    let t_after = solver.current_time();
+    ntff.sample(solver.grid(), t_after);
+}
+
+/// Hann (raised-cosine) ramp from 0 to 1 over `ramp_duration` seconds.
+///
+/// Returns `1.0` for `t ≥ ramp_duration` and
+/// `0.5 · (1 − cos(π · t / ramp_duration))` during the ramp.
+#[inline]
+fn hann_ramp(t: f64, ramp_duration: f64) -> f64 {
+    if !ramp_duration.is_finite() || ramp_duration <= 0.0 {
+        return 1.0;
+    }
+    if t >= ramp_duration {
+        return 1.0;
+    }
+    if t <= 0.0 {
+        return 0.0;
+    }
+    0.5 * (1.0 - (std::f64::consts::PI * t / ramp_duration).cos())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hann_ramp_endpoints() {
+        let d = 1.0;
+        assert!((hann_ramp(-0.5, d) - 0.0).abs() < 1e-15);
+        assert!((hann_ramp(0.0, d) - 0.0).abs() < 1e-15);
+        assert!((hann_ramp(0.5, d) - 0.5).abs() < 1e-12);
+        assert!((hann_ramp(1.0, d) - 1.0).abs() < 1e-15);
+        assert!((hann_ramp(2.0, d) - 1.0).abs() < 1e-15);
+    }
 
     #[test]
     fn radiation_pattern_sweeps_zero_to_180_in_5_deg() {
