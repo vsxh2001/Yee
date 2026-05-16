@@ -13,8 +13,6 @@ touchstone  = []
 opencascade = ["dep:opencascade"]
 
 [dependencies]
-yee-core     = { workspace = true }
 num-complex  = { workspace = true }
 opencascade  = { workspace = true, optional = true }
 thiserror    = { workspace = true }
-tracing      = { workspace = true }
