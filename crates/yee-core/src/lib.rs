@@ -34,6 +34,12 @@ pub enum Error {
     Numerical(String),
 
     /// Feature not yet implemented in this Phase.
+    //
+    // Note: `Unimplemented` carries a `&'static str` rather than `String` (the
+    // other variants' payload). These messages are always compile-time
+    // constants — fixing the payload to `&'static str` makes accidental
+    // dynamic construction (e.g. `format!` or runtime-built strings) a
+    // compile-time error, keeping the variant cheap and intent-revealing.
     #[error("unimplemented: {0}")]
     Unimplemented(&'static str),
 
@@ -98,7 +104,12 @@ impl FreqRange {
     /// assert!(FreqRange::new(1.0e9, 2.0e9, 0).is_err());
     /// ```
     pub fn new(start_hz: f64, stop_hz: f64, n_points: usize) -> Result<Self> {
-        if start_hz >= stop_hz || start_hz.is_nan() || stop_hz.is_nan() {
+        if !start_hz.is_finite() || !stop_hz.is_finite() {
+            return Err(Error::Invalid(format!(
+                "FreqRange requires finite start_hz and stop_hz, got start_hz = {start_hz}, stop_hz = {stop_hz}"
+            )));
+        }
+        if start_hz >= stop_hz {
             return Err(Error::Invalid(format!(
                 "FreqRange requires start_hz < stop_hz, got start_hz = {start_hz}, stop_hz = {stop_hz}"
             )));
@@ -129,9 +140,10 @@ impl FreqRange {
     ///
     /// let band = FreqRange::new(1.0e9, 2.0e9, 3).unwrap();
     /// let pts: Vec<f64> = band.iter().collect();
-    /// assert_eq!(pts[0], 1.0e9);
-    /// assert_eq!(pts[2], 2.0e9);
     /// assert_eq!(pts.len(), 3);
+    /// assert_eq!(pts[0], 1.0e9);
+    /// assert_eq!(pts[1], 1.5e9);
+    /// assert_eq!(pts[2], 2.0e9);
     /// ```
     pub fn iter(&self) -> FreqRangeIter {
         FreqRangeIter {
@@ -166,18 +178,29 @@ impl Iterator for FreqRangeIter {
         self.index += 1;
 
         // Pin endpoints exactly to avoid floating-point rounding at the bounds.
+        // Guards are written so the conditions are mutually exclusive even when
+        // n_points == 1 (where i == 0 and i + 1 == n_points would both be true);
+        // requiring n_points >= 2 on the stop_hz branch removes that overlap so
+        // a future reorder cannot silently flip behavior.
         if i == 0 {
-            return Some(self.start_hz);
+            Some(self.start_hz)
+        } else if self.n_points >= 2 && i + 1 == self.n_points {
+            Some(self.stop_hz)
+        } else {
+            // Interior samples for n_points >= 3.
+            let denom = (self.n_points - 1) as f64;
+            let t = (i as f64) / denom;
+            Some(self.start_hz + t * (self.stop_hz - self.start_hz))
         }
-        if i + 1 == self.n_points {
-            return Some(self.stop_hz);
-        }
-        // Interior samples for n_points >= 3.
-        let denom = (self.n_points - 1) as f64;
-        let t = (i as f64) / denom;
-        Some(self.start_hz + t * (self.stop_hz - self.start_hz))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.n_points - self.index;
+        (remaining, Some(remaining))
     }
 }
+
+impl ExactSizeIterator for FreqRangeIter {}
 
 /// Solver-agnostic skeleton. Concrete solvers (planar MoM, 3D FDTD) implement this.
 ///
