@@ -180,6 +180,74 @@ Out (Phase 3.bo.1+):
 - Constrained optimization.
 - Batch BO.
 
+## Active learning
+
+`al::active_learn` (re-exported as `active_learn`) runs a variance-acquisition
+active-learning loop on top of `GaussianProcess`. It is the same iteration
+loop as `bo::minimize` with Expected Improvement swapped for predictive
+variance: instead of picking the next point that most likely beats the
+current best, AL picks the point of maximum posterior uncertainty so that
+querying it most reduces the GP's overall variance (MacKay 1992).
+
+Use this when the goal is **an accurate surrogate over the whole parameter
+space**, not finding a minimum. The two acquisitions are dual: BO concentrates
+on low-objective regions, AL concentrates on high-uncertainty regions. For a
+fixed simulator budget, AL is what you want before BO when you have no
+specific objective in mind yet — e.g. building a 25-sample surrogate of an
+S-parameter response so the GUI can scrub geometry parameters interactively.
+
+### Acquisition: predictive variance
+
+```text
+score(x) = var(x)   where (_, var) = GaussianProcess::predict(x)
+```
+
+No exploration parameter is needed; the GP's predictive variance is already
+the right uncertainty estimate.
+
+### Usage
+
+```rust,ignore
+use nalgebra::DVector;
+use yee_surrogate::{active_learn, AlConfig};
+
+let objective = |x: &DVector<f64>| x[0].sin();
+let bounds = vec![(0.0, std::f64::consts::TAU)];
+let cfg = AlConfig {
+    n_initial: 5,
+    n_iters: 20,
+    n_candidates: 1024,
+    seed: 0xC0FFEE,
+};
+let res = active_learn(objective, bounds, cfg);
+// res.history holds every (x, y) evaluation in order.
+// res.final_gp is a GP refit on the full history — call predict on it directly.
+let (mean, var) = res.final_gp.predict(&DVector::from_row_slice(&[1.0]));
+```
+
+### Validation
+
+`tests/al_synthetic.rs` runs the smooth 1-D objective `sin(x)` on `[0, 2π]`
+with budget 5 + 20 and asserts that the AL-trained GP's test-grid RMSE is
+strictly less than half of a GP trained on 25 uniform-random points from
+the same seed family. Observed ratios are typically ~0.01 (AL is two
+orders of magnitude more accurate than random on this problem); the 0.5
+threshold leaves a wide margin so the test is not seed-fragile.
+
+### Scope and out-of-scope
+
+In:
+- Single-output variance-acquisition AL with continuous bounded parameters.
+- Uniform random candidate set per iteration; pick by max variance.
+- Returns the full history plus a final GP refit so callers can call
+  `predict` / `predict_mean` directly.
+
+Out (Phase 3.al.1+):
+- Multi-acquisition AL (variance + objective trade-off).
+- Multi-fidelity / cost-aware AL (Lam 2015).
+- Look-ahead / non-myopic AL (Gonzalez 2016).
+- Batch / parallel AL queries.
+
 ## Multi-objective optimization (NSGA-II)
 
 `nsga2::minimize` (re-exported as `nsga2_minimize`) runs a textbook

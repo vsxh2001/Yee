@@ -20,10 +20,12 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod al;
 pub mod bo;
 pub mod gp;
 pub mod nsga2;
 
+pub use al::{AlConfig, AlResult, active_learn};
 pub use bo::{BoConfig, BoResult, ei, minimize};
 pub use gp::{GaussianProcess, GpSurrogate, MlFitConfig};
 pub use nsga2::{Nsga2Config, Nsga2Result, minimize as nsga2_minimize};
