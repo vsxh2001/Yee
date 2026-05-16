@@ -42,3 +42,7 @@ harness = false
 [[bench]]
 name = "bo_step"
 harness = false
+
+[[bench]]
+name = "plane_wave_step"
+harness = false
