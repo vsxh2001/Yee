@@ -212,6 +212,36 @@ parameters.
 
 ---
 
+## Bayesian optimization
+
+`yee.bo_minimize` wraps `yee_surrogate::bo::minimize`: a Gaussian-process
+surrogate with Expected Improvement acquisition for minimizing a black-box
+scalar objective over a hyper-rectangle. The objective is any Python
+callable that accepts a 1-D `float64` numpy array of length `d` and
+returns a Python `float`; raised exceptions are captured and re-raised
+after the inner loop exits.
+
+```python
+import math
+import yee
+
+result = yee.bo_minimize(
+    lambda x: (x[0] - 3.0) ** 2 + math.sin(5.0 * x[0]),
+    [(0.0, 6.0)],
+    yee.BoConfig(n_initial=5, n_iters=20, seed=0xC0FFEE),
+)
+print(result.x_best, result.y_best)      # near (3.422, -0.807)
+print(result.history_x.shape)            # (25, 1) -- chronological evals
+```
+
+`BoConfig` defaults match `yee_surrogate::bo::BoConfig::default`:
+`n_initial=5`, `n_iters=20`, `n_candidates=1024`, `xi=0.01`,
+`seed=0xC0FFEE`. The returned `BoResult` exposes `x_best` (`float64[d]`),
+`y_best` (`float`), `history_x` (`float64[n_evals, d]`), and `history_y`
+(`float64[n_evals]`).
+
+---
+
 ## Public API at a glance
 
 | Symbol | Description |
@@ -224,6 +254,9 @@ parameters.
 | `yee.FdtdDriverConfig(n_steps, dipole_center_cells, dipole_length_cells, source_freq_hz, …)` | FDTD driver configuration: time steps, dipole geometry, source frequency, CPML/NTFF padding. |
 | `yee.FdtdDriver(nx, ny, nz, dx, cfg).run()` | Build a vacuum-grid driver, run the FDTD time loop with CPML + a short z-dipole, return an `FdtdRadiationPattern`. |
 | `yee.FdtdRadiationPattern` | `.theta_deg` (`float64[37]`, 0..180 in 5° steps) and `.e_theta_phi0` (`float64[37]`, normalized to peak = 1). |
+| `yee.BoConfig(n_initial, n_iters, n_candidates, xi, seed)` | Bayesian-optimization budget + RNG seed. Defaults match `yee_surrogate::bo::BoConfig::default`. |
+| `yee.bo_minimize(objective, bounds, config=None)` | Minimize a black-box scalar objective over a hyper-rectangle via GP + Expected Improvement. Returns a `BoResult`. |
+| `yee.BoResult` | `.x_best` (`float64[d]`), `.y_best` (`float`), `.history_x` (`float64[n_evals, d]`), `.history_y` (`float64[n_evals]`). |
 | `yee.touchstone.read(path)` | Read a Touchstone v1.1 file; returns a dict with keys `z0`, `freq_unit`, `format`, `n_ports`, `freq_hz`, `data`, `comments`. |
 | `yee.touchstone.write(path, file_dict)` | Write a Touchstone v1.1 file from the same dict schema. |
 
