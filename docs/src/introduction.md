@@ -1,5 +1,8 @@
 # Introduction
 
+> **Note:** External links assume placeholder org slug `yee-em`; revisit when
+> the repository URL is finalized.
+
 Yee is an open-source electromagnetic-simulation studio aimed at the RF,
 microwave, and antenna-engineering workflows that today depend on closed-source
 commercial tools. It is written in Rust, accelerated on NVIDIA CUDA, and

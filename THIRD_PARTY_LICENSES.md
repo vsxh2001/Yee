@@ -85,20 +85,20 @@ recipient choice.
 | `faer` | MIT | <https://crates.io/crates/faer> |
 | `nalgebra` | Apache-2.0 | <https://crates.io/crates/nalgebra> |
 | `ndarray` | MIT OR Apache-2.0 | <https://crates.io/crates/ndarray> |
-| `sprs` | Apache-2.0 | <https://crates.io/crates/sprs> |
+| `sprs` | MIT OR Apache-2.0 | <https://crates.io/crates/sprs> |
 | `num-complex` | MIT OR Apache-2.0 | <https://crates.io/crates/num-complex> |
 | `glam` | MIT OR Apache-2.0 | <https://crates.io/crates/glam> |
 | `parry3d` | Apache-2.0 | <https://crates.io/crates/parry3d> |
 | `geo` | MIT OR Apache-2.0 | <https://crates.io/crates/geo> |
-| `i_overlay` | MIT | <https://crates.io/crates/i_overlay> |
+| `i_overlay` | MIT OR Apache-2.0 | <https://crates.io/crates/i_overlay> |
 | `opencascade` | LGPL-2.1 | <https://crates.io/crates/opencascade> |
 | `opencascade-sys` | LGPL-2.1 | <https://crates.io/crates/opencascade-sys> |
 | `egui` | MIT OR Apache-2.0 | <https://crates.io/crates/egui> |
 | `eframe` | MIT OR Apache-2.0 | <https://crates.io/crates/eframe> |
 | `egui_plot` | MIT OR Apache-2.0 | <https://crates.io/crates/egui_plot> |
-| `egui_dock` | MIT OR Apache-2.0 | <https://crates.io/crates/egui_dock> |
+| `egui_dock` | MIT | <https://crates.io/crates/egui_dock> |
 | `wgpu` | MIT OR Apache-2.0 | <https://crates.io/crates/wgpu> |
-| `rerun` | Apache-2.0 OR MIT | <https://crates.io/crates/rerun> |
+| `rerun` | MIT OR Apache-2.0 | <https://crates.io/crates/rerun> |
 | `plotters` | MIT | <https://crates.io/crates/plotters> |
 | `pyo3` | MIT OR Apache-2.0 | <https://crates.io/crates/pyo3> |
 | `numpy` | BSD-2-Clause | <https://crates.io/crates/numpy> |

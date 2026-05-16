@@ -69,7 +69,7 @@ Conventions used below:
 - **Inset-fed patch antenna on RO4003C** (matched 50 Ω): published-paper figure-for-figure match.
 - All validation runs scripted; results pushed to `validation/results/` and regenerated in CI nightly.
 
-[^phase0-reclassified]: Originally listed under Phase 0; reclassified as Phase 1 in the 2026-05-16 Phase 0 walking-skeleton design (`docs/superpowers/specs/2026-05-16-phase-0-multi-agent-execution-design.md`).
+[^phase0-reclassified]: Originally listed under Phase 0; reclassified as Phase 1 in the [2026-05-16 Phase 0 walking-skeleton design](docs/superpowers/specs/2026-05-16-phase-0-multi-agent-execution-design.md).
 
 ⚠️ **Risks / dependencies.**
 - DCIM accuracy across wide frequency ranges is finicky; expect to ship multiple Green's-function evaluators (DCIM + direct Sommerfeld + rational fit) and switch adaptively.

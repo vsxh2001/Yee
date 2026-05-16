@@ -25,6 +25,9 @@ jobs:
       - name: Cache cargo build artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: cargo check (gate 1)
+        run: cargo check --workspace --no-default-features
+
       - name: cargo fmt --check --all
         run: cargo fmt --check --all
 
