@@ -6459,6 +6459,7 @@ dependencies = [
  "wgpu",
  "yee-core",
  "yee-io",
+ "yee-validation",
 ]
 
 [[package]]
