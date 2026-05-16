@@ -8,7 +8,10 @@
 //! ```
 //!
 //! Training factors the Gram matrix `K + sigma_n^2 I` via a Cholesky
-//! decomposition once and pre-solves `α = K^{-1} y` for fast mean prediction.
+//! decomposition once, caches the factor for variance queries, and pre-solves
+//! `α = K^{-1} y` for fast mean prediction. The cached factorization makes
+//! per-query cost O(n) for the mean and O(n^2) for the variance, where `n`
+//! is the number of training points.
 //!
 //! ## Hyperparameters
 //!
@@ -19,8 +22,9 @@
 //!   regularizer (`sigma_n^2 I` added to the diagonal of `K`).
 
 use nalgebra::{Cholesky, DMatrix, DVector, Dyn};
+use num_complex::Complex64;
 
-use crate::{Error, Result};
+use crate::{Dataset, Error, Result, Surrogate};
 
 /// Squared-exponential Gaussian-process regressor over a real scalar output.
 ///
@@ -39,10 +43,8 @@ pub struct GaussianProcess {
     /// Observation noise standard deviation.
     sigma_n: f64,
     /// Pre-computed `α = K^{-1} y` for fast mean prediction.
-    #[allow(dead_code)]
     k_inv_y: DVector<f64>,
-    /// Cached Cholesky factor of `K + sigma_n^2 I` (reserved for variance).
-    #[allow(dead_code)]
+    /// Cached Cholesky factor of `K + sigma_n^2 I`, reused for variance.
     k_chol: Cholesky<f64, Dyn>,
 }
 
@@ -138,6 +140,59 @@ impl GaussianProcess {
         self.x_train.ncols()
     }
 
+    /// Posterior mean at `x_star`. Cost is O(n · d).
+    ///
+    /// `x_star` must have length equal to [`Self::input_dim`].
+    pub fn predict_mean(&self, x_star: &DVector<f64>) -> f64 {
+        let k_star = self.kernel_vector(x_star);
+        k_star.dot(&self.k_inv_y)
+    }
+
+    /// Posterior mean and variance at `x_star`. Cost is O(n^2 · d).
+    ///
+    /// Variance is computed as
+    ///
+    /// ```text
+    /// k(x_star, x_star) - k_star^T · K^{-1} · k_star
+    /// ```
+    ///
+    /// via the cached Cholesky factor. A small floor of `0.0` is applied to
+    /// guard against tiny negative values that can arise from finite-precision
+    /// cancellation when the query coincides with a training point.
+    pub fn predict(&self, x_star: &DVector<f64>) -> (f64, f64) {
+        let k_star = self.kernel_vector(x_star);
+        let mean = k_star.dot(&self.k_inv_y);
+        let v = self.k_chol.solve(&k_star);
+        let k_ss = self.sigma_f * self.sigma_f; // k(x_star, x_star) for RBF
+        let var = (k_ss - k_star.dot(&v)).max(0.0);
+        (mean, var)
+    }
+
+    /// Build the `(n,)` kernel vector `k_star[i] = k(x_star, x_train[i, :])`.
+    fn kernel_vector(&self, x_star: &DVector<f64>) -> DVector<f64> {
+        let n = self.x_train.nrows();
+        let d = self.x_train.ncols();
+        assert_eq!(
+            x_star.len(),
+            d,
+            "GaussianProcess::kernel_vector: x_star has length {} but training inputs are {}-dim",
+            x_star.len(),
+            d
+        );
+        let two_l2 = 2.0 * self.length_scale * self.length_scale;
+        let sf2 = self.sigma_f * self.sigma_f;
+        let mut v = DVector::<f64>::zeros(n);
+        for i in 0..n {
+            let mut r2 = 0.0;
+            for j in 0..d {
+                let dx = self.x_train[(i, j)] - x_star[j];
+                r2 += dx * dx;
+            }
+            v[i] = sf2 * (-r2 / two_l2).exp();
+        }
+        v
+    }
+
     /// Length scale this GP was fit with.
     pub fn length_scale(&self) -> f64 {
         self.length_scale
@@ -163,6 +218,123 @@ fn squared_distance(a: &DMatrix<f64>, i: usize, b: &DMatrix<f64>, j: usize) -> f
     r2
 }
 
+/// `Surrogate` impl that adapts the scalar GP to the existing trait shape.
+///
+/// Treats the **real part** of `sample.output[0]` as the regression target
+/// across all training samples. Output dimensionality > 1 is rejected with
+/// [`Error::InconsistentOutput`] so callers can spot when they meant to use a
+/// multi-output backend. Hyperparameters are supplied at construction time;
+/// callers who need multi-output GPs should construct a [`GaussianProcess`]
+/// directly via [`GaussianProcess::fit`].
+///
+/// Stored as a wrapper rather than implemented directly on `GaussianProcess`
+/// because the GP has no meaningful "untrained" state.
+#[derive(Debug, Clone)]
+pub struct GpSurrogate {
+    inner: Option<GaussianProcess>,
+    length_scale: f64,
+    sigma_f: f64,
+    sigma_n: f64,
+}
+
+impl Default for GpSurrogate {
+    fn default() -> Self {
+        Self {
+            inner: None,
+            length_scale: 1.0,
+            sigma_f: 1.0,
+            sigma_n: 1e-4,
+        }
+    }
+}
+
+impl GpSurrogate {
+    /// Construct an untrained `GpSurrogate` with the given RBF hyperparameters.
+    pub fn with_hyperparams(length_scale: f64, sigma_f: f64, sigma_n: f64) -> Self {
+        Self {
+            inner: None,
+            length_scale,
+            sigma_f,
+            sigma_n,
+        }
+    }
+
+    /// Access the underlying fitted [`GaussianProcess`] (if trained).
+    pub fn inner(&self) -> Option<&GaussianProcess> {
+        self.inner.as_ref()
+    }
+
+    /// Posterior variance at `params`. Returns `None` if not yet trained.
+    pub fn predict_variance(&self, params: &[f64]) -> Option<f64> {
+        let gp = self.inner.as_ref()?;
+        let x = DVector::from_row_slice(params);
+        Some(gp.predict(&x).1)
+    }
+}
+
+impl Surrogate for GpSurrogate {
+    fn train(&mut self, dataset: &Dataset) -> Result<()> {
+        if dataset.is_empty() {
+            return Err(Error::EmptyDataset);
+        }
+        let d = dataset.samples[0].params.len();
+        let out_dim = dataset.samples[0].output.len();
+        if out_dim != 1 {
+            return Err(Error::InconsistentOutput {
+                expected: 1,
+                got: out_dim,
+            });
+        }
+        for s in &dataset.samples {
+            if s.params.len() != d {
+                return Err(Error::DimMismatch {
+                    training: d,
+                    query: s.params.len(),
+                });
+            }
+            if s.output.len() != out_dim {
+                return Err(Error::InconsistentOutput {
+                    expected: out_dim,
+                    got: s.output.len(),
+                });
+            }
+        }
+        let n = dataset.samples.len();
+        let mut x = DMatrix::<f64>::zeros(n, d);
+        let mut y = DVector::<f64>::zeros(n);
+        for (i, s) in dataset.samples.iter().enumerate() {
+            for (j, v) in s.params.iter().enumerate() {
+                x[(i, j)] = *v;
+            }
+            y[i] = s.output[0].re;
+        }
+        self.inner = Some(GaussianProcess::fit(
+            x,
+            y,
+            self.length_scale,
+            self.sigma_f,
+            self.sigma_n,
+        )?);
+        Ok(())
+    }
+
+    fn predict(&self, params: &[f64]) -> Result<Vec<Complex64>> {
+        let gp = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| Error::FitFailed("predict called before train".to_string()))?;
+        if params.len() != gp.input_dim() {
+            return Err(Error::DimMismatch {
+                training: gp.input_dim(),
+                query: params.len(),
+            });
+        }
+        let x = DVector::from_row_slice(params);
+        let mean = gp.predict_mean(&x);
+        Ok(vec![Complex64::new(mean, 0.0)])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,5 +357,20 @@ mod tests {
             GaussianProcess::fit(x, y, 1.0, 1.0, 1e-3),
             Err(Error::FitFailed(_))
         ));
+    }
+
+    #[test]
+    fn variance_at_training_point_is_near_noise() {
+        let x = DMatrix::<f64>::from_row_slice(3, 1, &[0.0, 1.0, 2.0]);
+        let y = DVector::<f64>::from_row_slice(&[0.0, 1.0, 0.0]);
+        let sigma_n = 1e-3;
+        let gp = GaussianProcess::fit(x, y, 0.5, 1.0, sigma_n).unwrap();
+        let x_star = DVector::<f64>::from_row_slice(&[1.0]);
+        let (_, var) = gp.predict(&x_star);
+        assert!(
+            (var - sigma_n * sigma_n).abs() < 1e-3,
+            "var at training point = {var}, expected ≈ {}",
+            sigma_n * sigma_n
+        );
     }
 }
