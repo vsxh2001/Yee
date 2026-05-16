@@ -10,6 +10,7 @@
 | `yee mesh <input>` | Mesh STEP / IGES / KiCad PCB via Gmsh | 0 (stub) → 1 |
 | `yee run <project>` | Run a simulation from a TOML project file | 1 |
 | `yee export <results>` | Export Touchstone / HDF5 | 0 (stub) → 1 |
+| `yee plot <touchstone>` | Plot S-parameters from a Touchstone file | 1 |
 | `yee bench <target>` | Run a `yee-bench` criterion benchmark | 3 |
 
 ## Installing (post-release)
@@ -50,6 +51,29 @@ Exit code is non-zero iff any included case is `Failed`; `Skipped`
 cases (Phase-deferred placeholders, see CLAUDE.md §10) never fail the
 run. The `mom-001` solve takes ~7-8 min in `--release`, so prefer the
 release profile when running locally.
+
+## Plot
+
+`yee plot` reads a Touchstone file via `yee-io` and emits a PNG (or SVG,
+chosen from the `--output` extension) through `yee-plotters`. This is the
+post-run review workflow: hand it a `.s1p` / `.s2p` / `.sNp` file and ask
+for the dB sweep, a Smith chart, or both.
+
+```bash
+# |S11| dB vs frequency (PNG)
+yee plot scratch/dipole.s1p --format db --output dipole-db.png
+
+# Smith chart (SVG; format is picked from the extension)
+yee plot scratch/dipole.s1p --format smith --output dipole.svg
+
+# Both: emits dipole-db.png and dipole-smith.png
+yee plot scratch/dipole.s1p --format both --output dipole.png
+```
+
+`--format` accepts `db`, `smith`, `phase`, or `both`. The `--kind` flag
+remains available as a backwards-compat alias. `--port N` selects the
+diagonal entry `S[N][N]` on multi-port files (default 0). `--width`,
+`--height`, and `--title` tune the rendered image.
 
 ## Bench
 

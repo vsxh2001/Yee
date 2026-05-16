@@ -87,15 +87,17 @@ enum Command {
     },
     /// Plot S-parameters from a Touchstone file.
     ///
-    /// The output format (PNG vs SVG) is chosen from the `--output` file
+    /// The output image format (PNG vs SVG) is chosen from the `--output` file
     /// extension; `.png` and `.svg` are accepted (no extension defaults to
-    /// PNG).
+    /// PNG). The plot kind is selected with `--format` (or its legacy alias
+    /// `--kind`) — `db`, `smith`, `phase`, or `both` (emits two files with
+    /// `-db` / `-smith` suffixes inserted before the extension).
     Plot {
         /// Input Touchstone path (.s1p, .s2p, etc.).
         input: PathBuf,
-        /// What to plot.
-        #[arg(long, value_enum, default_value_t = PlotKind::Db)]
-        kind: PlotKind,
+        /// What to plot. `--kind` is accepted as a legacy alias.
+        #[arg(long, visible_alias = "kind", value_enum, default_value_t = PlotKind::Db)]
+        format: PlotKind,
         /// Output file path; extension picks PNG vs SVG.
         #[arg(long, short)]
         output: PathBuf,
@@ -165,6 +167,10 @@ enum ExportFormat {
 }
 
 /// What `yee plot` should draw from the S-parameter sweep.
+///
+/// `Both` is a convenience that emits a dB plot and a Smith chart in one
+/// invocation; the two output paths are derived from `--output` by inserting
+/// `-db` / `-smith` before the file extension.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 enum PlotKind {
     /// `|S|` in dB vs frequency.
@@ -173,6 +179,8 @@ enum PlotKind {
     Smith,
     /// `phase(S)` in degrees vs frequency.
     Phase,
+    /// Emit both a dB plot and a Smith chart (two output files).
+    Both,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -213,7 +221,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         } => run_export(&input, format, &output),
         Command::Plot {
             input,
-            kind,
+            format,
             output,
             width,
             height,
@@ -221,7 +229,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             port,
         } => plot::run_plot(plot::PlotArgs {
             input,
-            kind,
+            kind: format,
             output,
             width,
             height,
