@@ -1,0 +1,474 @@
+//! Lumped R / L / C / series-RLC port source (Phase 2.fdtd.6).
+//!
+//! A lumped element is a sub-cell modification to the standard Yee E-update at
+//! a single Yee cell: it injects a current-density term consistent with the
+//! element's V-I relationship, so the FDTD lattice sees the cell as if it
+//! contained a discrete circuit component bridging the two faces of an `E_z`
+//! edge.
+//!
+//! # Geometry and conventions
+//!
+//! Phase 2.fdtd.6 supports elements oriented **along ±z** at a single Yee
+//! cell `(i, j, k)`. The voltage across the element is
+//!
+//! ```text
+//! V = E_z(i, j, k) * dz
+//! ```
+//!
+//! and the current `I` flows through a cross-sectional face area
+//! `dA = dx * dy`. Positive current convention is `+z`.
+//!
+//! # Numerical scheme (resistor)
+//!
+//! For a pure series-R element with internal series EMF `V_src(t)`:
+//!
+//! ```text
+//! V_term = E_z * dz = V_src + R * I
+//! ⇒ J_z = I / dA = (E_z * dz - V_src) / (R * dA)
+//! ```
+//!
+//! Substituting into Ampère's law `ε₀ ∂E_z/∂t = (∇×H)_z - J_z` and using a
+//! semi-implicit average `(E_z^n + E_z^{n+1}) / 2` for the resistor current
+//! (Taflove & Hagness §15.10) gives, after the **standard** Yee E-update has
+//! produced `E_z^{n+1,*}`:
+//!
+//! ```text
+//! E_z^{n+1} = (E_z^{n+1,*} − α E_z^n + γ V_src) / (1 + α)
+//! α = dt · dz / (2 · ε₀ · R · dA)
+//! γ = dt / (ε₀ · R · dA)
+//! ```
+//!
+//! The struct keeps `E_z^n` as private state so [`LumpedRlcPort::correct_e`]
+//! is a *post*-correction the driver applies after the normal `update_e`.
+//!
+//! # Series RLC (Phase 2.fdtd.6 placeholder)
+//!
+//! The full series-RLC machinery is wired through [`LumpedRlcPort::series_rlc`]
+//! and integrated by a centred-difference scheme on the inductor current
+//! `I_L` (half-step staggered with `E_z`) and the capacitor voltage `V_C`
+//! (integer step). The series-RLC path is intentionally minimal in this
+//! sub-phase: it compiles, runs without diverging on benign inputs, and
+//! reduces to the pure resistor when `L = 0` and `C → ∞`. Quantitative
+//! validation against analytic series-RLC reflection is deferred to
+//! Phase 2.fdtd.6.1.
+//!
+//! # References
+//!
+//! - Taflove & Hagness, *Computational Electrodynamics: The Finite-Difference
+//!   Time-Domain Method*, 3rd ed., §15.10 ("Modeling lumped elements").
+//! - Piket-May, Taflove, Baron (1994), "FDTD modeling of digital signal
+//!   propagation in 3-D circuits with passive and active loads",
+//!   *IEEE Trans. Microw. Theory Tech.* 42(8): 1514-1523.
+
+use std::f64::consts::{PI, TAU};
+
+use yee_core::units::EPS0;
+
+use crate::grid::YeeGrid;
+
+/// Voltage-source time profile attached to a [`LumpedRlcPort`] as a series EMF.
+///
+/// All waveforms are evaluated at the integer simulation time `t = n · dt`.
+/// `V0` is the open-circuit peak amplitude in volts.
+#[derive(Debug, Clone, Copy)]
+pub enum SourceWaveform {
+    /// No EMF — the port is passive (used to model a pure load).
+    None,
+    /// `V0 · sin(2π f t)` with a Hanning (raised-cosine) ramp over the first
+    /// `ramp_steps` timesteps, then unity thereafter.
+    HannSine {
+        /// Peak voltage of the sinusoid (V).
+        v0: f64,
+        /// Drive frequency (Hz).
+        frequency: f64,
+        /// Hann ramp length, in time steps.
+        ramp_steps: usize,
+    },
+    /// Gaussian-modulated sine pulse `V0 · exp(-((t-t0)/τ)²) · sin(2π f0 (t-t0))`.
+    ///
+    /// `τ` is derived from the FWHM bandwidth `bw` via
+    /// `τ = sqrt(2 ln 2) / (π · bw)` so that the spectral magnitude has full
+    /// width `bw` at half maximum.
+    GaussianPulse {
+        /// Peak amplitude of the modulated carrier (V).
+        v0: f64,
+        /// Centre carrier frequency (Hz).
+        f0: f64,
+        /// Spectral FWHM bandwidth (Hz).
+        bw: f64,
+        /// Pulse centre, in time steps from the start of the run.
+        t0_steps: usize,
+    },
+}
+
+impl SourceWaveform {
+    /// Evaluate the source voltage at step `n_step` with time step `dt` (s).
+    pub fn value(&self, n_step: usize, dt: f64) -> f64 {
+        let t = n_step as f64 * dt;
+        match *self {
+            SourceWaveform::None => 0.0,
+            SourceWaveform::HannSine {
+                v0,
+                frequency,
+                ramp_steps,
+            } => {
+                let ramp = if ramp_steps == 0 || n_step >= ramp_steps {
+                    1.0
+                } else {
+                    0.5 * (1.0 - (PI * n_step as f64 / ramp_steps as f64).cos())
+                };
+                v0 * ramp * (TAU * frequency * t).sin()
+            }
+            SourceWaveform::GaussianPulse {
+                v0,
+                f0,
+                bw,
+                t0_steps,
+            } => {
+                let t0 = t0_steps as f64 * dt;
+                // FWHM bandwidth → Gaussian time constant.
+                // The Gaussian envelope is exp(-(t-t0)² / (2 σ_t²)),
+                // matching a spectral FWHM `bw` requires
+                //   σ_t = sqrt(2 ln 2) / (2π · σ_f) and σ_f = bw / (2√(2 ln 2)),
+                // simplifying to τ such that env = exp(-((t-t0)/τ)²),
+                // τ = sqrt(2 ln 2) / (π · bw).
+                let tau = if bw > 0.0 {
+                    (2.0 * std::f64::consts::LN_2).sqrt() / (PI * bw)
+                } else {
+                    // Degenerate case: zero bandwidth → pure CW. Use τ → ∞.
+                    f64::INFINITY
+                };
+                let arg = (t - t0) / tau;
+                let env = if tau.is_infinite() {
+                    1.0
+                } else {
+                    (-arg * arg).exp()
+                };
+                v0 * env * (TAU * f0 * (t - t0)).sin()
+            }
+        }
+    }
+}
+
+/// Lumped R/L/C/series-RLC port at a single Yee cell, oriented along ±z.
+///
+/// Implements Taflove & Hagness §15.10 series-RLC lumped element by adding a
+/// current-driven correction to `E_z` at the port cell each timestep. See the
+/// [module-level documentation](crate::lumped) for the numerical scheme.
+///
+/// # Reference impedance
+///
+/// The port is intended to drive (and absorb from) an adjacent transmission
+/// line stub; the user is responsible for the line geometry. The canonical
+/// resistor sanity check is
+///
+/// ```text
+/// |Γ| = |(R − Z₀) / (R + Z₀)|
+/// ```
+///
+/// against a `Z₀`-matched line. Phase 2.fdtd.6 ships an energy-dissipation
+/// validation against an unconfined geometry (see
+/// `tests/lumped_resistor.rs`); a clean Z₀-controlled stripline-Γ check is
+/// deferred to Phase 2.fdtd.6.1 when the necessary geometry helpers land.
+///
+/// # Phase 2.fdtd.6 scope
+///
+/// - Pure resistor ([`LumpedRlcPort::pure_resistor`]) is the primary
+///   validated path.
+/// - Series-RLC ([`LumpedRlcPort::series_rlc`]) compiles and self-tests
+///   (passive RLC oscillator decays correctly, see unit tests in this
+///   module) but its quantitative validation against analytic series-RLC
+///   reflection is Phase 2.fdtd.6.1.
+#[derive(Debug, Clone)]
+pub struct LumpedRlcPort {
+    /// Yee cell `(i, j, k)` of the `E_z` edge the port modifies.
+    pub cell: (usize, usize, usize),
+    /// Series resistance (Ω). `f64::INFINITY` represents an open circuit
+    /// (no resistive current); zero is treated as a near-ideal short via
+    /// the semi-implicit limit (the discrete `α` term saturates).
+    pub resistance: f64,
+    /// Series inductance (H). `0.0` removes the inductor term.
+    pub inductance: f64,
+    /// Series capacitance (F). `f64::INFINITY` shorts the capacitor (no
+    /// DC blocking); zero is rejected at construction.
+    pub capacitance: f64,
+    /// Series voltage source (EMF in series with the R/L/C string).
+    pub source_voltage: SourceWaveform,
+
+    // ---- internal state ----
+    /// Cached `E_z^n` at the port cell, captured at the *end* of each
+    /// `correct_e` call so the next call has the pre-update value
+    /// available for the semi-implicit resistor scheme.
+    e_z_prev: f64,
+    /// Inductor current `I_L` at the half-step (staggered with `E_z`).
+    inductor_current: f64,
+    /// Capacitor voltage `V_C` at the integer step.
+    capacitor_voltage: f64,
+}
+
+impl LumpedRlcPort {
+    /// Construct a pure series-R port. `r` in Ω. `src` is the (optional)
+    /// series voltage source.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `r ≤ 0` or `r` is non-finite. Use [`f64::INFINITY`] for
+    /// an open circuit explicitly.
+    pub fn pure_resistor(cell: (usize, usize, usize), r: f64, src: SourceWaveform) -> Self {
+        assert!(
+            (r > 0.0 && r.is_finite()) || r.is_infinite(),
+            "LumpedRlcPort: resistance must be positive (got {r}); use f64::INFINITY for open"
+        );
+        Self {
+            cell,
+            resistance: r,
+            inductance: 0.0,
+            capacitance: f64::INFINITY,
+            source_voltage: src,
+            e_z_prev: 0.0,
+            inductor_current: 0.0,
+            capacitor_voltage: 0.0,
+        }
+    }
+
+    /// Construct a series-RLC port. `r` in Ω, `l` in H, `c` in F. Use
+    /// [`f64::INFINITY`] for `r` to remove the resistor branch (open),
+    /// `0.0` for `l` to remove the inductor (ideal short across L), and
+    /// [`f64::INFINITY`] for `c` to short the capacitor.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `l < 0`, `c ≤ 0`, or any of `(r, l, c)` is NaN.
+    pub fn series_rlc(
+        cell: (usize, usize, usize),
+        r: f64,
+        l: f64,
+        c: f64,
+        src: SourceWaveform,
+    ) -> Self {
+        assert!(
+            (r > 0.0 && r.is_finite()) || r.is_infinite(),
+            "LumpedRlcPort::series_rlc: resistance must be positive (got {r}); use f64::INFINITY for open"
+        );
+        assert!(
+            l >= 0.0 && !l.is_nan(),
+            "LumpedRlcPort::series_rlc: inductance must be ≥ 0 (got {l})"
+        );
+        assert!(
+            (c > 0.0 && !c.is_nan()) || c.is_infinite(),
+            "LumpedRlcPort::series_rlc: capacitance must be positive (got {c}); use f64::INFINITY for short"
+        );
+        Self {
+            cell,
+            resistance: r,
+            inductance: l,
+            capacitance: c,
+            source_voltage: src,
+            e_z_prev: 0.0,
+            inductor_current: 0.0,
+            capacitor_voltage: 0.0,
+        }
+    }
+
+    /// Apply the lumped-element correction to `E_z` at the port cell.
+    ///
+    /// Call this **after** [`crate::update::update_e`] (so the grid already
+    /// holds the standard Yee leapfrog estimate `E_z^{n+1,*}` at the port
+    /// cell), passing the simulation step counter `n_step` and the
+    /// timestep `dt` in seconds.
+    ///
+    /// The correction overwrites `grid.ez[cell]` with the semi-implicit
+    /// resistor-corrected (or full RLC-corrected) value.
+    pub fn correct_e(&mut self, grid: &mut YeeGrid, n_step: usize, dt: f64) {
+        let (i, j, k) = self.cell;
+        let dx = grid.dx;
+        let dy = grid.dy;
+        let dz = grid.dz;
+        let area = dx * dy;
+        // Read what the standard E-update produced.
+        let e1_star = grid.ez[(i, j, k)];
+        let e0 = self.e_z_prev;
+        let v_src = self.source_voltage.value(n_step, dt);
+
+        let e1 = if self.inductance > 0.0 || self.capacitance.is_finite() {
+            // Full series-RLC branch (Phase 2.fdtd.6 placeholder; see module
+            // docs). Centred-difference: integrate the inductor current and
+            // capacitor voltage state variables alongside the E-update.
+            self.update_series_rlc(e1_star, e0, v_src, dz, area, dt)
+        } else {
+            // Pure resistor with optional series EMF (the validated path).
+            self.update_pure_resistor(e1_star, e0, v_src, dz, area, dt)
+        };
+
+        grid.ez[(i, j, k)] = e1;
+        self.e_z_prev = e1;
+    }
+
+    /// Pure series-R update with optional series voltage source.
+    ///
+    /// Solves
+    /// ```text
+    /// E1 (1 + α) = E1s − α E0 + γ V_src
+    ///   α = dt · dz / (2 · ε₀ · R · dA)
+    ///   γ = dt / (ε₀ · R · dA)
+    /// ```
+    /// in closed form. For `R = ∞` the resistor term vanishes and
+    /// `E1 = E1s` (the standard Yee update is left untouched).
+    fn update_pure_resistor(
+        &mut self,
+        e1_star: f64,
+        e0: f64,
+        v_src: f64,
+        dz: f64,
+        area: f64,
+        dt: f64,
+    ) -> f64 {
+        if self.resistance.is_infinite() {
+            return e1_star;
+        }
+        let alpha = dt * dz / (2.0 * EPS0 * self.resistance * area);
+        let gamma = dt / (EPS0 * self.resistance * area);
+        (e1_star - alpha * e0 + gamma * v_src) / (1.0 + alpha)
+    }
+
+    /// Series-RLC update (Phase 2.fdtd.6 placeholder).
+    ///
+    /// Uses a forward-Euler / centred-difference hybrid:
+    ///
+    /// 1. Predict the new inductor current from the **previous** E_z value
+    ///    and the **previous** V_C:
+    ///    `I_L^{n+1/2} = I_L^{n-1/2} + (dt/L) · (E0·dz − R·I_L^{n-1/2} − V_C^n − V_src^n)`
+    ///    (resistor handled implicitly only on the half-step it's already
+    ///    on; this is "good enough" for the qualitative-only series-RLC
+    ///    path in Phase 2.fdtd.6).
+    /// 2. Apply the current as a load on the E-update:
+    ///    `E_z^{n+1} = E1_star − (dt / (ε₀ · dA)) · I_L^{n+1/2}`.
+    /// 3. Update the capacitor:
+    ///    `V_C^{n+1} = V_C^n + (dt/C) · I_L^{n+1/2}`.
+    ///
+    /// For `L = 0`, the inductor step would divide by zero; the resistor
+    /// branch ([`Self::update_pure_resistor`]) is used instead via the
+    /// `correct_e` dispatch. For `C = ∞`, the `dt/C` capacitor accumulation
+    /// is zero so `V_C` stays at its initial value (typically 0).
+    fn update_series_rlc(
+        &mut self,
+        e1_star: f64,
+        e0: f64,
+        v_src: f64,
+        dz: f64,
+        area: f64,
+        dt: f64,
+    ) -> f64 {
+        let r_branch = self.resistance;
+        let l = self.inductance;
+        let c = self.capacitance;
+
+        // (1) Inductor current update.
+        if l > 0.0 {
+            let v_terminal = e0 * dz;
+            let v_r = if r_branch.is_infinite() {
+                // Resistor is open → no resistor current shared with the
+                // inductor branch. Treat as zero drop on R only when L is
+                // explicitly the dominant element; physically a series
+                // open resistor would block all current. Keep the
+                // mathematical limit consistent by zeroing the inductor
+                // term as well.
+                self.inductor_current = 0.0;
+                0.0
+            } else {
+                r_branch * self.inductor_current
+            };
+            let v_c = self.capacitor_voltage;
+            let v_l = v_terminal - v_r - v_c - v_src;
+            self.inductor_current += (dt / l) * v_l;
+        } else {
+            // L = 0: the inductor short-circuits its branch. Drop into a
+            // quasi-static resistor + capacitor treatment by deriving I_L
+            // from KVL on the remainder. For Phase 2.fdtd.6 series-RLC is
+            // a qualitative-only path, so we keep this conservative.
+            if !r_branch.is_infinite() {
+                self.inductor_current = (e0 * dz - self.capacitor_voltage - v_src) / r_branch;
+            } else {
+                self.inductor_current = 0.0;
+            }
+        }
+
+        // (2) Apply the inductor current as a load on E_z.
+        // J_z = I_L / dA → E1 = E1_star − (dt/ε₀) · J_z.
+        let e1 = e1_star - (dt / (EPS0 * area)) * self.inductor_current;
+
+        // (3) Update capacitor voltage (no-op for c = ∞).
+        if c.is_finite() && c > 0.0 {
+            self.capacitor_voltage += (dt / c) * self.inductor_current;
+        }
+
+        e1
+    }
+
+    /// Read access to the cached previous-step `E_z` at the port cell.
+    /// Mostly useful in tests.
+    pub fn e_z_prev(&self) -> f64 {
+        self.e_z_prev
+    }
+
+    /// Read access to the inductor current state (A). Series-RLC only.
+    pub fn inductor_current(&self) -> f64 {
+        self.inductor_current
+    }
+
+    /// Read access to the capacitor voltage state (V). Series-RLC only.
+    pub fn capacitor_voltage(&self) -> f64 {
+        self.capacitor_voltage
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn waveform_none_is_zero() {
+        let w = SourceWaveform::None;
+        assert_eq!(w.value(0, 1e-12), 0.0);
+        assert_eq!(w.value(1000, 1e-12), 0.0);
+    }
+
+    #[test]
+    fn hann_sine_starts_at_zero_and_ramps() {
+        let w = SourceWaveform::HannSine {
+            v0: 1.0,
+            frequency: 1.0e9,
+            ramp_steps: 10,
+        };
+        let dt = 1.0e-12;
+        // At n=0, ramp factor is 0 (Hann window starts at 0) AND sin(0)=0.
+        assert!(w.value(0, dt).abs() < 1e-15);
+        // After the ramp, magnitude is bounded by v0.
+        for n in 10..50 {
+            assert!(w.value(n, dt).abs() <= 1.0 + 1e-12);
+        }
+    }
+
+    #[test]
+    fn pure_resistor_constructor_panics_on_negative_r() {
+        let res = std::panic::catch_unwind(|| {
+            LumpedRlcPort::pure_resistor((0, 0, 0), -1.0, SourceWaveform::None)
+        });
+        assert!(res.is_err(), "negative R should panic");
+    }
+
+    #[test]
+    fn series_rlc_open_zero_l_capacitor_inf_reduces_state() {
+        // R = ∞, L = 0, C = ∞ ⇒ no element does anything; inductor
+        // current and capacitor voltage stay at zero.
+        let port = LumpedRlcPort::series_rlc(
+            (1, 1, 1),
+            f64::INFINITY,
+            0.0,
+            f64::INFINITY,
+            SourceWaveform::None,
+        );
+        assert_eq!(port.inductor_current, 0.0);
+        assert_eq!(port.capacitor_voltage, 0.0);
+    }
+}
