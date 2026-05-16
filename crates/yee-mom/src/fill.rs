@@ -93,15 +93,37 @@ fn pair_contribution(
 
     let topology = topology_of(basis, t_outer, t_inner);
 
-    let integrand = move |r_outer: Vector3<f64>, r_inner: Vector3<f64>| -> Complex64 {
+    // Duffy regularizes 1/R through its Jacobian — the integrand must remain
+    // the FULL Green's function G(R), never `scalar_smooth`. Using
+    // `scalar_smooth` (= G − 1/(4πR)) inside the Duffy path would double-
+    // subtract the 1/R term and systematically bias every singular and
+    // near-singular pair contribution.
+    let integrand_duffy = |r_outer: Vector3<f64>, r_inner: Vector3<f64>| -> Complex64 {
         let fm = basis_value_at_point(basis, m, t_outer, r_outer, &outer_v);
         let fn_vec = basis_value_at_point(basis, n, t_inner, r_inner, &inner_v);
         let r = (r_outer - r_inner).norm();
-        let g = if r > 1.0e-12 {
+        // `green.scalar` panics at r == 0. Dunavant order-5 has no vertex
+        // point, so a Duffy sub-triangle Gauss point coinciding bit-exactly
+        // with the outer anchor `r_outer` cannot occur in practice — but
+        // the bit-exact guard is cheap and removes the panic risk. At r == 0
+        // the Duffy Jacobian also vanishes, so the analytic limit
+        // −j k0 / (4π) of G as R → 0 (matching `scalar_smooth`) is a safe
+        // value here; it does not double-subtract because the Jacobian is
+        // zero on the same point.
+        let g = if r > 0.0 {
             green.scalar(r_outer, r_inner)
         } else {
-            green.scalar_smooth(r_outer, r_inner)
+            Complex64::new(0.0, -green.k0.re / (4.0 * std::f64::consts::PI))
         };
+        omega_mu0 * Complex64::new(fm.dot(&fn_vec), 0.0) * g
+            + inv_omega_eps0 * Complex64::new(div_m * div_n, 0.0) * g
+    };
+
+    // Well-separated pairs never have r near zero; full G is always defined.
+    let integrand_gauss = |r_outer: Vector3<f64>, r_inner: Vector3<f64>| -> Complex64 {
+        let fm = basis_value_at_point(basis, m, t_outer, r_outer, &outer_v);
+        let fn_vec = basis_value_at_point(basis, n, t_inner, r_inner, &inner_v);
+        let g = green.scalar(r_outer, r_inner);
         omega_mu0 * Complex64::new(fm.dot(&fn_vec), 0.0) * g
             + inv_omega_eps0 * Complex64::new(div_m * div_n, 0.0) * g
     };
@@ -113,7 +135,7 @@ fn pair_contribution(
                 outer_vertices: outer_v,
                 inner_vertices: inner_v,
             };
-            duffy.integrate(5, integrand)
+            duffy.integrate(5, integrand_duffy)
         }
         None => {
             // Well-separated pair: straight nested Gauss.
@@ -122,7 +144,7 @@ fn pair_contribution(
                 let r_outer = bary_to_point(&outer_v, *p_out);
                 for (p_in, w_in) in gauss.points.iter().zip(gauss.weights.iter()) {
                     let r_inner = bary_to_point(&inner_v, *p_in);
-                    let val = integrand(r_outer, r_inner);
+                    let val = integrand_gauss(r_outer, r_inner);
                     acc += Complex64::new(*w_out * *w_in * outer_area * inner_area, 0.0) * val;
                 }
             }
@@ -140,6 +162,7 @@ fn triangle_vertices(basis: &RwgBasis, tri: u32) -> [Vector3<f64>; 3] {
     ]
 }
 
+// PERF/DRY(phase-1.1): consolidate with quadrature::bary_to_point.
 fn bary_to_point(v: &[Vector3<f64>; 3], bary: [f64; 3]) -> Vector3<f64> {
     bary[0] * v[0] + bary[1] * v[1] + bary[2] * v[2]
 }
@@ -147,6 +170,7 @@ fn bary_to_point(v: &[Vector3<f64>; 3], bary: [f64; 3]) -> Vector3<f64> {
 /// Reconstruct barycentric coordinates for `r` projected into the plane of
 /// `tri_v`, then evaluate basis `k`. This is more work than carrying the
 /// barycentric coord through, but isolates the API at Phase 1.0.
+// PERF(phase-1.1): hoist barycentric pre-computation.
 fn basis_value_at_point(
     basis: &RwgBasis,
     k: usize,
@@ -219,10 +243,11 @@ mod tests {
                 let a = z[(m, nidx)];
                 let b = z[(nidx, m)];
                 assert!(a.re.is_finite() && a.im.is_finite());
-                let scale = a.norm().max(b.norm()).max(1.0);
-                // Reciprocal MoM: Z is symmetric (NOT Hermitian).
+                // Reciprocal MoM: Z is symmetric (NOT Hermitian). Tightened
+                // to 1e-9 per plan spec — catches genuine reciprocity
+                // violations that a looser tolerance would hide.
                 assert!(
-                    (a - b).norm() <= 1.0e-6 * scale,
+                    (a - b).norm() < 1.0e-9 * a.norm().max(1.0),
                     "asymmetry Z[{m},{nidx}]={a} vs Z[{nidx},{m}]={b}"
                 );
             }
