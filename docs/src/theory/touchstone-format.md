@@ -13,32 +13,28 @@ not accept.
 ## 1. Introduction
 
 Touchstone is the *de facto* interchange format for small-signal
-multiport network data. It originated at EEsof in the late 1980s,
-passed through Hewlett-Packard / Agilent / Keysight, and is now
-maintained by the IBIS Open Forum. The v1.1 grammar — frequency,
-parameter type, complex format, reference impedance, and a flat block
-of floating-point data — has remained essentially unchanged across
-those three decades, which is why almost every commercial RF and
-microwave tool emits and accepts it. CITI files exist; almost nothing
-in production uses them.
+multiport network data. The v1.1 grammar — frequency, parameter
+type, complex format, reference impedance, and a flat block of
+floating-point data — has remained essentially unchanged for three
+decades, which is why almost every commercial RF and microwave
+tool emits and accepts it. CITI files exist; almost nothing in
+production uses them.
 
 Yee's `yee-io` ships a strict Touchstone v1.1 reader and writer:
 strict because the surface it commits to is small and stable, and
 because tolerating ill-formed input silently is how subtle physics
 bugs travel between tools. The reader rejects what it cannot
 faithfully represent; the writer never emits something it cannot
-re-read. Touchstone v2.0 keyword sections, noise-data blocks,
-per-frequency reference-impedance overrides, and Y/Z/G/H parameter
-types are out of scope for Phase 0 — see §7 for the explicit
-non-goals list.
+re-read. Touchstone v2.0 keyword sections, noise-data blocks, and
+non-S parameter types are out of scope for Phase 0 — see §7.
 
-The format is line-oriented and ASCII. A conforming file consists of,
-in order: zero or more comment lines, exactly one **option line**,
-and one or more **data records**, with comments allowed interleaved.
-A record describes the full $N \times N$ S-matrix at one frequency.
-The port count $N$ is determined from the file extension —
-`.s1p`, `.s2p`, …, `.sNp` — not from any in-file declaration.
-`yee-io` accepts `.s1p` through `.s4p` in Phase 0.
+The format is line-oriented and ASCII. A conforming file consists
+of zero or more comment lines, exactly one **option line**, and one
+or more **data records**, with comments allowed interleaved. Each
+record describes one $N \times N$ S-matrix at one frequency. The
+port count $N$ is determined from the file extension —
+`.s1p`, …, `.sNp` — not from any in-file declaration. `yee-io`
+accepts `.s1p` through `.s4p` in Phase 0.
 
 ## 2. File structure
 
@@ -82,23 +78,22 @@ five fields are:
 ### Frequency unit
 
 One of `Hz`, `kHz`, `MHz`, `GHz`, case-insensitive. `yee-io`
-preserves the original spelling so a `read → write` round-trip
-emits the same unit string, but *internally all frequencies are
-normalised to Hz*. The conversion is
+preserves the original spelling for round-trip fidelity, but
+*internally all frequencies are normalised to Hz*:
 
 $$
 f_{\text{Hz}} \;=\; f_{\text{file}} \cdot
 \begin{cases}
-1, & \text{unit} = \text{Hz} \\
-10^3, & \text{unit} = \text{kHz} \\
-10^6, & \text{unit} = \text{MHz} \\
-10^9, & \text{unit} = \text{GHz}
+1, & \text{Hz} \\
+10^3, & \text{kHz} \\
+10^6, & \text{MHz} \\
+10^9, & \text{GHz}.
 \end{cases}
 $$
 
-Storing the canonical Hz value means that a downstream consumer who
-mixes files written in different units — a not-uncommon case — never
-has to know what the original file's unit was.
+Storing the canonical Hz value means a consumer who mixes files
+written in different units never has to know what the source
+unit was.
 
 ### Parameter type
 
@@ -185,14 +180,166 @@ round-trip to catch any future refactor that loses the swap.
 
 ### .sNp for N ≥ 3
 
-For three or more ports the row of $1 + 2N^2$ floats is wrapped
-across multiple physical lines, with **at most four S-parameter
-entries (eight floats) per line** per the spec, the leading
-frequency value on the first line of each record. `yee-io` parses
-permissively — it flattens all data tokens regardless of line
-breaks, then chunks them into records by counting $1 + 2N^2$
-floats at a time. This handles the "trailing-token-count" rule
-without requiring the parser to track which physical line a token
-came from. The order within the wrapped record is plain row-major
-`S_{ij}` with $i$ slowest-varying, the natural mathematical layout
-that the $N = 2$ swap explicitly violates.
+For three or more ports the row of $1 + 2N^2$ floats wraps across
+multiple physical lines — at most four S-parameter entries (eight
+floats) per line, the leading frequency value on the first line
+of each record. `yee-io` parses permissively: it flattens all
+data tokens regardless of line breaks and chunks them into records
+by counting $1 + 2N^2$ floats at a time. This handles the
+"trailing-token-count" rule without tracking physical-line origin.
+The wrapped order is plain row-major $S_{ij}$ with $i$ slowest-
+varying — the natural mathematical layout that the $N = 2$ swap
+explicitly violates.
+
+## 5. Numeric format
+
+Touchstone v1.1 does not mandate column widths or exponent letter
+case. `yee-io`'s writer is conservative: every floating-point
+token is rendered through the helper `format_g`, which delegates
+to Rust's shortest-round-trip `Display` for `f64`. Since Rust
+1.55 the default `{}` format on `f64` emits the shortest decimal
+string that parses losslessly back, so writing a value and
+re-reading it is bit-exact. Tokens are single-space-separated;
+tabs and multi-space runs are never emitted, and there is no
+column alignment. This keeps `git diff` clean across writer
+versions and matches what most production instruments produce.
+
+### The DB / zero-magnitude trap
+
+Of the three complex formats only `DB` is non-injective at $|s| = 0$.
+The encode path computes
+
+$$
+|s|_{\text{dB}} \;=\; 20 \log_{10} |s|,
+$$
+
+which yields $-\infty$ when $|s| = 0$ exactly. There is no
+standard spelling of $-\infty$ in Touchstone v1.1, and writers in
+the wild emit any of `-inf`, `-Inf`, `-1e999`, or silent
+truncation. Rather than pick one and lose interoperability,
+`yee-io`'s `render()` detects the non-finite case pre-write and
+returns `Error::InvalidFile` with a diagnostic suggesting a
+finite dB floor — typically `-200 dB`. A caller who needs exact
+zeros should switch the file's `format` field to
+`Format::RealImag`, which writes `0 0` without complaint. The
+test `render_rejects_zero_magnitude_under_db_format` pins this.
+
+## 6. Comments and whitespace
+
+Three lexical conveniences round out the format:
+
+- **Bang-comments.** Any line whose first non-whitespace byte is
+  `!` is a comment, terminated by the newline. A trailing
+  `! …` segment on a data row is also accepted and split at the
+  `!`. `yee-io` collects all comment text, in source order, into
+  `File::comments` and re-emits it at the top of the round-tripped
+  file; the leading `!` is stripped but internal whitespace is
+  preserved.
+- **Hash is reserved.** The `#` byte is legal only as the first
+  non-whitespace byte of the option line. Any other `#` triggers
+  a parse error rather than being mis-read as a Python-style
+  comment.
+- **Whitespace.** Trailing whitespace, CRLF line endings, and
+  empty lines between records are tolerated. Tabs are treated as
+  ordinary whitespace on read, never emitted on write. Two option
+  lines in one file is an error per the v1.1 spec.
+
+These rules are exercised by the round-trip integration test in
+`crates/yee-mom/tests/touchstone_roundtrip.rs`, which is one of
+the project's named validation gates and must not be weakened.
+
+## 7. What `yee-io` does *not* do
+
+The deliberate non-goals:
+
+- **Touchstone v2.0 keyword sections** — `[Version]`,
+  `[Number of Ports]`, `[Two-Port Order]`, `[Number of Frequencies]`,
+  `[Reference]`, `[Matrix Format]`, and the rest. A v2.0 file
+  parse-errors at the first `[`.
+- **Mixed-mode (`[Mixed-Mode Order]`).** Differential / common-mode
+  reformulation belongs at a layer above the file format.
+- **Noise-data sections.** The optional noise-parameter block that
+  follows the S-block in some `.s2p` files is not parsed; a file
+  containing one fails the "multiple of $1 + 2N^2$ floats" check
+  on read.
+- **Non-S parameter types** (`Y`, `Z`, `G`, `H`). The check is in
+  `parse_option_line`; lifting the restriction is a Phase 1.x
+  scope decision, not a fundamental limit.
+- **Per-frequency / per-port reference-impedance overrides.**
+  `yee-io` stores a single scalar `z0` per file.
+- **Passivity violations on read.** Every read verifies
+  $\sigma_{\max}(S) \le 1 + 10^{-9}$ at every frequency via power
+  iteration on $S^\dagger S$. A gain-bearing matrix fails the read,
+  catching the failure at the file boundary instead of letting it
+  propagate downstream.
+
+## 8. Example use
+
+Three short snippets, all pulled from `crates/yee-io/src/touchstone.rs`.
+
+Reading a file. The port count is inferred from the extension; the
+returned `File` is fully normalised (Hz frequencies, row-major
+S-matrices, validated passivity):
+
+```rust
+use std::path::Path;
+use yee_io::touchstone;
+
+let ts = touchstone::read(Path::new("antenna.s2p"))?;
+println!("{} ports, {} frequencies, Z0 = {} Ω",
+         ts.n_ports, ts.freq_hz.len(), ts.z0);
+# Ok::<(), yee_io::Error>(())
+```
+
+Writing a file. The writer round-trips precision and rejects
+non-finite values before they reach disk:
+
+```rust
+use std::path::Path;
+use yee_io::touchstone;
+
+touchstone::write(Path::new("out.s1p"), &file)?;
+# Ok::<(), yee_io::Error>(())
+```
+
+Manual construction — useful in tests, when synthesising
+analytic references, or when up-converting from another tool's
+data structure:
+
+```rust
+use num_complex::Complex64;
+use yee_io::touchstone::{File, FreqUnit, Format};
+
+let file = File {
+    n_ports: 1,
+    z0: 50.0,
+    freq_unit: FreqUnit::GHz,
+    format: Format::RealImag,
+    freq_hz: vec![1.0e9, 2.0e9, 3.0e9],
+    data: vec![
+        vec![Complex64::new(-0.5, 0.1)],
+        vec![Complex64::new(-0.3, 0.2)],
+        vec![Complex64::new(-0.1, 0.3)],
+    ],
+    comments: vec![" generated by example".into()],
+};
+```
+
+A `read → write → read` cycle on a Phase 0–compatible file is
+guaranteed bit-exact in the field values; only the comment
+ordering and option-line spacing are normalised.
+
+## 9. References
+
+- IBIS Open Forum, *Touchstone File Format Specification*, Rev.
+  2.0 (2009). The v1.1 grammar is embedded in §3 of the v2.0
+  document.
+  <https://ibis.org/connector/touchstone_spec11.pdf>
+- D. M. Pozar, *Microwave Engineering*, 4th ed., Wiley, 2011, §4.3
+  on the scattering-parameter formalism that motivates the
+  reference-impedance choice.
+- `yee-io` implementation:
+  [`crates/yee-io/src/touchstone.rs`](https://github.com/yee-em/yee/blob/main/crates/yee-io/src/touchstone.rs).
+- The named validation gate `crates/yee-mom/tests/touchstone_roundtrip.rs`,
+  which guards format fidelity across the `yee-mom` solver
+  boundary.
