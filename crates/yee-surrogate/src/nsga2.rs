@@ -78,6 +78,129 @@ pub struct Nsga2Result {
     pub pareto_front_indices: Vec<usize>,
 }
 
+/// Pareto-dominance test for minimization.
+///
+/// Returns `true` iff `a` dominates `b`: every component of `a` is `≤` the
+/// corresponding component of `b`, and at least one is strictly less.
+fn dominates(a: &[f64], b: &[f64]) -> bool {
+    debug_assert_eq!(a.len(), b.len());
+    let mut strictly_better = false;
+    for (ai, bi) in a.iter().zip(b.iter()) {
+        if ai > bi {
+            return false;
+        }
+        if ai < bi {
+            strictly_better = true;
+        }
+    }
+    strictly_better
+}
+
+/// Fast non-dominated sort (Deb 2002, §III.A).
+///
+/// Input: a slice of objective vectors (`m`-dim each, minimization).
+///
+/// Output: a list of fronts `[F0, F1, …]` where `F0` is the Pareto-optimal
+/// set. Each front is a list of indices into the input slice.
+///
+/// Runtime: `O(M · N²)` time, `O(N²)` space, where `N` is the input length and
+/// `M` is the objective count.
+pub(crate) fn fast_non_dominated_sort(objectives: &[DVector<f64>]) -> Vec<Vec<usize>> {
+    let n = objectives.len();
+    if n == 0 {
+        return Vec::new();
+    }
+
+    // For each i: indices of solutions that i dominates, and a count of how
+    // many dominate i.
+    let mut dominated: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut domination_count: Vec<usize> = vec![0; n];
+
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let oi = objectives[i].as_slice();
+            let oj = objectives[j].as_slice();
+            if dominates(oi, oj) {
+                dominated[i].push(j);
+                domination_count[j] += 1;
+            } else if dominates(oj, oi) {
+                dominated[j].push(i);
+                domination_count[i] += 1;
+            }
+        }
+    }
+
+    let mut fronts: Vec<Vec<usize>> = Vec::new();
+    let mut current: Vec<usize> = (0..n).filter(|&i| domination_count[i] == 0).collect();
+
+    while !current.is_empty() {
+        let mut next: Vec<usize> = Vec::new();
+        for &i in &current {
+            // Iterate by index to avoid a simultaneous mutable + immutable
+            // borrow of `dominated`.
+            for k in 0..dominated[i].len() {
+                let j = dominated[i][k];
+                domination_count[j] -= 1;
+                if domination_count[j] == 0 {
+                    next.push(j);
+                }
+            }
+        }
+        fronts.push(current);
+        current = next;
+    }
+
+    fronts
+}
+
+/// Crowding distance assignment for a single front (Deb 2002, §III.B).
+///
+/// For each objective, sort the front by that objective, set the boundary
+/// points' contribution to `+∞`, and add the normalized neighbor gap for
+/// every interior point. The returned vector has one entry per element of
+/// `front`, in the same order.
+///
+/// If the front has `≤ 2` points all distances are `+∞`. If an objective's
+/// range is zero across the front, that objective contributes nothing
+/// (avoids `0 / 0`).
+pub(crate) fn crowding_distance(front: &[usize], objectives: &[DVector<f64>]) -> Vec<f64> {
+    let len = front.len();
+    let mut dist = vec![0.0_f64; len];
+    if len == 0 {
+        return dist;
+    }
+    if len <= 2 {
+        for d in &mut dist {
+            *d = f64::INFINITY;
+        }
+        return dist;
+    }
+    let m = objectives[front[0]].len();
+    for k in 0..m {
+        // Indices into `front` sorted by objective k.
+        let mut order: Vec<usize> = (0..len).collect();
+        order.sort_by(|&a, &b| {
+            objectives[front[a]][k]
+                .partial_cmp(&objectives[front[b]][k])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let fmin = objectives[front[order[0]]][k];
+        let fmax = objectives[front[order[len - 1]]][k];
+        dist[order[0]] = f64::INFINITY;
+        dist[order[len - 1]] = f64::INFINITY;
+        let range = fmax - fmin;
+        if range <= 0.0 {
+            continue;
+        }
+        for i in 1..(len - 1) {
+            let prev = objectives[front[order[i - 1]]][k];
+            let next = objectives[front[order[i + 1]]][k];
+            dist[order[i]] += (next - prev) / range;
+        }
+    }
+    dist
+}
+
 /// Stub entry point. The full NSGA-II pipeline lands in follow-up commits;
 /// for now this only validates the inputs so the public API compiles.
 pub fn minimize<F>(
@@ -101,5 +224,74 @@ where
         population: Vec::new(),
         objectives: Vec::new(),
         pareto_front_indices: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dv(values: &[f64]) -> DVector<f64> {
+        DVector::from_row_slice(values)
+    }
+
+    #[test]
+    fn dominates_basic() {
+        assert!(dominates(&[0.0, 0.0], &[1.0, 1.0]));
+        assert!(dominates(&[0.0, 1.0], &[1.0, 1.0]));
+        assert!(!dominates(&[1.0, 1.0], &[1.0, 1.0]));
+        assert!(!dominates(&[0.0, 2.0], &[1.0, 1.0]));
+    }
+
+    #[test]
+    fn fast_non_dominated_sort_two_fronts() {
+        // F0 = {(0,2), (1,1), (2,0)} mutually non-dominated.
+        // F1 = {(1,2), (2,1)} each dominated by exactly one F0 point.
+        let objs = vec![
+            dv(&[0.0, 2.0]),
+            dv(&[1.0, 1.0]),
+            dv(&[2.0, 0.0]),
+            dv(&[1.0, 2.0]),
+            dv(&[2.0, 1.0]),
+        ];
+        let fronts = fast_non_dominated_sort(&objs);
+        assert_eq!(fronts.len(), 2);
+        let mut f0 = fronts[0].clone();
+        f0.sort();
+        assert_eq!(f0, vec![0, 1, 2]);
+        let mut f1 = fronts[1].clone();
+        f1.sort();
+        assert_eq!(f1, vec![3, 4]);
+    }
+
+    #[test]
+    fn fast_non_dominated_sort_empty() {
+        let fronts = fast_non_dominated_sort(&[]);
+        assert!(fronts.is_empty());
+    }
+
+    #[test]
+    fn crowding_distance_boundary_infinite_interior_finite() {
+        // Front of 4 points along a line in objective space: boundaries get
+        // ∞, interior gets a finite positive number.
+        let objs = vec![
+            dv(&[0.0, 3.0]),
+            dv(&[1.0, 2.0]),
+            dv(&[2.0, 1.0]),
+            dv(&[3.0, 0.0]),
+        ];
+        let front: Vec<usize> = (0..4).collect();
+        let cd = crowding_distance(&front, &objs);
+        assert!(cd[0].is_infinite());
+        assert!(cd[3].is_infinite());
+        assert!(cd[1].is_finite() && cd[1] > 0.0);
+        assert!(cd[2].is_finite() && cd[2] > 0.0);
+    }
+
+    #[test]
+    fn crowding_distance_small_front_is_infinite() {
+        let objs = vec![dv(&[0.0, 1.0]), dv(&[1.0, 0.0])];
+        let cd = crowding_distance(&[0, 1], &objs);
+        assert!(cd.iter().all(|d| d.is_infinite()));
     }
 }
