@@ -13,7 +13,7 @@ default = []
 cuda    = ["dep:cudarc"]
 
 [dependencies]
-yee-core  = { workspace = true }
+# Phase 1 will re-add `yee-core` (shared Error/Result) and `tracing` (solver
+# telemetry) — kept out for now to silence unused-dependency warnings.
 cudarc    = { workspace = true, optional = true }
 thiserror = { workspace = true }
-tracing   = { workspace = true }

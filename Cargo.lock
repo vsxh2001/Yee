@@ -2252,8 +2252,6 @@ version = "0.0.0"
 dependencies = [
  "cudarc",
  "thiserror 1.0.69",
- "tracing",
- "yee-core",
 ]
 
 [[package]]
