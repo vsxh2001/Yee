@@ -17,14 +17,14 @@
 // solve.rs (Task 9) consumes impedance_matrix.
 
 use crate::basis::RwgBasis;
-use crate::greens::FreeSpaceGreen;
+use crate::greens::Greens;
 use crate::quadrature::{DuffyTopology, DuffyTransform, GaussTriangle};
 use faer::Mat;
 use nalgebra::Vector3;
 use num_complex::Complex64;
 use rayon::prelude::*;
 
-pub(crate) fn impedance_matrix(basis: &RwgBasis, green: &FreeSpaceGreen) -> Mat<Complex64> {
+pub(crate) fn impedance_matrix<G: Greens + Sync>(basis: &RwgBasis, green: &G) -> Mat<Complex64> {
     let n = basis.n_basis();
 
     // Row-parallel fill. faer::Mat is not Sync across rows, so build
@@ -50,9 +50,9 @@ pub(crate) fn impedance_matrix(basis: &RwgBasis, green: &FreeSpaceGreen) -> Mat<
     z
 }
 
-fn matrix_element(
+fn matrix_element<G: Greens>(
     basis: &RwgBasis,
-    green: &FreeSpaceGreen,
+    green: &G,
     gauss: &GaussTriangle,
     m: usize,
     n: usize,
@@ -69,9 +69,9 @@ fn matrix_element(
     z_mn
 }
 
-fn pair_contribution(
+fn pair_contribution<G: Greens>(
     basis: &RwgBasis,
-    green: &FreeSpaceGreen,
+    green: &G,
     gauss: &GaussTriangle,
     m: usize,
     n: usize,
@@ -86,46 +86,59 @@ fn pair_contribution(
     let div_m = basis.div(m, t_outer);
     let div_n = basis.div(n, t_inner);
 
-    // k0 = ω/c real for free space. η0 stored on Green struct.
-    let k0 = green.k0.re;
-    let omega_mu0 = Complex64::new(0.0, 1.0) * Complex64::new(k0 * green.eta0, 0.0); // j k0 η0
-    let inv_omega_eps0 = Complex64::new(0.0, -1.0) * Complex64::new(green.eta0 / k0, 0.0); // -j η0/k0
+    // k0 = ω/c real for the lossless backgrounds we support. η0 stored on
+    // the Green's-function object.
+    let k0 = green.k0().re;
+    let eta0 = green.eta0();
+    let omega_mu0 = Complex64::new(0.0, 1.0) * Complex64::new(k0 * eta0, 0.0); // j k0 η0
+    let inv_omega_eps0 = Complex64::new(0.0, -1.0) * Complex64::new(eta0 / k0, 0.0); // -j η0/k0
 
     let topology = topology_of(basis, t_outer, t_inner);
 
     // Duffy regularizes 1/R through its Jacobian — the integrand must remain
-    // the FULL Green's function G(R), never `scalar_smooth`. Using
-    // `scalar_smooth` (= G − 1/(4πR)) inside the Duffy path would double-
-    // subtract the 1/R term and systematically bias every singular and
-    // near-singular pair contribution.
+    // the FULL Green's function G(R), never the singularity-subtracted
+    // `_smooth` form. Using `_smooth` (= G − 1/(4πR)) inside the Duffy path
+    // would double-subtract the 1/R term and systematically bias every
+    // singular and near-singular pair contribution.
+    //
+    // The vector- and scalar-potential terms use different scalar Green's
+    // functions (`G^A` vs `G^Φ`). For [`FreeSpaceGreen`] these coincide; for
+    // a multilayer kernel they differ.
     let integrand_duffy = |r_outer: Vector3<f64>, r_inner: Vector3<f64>| -> Complex64 {
         let fm = basis_value_at_point(basis, m, t_outer, r_outer, &outer_v);
         let fn_vec = basis_value_at_point(basis, n, t_inner, r_inner, &inner_v);
         let r = (r_outer - r_inner).norm();
-        // `green.scalar` panics at r == 0. Dunavant order-5 has no vertex
-        // point, so a Duffy sub-triangle Gauss point coinciding bit-exactly
-        // with the outer anchor `r_outer` cannot occur in practice — but
-        // the bit-exact guard is cheap and removes the panic risk. At r == 0
-        // the Duffy Jacobian also vanishes, so the analytic limit
-        // −j k0 / (4π) of G as R → 0 (matching `scalar_smooth`) is a safe
-        // value here; it does not double-subtract because the Jacobian is
-        // zero on the same point.
-        let g = if r > 0.0 {
-            green.scalar(r_outer, r_inner)
+        // `scalar_vector` / `scalar_scalar` panic on the free-space path at
+        // r == 0. Dunavant order-5 has no vertex point, so a Duffy sub-
+        // triangle Gauss point coinciding bit-exactly with the outer anchor
+        // cannot occur in practice — but the bit-exact guard is cheap and
+        // removes the panic risk. At r == 0 the Duffy Jacobian also
+        // vanishes, so substituting the smooth-limit values is safe (they
+        // are weighted by zero); they do not double-subtract because the
+        // Jacobian is zero on the same point.
+        let (g_a, g_phi) = if r > 0.0 {
+            (
+                green.scalar_vector(r_outer, r_inner),
+                green.scalar_scalar(r_outer, r_inner),
+            )
         } else {
-            Complex64::new(0.0, -green.k0.re / (4.0 * std::f64::consts::PI))
+            (
+                green.scalar_vector_smooth(r_outer, r_inner),
+                green.scalar_scalar_smooth(r_outer, r_inner),
+            )
         };
-        omega_mu0 * Complex64::new(fm.dot(&fn_vec), 0.0) * g
-            + inv_omega_eps0 * Complex64::new(div_m * div_n, 0.0) * g
+        omega_mu0 * Complex64::new(fm.dot(&fn_vec), 0.0) * g_a
+            + inv_omega_eps0 * Complex64::new(div_m * div_n, 0.0) * g_phi
     };
 
     // Well-separated pairs never have r near zero; full G is always defined.
     let integrand_gauss = |r_outer: Vector3<f64>, r_inner: Vector3<f64>| -> Complex64 {
         let fm = basis_value_at_point(basis, m, t_outer, r_outer, &outer_v);
         let fn_vec = basis_value_at_point(basis, n, t_inner, r_inner, &inner_v);
-        let g = green.scalar(r_outer, r_inner);
-        omega_mu0 * Complex64::new(fm.dot(&fn_vec), 0.0) * g
-            + inv_omega_eps0 * Complex64::new(div_m * div_n, 0.0) * g
+        let g_a = green.scalar_vector(r_outer, r_inner);
+        let g_phi = green.scalar_scalar(r_outer, r_inner);
+        omega_mu0 * Complex64::new(fm.dot(&fn_vec), 0.0) * g_a
+            + inv_omega_eps0 * Complex64::new(div_m * div_n, 0.0) * g_phi
     };
 
     match topology {
@@ -216,6 +229,7 @@ fn topology_of(basis: &RwgBasis, t1: u32, t2: u32) -> Option<DuffyTopology> {
 mod tests {
     use super::*;
     use crate::basis::RwgBasis;
+    use crate::greens::FreeSpaceGreen;
     use nalgebra::Vector3;
     use yee_mesh::TriMesh;
 

@@ -15,6 +15,7 @@
 pub(crate) mod basis;
 pub(crate) mod fill;
 pub(crate) mod greens;
+pub(crate) mod multilayer;
 pub(crate) mod quadrature;
 pub(crate) mod solve;
 
@@ -175,7 +176,6 @@ pub mod __internal {
     //! Test-helper surface. Not stable API; do not depend on it.
 
     use crate::fill::impedance_matrix;
-    use crate::greens::FreeSpaceGreen;
     use crate::solve::delta_gap_rhs;
     use faer::linalg::solvers::{PartialPivLu, Solve};
     use num_complex::Complex64;
@@ -186,6 +186,15 @@ pub mod __internal {
     /// tests can inspect port edges, lengths, and counts without forcing the
     /// real `basis` module to be `pub`.
     pub use crate::basis::RwgBasis;
+
+    /// Public re-export of [`MultilayerGreens`] for the Phase 1.1
+    /// integration tests. Not part of the stable API.
+    pub use crate::multilayer::MultilayerGreens;
+
+    /// Public re-export of the `Greens` trait and `FreeSpaceGreen` struct
+    /// so `__internal` callers (the integration tests) can name them in
+    /// generic signatures. Not part of the stable API.
+    pub use crate::greens::{FreeSpaceGreen, Greens};
 
     /// Test-only constructor for [`RwgBasis`] — wraps the crate-private
     /// `from_mesh` so integration tests can build a basis without making
@@ -314,5 +323,49 @@ pub mod __internal {
             .port_basis_indices(port_tag)
             .map(|k| (basis.edges[k].length, i[(k, 0)]))
             .collect())
+    }
+
+    /// Generic Phase 1.1 helper: assemble the MPIE impedance matrix using
+    /// the supplied [`Greens`] implementation, solve a delta-gap excitation
+    /// at `port_tag`, and return `Z_in = V_port / I_port`. Identical to the
+    /// `z_in_and_residual_at_freq` helper but parameterised over the
+    /// Green's-function kernel so multilayer integration tests can compare
+    /// free-space and multilayer evaluations on the same mesh.
+    pub fn z_in_with_greens<G: Greens + Sync>(
+        mesh: &TriMesh,
+        port_tag: u32,
+        green: &G,
+    ) -> Result<Complex64, Error> {
+        let basis = RwgBasis::from_mesh(mesh.clone())?;
+        let z = impedance_matrix(&basis, green);
+        let b = delta_gap_rhs(&basis, port_tag);
+
+        let lu = PartialPivLu::new(z.as_ref());
+        let i = lu.solve(b.as_ref());
+
+        let mut i_port = Complex64::new(0.0, 0.0);
+        for k in basis.port_basis_indices(port_tag) {
+            i_port += b[(k, 0)] * i[(k, 0)];
+        }
+        if i_port.norm() < 1e-30 {
+            return Err(Error::Numerical(
+                "port current vanished; check port tagging".into(),
+            ));
+        }
+        let v_port = Complex64::new(1.0, 0.0);
+        Ok(v_port / i_port)
+    }
+
+    /// Free-space convenience wrapper around [`z_in_with_greens`]: build
+    /// the basis, instantiate [`FreeSpaceGreen`] at `freq_hz`, and solve.
+    /// Mirrors the multilayer entry point so call sites in tests stay
+    /// uniform.
+    pub fn z_in_free_space(
+        mesh: &TriMesh,
+        port_tag: u32,
+        freq_hz: f64,
+    ) -> Result<Complex64, Error> {
+        let green = FreeSpaceGreen::new(freq_hz);
+        z_in_with_greens(mesh, port_tag, &green)
     }
 }
