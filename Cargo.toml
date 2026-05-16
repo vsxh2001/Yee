@@ -8,6 +8,7 @@ members = [
     "crates/yee-fdtd",
     "crates/yee-io",
     "crates/yee-cli",
+    "crates/yee-gui",
     "crates/yee-py",
 ]
 
@@ -59,10 +60,16 @@ opencascade     = "0.2"
 opencascade-sys = "0.2"
 
 # GUI / Viz
-egui      = "0.34"
-eframe    = "0.34"
-egui_plot = "0.34"
-egui_dock = "0.18"
+# NOTE: egui 0.34 (the version called out by TECH_STACK / Phase 1.gui.0)
+# requires rustc 1.92, but the workspace toolchain is pinned to 1.88 (see
+# rust-toolchain.toml). egui_dock 0.17 and egui_plot 0.33 both peg
+# themselves to egui 0.32, so the whole egui ecosystem here is held back
+# to 0.32 patches that compile on 1.88. Bumping the workspace toolchain to
+# 1.92 and returning to egui 0.34 / egui_dock 0.18 is a Phase 1.gui.1+ task.
+egui      = "0.32"
+eframe    = "0.32"
+egui_plot = "0.33"
+egui_dock = "0.17"
 wgpu      = "26"
 rerun     = { version = "0.31", default-features = false, features = ["sdk"] }
 plotters  = "0.3"
