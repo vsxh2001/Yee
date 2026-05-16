@@ -34,7 +34,6 @@ pub struct GaussianProcess {
     /// Training input matrix, shape (n, d).
     x_train: DMatrix<f64>,
     /// Training output vector, shape (n,).
-    #[allow(dead_code)]
     y_train: DVector<f64>,
     /// RBF kernel length scale.
     length_scale: f64,
@@ -205,6 +204,39 @@ impl GaussianProcess {
     pub fn sigma_n(&self) -> f64 {
         self.sigma_n
     }
+
+    /// Log marginal likelihood of the training data under the fitted GP:
+    ///
+    /// ```text
+    /// log p(y | X, θ) = -0.5 · yᵀ K⁻¹ y - 0.5 · log|K| - (n/2) · log(2π)
+    /// ```
+    ///
+    /// Computed from cached state:
+    ///
+    /// - The **data-fit** term `-0.5 · yᵀ α` reuses the cached `α = K⁻¹ y`.
+    /// - The **complexity** term `-0.5 · log|K| = -sum(log diag(L))` reuses
+    ///   the cached lower-triangular Cholesky factor `L` of `K + σ_n² I`,
+    ///   exploiting `log|K| = 2 · sum(log diag(L))`.
+    /// - The **normalizer** is `-(n/2) · log(2π)`.
+    ///
+    /// Higher is better; useful for model selection between fitted GPs and
+    /// as the objective for hyperparameter optimization (see
+    /// `GaussianProcess::fit_ml`, landing in a follow-up commit).
+    pub fn log_marginal_likelihood(&self) -> f64 {
+        let n = self.x_train.nrows();
+        // -0.5 * y^T alpha
+        let data_fit = -0.5 * self.y_train.dot(&self.k_inv_y);
+        // -0.5 * log|K| = -sum(log diag(L))
+        let l = self.k_chol.l();
+        let mut log_diag_sum = 0.0;
+        for i in 0..n {
+            log_diag_sum += l[(i, i)].ln();
+        }
+        let complexity = -log_diag_sum;
+        // -(n/2) log(2π)
+        let norm = -0.5 * (n as f64) * (2.0 * std::f64::consts::PI).ln();
+        data_fit + complexity + norm
+    }
 }
 
 /// Squared Euclidean distance between row `i` of `a` and row `j` of `b`.
@@ -357,6 +389,51 @@ mod tests {
             GaussianProcess::fit(x, y, 1.0, 1.0, 1e-3),
             Err(Error::FitFailed(_))
         ));
+    }
+
+    #[test]
+    fn log_marginal_likelihood_matches_textbook_decomposition() {
+        // Tiny n=3 problem: re-derive log p(y|X,θ) from raw K and compare.
+        let x = DMatrix::<f64>::from_row_slice(3, 1, &[0.0, 1.0, 2.0]);
+        let y = DVector::<f64>::from_row_slice(&[0.0, 1.0, 0.0]);
+        let length_scale = 0.5;
+        let sigma_f = 1.0;
+        let sigma_n = 1e-2;
+        let gp = GaussianProcess::fit(x.clone(), y.clone(), length_scale, sigma_f, sigma_n)
+            .expect("fit");
+
+        // Rebuild K + sigma_n^2 I directly and compute log p(y|X,θ) by the
+        // textbook expression: -0.5 y^T K^-1 y - 0.5 log|K| - n/2 log(2π).
+        let n = 3;
+        let mut k = DMatrix::<f64>::zeros(n, n);
+        let two_l2 = 2.0 * length_scale * length_scale;
+        let sf2 = sigma_f * sigma_f;
+        let sn2 = sigma_n * sigma_n;
+        for i in 0..n {
+            for j in 0..n {
+                let dx = x[(i, 0)] - x[(j, 0)];
+                k[(i, j)] = sf2 * (-(dx * dx) / two_l2).exp();
+            }
+            k[(i, i)] += sn2;
+        }
+        let chol = k.clone().cholesky().expect("PSD");
+        let alpha = chol.solve(&y);
+        let data_fit = -0.5 * y.dot(&alpha);
+        // log|K| = 2 sum(log diag(L))
+        let l = chol.l();
+        let mut log_diag = 0.0;
+        for i in 0..n {
+            log_diag += l[(i, i)].ln();
+        }
+        let complexity = -log_diag;
+        let norm = -0.5 * (n as f64) * (2.0 * std::f64::consts::PI).ln();
+        let expected = data_fit + complexity + norm;
+
+        let got = gp.log_marginal_likelihood();
+        assert!(
+            (got - expected).abs() < 1e-10,
+            "log_marginal_likelihood = {got}, expected {expected}"
+        );
     }
 
     #[test]
