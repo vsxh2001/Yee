@@ -90,7 +90,7 @@ fn mesh_without_gmsh_feature_exits_2() {
     );
 }
 
-/// `yee export --format hdf5` exits with code 2 and mentions hdf5.
+/// `yee export --format hdf5` exits with code 2 and mentions hdf5 on stderr.
 #[test]
 fn export_hdf5_exits_2() {
     Command::cargo_bin("yee")
@@ -105,7 +105,7 @@ fn export_hdf5_exits_2() {
         .assert()
         .failure()
         .code(2)
-        .stdout(contains("hdf5"));
+        .stderr(contains("hdf5"));
 }
 
 /// `yee export --format touchstone` reads a real Touchstone file and writes a new one.

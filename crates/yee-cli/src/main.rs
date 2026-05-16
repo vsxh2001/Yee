@@ -139,7 +139,10 @@ fn run_export(
             Ok(ExitCode::SUCCESS)
         }
         ExportFormat::Hdf5 => {
-            println!("hdf5 not yet enabled");
+            // Diagnostic messages go to stderr — keeps stdout clean for any
+            // future success output (e.g. a confirmation path) and matches the
+            // convention used by `run_mesh` for `NotEnabled`.
+            eprintln!("hdf5 not yet enabled");
             Ok(ExitCode::from(2))
         }
     }
