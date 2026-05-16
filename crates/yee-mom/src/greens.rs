@@ -40,7 +40,7 @@ use yee_core::units::C0;
 /// multilayer kernels they differ because the TE / TM partitioning of the
 /// substrate Sommerfeld integrals (or their DCIM approximation) projects
 /// onto each potential differently.
-pub(crate) trait Greens {
+pub trait Greens {
     /// Background wave number (Hz·s/m → rad/m once multiplied by ω).
     fn k0(&self) -> Complex64;
     /// Free-space wave impedance √(μ₀/ε₀), in ohms.
