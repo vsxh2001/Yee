@@ -1,0 +1,35 @@
+[package]
+name         = "yee-bench"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+description  = "Criterion benchmarks for Yee's hot paths."
+publish      = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+yee-core    = { workspace = true }
+yee-mesh    = { workspace = true }
+yee-mom     = { workspace = true }
+yee-fdtd    = { workspace = true }
+faer        = { workspace = true }
+num-complex = { workspace = true }
+nalgebra    = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "mom_solve"
+harness = false
+
+[[bench]]
+name = "fdtd_step"
+harness = false
+
+[[bench]]
+name = "gmres_vs_direct"
+harness = false

@@ -13,6 +13,7 @@ members = [
     "crates/yee-py",
     "crates/yee-surrogate",
     "crates/yee-validation",
+    "crates/yee-bench",
     "examples/half-wave-dipole",
     "examples/microstrip-line",
     "examples/patch-2g4",
@@ -104,6 +105,9 @@ serde_json = "1"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+
+# Benchmarking
+criterion = "0.5"
 
 [profile.release]
 opt-level     = 3
