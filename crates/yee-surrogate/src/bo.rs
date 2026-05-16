@@ -130,6 +130,90 @@ fn erf_as(x: f64) -> f64 {
     sign * y
 }
 
+/// Latin-hypercube sample of `n` points in `bounds`.
+///
+/// For each dimension, splits `[0, 1]` into `n` equal strata, draws one
+/// uniform point per stratum, then independently permutes the strata across
+/// dimensions and scales to the requested bounds.
+#[allow(dead_code)] // wired up by `minimize` in the next commit
+fn latin_hypercube(n: usize, bounds: &[(f64, f64)], rng: &mut Xorshift64) -> Vec<DVector<f64>> {
+    let d = bounds.len();
+    // Unit-cube LHS values: lhs_unit[i][j] is the i-th sample's j-th coord in [0, 1].
+    let mut lhs_unit = vec![vec![0.0_f64; d]; n];
+    #[allow(clippy::needless_range_loop)]
+    for j in 0..d {
+        // Generate one stratified value per stratum.
+        let mut col: Vec<f64> = (0..n)
+            .map(|k| ((k as f64) + rng.next_f64()) / (n as f64))
+            .collect();
+        // Fisher-Yates shuffle across samples for this dimension.
+        for i in (1..n).rev() {
+            let r = rng.next_u64() as usize % (i + 1);
+            col.swap(i, r);
+        }
+        for (i, v) in col.into_iter().enumerate() {
+            lhs_unit[i][j] = v;
+        }
+    }
+    // Scale to bounds.
+    lhs_unit
+        .into_iter()
+        .map(|row| {
+            let mut x = DVector::<f64>::zeros(d);
+            for (j, &(lo, hi)) in bounds.iter().enumerate() {
+                x[j] = lo + (hi - lo) * row[j];
+            }
+            x
+        })
+        .collect()
+}
+
+/// One uniform sample in the hyper-rectangle `bounds`.
+#[allow(dead_code)] // wired up by `minimize` in the next commit
+fn uniform_in_bounds(bounds: &[(f64, f64)], rng: &mut Xorshift64) -> DVector<f64> {
+    let mut x = DVector::<f64>::zeros(bounds.len());
+    for (j, &(lo, hi)) in bounds.iter().enumerate() {
+        x[j] = lo + (hi - lo) * rng.next_f64();
+    }
+    x
+}
+
+/// Tiny xorshift64 PRNG. Seeded reproducibly from [`BoConfig::seed`].
+///
+/// This is deliberately not exposed in the public API; BO callers control
+/// randomness via [`BoConfig::seed`] only.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // wired up by `minimize` in the next commit
+pub(crate) struct Xorshift64 {
+    state: u64,
+}
+
+#[allow(dead_code)] // wired up by `minimize` in the next commit
+impl Xorshift64 {
+    /// Construct a new PRNG. A zero seed is replaced by a non-zero constant so
+    /// the recurrence does not collapse to `state = 0`.
+    pub(crate) fn new(seed: u64) -> Self {
+        let s = if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed };
+        Self { state: s }
+    }
+
+    /// Next raw `u64` from the stream.
+    pub(crate) fn next_u64(&mut self) -> u64 {
+        let mut x = self.state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.state = x;
+        x
+    }
+
+    /// Next `f64` in `[0, 1)`.
+    pub(crate) fn next_f64(&mut self) -> f64 {
+        // Take the top 53 bits, scale by 2^-53.
+        ((self.next_u64() >> 11) as f64) * (1.0 / ((1_u64 << 53) as f64))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,5 +264,34 @@ mod tests {
         let lo = ei(mean, 0.1, f_best, 0.0);
         let hi = ei(mean, 0.5, f_best, 0.0);
         assert!(hi > lo, "EI should grow with std: {lo} -> {hi}");
+    }
+
+    #[test]
+    fn xorshift_is_deterministic_from_seed() {
+        let mut a = Xorshift64::new(42);
+        let mut b = Xorshift64::new(42);
+        for _ in 0..16 {
+            assert_eq!(a.next_u64(), b.next_u64());
+        }
+    }
+
+    #[test]
+    fn latin_hypercube_respects_bounds_and_stratification() {
+        let mut rng = Xorshift64::new(7);
+        let bounds = vec![(0.0, 6.0)];
+        let n = 8;
+        let pts = latin_hypercube(n, &bounds, &mut rng);
+        assert_eq!(pts.len(), n);
+        // Every stratum [k/n, (k+1)/n) (scaled to bounds) gets exactly one point.
+        let mut hit = vec![false; n];
+        for p in &pts {
+            let u = (p[0] - 0.0) / 6.0;
+            let k = (u * n as f64).floor() as usize;
+            let k = k.min(n - 1);
+            assert!(!hit[k], "stratum {k} hit twice");
+            hit[k] = true;
+            assert!(p[0] >= 0.0 && p[0] <= 6.0);
+        }
+        assert!(hit.iter().all(|&b| b), "all strata must be covered");
     }
 }
