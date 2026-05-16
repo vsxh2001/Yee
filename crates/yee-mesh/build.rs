@@ -12,8 +12,9 @@
 //! rerun-if-env hints.
 
 fn main() {
-    // Always rerun if the env var that controls SDK discovery changes.
+    // Rerun whenever any env var controlling SDK discovery or version changes.
     println!("cargo:rerun-if-env-changed=GMSH_SDK_ROOT");
+    println!("cargo:rerun-if-env-changed=GMSH_VERSION");
     println!("cargo:rerun-if-changed=build.rs");
 
     #[cfg(feature = "gmsh")]
@@ -26,7 +27,10 @@ fn generate_bindings() {
     use std::fs;
     use std::path::PathBuf;
 
-    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
+    let out_dir = PathBuf::from(
+        env::var_os("OUT_DIR")
+            .unwrap_or_else(|| panic!("cargo did not provide OUT_DIR to build.rs")),
+    );
     let bindings_path = out_dir.join("bindings.rs");
 
     let Some(sdk_root) = env::var_os("GMSH_SDK_ROOT") else {
@@ -35,8 +39,12 @@ fn generate_bindings() {
              is enabled but bindgen will be skipped. Writing empty bindings \
              stub so type-only consumers compile."
         );
-        fs::write(&bindings_path, "// GMSH_SDK_ROOT unset; empty stub.\n")
-            .expect("write empty bindings stub");
+        fs::write(&bindings_path, "// GMSH_SDK_ROOT unset; empty stub.\n").unwrap_or_else(|e| {
+            panic!(
+                "failed to write empty bindings stub to {}: {e}",
+                bindings_path.display()
+            )
+        });
         return;
     };
 
@@ -46,14 +54,25 @@ fn generate_bindings() {
 
     let bindings = bindgen::Builder::default()
         .header(header.to_string_lossy())
+        // gmshc.h is a C header; pin the standard so clang doesn't pick up
+        // a host-dependent default.
+        .clang_arg("--std=c99")
         .allowlist_function("gmsh.*")
         .allowlist_type("gmsh.*")
         .allowlist_var("gmsh.*")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
-        .expect("bindgen failed to generate gmshc bindings");
+        .unwrap_or_else(|e| {
+            panic!(
+                "bindgen failed to generate bindings from {}: {e}",
+                header.display()
+            )
+        });
 
-    bindings
-        .write_to_file(&bindings_path)
-        .expect("write bindings.rs");
+    bindings.write_to_file(&bindings_path).unwrap_or_else(|e| {
+        panic!(
+            "failed to write generated bindings to {}: {e}",
+            bindings_path.display()
+        )
+    });
 }

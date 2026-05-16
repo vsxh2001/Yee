@@ -23,7 +23,9 @@ use crate::{Result, TriMesh};
 /// against the API surface even when the crate is built without `gmsh`.
 #[derive(Debug)]
 pub struct Session {
-    // Private field keeps the struct opaque and forces use of `Session::new`.
+    // Phase-0 placeholder: this unit field keeps the struct opaque and forces
+    // construction through `Session::new`. Phase 1 will replace it with the
+    // real Gmsh context handle returned by the FFI.
     _private: (),
 }
 
@@ -31,7 +33,8 @@ impl Session {
     /// Open a new Gmsh session.
     ///
     /// Without the `gmsh` feature this returns [`Error::NotEnabled`] and
-    /// performs no work. It never panics.
+    /// performs no work. With the `gmsh` feature, this panics in Phase 0
+    /// (FFI wiring deferred to Phase 1).
     pub fn new() -> Result<Self> {
         #[cfg(not(feature = "gmsh"))]
         {
@@ -45,6 +48,10 @@ impl Session {
     }
 
     /// Import a STEP file into the current session's OCC kernel.
+    ///
+    /// Without the `gmsh` feature this returns [`Error::NotEnabled`] and
+    /// performs no work. With the `gmsh` feature, this panics in Phase 0
+    /// (FFI wiring deferred to Phase 1).
     pub fn import_step(&mut self, _path: &Path) -> Result<()> {
         #[cfg(not(feature = "gmsh"))]
         {
@@ -58,6 +65,10 @@ impl Session {
     }
 
     /// Mesh the loaded geometry up to the requested dimension.
+    ///
+    /// Without the `gmsh` feature this returns [`Error::NotEnabled`] and
+    /// performs no work. With the `gmsh` feature, this panics in Phase 0
+    /// (FFI wiring deferred to Phase 1).
     pub fn mesh(&mut self, _dim: i32) -> Result<()> {
         #[cfg(not(feature = "gmsh"))]
         {
@@ -71,6 +82,10 @@ impl Session {
     }
 
     /// Extract surface triangles from the current mesh.
+    ///
+    /// Without the `gmsh` feature this returns [`Error::NotEnabled`] and
+    /// performs no work. With the `gmsh` feature, this panics in Phase 0
+    /// (FFI wiring deferred to Phase 1).
     pub fn tris(&self) -> Result<TriMesh> {
         #[cfg(not(feature = "gmsh"))]
         {

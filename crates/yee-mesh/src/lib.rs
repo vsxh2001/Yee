@@ -51,6 +51,9 @@ impl TriMesh {
     /// Currently the only invariant enforced is that there is exactly one
     /// tag per triangle. Returns [`Error::Invalid`] with a descriptive
     /// message when `triangles.len() != tags.len()`.
+    ///
+    /// Phase 1 will additionally validate that each triangle index is
+    /// `< vertices.len()`.
     pub fn new(
         vertices: Vec<Vector3<f64>>,
         triangles: Vec<[u32; 3]>,
