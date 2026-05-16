@@ -15,9 +15,13 @@ cuda    = ["yee-cuda/cuda"]
 yee-core    = { workspace = true }
 yee-mesh    = { workspace = true }
 yee-cuda    = { workspace = true }
+yee-io      = { workspace = true }
 faer        = { workspace = true }
 nalgebra    = { workspace = true }
 num-complex = { workspace = true }
 ndarray     = { workspace = true }
 thiserror   = { workspace = true }
 tracing     = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

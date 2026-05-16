@@ -60,3 +60,30 @@ impl Solver for PlanarMoM {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_constructs() {
+        // Phase 0 sanity: the empty-shell solver must be default-constructible.
+        let _solver = PlanarMoM::default();
+    }
+
+    #[test]
+    fn run_returns_unimplemented_with_exact_message() {
+        // The Phase 0 contract is that `run` returns the variant
+        // `yee_core::Error::Unimplemented` with this exact static message.
+        let solver = PlanarMoM::default();
+        let mesh = TriMesh::default();
+        let freq = FreqRange::new(1.0e9, 2.0e9, 3).expect("valid FreqRange");
+        let err = solver.run(&mesh, freq).expect_err("run must return Err in Phase 0");
+        match err {
+            yee_core::Error::Unimplemented(msg) => {
+                assert_eq!(msg, "PlanarMoM::run not implemented in phase 0");
+            }
+            other => panic!("expected Unimplemented, got: {other:?}"),
+        }
+    }
+}
