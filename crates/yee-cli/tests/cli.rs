@@ -69,6 +69,26 @@ fn validate_all_runs_both() {
         .stdout(contains("Phase 2 deliverable"));
 }
 
+/// `yee mesh` without the `gmsh` feature exits with code 2 and mentions gmsh.
+#[test]
+fn mesh_without_gmsh_feature_exits_2() {
+    let output = Command::cargo_bin("yee")
+        .unwrap()
+        .args(["mesh", "/tmp/nonexistent.step"])
+        .assert()
+        .failure()
+        .code(2)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("gmsh"),
+        "expected output to mention gmsh, got: stdout={stdout:?} stderr={stderr:?}"
+    );
+}
+
 /// Unknown subcommand exits non-zero with a clap error/suggestion.
 #[test]
 fn unknown_subcommand_suggests() {

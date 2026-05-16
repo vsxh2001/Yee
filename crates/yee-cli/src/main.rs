@@ -5,10 +5,13 @@
 //! Phase 0 wires the following subcommands:
 //!
 //! - `yee validate <mom|fdtd|all>` — prints planned validation cases.
-//! - `yee mesh <path>` — Phase 0 stub (wired in a later commit).
+//! - `yee mesh <path>` — constructs a `yee_mesh::Session`. Without the
+//!   `gmsh` feature this exits with code 2 and a guidance message.
 //! - `yee export <input> --format <touchstone|hdf5> <output>` — Phase 0
 //!   stub (wired in a later commit).
 //! - `yee run <project>` — Phase 0 stub from the scaffold.
+
+use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -62,26 +65,61 @@ enum ValidateTarget {
     All,
 }
 
-fn main() -> Result<()> {
+fn main() -> ExitCode {
     tracing_subscriber::fmt().with_target(false).init();
 
     let cli = Cli::parse();
-    match cli.command {
-        Command::Validate { target } => run_validate(target),
-        Command::Mesh { input } => {
-            println!("yee mesh {} — Phase 0 stub.", input.display());
+    match run(cli) {
+        Ok(code) => code,
+        Err(err) => {
+            eprintln!("error: {err:#}");
+            ExitCode::from(1)
         }
+    }
+}
+
+fn run(cli: Cli) -> Result<ExitCode> {
+    match cli.command {
+        Command::Validate { target } => {
+            run_validate(target);
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Mesh { input } => Ok(run_mesh(&input)),
         Command::Run { project } => {
             println!("yee run {} — Phase 0 stub.", project.display());
+            Ok(ExitCode::SUCCESS)
         }
         Command::Export { results, format } => {
             println!(
                 "yee export {} --format {format} — Phase 0 stub.",
                 results.display()
             );
+            Ok(ExitCode::SUCCESS)
         }
     }
-    Ok(())
+}
+
+/// Construct a [`yee_mesh::Session`] for `input`. Without the `gmsh` feature
+/// the underlying crate returns [`yee_mesh::Error::NotEnabled`]; we surface
+/// this to the user with exit code 2.
+fn run_mesh(_input: &std::path::Path) -> ExitCode {
+    match yee_mesh::Session::new() {
+        Ok(_session) => {
+            // Phase 1 wires `import_step` and `mesh` against the real Gmsh
+            // FFI; for Phase 0 simply constructing the session is the
+            // smoke-test contract.
+            println!("yee mesh: session opened (Phase 0 stub).");
+            ExitCode::SUCCESS
+        }
+        Err(yee_mesh::Error::NotEnabled) => {
+            eprintln!("mesh feature not enabled; rebuild with --features gmsh");
+            ExitCode::from(2)
+        }
+        Err(err) => {
+            eprintln!("mesh error: {err}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 fn run_validate(target: ValidateTarget) {
