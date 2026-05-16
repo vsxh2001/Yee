@@ -1,0 +1,25 @@
+[build-system]
+requires      = ["maturin>=1.10,<2.0"]
+build-backend = "maturin"
+
+[project]
+name            = "yee"
+description     = "GPU-accelerated electromagnetic simulation."
+requires-python = ">=3.10"
+license         = { text = "GPL-3.0-or-later" }
+classifiers     = [
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies    = ["numpy>=1.26"]
+dynamic         = ["version"]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.maturin]
+manifest-path  = "Cargo.toml"
+features       = ["pyo3/extension-module"]
+python-source  = "python"
+module-name    = "yee._yee"

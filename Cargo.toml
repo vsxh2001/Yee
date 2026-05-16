@@ -8,6 +8,7 @@ members = [
     "crates/yee-fdtd",
     "crates/yee-io",
     "crates/yee-cli",
+    "crates/yee-py",
 ]
 
 [workspace.package]
