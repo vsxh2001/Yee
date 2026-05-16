@@ -38,3 +38,7 @@ harness = false
 [[bench]]
 name = "gp_fit"
 harness = false
+
+[[bench]]
+name = "bo_step"
+harness = false
