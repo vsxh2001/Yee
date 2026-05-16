@@ -7,11 +7,37 @@ use crate::basis::RwgBasis;
 use crate::fill::impedance_matrix;
 use crate::greens::FreeSpaceGreen;
 use crate::ports::{DeltaGapPort, Port};
+use crate::roughness::{RoughnessModel, SIGMA_COPPER};
 use faer::Mat;
 use faer::linalg::solvers::{PartialPivLu, Solve};
 use num_complex::Complex64;
 use yee_core::{Error, FreqRange};
 use yee_io::touchstone::{File as TouchstoneFile, Format, FreqUnit};
+
+/// Apply a frequency-dependent surface-roughness loss multiplier to the
+/// impedance matrix in-place.
+///
+/// Phase 1.4.0 walking skeleton: scales every entry of `z` by the same
+/// `K(f)` returned by `roughness.loss_multiplier(freq_hz, SIGMA_COPPER)`,
+/// which is mathematically equivalent to scaling the final `Z_in` (and
+/// therefore `S11` through the bilinear transform) by `K(f)`. This is a
+/// coarse approximation — see the limitation documented in
+/// [`crate::roughness`]. Conductivity is hard-coded to copper here;
+/// Phase 1.4.1 will plumb a material-aware sigma through the basis.
+pub(crate) fn apply_roughness(
+    z: &mut Mat<Complex64>,
+    roughness: &RoughnessModel,
+    freq_hz: f64,
+) {
+    let k = roughness.loss_multiplier(freq_hz, SIGMA_COPPER);
+    let scale = Complex64::new(k, 0.0);
+    let (nrows, ncols) = (z.nrows(), z.ncols());
+    for j in 0..ncols {
+        for i in 0..nrows {
+            z[(i, j)] *= scale;
+        }
+    }
+}
 
 /// Build a 1 V delta-gap RHS across every edge tagged with `port_tag`.
 /// `b[k] = V × length_k` for port edges, zero elsewhere.
@@ -51,9 +77,13 @@ pub(crate) fn s_parameters_at_freq(
     port: &dyn Port,
     freq_hz: f64,
     z0_ref: f64,
+    roughness: Option<&RoughnessModel>,
 ) -> Result<Complex64, Error> {
     let green = FreeSpaceGreen::new(freq_hz);
-    let z = impedance_matrix(basis, &green);
+    let mut z = impedance_matrix(basis, &green);
+    if let Some(rough) = roughness {
+        apply_roughness(&mut z, rough, freq_hz);
+    }
     let b = port.rhs(basis, freq_hz);
 
     // Partial-pivot LU is the canonical dense solver for the (non-Hermitian
@@ -88,11 +118,12 @@ pub(crate) fn s_parameters_sweep(
     port: &dyn Port,
     freq_range: FreqRange,
     z0_ref: f64,
+    roughness: Option<&RoughnessModel>,
 ) -> Result<TouchstoneFile, Error> {
     let mut freq_hz = Vec::new();
     let mut data: Vec<Vec<Complex64>> = Vec::new();
     for f in freq_range.iter() {
-        let s11 = s_parameters_at_freq(basis, port, f, z0_ref)?;
+        let s11 = s_parameters_at_freq(basis, port, f, z0_ref, roughness)?;
         freq_hz.push(f);
         data.push(vec![s11]);
     }
@@ -150,7 +181,7 @@ mod tests {
             tag: 1,
             voltage: Complex64::new(1.0, 0.0),
         };
-        let file = s_parameters_sweep(&basis, &port, freq, 50.0).expect("sweep");
+        let file = s_parameters_sweep(&basis, &port, freq, 50.0, None).expect("sweep");
         assert_eq!(file.freq_hz.len(), 3);
         assert_eq!(file.data.len(), 3);
         assert_eq!(file.n_ports, 1);
