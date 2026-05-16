@@ -20,6 +20,20 @@
 //! - `sigma_f` — signal standard deviation. Controls the prior amplitude.
 //! - `sigma_n` — observation-noise standard deviation. Acts as a Tikhonov
 //!   regularizer (`sigma_n^2 I` added to the diagonal of `K`).
+//!
+//! ## Hyperparameter optimization
+//!
+//! [`GaussianProcess::fit_ml`] maximizes the log marginal likelihood
+//! `log p(y | X, θ)` over `θ = (length_scale, sigma_f, sigma_n)` via gradient
+//! ascent in log-space (so positivity of each hyperparameter is preserved by
+//! construction). The gradient is computed by **central differences** rather
+//! than analytically: the analytic gradient requires `tr(K⁻¹ ∂K/∂θ)` which is
+//! O(n³) per parameter and easy to get wrong. Central differences cost
+//! 6 K-builds per iteration (two per parameter), but for the small
+//! problems this surrogate is intended for (n ≲ 50) the simplicity of the
+//! numerical path is the better tradeoff. Each K-build is itself O(n³), so
+//! callers with larger `n` should expect optimization to dominate training
+//! time.
 
 use nalgebra::{Cholesky, DMatrix, DVector, Dyn};
 use num_complex::Complex64;
@@ -220,8 +234,8 @@ impl GaussianProcess {
     /// - The **normalizer** is `-(n/2) · log(2π)`.
     ///
     /// Higher is better; useful for model selection between fitted GPs and
-    /// as the objective for hyperparameter optimization (see
-    /// `GaussianProcess::fit_ml`, landing in a follow-up commit).
+    /// as the objective for hyperparameter optimization via
+    /// [`GaussianProcess::fit_ml`].
     pub fn log_marginal_likelihood(&self) -> f64 {
         let n = self.x_train.nrows();
         // -0.5 * y^T alpha
@@ -236,6 +250,122 @@ impl GaussianProcess {
         // -(n/2) log(2π)
         let norm = -0.5 * (n as f64) * (2.0 * std::f64::consts::PI).ln();
         data_fit + complexity + norm
+    }
+}
+
+/// Configuration for marginal-likelihood hyperparameter optimization.
+///
+/// Passed to [`GaussianProcess::fit_ml`]. Defaults are tuned for the
+/// low-dimensional, small-n surrogate problems this crate targets; expect to
+/// tune `gradient_step` and `max_iters` for larger problems.
+#[derive(Debug, Clone)]
+pub struct MlFitConfig {
+    /// Starting length scale (linear-space, not log-space).
+    pub initial_length_scale: f64,
+    /// Starting signal stddev.
+    pub initial_sigma_f: f64,
+    /// Starting noise stddev.
+    pub initial_sigma_n: f64,
+    /// Maximum gradient-ascent iterations.
+    pub max_iters: usize,
+    /// Learning rate applied to the log-space parameter vector.
+    pub gradient_step: f64,
+    /// Convergence threshold on the L2 norm of the log-space gradient.
+    pub tol: f64,
+}
+
+impl Default for MlFitConfig {
+    fn default() -> Self {
+        Self {
+            initial_length_scale: 1.0,
+            initial_sigma_f: 1.0,
+            initial_sigma_n: 1e-3,
+            max_iters: 200,
+            gradient_step: 0.05,
+            tol: 1e-4,
+        }
+    }
+}
+
+impl GaussianProcess {
+    /// Fit a GP by maximizing the log marginal likelihood over
+    /// `(length_scale, sigma_f, sigma_n)`.
+    ///
+    /// Optimizes in log-space (`θ = (log ℓ, log σ_f, log σ_n)`) so the three
+    /// hyperparameters stay strictly positive without an explicit constraint.
+    /// The gradient is computed by central differences (step `1e-3` in
+    /// log-space) on [`Self::log_marginal_likelihood`]; the optimizer is
+    /// plain gradient ascent. See the module-level docs for the rationale.
+    ///
+    /// Iteration halts when the L2 norm of the log-space gradient drops
+    /// below `cfg.tol` or `cfg.max_iters` is exhausted, whichever comes
+    /// first. The returned [`GaussianProcess`] is a fresh refit with the
+    /// optimized hyperparameters, so its cached `α` and Cholesky factor are
+    /// consistent.
+    ///
+    /// Returns [`Error::FitFailed`] if any K-build along the optimization
+    /// trajectory is non-PSD (i.e. Cholesky-factor fails). In that case the
+    /// last successful fit is *not* returned; the caller should widen the
+    /// initial `sigma_n` and retry.
+    pub fn fit_ml(x: DMatrix<f64>, y: DVector<f64>, cfg: MlFitConfig) -> Result<Self> {
+        if cfg.initial_length_scale <= 0.0
+            || cfg.initial_sigma_f <= 0.0
+            || cfg.initial_sigma_n <= 0.0
+        {
+            return Err(Error::FitFailed(format!(
+                "fit_ml: initial hyperparameters must be strictly positive, got \
+                 (length_scale={}, sigma_f={}, sigma_n={})",
+                cfg.initial_length_scale, cfg.initial_sigma_f, cfg.initial_sigma_n
+            )));
+        }
+
+        // Log-space parameter vector: (log ℓ, log σ_f, log σ_n).
+        let mut theta = [
+            cfg.initial_length_scale.ln(),
+            cfg.initial_sigma_f.ln(),
+            cfg.initial_sigma_n.ln(),
+        ];
+        let h = 1e-3_f64; // central-difference step in log-space
+
+        // Evaluate the log marginal likelihood at a candidate θ. Wrapped so
+        // we can call it repeatedly inside the central-difference loop
+        // without re-deriving the (ℓ, σ_f, σ_n) decoding each time.
+        let lml_at = |theta: [f64; 3]| -> Result<f64> {
+            let l = theta[0].exp();
+            let sf = theta[1].exp();
+            let sn = theta[2].exp();
+            let gp = GaussianProcess::fit(x.clone(), y.clone(), l, sf, sn)?;
+            Ok(gp.log_marginal_likelihood())
+        };
+
+        for _ in 0..cfg.max_iters {
+            // Central-difference gradient: 2 K-builds per parameter = 6 total.
+            let mut grad = [0.0_f64; 3];
+            for k in 0..3 {
+                let mut tp = theta;
+                let mut tm = theta;
+                tp[k] += h;
+                tm[k] -= h;
+                let lp = lml_at(tp)?;
+                let lm = lml_at(tm)?;
+                grad[k] = (lp - lm) / (2.0 * h);
+            }
+
+            let gnorm = (grad[0] * grad[0] + grad[1] * grad[1] + grad[2] * grad[2]).sqrt();
+            if gnorm < cfg.tol {
+                break;
+            }
+
+            // Gradient ascent in log-space.
+            for k in 0..3 {
+                theta[k] += cfg.gradient_step * grad[k];
+            }
+        }
+
+        let length_scale = theta[0].exp();
+        let sigma_f = theta[1].exp();
+        let sigma_n = theta[2].exp();
+        Self::fit(x, y, length_scale, sigma_f, sigma_n)
     }
 }
 

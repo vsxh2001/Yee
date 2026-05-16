@@ -19,7 +19,7 @@
 
 pub mod gp;
 
-pub use gp::{GaussianProcess, GpSurrogate};
+pub use gp::{GaussianProcess, GpSurrogate, MlFitConfig};
 
 use num_complex::Complex64;
 
