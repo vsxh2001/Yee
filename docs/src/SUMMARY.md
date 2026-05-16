@@ -6,6 +6,7 @@
 
 - [Planar Method of Moments](theory/planar-mom.md)
 - [Finite-Difference Time-Domain](theory/fdtd.md)
+- [GP Surrogates and Bayesian Optimization](theory/surrogate-gp-bo.md)
 
 # Tutorials
 
