@@ -36,7 +36,7 @@ pub mod grid;
 pub mod sources;
 pub mod update;
 
-pub use cpml::CpmlParams;
+pub use cpml::{CpmlParams, CpmlState};
 pub use grid::YeeGrid;
 
 /// FDTD-layer errors.
