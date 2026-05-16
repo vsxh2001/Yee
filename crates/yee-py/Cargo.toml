@@ -1,0 +1,23 @@
+[package]
+name         = "yee-py"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "Python bindings for Yee electromagnetic simulation."
+
+[lib]
+name       = "yee"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+yee-core    = { workspace = true }
+yee-mesh    = { workspace = true }
+yee-mom     = { workspace = true }
+yee-io      = { workspace = true }
+pyo3        = { workspace = true }
+numpy       = { workspace = true }
+num-complex = { workspace = true }
+nalgebra    = { workspace = true }
+thiserror   = { workspace = true }

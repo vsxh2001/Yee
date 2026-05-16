@@ -1,0 +1,22 @@
+[package]
+name         = "example-half-wave-dipole"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+publish      = false
+
+[[bin]]
+name = "half-wave-dipole"
+path = "src/main.rs"
+
+[dependencies]
+yee-core    = { workspace = true }
+yee-mesh    = { workspace = true }
+yee-mom     = { workspace = true }
+yee-io      = { workspace = true }
+nalgebra    = { workspace = true }
+num-complex = { workspace = true }
+anyhow      = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
