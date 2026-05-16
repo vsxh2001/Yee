@@ -16,6 +16,7 @@ fn help_lists_every_subcommand() {
         .stdout(contains("validate"))
         .stdout(contains("mesh"))
         .stdout(contains("export"))
+        .stdout(contains("plot"))
         .stdout(contains("completions"))
         .stdout(contains("run"));
 }
@@ -149,6 +150,85 @@ fn unknown_subcommand_suggests() {
         stderr.contains("unrecognized") || stderr.contains("similar") || stderr.contains("error"),
         "expected an error/suggestion from clap, got: {stderr}"
     );
+}
+
+/// `yee plot --kind db` reads a 3-point .s1p and writes a non-empty PNG.
+#[test]
+fn plot_writes_png_from_touchstone() {
+    let tmp = TempDir::new();
+    let input = tmp.path().join("in.s1p");
+    let output = tmp.path().join("out.png");
+
+    std::fs::write(
+        &input,
+        "# Hz S RI R 50\n1.0e9 0.1 0.2\n1.5e9 0.15 0.25\n2.0e9 0.2 0.3\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("yee")
+        .unwrap()
+        .arg("plot")
+        .arg(&input)
+        .arg("--kind")
+        .arg("db")
+        .arg("--output")
+        .arg(&output)
+        .assert()
+        .success();
+
+    assert!(output.exists(), "output PNG not created: {output:?}");
+    let size = std::fs::metadata(&output).unwrap().len();
+    assert!(size > 1024, "PNG output too small: {size} bytes");
+}
+
+/// `yee plot --kind smith --output *.svg` produces a valid SVG file.
+#[test]
+fn plot_writes_svg_from_touchstone() {
+    let tmp = TempDir::new();
+    let input = tmp.path().join("in.s1p");
+    let output = tmp.path().join("out.svg");
+    std::fs::write(
+        &input,
+        "# Hz S RI R 50\n1.0e9 0.5 0.1\n1.5e9 0.4 0.05\n2.0e9 0.3 0.0\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("yee")
+        .unwrap()
+        .arg("plot")
+        .arg(&input)
+        .arg("--kind")
+        .arg("smith")
+        .arg("--output")
+        .arg(&output)
+        .assert()
+        .success();
+
+    let body = std::fs::read_to_string(&output).unwrap();
+    assert!(body.contains("<svg"), "SVG output missing <svg> tag");
+}
+
+/// `yee plot --output foo.bmp` rejects unknown extensions.
+#[test]
+fn plot_rejects_unknown_extension() {
+    let tmp = TempDir::new();
+    let input = tmp.path().join("in.s1p");
+    let output = tmp.path().join("out.bmp");
+    std::fs::write(
+        &input,
+        "# Hz S RI R 50\n1.0e9 0.1 0.2\n2.0e9 0.2 0.3\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("yee")
+        .unwrap()
+        .arg("plot")
+        .arg(&input)
+        .arg("--output")
+        .arg(&output)
+        .assert()
+        .failure()
+        .stderr(contains("bmp"));
 }
 
 /// `yee completions bash` writes a bash completion script to stdout.
