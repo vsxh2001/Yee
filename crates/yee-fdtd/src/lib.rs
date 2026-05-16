@@ -40,6 +40,7 @@
 pub mod boundary;
 pub mod cpml;
 pub mod dispersive;
+pub mod driver;
 pub mod grid;
 pub mod material;
 pub mod ntff;
@@ -48,6 +49,7 @@ pub mod update;
 
 pub use cpml::{CpmlParams, CpmlState};
 pub use dispersive::DispersiveState;
+pub use driver::{FdtdDriver, FdtdDriverConfig, RadiationPattern};
 pub use grid::YeeGrid;
 pub use material::{Material, MaterialMap};
 pub use ntff::{NtffParams, NtffState};
@@ -131,6 +133,34 @@ impl WalkingSkeletonSolver {
     /// Borrow the CPML state, if one was configured via [`Self::with_cpml`].
     pub fn cpml(&self) -> Option<&CpmlState> {
         self.cpml.as_ref()
+    }
+
+    /// Mutable borrow of the CPML state, if one was configured.
+    ///
+    /// Escape hatch for callers (e.g. [`crate::driver::FdtdDriver`]) that
+    /// need to drive the CPML's `update_e` / `update_h` against the grid
+    /// directly. Most users should call [`Self::step`] or
+    /// [`Self::step_with_source`] instead.
+    pub fn cpml_mut(&mut self) -> Option<&mut CpmlState> {
+        self.cpml.as_mut()
+    }
+
+    /// Split borrow: mutable references to both the grid and the CPML
+    /// state simultaneously. Returns `(grid, None)` if no CPML is
+    /// configured.
+    ///
+    /// This is the primitive that lets a driver build a custom
+    /// time-step body (e.g. injecting a non-Gaussian source) without
+    /// re-implementing CPML wiring.
+    pub fn grid_and_cpml_mut(&mut self) -> (&mut YeeGrid, Option<&mut CpmlState>) {
+        (&mut self.grid, self.cpml.as_mut())
+    }
+
+    /// Increment the internal step counter (advances the simulation
+    /// clock by one `dt`). Used by drivers that build their own
+    /// time-step body around [`Self::grid_and_cpml_mut`].
+    pub fn advance_clock(&mut self) {
+        self.step += 1;
     }
 
     /// Immutable view of the underlying grid (e.g. for probing field values).
