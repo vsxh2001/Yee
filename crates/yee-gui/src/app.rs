@@ -177,8 +177,7 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
             }
             Some(f) => {
                 // S11 lives at row-major slot 0 for any port count.
-                let s11: Vec<num_complex::Complex64> =
-                    f.data.iter().map(|m| m[0]).collect();
+                let s11: Vec<num_complex::Complex64> = f.data.iter().map(|m| m[0]).collect();
                 match tab {
                     TabKind::S11Db => show_s11_db_plot(ui, &f.freq_hz, &s11),
                     TabKind::Smith => show_smith_chart(ui, &s11),

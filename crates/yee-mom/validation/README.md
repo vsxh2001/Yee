@@ -13,7 +13,7 @@ Every solver feature is held against a canonical published benchmark before it s
 
 | ID | Case | Tolerance |
 |----|------|-----------|
-| `mom-001` | Half-wave dipole Z ≈ 73 + j42 Ω | ±5% |
+| `mom-001` | Half-wave dipole, L=1m, a=5mm cylinder, delta-gap, NEC-4 reference Z ≈ 87 + j41 Ω | ±5% on Re(Z), ±10% on Im(Z) |
 | `mom-002` | 50 Ω microstrip line Z₀ on FR-4 (h=1.6, εr=4.4) | ±3% vs TX-LINE / Hammerstad-Jensen |
 | `mom-003` | 2.4 GHz rectangular patch on FR-4 (29.2×38.0 mm) | resonance ±2%; \|S11\| < −10 dB |
 

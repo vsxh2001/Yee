@@ -12,6 +12,12 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub(crate) mod basis;
+pub(crate) mod fill;
+pub(crate) mod greens;
+pub(crate) mod quadrature;
+pub(crate) mod solve;
+
 use num_complex::Complex64;
 use yee_core::{FreqRange, Solver};
 use yee_mesh::TriMesh;
@@ -120,10 +126,10 @@ impl Solver for PlanarMoM {
     type Geometry = TriMesh;
     type Output = SParameters;
 
-    fn run(&self, _geometry: &Self::Geometry, _freq: FreqRange) -> yee_core::Result<Self::Output> {
-        Err(yee_core::Error::Unimplemented(
-            "PlanarMoM::run not implemented in phase 0",
-        ))
+    fn run(&self, geometry: &Self::Geometry, freq: FreqRange) -> yee_core::Result<Self::Output> {
+        let basis = basis::RwgBasis::from_mesh(geometry.clone())?;
+        let file = solve::s_parameters_sweep(&basis, 1, freq, 50.0)?;
+        Ok(SParameters::from_touchstone(&file))
     }
 }
 
@@ -138,20 +144,175 @@ mod tests {
     }
 
     #[test]
-    fn run_returns_unimplemented_with_exact_message() {
-        // The Phase 0 contract is that `run` returns the variant
-        // `yee_core::Error::Unimplemented` with this exact static message.
-        let solver = PlanarMoM::default();
-        let mesh = TriMesh::default();
-        let freq = FreqRange::new(1.0e9, 2.0e9, 3).expect("valid FreqRange");
-        let err = solver
-            .run(&mesh, freq)
-            .expect_err("run must return Err in Phase 0");
-        match err {
-            yee_core::Error::Unimplemented(msg) => {
-                assert_eq!(msg, "PlanarMoM::run not implemented in phase 0");
+    fn run_without_port_tags_returns_numerical_error() {
+        use nalgebra::Vector3;
+        use yee_mesh::TriMesh;
+
+        let mesh = TriMesh::new(
+            vec![
+                Vector3::new(0.0, 0.0, 0.0),
+                Vector3::new(0.1, 0.0, 0.0),
+                Vector3::new(0.1, 0.1, 0.0),
+                Vector3::new(0.0, 0.1, 0.0),
+            ],
+            vec![[0u32, 1, 2], [0u32, 2, 3]],
+            vec![0u32, 0u32], // no port tags → port edges empty → port current vanishes
+        )
+        .unwrap();
+        let freq = FreqRange::new(1.0e9, 2.0e9, 2).unwrap();
+        let result = PlanarMoM::default().run(&mesh, freq);
+        match result {
+            Err(yee_core::Error::Numerical(msg)) => {
+                assert!(msg.contains("port current"), "got: {msg}");
             }
-            other => panic!("expected Unimplemented, got: {other:?}"),
+            other => panic!("expected Numerical error, got {other:?}"),
         }
+    }
+}
+
+#[doc(hidden)]
+pub mod __internal {
+    //! Test-helper surface. Not stable API; do not depend on it.
+
+    use crate::fill::impedance_matrix;
+    use crate::greens::FreeSpaceGreen;
+    use crate::solve::delta_gap_rhs;
+    use faer::linalg::solvers::{PartialPivLu, Solve};
+    use num_complex::Complex64;
+    use yee_core::Error;
+    use yee_mesh::TriMesh;
+
+    /// Public re-export of the crate-private RWG basis type so integration
+    /// tests can inspect port edges, lengths, and counts without forcing the
+    /// real `basis` module to be `pub`.
+    pub use crate::basis::RwgBasis;
+
+    /// Test-only constructor for [`RwgBasis`] — wraps the crate-private
+    /// `from_mesh` so integration tests can build a basis without making
+    /// `basis::RwgBasis::from_mesh` itself public.
+    pub fn build_basis(mesh: &TriMesh) -> Result<RwgBasis, Error> {
+        RwgBasis::from_mesh(mesh.clone())
+    }
+
+    /// Build the impedance matrix and return its condition number via
+    /// `cond = sigma_max / sigma_min`. Helper for the condition-number
+    /// regression test; not a public API.
+    ///
+    /// The `_port_tag` argument is reserved for future per-port conditioning
+    /// diagnostics; the matrix itself depends only on the mesh and the
+    /// excitation frequency, so it is intentionally unused today.
+    pub fn condition_number_at_freq(
+        mesh: &TriMesh,
+        _port_tag: u32,
+        freq_hz: f64,
+    ) -> Result<f64, Error> {
+        let basis = RwgBasis::from_mesh(mesh.clone())?;
+        let green = FreeSpaceGreen::new(freq_hz);
+        let z = impedance_matrix(&basis, &green);
+
+        // faer 0.23 ships a `MatRef::singular_values()` shortcut that
+        // computes the SVD and returns the singular values as a plain
+        // `Vec<f64>` (real, nonnegative, descending). This avoids juggling
+        // the lower-level `Svd::new(...).S()` / `DiagRef::column_vector()`
+        // chain — see
+        // https://docs.rs/faer/0.23/faer/struct.MatRef.html#method.singular_values.
+        let s = z
+            .as_ref()
+            .singular_values()
+            .map_err(|e| Error::Numerical(format!("SVD failed: {e:?}")))?;
+
+        let mut max_s: f64 = 0.0;
+        let mut min_s: f64 = f64::INFINITY;
+        for sv in s.iter().copied() {
+            if sv > max_s {
+                max_s = sv;
+            }
+            if sv > 0.0 && sv < min_s {
+                min_s = sv;
+            }
+        }
+        if min_s <= 0.0 || !min_s.is_finite() {
+            return Err(Error::Numerical("Z is singular".into()));
+        }
+        Ok(max_s / min_s)
+    }
+
+    /// Diagnostic helper: solve `Z·i = b` at `freq_hz` and return both
+    /// `Z_in = V_port / I_port` and the relative LU residual
+    /// `||Z·i - b||_2 / ||b||_2`. A clean LU should produce a residual
+    /// well below `1e-10` on this geometry; anything larger indicates the
+    /// solve itself is broken rather than the formulation.
+    ///
+    /// This mirrors `solve::s_parameters_at_freq` but exposes `Z_in`
+    /// directly (instead of `S11`) and the LU residual instead of
+    /// swallowing it. It is intentionally a separate helper rather than a
+    /// public surface change on `solve` because the residual diagnostic
+    /// is not something callers should depend on long term.
+    pub fn z_in_and_residual_at_freq(
+        mesh: &TriMesh,
+        port_tag: u32,
+        freq_hz: f64,
+        _z0_ref: f64,
+    ) -> Result<(Complex64, f64), Error> {
+        let basis = RwgBasis::from_mesh(mesh.clone())?;
+        let green = FreeSpaceGreen::new(freq_hz);
+        let z = impedance_matrix(&basis, &green);
+        let b = delta_gap_rhs(&basis, port_tag);
+
+        let lu = PartialPivLu::new(z.as_ref());
+        let i = lu.solve(b.as_ref());
+
+        // Residual norm: ||Z·i - b||_2 / ||b||_2. faer's Mat does not have a
+        // direct `*` operator producing a Mat (it uses MatRef × MatRef on the
+        // generic level), so we hand-roll the matvec to keep this self-
+        // contained — n is small enough (~1k) that the cost is irrelevant.
+        let n = z.nrows();
+        let mut residual_sq = 0.0_f64;
+        let mut b_norm_sq = 0.0_f64;
+        for m in 0..n {
+            let mut zi_m = Complex64::new(0.0, 0.0);
+            for k in 0..n {
+                zi_m += z[(m, k)] * i[(k, 0)];
+            }
+            let diff = zi_m - b[(m, 0)];
+            residual_sq += diff.norm_sqr();
+            b_norm_sq += b[(m, 0)].norm_sqr();
+        }
+        let rel_residual = (residual_sq / b_norm_sq.max(f64::MIN_POSITIVE)).sqrt();
+
+        let mut i_port = Complex64::new(0.0, 0.0);
+        for k in basis.port_basis_indices(port_tag) {
+            i_port += b[(k, 0)] * i[(k, 0)];
+        }
+        if i_port.norm() < 1e-30 {
+            return Err(Error::Numerical(
+                "port current vanished; check port tagging".into(),
+            ));
+        }
+        let v_port = Complex64::new(1.0, 0.0);
+        let z_in = v_port / i_port;
+        Ok((z_in, rel_residual))
+    }
+
+    /// Diagnostic: return per-port-edge `(length_k, i_k)` pairs at `freq_hz`.
+    /// Used to check whether the RWG +/- orientation around the cylinder
+    /// port ring is consistent (all `i_k` same sign and magnitude on a
+    /// symmetric mesh) or whether some port edges are flipped and partially
+    /// cancelling in the `Σ b_k · i_k` sum.
+    pub fn port_edge_currents(
+        mesh: &TriMesh,
+        port_tag: u32,
+        freq_hz: f64,
+    ) -> Result<Vec<(f64, Complex64)>, Error> {
+        let basis = RwgBasis::from_mesh(mesh.clone())?;
+        let green = FreeSpaceGreen::new(freq_hz);
+        let z = impedance_matrix(&basis, &green);
+        let b = delta_gap_rhs(&basis, port_tag);
+        let lu = PartialPivLu::new(z.as_ref());
+        let i = lu.solve(b.as_ref());
+        Ok(basis
+            .port_basis_indices(port_tag)
+            .map(|k| (basis.edges[k].length, i[(k, 0)]))
+            .collect())
     }
 }

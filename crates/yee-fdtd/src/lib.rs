@@ -118,14 +118,7 @@ impl WalkingSkeletonSolver {
     /// is visible to the next E update through the standard leapfrog timing.
     /// The Gaussian is sampled at the current simulation time (before this
     /// step advances the clock).
-    pub fn step_with_source(
-        &mut self,
-        i: usize,
-        j: usize,
-        k: usize,
-        t0: f64,
-        sigma: f64,
-    ) {
+    pub fn step_with_source(&mut self, i: usize, j: usize, k: usize, t0: f64, sigma: f64) {
         let t = self.current_time();
         update::update_h(&mut self.grid);
         boundary::apply_pec(&mut self.grid);
