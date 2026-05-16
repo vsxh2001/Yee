@@ -1,0 +1,19 @@
+[package]
+name         = "yee-plotters"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "Static PNG/SVG export of S-parameter plots (dB, phase, Smith chart) via plotters."
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+num-complex = { workspace = true }
+plotters    = { workspace = true }
+thiserror   = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

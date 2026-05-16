@@ -9,6 +9,7 @@ members = [
     "crates/yee-io",
     "crates/yee-cli",
     "crates/yee-gui",
+    "crates/yee-plotters",
     "crates/yee-py",
     "examples/half-wave-dipole",
     "examples/microstrip-line",
