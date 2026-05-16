@@ -8,11 +8,13 @@
 use pyo3::prelude::*;
 
 mod errors;
+mod freq;
 mod trimesh;
 
 #[pymodule]
 fn _yee(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_class::<trimesh::PyTriMesh>()?;
+    m.add_class::<freq::PyFreqRange>()?;
     Ok(())
 }
