@@ -1,0 +1,10 @@
+! 2-port synthetic Touchstone v1.1 fixture
+! Ideal 50-ohm matched 6 dB attenuator referenced to Z0 = 50 ohm.
+! S11 = S22 = 0, S21 = S12 = 10^(-6/20) = 0.5011872336272722.
+! Lossy but reciprocal and passive; sigma_max(S) ~ 0.5012 < 1.
+! On-disk per-frequency column order is f S11 S21 S12 S22 (Touchstone v1 quirk).
+# GHz S RI R 50
+1.0 0.0 0.0 0.5011872336272722 0.0 0.5011872336272722 0.0 0.0 0.0
+2.0 0.0 0.0 0.5011872336272722 0.0 0.5011872336272722 0.0 0.0 0.0
+5.0 0.0 0.0 0.5011872336272722 0.0 0.5011872336272722 0.0 0.0 0.0
+10.0 0.0 0.0 0.5011872336272722 0.0 0.5011872336272722 0.0 0.0 0.0

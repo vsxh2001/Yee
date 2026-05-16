@@ -1,0 +1,8 @@
+! 1-port synthetic Touchstone v1.1 fixture
+! Pure resistive 75-ohm load referenced to Z0 = 50 ohm.
+! S11 = (75-50)/(75+50) = 0.2 at every frequency.
+# GHz S RI R 50
+1.0 0.2 0.0
+2.0 0.2 0.0
+5.0 0.2 0.0
+10.0 0.2 0.0

@@ -1,0 +1,4 @@
+! 2-port NON-PASSIVE fixture: every S-parameter is 2 + 0j.
+! Used to verify the passivity rejection path. sigma_max(S) >> 1 here.
+# GHz S RI R 50
+1.0 2.0 0.0 2.0 0.0 2.0 0.0 2.0 0.0
