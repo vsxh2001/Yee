@@ -89,6 +89,56 @@ fn mesh_without_gmsh_feature_exits_2() {
     );
 }
 
+/// `yee export --format hdf5` exits with code 2 and mentions hdf5.
+#[test]
+fn export_hdf5_exits_2() {
+    Command::cargo_bin("yee")
+        .unwrap()
+        .args([
+            "export",
+            "/tmp/in.s1p",
+            "--format",
+            "hdf5",
+            "/tmp/out.h5",
+        ])
+        .assert()
+        .failure()
+        .code(2)
+        .stdout(contains("hdf5"));
+}
+
+/// `yee export --format touchstone` reads a real Touchstone file and writes a new one.
+#[test]
+fn export_touchstone_roundtrip() {
+    let dir = tempdir();
+    let input = dir.join("in.s1p");
+    let output = dir.join("out.s1p");
+    std::fs::write(
+        &input,
+        "! example one-port\n# GHz S RI R 50\n1.0 0.5 -0.25\n2.0 0.4 -0.20\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("yee")
+        .unwrap()
+        .args([
+            "export",
+            input.to_str().unwrap(),
+            "--format",
+            "touchstone",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let written = std::fs::read_to_string(&output).unwrap();
+    assert!(
+        written.contains("# GHz S RI"),
+        "expected option line in output, got: {written}"
+    );
+    assert!(written.contains("0.5"), "expected data, got: {written}");
+}
+
 /// Unknown subcommand exits non-zero with a clap error/suggestion.
 #[test]
 fn unknown_subcommand_suggests() {
@@ -104,4 +154,15 @@ fn unknown_subcommand_suggests() {
         stderr.contains("unrecognized") || stderr.contains("similar") || stderr.contains("error"),
         "expected an error/suggestion from clap, got: {stderr}"
     );
+}
+
+/// Helper: create a unique temp directory under `std::env::temp_dir()`.
+fn tempdir() -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let pid = std::process::id();
+    let path = std::env::temp_dir().join(format!("yee-cli-test-{pid}-{n}"));
+    std::fs::create_dir_all(&path).unwrap();
+    path
 }

@@ -7,10 +7,11 @@
 //! - `yee validate <mom|fdtd|all>` — prints planned validation cases.
 //! - `yee mesh <path>` — constructs a `yee_mesh::Session`. Without the
 //!   `gmsh` feature this exits with code 2 and a guidance message.
-//! - `yee export <input> --format <touchstone|hdf5> <output>` — Phase 0
-//!   stub (wired in a later commit).
+//! - `yee export <input> --format <touchstone|hdf5> <output>` — reads/writes
+//!   Touchstone via `yee-io`. `hdf5` is not yet enabled and exits with code 2.
 //! - `yee run <project>` — Phase 0 stub from the scaffold.
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::Result;
@@ -38,21 +39,31 @@ enum Command {
     /// Mesh a geometry file via Gmsh.
     Mesh {
         /// Input geometry path (.step / .iges / .kicad_pcb).
-        input: std::path::PathBuf,
+        input: PathBuf,
     },
     /// Run a simulation defined by a project file (Phase 0 stub).
     Run {
         /// Path to the project TOML.
-        project: std::path::PathBuf,
+        project: PathBuf,
     },
     /// Export results to Touchstone or HDF5.
     Export {
-        /// Path to the run results.
-        results: std::path::PathBuf,
-        /// Output format: `touchstone` or `hdf5`.
-        #[arg(long, default_value = "touchstone")]
-        format: String,
+        /// Path to the input results file (e.g. a Touchstone `.s*p` file).
+        input: PathBuf,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = ExportFormat::Touchstone)]
+        format: ExportFormat,
+        /// Output file path.
+        output: PathBuf,
     },
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum ExportFormat {
+    /// Touchstone v1.1 (.s1p/.s2p/.s3p/.s4p).
+    Touchstone,
+    /// HDF5 (not yet enabled).
+    Hdf5,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -89,12 +100,30 @@ fn run(cli: Cli) -> Result<ExitCode> {
             println!("yee run {} — Phase 0 stub.", project.display());
             Ok(ExitCode::SUCCESS)
         }
-        Command::Export { results, format } => {
-            println!(
-                "yee export {} --format {format} — Phase 0 stub.",
-                results.display()
-            );
+        Command::Export {
+            input,
+            format,
+            output,
+        } => run_export(&input, format, &output),
+    }
+}
+
+fn run_export(
+    input: &std::path::Path,
+    format: ExportFormat,
+    output: &std::path::Path,
+) -> Result<ExitCode> {
+    match format {
+        ExportFormat::Touchstone => {
+            let file = yee_io::touchstone::read(input)
+                .map_err(|e| anyhow::anyhow!("failed to read Touchstone file: {e}"))?;
+            yee_io::touchstone::write(output, &file)
+                .map_err(|e| anyhow::anyhow!("failed to write Touchstone file: {e}"))?;
             Ok(ExitCode::SUCCESS)
+        }
+        ExportFormat::Hdf5 => {
+            println!("hdf5 not yet enabled");
+            Ok(ExitCode::from(2))
         }
     }
 }
