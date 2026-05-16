@@ -13,6 +13,10 @@
 
 use nalgebra::Vector3;
 
+mod session;
+
+pub use session::Session;
+
 /// Meshing errors.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -42,6 +46,33 @@ pub struct TriMesh {
 }
 
 impl TriMesh {
+    /// Build a `TriMesh` after validating its invariants.
+    ///
+    /// Currently the only invariant enforced is that there is exactly one
+    /// tag per triangle. Returns [`Error::Invalid`] with a descriptive
+    /// message when `triangles.len() != tags.len()`.
+    ///
+    /// Phase 1 will additionally validate that each triangle index is
+    /// `< vertices.len()`.
+    pub fn new(
+        vertices: Vec<Vector3<f64>>,
+        triangles: Vec<[u32; 3]>,
+        tags: Vec<u32>,
+    ) -> Result<Self> {
+        if triangles.len() != tags.len() {
+            return Err(Error::Invalid(format!(
+                "triangles ({}) and tags ({}) must have equal length",
+                triangles.len(),
+                tags.len()
+            )));
+        }
+        Ok(Self {
+            vertices,
+            triangles,
+            tags,
+        })
+    }
+
     /// Number of triangles.
     pub fn n_tris(&self) -> usize {
         self.triangles.len()
