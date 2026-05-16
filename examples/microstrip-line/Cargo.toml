@@ -1,0 +1,19 @@
+[package]
+name         = "example-microstrip-line"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+publish      = false
+
+[[bin]]
+name = "microstrip-line"
+path = "src/main.rs"
+
+[dependencies]
+yee-core = { workspace = true }
+yee-mesh = { workspace = true }
+yee-io   = { workspace = true }
+anyhow   = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
