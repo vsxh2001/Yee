@@ -179,6 +179,39 @@ training-data log marginal likelihood for model comparison.
 
 ---
 
+## FDTD driver
+
+`yee.FdtdDriver` wraps the end-to-end FDTD walking-skeleton driver from
+`yee-fdtd`: it builds a vacuum [`YeeGrid`](https://docs.rs/yee-fdtd), wires
+CPML on every face, drives a short z-directed dipole at a sinusoid + Hann
+ramp, and returns the far-field θ-cut at `φ = 0`, sampled in 5° steps and
+normalized so the peak equals `1.0`. The expected analytic pattern for a
+short z-dipole is `|E_θ| ∝ sin θ`.
+
+```python
+import numpy as np
+import yee
+
+cfg = yee.FdtdDriverConfig(
+    n_steps=800,
+    dipole_center_cells=(30, 30, 30),
+    dipole_length_cells=5,
+    source_freq_hz=1.0e9,
+)                                  # ntff_surface_pad_cells=4, cpml_thickness_cells=10 by default
+driver = yee.FdtdDriver(60, 60, 60, 5.0e-3, cfg)
+pattern = driver.run()             # ~5 s on release build, releases the GIL
+theta = np.asarray(pattern.theta_deg)         # float64[37], 0..180 in 5° steps
+e_theta = np.asarray(pattern.e_theta_phi0)    # float64[37], normalized to peak = 1
+```
+
+A single `FdtdDriver` may be `.run()` more than once: each call builds a
+fresh underlying Rust driver and returns an independent
+`FdtdRadiationPattern`. The Rust `run` consumes its driver internally, but
+the Python wrapper holds only the cheap-to-copy configuration plus grid
+parameters.
+
+---
+
 ## Public API at a glance
 
 | Symbol | Description |
@@ -188,6 +221,9 @@ training-data log marginal likelihood for model comparison.
 | `yee.PlanarMoM().run(mesh, freq)` | Solve planar MoM; returns `SParameters`. Currently raises `RuntimeError("unimplemented: ...")` until Phase 1.0 physics land. |
 | `yee.SParameters` | Container: `.n_ports` (int), `.freq_hz` (`float64[F]`), `.data` (`complex128[F, N, N]`), `.write_touchstone(path, z0)`. |
 | `yee.GaussianProcess.fit(x, y, length_scale, sigma_f, sigma_n)` | Fit a scalar RBF-kernel GP with explicit hyperparameters; `.fit_ml(x, y, …)` instead maximizes the log marginal likelihood. |
+| `yee.FdtdDriverConfig(n_steps, dipole_center_cells, dipole_length_cells, source_freq_hz, …)` | FDTD driver configuration: time steps, dipole geometry, source frequency, CPML/NTFF padding. |
+| `yee.FdtdDriver(nx, ny, nz, dx, cfg).run()` | Build a vacuum-grid driver, run the FDTD time loop with CPML + a short z-dipole, return an `FdtdRadiationPattern`. |
+| `yee.FdtdRadiationPattern` | `.theta_deg` (`float64[37]`, 0..180 in 5° steps) and `.e_theta_phi0` (`float64[37]`, normalized to peak = 1). |
 | `yee.touchstone.read(path)` | Read a Touchstone v1.1 file; returns a dict with keys `z0`, `freq_unit`, `format`, `n_ports`, `freq_hz`, `data`, `comments`. |
 | `yee.touchstone.write(path, file_dict)` | Write a Touchstone v1.1 file from the same dict schema. |
 
