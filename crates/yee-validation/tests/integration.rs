@@ -46,3 +46,39 @@ fn mom_001_emits_plot_artifacts() {
         );
     }
 }
+
+/// mom-002: assert the microstrip case lands in
+/// [`yee_validation::Status::Passed`] when the aggregator runs all
+/// cases. Ignored because the aggregator pulls in mom-001 (~8 min)
+/// even though mom-002 itself is quick (~tens of seconds at the
+/// 30x2 strip mesh).
+#[test]
+#[ignore = "slow: aggregator invokes mom-001 (~8 min) + mom-002 (~30s)"]
+fn mom_002_passes_with_loose_tolerance() {
+    let report = yee_validation::Report::run_all();
+    let mom_002 = report
+        .cases
+        .iter()
+        .find(|c| c.id == "mom-002")
+        .expect("mom-002 case present");
+    assert!(
+        matches!(mom_002.status, yee_validation::Status::Passed),
+        "mom-002 failed in aggregator: {}",
+        mom_002.notes
+    );
+    assert!(
+        !mom_002.plot_paths.is_empty(),
+        "mom-002 should emit plot artifacts: {}",
+        mom_002.notes
+    );
+    for p in &mom_002.plot_paths {
+        assert!(p.exists(), "plot path missing: {}", p.display());
+        let size = std::fs::metadata(p).unwrap().len();
+        assert!(
+            size > 1024,
+            "plot {} too small ({} bytes)",
+            p.display(),
+            size
+        );
+    }
+}
