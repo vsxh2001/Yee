@@ -9,6 +9,9 @@ members = [
     "crates/yee-io",
     "crates/yee-cli",
     "crates/yee-py",
+    "examples/half-wave-dipole",
+    "examples/microstrip-line",
+    "examples/patch-2g4",
 ]
 
 [workspace.package]
