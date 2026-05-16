@@ -24,6 +24,8 @@ yee-mom     = { workspace = true }
 yee-fdtd    = { workspace = true }
 yee-cuda    = { workspace = true }
 yee-io      = { workspace = true }
+yee-plotters = { workspace = true }
+num-complex = { workspace = true }
 clap        = { workspace = true }
 clap_complete = "4"
 anyhow      = { workspace = true }
