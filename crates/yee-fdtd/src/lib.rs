@@ -40,6 +40,7 @@
 pub mod boundary;
 pub mod cpml;
 pub mod dispersive;
+pub mod driver;
 pub mod grid;
 pub mod material;
 pub mod ntff;
@@ -48,6 +49,7 @@ pub mod update;
 
 pub use cpml::{CpmlParams, CpmlState};
 pub use dispersive::DispersiveState;
+pub use driver::{FdtdDriver, FdtdDriverConfig, RadiationPattern};
 pub use grid::YeeGrid;
 pub use material::{Material, MaterialMap};
 pub use ntff::{NtffParams, NtffState};
