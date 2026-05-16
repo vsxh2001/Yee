@@ -14,8 +14,8 @@
 //!    c. Combine `P ∪ Q` → `R` of size `2N`.
 //!    d. Fast non-dominated sort `R` into fronts `F1, F2, …`.
 //!    e. Build new `P` from fronts in order; when adding the next front would
-//!       exceed `N`, partial-select from the boundary front by descending
-//!       crowding distance.
+//!    exceed `N`, partial-select from the boundary front by descending
+//!    crowding distance.
 //! 4. Return final `P` plus the indices of `F1`.
 //!
 //! Reference: Deb, Pratap, Agarwal, Meyarivan, "A fast and elitist
@@ -136,15 +136,16 @@ pub(crate) fn fast_non_dominated_sort(objectives: &[DVector<f64>]) -> Vec<Vec<us
     while !current.is_empty() {
         let mut next: Vec<usize> = Vec::new();
         for &i in &current {
-            // Iterate by index to avoid a simultaneous mutable + immutable
-            // borrow of `dominated`.
-            for k in 0..dominated[i].len() {
-                let j = dominated[i][k];
+            // Take the dominated list out so we can index into it without a
+            // simultaneous immutable borrow of `dominated`.
+            let dom_i = std::mem::take(&mut dominated[i]);
+            for &j in &dom_i {
                 domination_count[j] -= 1;
                 if domination_count[j] == 0 {
                     next.push(j);
                 }
             }
+            dominated[i] = dom_i;
         }
         fronts.push(current);
         current = next;
@@ -170,12 +171,11 @@ pub(crate) fn crowding_distance(front: &[usize], objectives: &[DVector<f64>]) ->
         return dist;
     }
     if len <= 2 {
-        for d in &mut dist {
-            *d = f64::INFINITY;
-        }
+        dist.fill(f64::INFINITY);
         return dist;
     }
     let m = objectives[front[0]].len();
+    #[allow(clippy::needless_range_loop)]
     for k in 0..m {
         // Indices into `front` sorted by objective k.
         let mut order: Vec<usize> = (0..len).collect();
@@ -341,10 +341,46 @@ pub(crate) fn polynomial_mutation(
     }
 }
 
-/// Stub entry point. The full NSGA-II pipeline lands in follow-up commits;
-/// for now this only validates the inputs so the public API compiles.
+/// Compute `rank[i]` (front index) and `crowding[i]` (crowding distance
+/// within its front) for every individual, given the fronts from
+/// [`fast_non_dominated_sort`] and the per-individual objective vectors.
+fn rank_and_crowding(
+    fronts: &[Vec<usize>],
+    objectives: &[DVector<f64>],
+    n: usize,
+) -> (Vec<usize>, Vec<f64>) {
+    let mut rank = vec![0_usize; n];
+    let mut crowding = vec![0.0_f64; n];
+    for (r, front) in fronts.iter().enumerate() {
+        let cd = crowding_distance(front, objectives);
+        for (k, &idx) in front.iter().enumerate() {
+            rank[idx] = r;
+            crowding[idx] = cd[k];
+        }
+    }
+    (rank, crowding)
+}
+
+/// Minimize an `m`-objective function over a hyper-rectangle with NSGA-II.
+///
+/// The `objectives` closure must return a `Vec<f64>` of length `n_objectives`
+/// for every input. `bounds` is a `(lo, hi)` pair per dimension. The
+/// initial population is a Latin-hypercube design over the bounds.
+///
+/// Per generation: binary tournament selection on `(rank, crowding)`
+/// produces parent pairs, SBX crossover + polynomial mutation produces `N`
+/// offspring `Q`, the combined `P ∪ Q` is fast-non-dominated-sorted, and the
+/// new `P` is filled front-by-front with a crowding-distance partial-select
+/// on the last front that won't fit whole.
+///
+/// Returns the final population, its objective vectors, and the indices of
+/// the Pareto-optimal subset (front 0).
+///
+/// Panics if `bounds` is empty, any `(lo, hi)` has `hi <= lo`,
+/// `n_objectives < 1`, `cfg.population_size < 2`, or the objective function
+/// returns a vector of the wrong length.
 pub fn minimize<F>(
-    _objectives: F,
+    objectives: F,
     bounds: Vec<(f64, f64)>,
     n_objectives: usize,
     cfg: Nsga2Config,
@@ -353,18 +389,126 @@ where
     F: Fn(&DVector<f64>) -> Vec<f64>,
 {
     assert!(!bounds.is_empty(), "nsga2: bounds must be non-empty");
-    assert!(n_objectives >= 1, "nsga2: n_objectives must be ≥ 1");
-    assert!(
-        cfg.population_size >= 2,
-        "nsga2: population_size must be ≥ 2"
-    );
-    // Touch the RNG so `Xorshift64` is exercised in tree from this module.
-    let _ = Xorshift64::new(cfg.seed);
-    Nsga2Result {
-        population: Vec::new(),
-        objectives: Vec::new(),
-        pareto_front_indices: Vec::new(),
+    for (i, (lo, hi)) in bounds.iter().enumerate() {
+        assert!(hi > lo, "nsga2: bounds[{i}] has hi ({hi}) <= lo ({lo})");
     }
+    assert!(n_objectives >= 1, "nsga2: n_objectives must be ≥ 1");
+    let n = cfg.population_size;
+    assert!(n >= 2, "nsga2: population_size must be ≥ 2 (got {n})");
+
+    let mut rng = Xorshift64::new(cfg.seed);
+
+    // ----- Initial Latin-hypercube population P, evaluated. -----
+    let mut population = crate::bo::latin_hypercube(n, &bounds, &mut rng);
+    let mut objs: Vec<DVector<f64>> = population
+        .iter()
+        .map(|x| evaluate(&objectives, x, n_objectives))
+        .collect();
+
+    // Initial ranks and crowding distances for tournament selection.
+    let (mut rank, mut crowding) = {
+        let fronts = fast_non_dominated_sort(&objs);
+        rank_and_crowding(&fronts, &objs, n)
+    };
+
+    for _gen in 0..cfg.n_generations {
+        // ----- Generate N offspring Q via tournament + SBX + mutation. -----
+        let mut offspring: Vec<DVector<f64>> = Vec::with_capacity(n);
+        while offspring.len() < n {
+            let p1 = tournament_select(&rank, &crowding, &mut rng);
+            let p2 = tournament_select(&rank, &crowding, &mut rng);
+            let (mut c1, mut c2) =
+                sbx_crossover(&population[p1], &population[p2], &bounds, cfg.crossover_eta, &mut rng);
+            polynomial_mutation(&mut c1, &bounds, cfg.mutation_eta, cfg.mutation_probability, &mut rng);
+            polynomial_mutation(&mut c2, &bounds, cfg.mutation_eta, cfg.mutation_probability, &mut rng);
+            offspring.push(c1);
+            if offspring.len() < n {
+                offspring.push(c2);
+            }
+        }
+        let off_objs: Vec<DVector<f64>> = offspring
+            .iter()
+            .map(|x| evaluate(&objectives, x, n_objectives))
+            .collect();
+
+        // ----- Combine P ∪ Q → R, sort fronts, fill new P. -----
+        let mut combined_pop: Vec<DVector<f64>> = Vec::with_capacity(2 * n);
+        let mut combined_objs: Vec<DVector<f64>> = Vec::with_capacity(2 * n);
+        combined_pop.append(&mut population);
+        combined_objs.append(&mut objs);
+        combined_pop.extend(offspring);
+        combined_objs.extend(off_objs);
+
+        let fronts = fast_non_dominated_sort(&combined_objs);
+
+        let mut new_pop: Vec<DVector<f64>> = Vec::with_capacity(n);
+        let mut new_objs: Vec<DVector<f64>> = Vec::with_capacity(n);
+        for front in &fronts {
+            if new_pop.len() + front.len() <= n {
+                for &idx in front {
+                    new_pop.push(combined_pop[idx].clone());
+                    new_objs.push(combined_objs[idx].clone());
+                }
+                if new_pop.len() == n {
+                    break;
+                }
+            } else {
+                // Partial-fill: take the front's largest crowding distances.
+                let cd = crowding_distance(front, &combined_objs);
+                let mut order: Vec<usize> = (0..front.len()).collect();
+                order.sort_by(|&a, &b| {
+                    cd[b].partial_cmp(&cd[a]).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let need = n - new_pop.len();
+                for &k in order.iter().take(need) {
+                    let idx = front[k];
+                    new_pop.push(combined_pop[idx].clone());
+                    new_objs.push(combined_objs[idx].clone());
+                }
+                break;
+            }
+        }
+
+        population = new_pop;
+        objs = new_objs;
+
+        // Refresh ranks and crowding for the next generation's selection.
+        let new_fronts = fast_non_dominated_sort(&objs);
+        let (r, c) = rank_and_crowding(&new_fronts, &objs, n);
+        rank = r;
+        crowding = c;
+    }
+
+    // ----- Identify the final Pareto front for the result. -----
+    let fronts = fast_non_dominated_sort(&objs);
+    let pareto_front_indices = if fronts.is_empty() {
+        Vec::new()
+    } else {
+        fronts[0].clone()
+    };
+
+    Nsga2Result {
+        population,
+        objectives: objs,
+        pareto_front_indices,
+    }
+}
+
+/// Evaluate a closure and convert its `Vec<f64>` return into a [`DVector`],
+/// asserting the length matches `n_objectives`.
+fn evaluate<F>(f: &F, x: &DVector<f64>, n_objectives: usize) -> DVector<f64>
+where
+    F: Fn(&DVector<f64>) -> Vec<f64>,
+{
+    let v = f(x);
+    assert_eq!(
+        v.len(),
+        n_objectives,
+        "nsga2: objective returned {} values, expected {}",
+        v.len(),
+        n_objectives
+    );
+    DVector::from_vec(v)
 }
 
 #[cfg(test)]
