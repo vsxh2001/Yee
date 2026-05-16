@@ -17,6 +17,10 @@
 //!   is picked from the output file extension).
 //! - `yee completions <shell>` — emits a shell completion script to stdout
 //!   (`bash`, `zsh`, `fish`).
+//! - `yee bench <target> [-- <criterion-args>]` — shells out to
+//!   `cargo bench -p yee-bench` for the chosen benchmark binary (or all of
+//!   them with `all`). Stdout/stderr are inherited so criterion's live
+//!   progress output is preserved.
 //! - `yee run <project>` — Phase 0 stub from the scaffold.
 
 use std::io;
@@ -115,6 +119,41 @@ enum Command {
         /// Target shell (`bash`, `zsh`, `fish`, ...).
         shell: Shell,
     },
+    /// Run a yee-bench criterion benchmark.
+    ///
+    /// Shells out to `cargo bench -p yee-bench [--bench <name>]` and
+    /// inherits stdout/stderr so criterion's progress and statistics
+    /// display live. Extra arguments after `--` are forwarded as
+    /// criterion CLI flags (e.g. `yee bench bo -- --warm-up-time 1`).
+    Bench {
+        /// Which bench to run.
+        #[arg(value_enum)]
+        target: BenchTarget,
+        /// Pass through extra `--bench` args to cargo (e.g. `--baseline=foo`).
+        #[arg(last = true)]
+        extra: Vec<String>,
+    },
+}
+
+/// Which `yee-bench` criterion target to invoke.
+///
+/// Each variant maps to a `[[bench]]` entry in `crates/yee-bench/Cargo.toml`;
+/// see [`run_bench`] for the variant → `--bench <name>` translation.
+/// `All` runs every bench by omitting the `--bench` flag entirely.
+#[derive(ValueEnum, Clone, Debug)]
+enum BenchTarget {
+    /// MoM solve on dipole 8×8 single freq.
+    Mom,
+    /// FDTD step on 50³ vacuum grid.
+    Fdtd,
+    /// GMRES vs direct LU at 128×128.
+    Gmres,
+    /// Gaussian-process fit + fit_ml.
+    Gp,
+    /// Full Bayesian-optimization run.
+    Bo,
+    /// Run all yee-bench benches.
+    All,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -194,6 +233,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let bin_name = cmd.get_name().to_string();
             generate(shell, &mut cmd, bin_name, &mut io::stdout());
             Ok(ExitCode::SUCCESS)
+        }
+        Command::Bench { .. } => {
+            // Handler wired in the next commit.
+            unimplemented!("yee bench handler arrives in run_bench (next commit)")
         }
     }
 }
