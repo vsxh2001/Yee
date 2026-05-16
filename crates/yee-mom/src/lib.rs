@@ -33,6 +33,18 @@ pub enum Error {
 /// MoM-layer result alias.
 pub type Result<T> = core::result::Result<T, Error>;
 
+/// Boundary mapping: any failure surfaced by `yee_io` while writing a
+/// Touchstone file is rendered into `yee_core::Error::Io` so callers higher
+/// in the stack (the CLI, solver drivers, etc.) only need to match a single
+/// crate-wide error surface. The full `yee_io::Error` message text — line
+/// and column hints included — is preserved verbatim inside the wrapped
+/// string. The `yee-mom` crate's local [`Error`] is intentionally *not*
+/// used here because the entry point ([`SParameters::write_touchstone`])
+/// returns `yee_core::Result`, matching the [`yee_core::Solver`] convention.
+fn io_to_core(e: yee_io::Error) -> yee_core::Error {
+    yee_core::Error::Io(e.to_string())
+}
+
 /// Multi-port S-parameter container — Phase 0 placeholder.
 #[derive(Debug, Clone)]
 pub struct SParameters {
@@ -42,6 +54,60 @@ pub struct SParameters {
     pub data: Vec<Vec<Complex64>>,
     /// Number of ports (n).
     pub n_ports: usize,
+}
+
+impl SParameters {
+    /// Build an [`SParameters`] from a parsed [`yee_io::touchstone::File`].
+    ///
+    /// `yee_io` already canonicalises frequencies to Hz and reorders the
+    /// S-matrix into mathematical row-major (including the n = 2 off-diagonal
+    /// swap), so this is a structural copy — no numeric transformation.
+    pub fn from_touchstone(file: &yee_io::touchstone::File) -> Self {
+        Self {
+            freq_hz: file.freq_hz.clone(),
+            data: file.data.clone(),
+            n_ports: file.n_ports,
+        }
+    }
+
+    /// Build a [`yee_io::touchstone::File`] from `self`, tagging it with the
+    /// supplied reference impedance, on-disk numeric format, and frequency
+    /// unit. Comments are intentionally left empty — this constructor exists
+    /// for the simulation → file path where there is no source commentary
+    /// to preserve. Callers that need to attach commentary should build the
+    /// [`yee_io::touchstone::File`] manually after calling this.
+    pub fn to_touchstone(
+        &self,
+        z0: f64,
+        format: yee_io::touchstone::Format,
+        freq_unit: yee_io::touchstone::FreqUnit,
+    ) -> yee_io::touchstone::File {
+        yee_io::touchstone::File {
+            n_ports: self.n_ports,
+            z0,
+            freq_unit,
+            format,
+            freq_hz: self.freq_hz.clone(),
+            data: self.data.clone(),
+            comments: Vec::new(),
+        }
+    }
+
+    /// Write `self` to `path` as a Touchstone v1.1 file.
+    ///
+    /// Defaults: `Format::RealImag` numeric encoding, `FreqUnit::Hz` for
+    /// frequencies (matches the canonical SI representation already stored
+    /// in [`SParameters::freq_hz`]). Errors from `yee_io` are mapped to
+    /// [`yee_core::Error::Io`] via the boundary helper documented at module
+    /// level.
+    pub fn write_touchstone(&self, path: &std::path::Path, z0: f64) -> yee_core::Result<()> {
+        let file = self.to_touchstone(
+            z0,
+            yee_io::touchstone::Format::RealImag,
+            yee_io::touchstone::FreqUnit::Hz,
+        );
+        yee_io::touchstone::write(path, &file).map_err(io_to_core)
+    }
 }
 
 /// The planar MoM solver. Phase 0: empty shell.
