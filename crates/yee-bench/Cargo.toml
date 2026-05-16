@@ -46,3 +46,7 @@ harness = false
 [[bench]]
 name = "plane_wave_step"
 harness = false
+
+[[bench]]
+name = "lumped_resistor"
+harness = false
