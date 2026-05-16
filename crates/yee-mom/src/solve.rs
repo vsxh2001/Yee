@@ -6,6 +6,7 @@
 use crate::basis::RwgBasis;
 use crate::fill::impedance_matrix;
 use crate::greens::FreeSpaceGreen;
+use crate::ports::{DeltaGapPort, Port};
 use faer::Mat;
 use faer::linalg::solvers::{PartialPivLu, Solve};
 use num_complex::Complex64;
@@ -15,17 +16,18 @@ use yee_io::touchstone::{File as TouchstoneFile, Format, FreqUnit};
 /// Build a 1 V delta-gap RHS across every edge tagged with `port_tag`.
 /// `b[k] = V × length_k` for port edges, zero elsewhere.
 ///
-/// The delta-gap source model treats a port edge as carrying a 1 V impulse
-/// across its gap; the Galerkin testing of that impulse against the RWG
-/// basis on the same edge yields `length_k` (with V = 1) — exactly the
-/// classical RWG port loading. All non-port basis indices remain zero.
+/// Thin compatibility wrapper around [`DeltaGapPort`] with `voltage = 1 + 0i`.
+/// Retained so existing internal/test call sites that pre-date the Phase 1.3
+/// [`Port`] trait keep compiling against a stable signature.
 pub(crate) fn delta_gap_rhs(basis: &RwgBasis, port_tag: u32) -> Mat<Complex64> {
-    let n = basis.n_basis();
-    let mut b = Mat::<Complex64>::zeros(n, 1);
-    for k in basis.port_basis_indices(port_tag) {
-        b[(k, 0)] = Complex64::new(basis.edges[k].length, 0.0);
-    }
-    b
+    let port = DeltaGapPort {
+        tag: port_tag,
+        voltage: Complex64::new(1.0, 0.0),
+    };
+    // Free-space delta-gap RHS is frequency-independent; the `freq_hz`
+    // argument exists only for ports whose RHS depends on it (wave ports
+    // in Phase 1.3.1+). Passing 0.0 here is safe.
+    port.rhs(basis, 0.0)
 }
 
 /// Solve at a single frequency and return S11 referenced to `z0_ref`.
@@ -33,25 +35,26 @@ pub(crate) fn delta_gap_rhs(basis: &RwgBasis, port_tag: u32) -> Mat<Complex64> {
 /// Pipeline:
 /// 1. Build the free-space Green's function at `freq_hz`.
 /// 2. Assemble the MPIE impedance matrix `Z` over the RWG basis.
-/// 3. Build the delta-gap RHS `b` for `port_tag`.
+/// 3. Build the RHS `b = port.rhs(basis, freq_hz)`.
 /// 4. Factorise `Z = L U` (partial pivoting) and solve `Z i = b`.
-/// 5. Recover the port current as the basis-weighted sum
-///    `I_port = Σ_k b_k · i_k` over port edges. This is the Galerkin
-///    projection of the testing-weighted current back onto the port,
-///    and matches the inner product that defines `b`.
-/// 6. Return `S11 = (Z_in − Z0) / (Z_in + Z0)` with `Z_in = 1 V / I_port`.
+/// 5. Recover the port current as `port.port_current(basis, i)`. For a
+///    delta-gap or uniform-mode wave port this is the Galerkin projection
+///    `Σ_k length_k · i_k` over port edges, matching the inner product
+///    that defines `b`.
+/// 6. Return `S11 = (Z_in − Z0) / (Z_in + Z0)` with `Z_in = V / I_port` and
+///    `V = port.port_voltage()`.
 ///
 /// Returns [`Error::Numerical`] if `|I_port|` drops below `1e-30`, which
 /// indicates a pathological port tagging (no real current driven).
 pub(crate) fn s_parameters_at_freq(
     basis: &RwgBasis,
-    port_tag: u32,
+    port: &dyn Port,
     freq_hz: f64,
     z0_ref: f64,
 ) -> Result<Complex64, Error> {
     let green = FreeSpaceGreen::new(freq_hz);
     let z = impedance_matrix(basis, &green);
-    let b = delta_gap_rhs(basis, port_tag);
+    let b = port.rhs(basis, freq_hz);
 
     // Partial-pivot LU is the canonical dense solver for the (non-Hermitian
     // but symmetric) MPIE impedance matrix; full pivoting is overkill and
@@ -59,13 +62,7 @@ pub(crate) fn s_parameters_at_freq(
     let lu = PartialPivLu::new(z.as_ref());
     let i = lu.solve(b.as_ref());
 
-    // Basis-weighted port current: Σ_k b_k · i_k over port edges. Because
-    // `b_k = length_k` (real) on port edges, this is the standard RWG port
-    // current. We do not sum over non-port edges because `b_k = 0` there.
-    let mut i_port = Complex64::new(0.0, 0.0);
-    for k in basis.port_basis_indices(port_tag) {
-        i_port += b[(k, 0)] * i[(k, 0)];
-    }
+    let i_port = port.port_current(basis, &i);
 
     if i_port.norm() < 1e-30 {
         return Err(Error::Numerical(
@@ -73,7 +70,7 @@ pub(crate) fn s_parameters_at_freq(
         ));
     }
 
-    let v_port = Complex64::new(1.0, 0.0);
+    let v_port = port.port_voltage();
     let z_in = v_port / i_port;
     let z0 = Complex64::new(z0_ref, 0.0);
     Ok((z_in - z0) / (z_in + z0))
@@ -88,14 +85,14 @@ pub(crate) fn s_parameters_at_freq(
 /// further massaging.
 pub(crate) fn s_parameters_sweep(
     basis: &RwgBasis,
-    port_tag: u32,
+    port: &dyn Port,
     freq_range: FreqRange,
     z0_ref: f64,
 ) -> Result<TouchstoneFile, Error> {
     let mut freq_hz = Vec::new();
     let mut data: Vec<Vec<Complex64>> = Vec::new();
     for f in freq_range.iter() {
-        let s11 = s_parameters_at_freq(basis, port_tag, f, z0_ref)?;
+        let s11 = s_parameters_at_freq(basis, port, f, z0_ref)?;
         freq_hz.push(f);
         data.push(vec![s11]);
     }
@@ -149,7 +146,11 @@ mod tests {
     fn sweep_produces_n_points_rows() {
         let basis = RwgBasis::from_mesh(two_tri_mesh_with_port()).unwrap();
         let freq = FreqRange::new(1.0e9, 1.5e9, 3).unwrap();
-        let file = s_parameters_sweep(&basis, 1, freq, 50.0).expect("sweep");
+        let port = DeltaGapPort {
+            tag: 1,
+            voltage: Complex64::new(1.0, 0.0),
+        };
+        let file = s_parameters_sweep(&basis, &port, freq, 50.0).expect("sweep");
         assert_eq!(file.freq_hz.len(), 3);
         assert_eq!(file.data.len(), 3);
         assert_eq!(file.n_ports, 1);

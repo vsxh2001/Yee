@@ -130,7 +130,15 @@ impl Solver for PlanarMoM {
 
     fn run(&self, geometry: &Self::Geometry, freq: FreqRange) -> yee_core::Result<Self::Output> {
         let basis = basis::RwgBasis::from_mesh(geometry.clone())?;
-        let file = solve::s_parameters_sweep(&basis, 1, freq, 50.0)?;
+        // mom-001 / Phase 1.0 default excitation: 1 V delta-gap on port_tag 1.
+        // Phase 1.3 routes this through the `Port` trait without changing
+        // numerics — `DeltaGapPort { tag: 1, voltage: 1+0i }` reproduces the
+        // legacy `delta_gap_rhs(..., 1)` bit-for-bit.
+        let port = ports::DeltaGapPort {
+            tag: 1,
+            voltage: Complex64::new(1.0, 0.0),
+        };
+        let file = solve::s_parameters_sweep(&basis, &port, freq, 50.0)?;
         Ok(SParameters::from_touchstone(&file))
     }
 }
