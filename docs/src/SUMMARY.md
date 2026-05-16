@@ -28,3 +28,7 @@
 - [ADR-0008: validation aggregator JSON + PNG](decisions/0008-validation-aggregator-json-and-png.md)
 - [ADR-0009: hand-rolled Gaussian process surrogate](decisions/0009-gaussian-process-surrogate.md)
 - [ADR-0010: BO Expected Improvement before NSGA-II](decisions/0010-bayesian-optimization-ei-first.md)
+- [ADR-0011: Toolchain bump to Rust 1.92 / egui 0.34 / wgpu 29](decisions/0011-toolchain-bump-rust-1-92-egui-0-34.md)
+- [ADR-0012: NSGA-II as a separate module from BO](decisions/0012-multi-objective-nsga2.md)
+- [ADR-0013: Active learning via variance acquisition](decisions/0013-active-learning-variance-acquisition.md)
+- [ADR-0014: TF/SF slab geometry, finite box deferred](decisions/0014-tfsf-slab-not-finite-box.md)
