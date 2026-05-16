@@ -34,3 +34,23 @@ cargo run --release --example half-wave-dipole
 ```
 
 Phase 1+ examples will additionally have a Python sibling in `examples/<name>/python/` showing the Jupyter / PyO3 workflow.
+
+## Python notebooks
+
+Standalone Jupyter notebooks that exercise the `yee` Python bindings end-to-end live under [`examples/python/`](python/).
+
+| Notebook | What it demonstrates |
+|----------|----------------------|
+| [`python/bo_monopole.ipynb`](python/bo_monopole.ipynb) | Bayesian optimization (`yee.bo_minimize`) on a synthetic monopole-length VSWR objective. Closed-form mock objective; converges to L ≈ λ/4 in 30 evaluations. |
+
+To run:
+
+```bash
+# one-time setup
+uv venv .venv && source .venv/bin/activate
+uv pip install maturin pytest numpy matplotlib jupyter
+(cd crates/yee-py && maturin develop --release)
+
+# launch the notebook
+jupyter notebook examples/python/bo_monopole.ipynb
+```
