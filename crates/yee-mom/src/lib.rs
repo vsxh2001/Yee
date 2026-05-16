@@ -169,3 +169,57 @@ mod tests {
         }
     }
 }
+
+#[doc(hidden)]
+pub mod __internal {
+    //! Test-helper surface. Not stable API; do not depend on it.
+
+    use crate::basis::RwgBasis;
+    use crate::fill::impedance_matrix;
+    use crate::greens::FreeSpaceGreen;
+    use yee_core::Error;
+    use yee_mesh::TriMesh;
+
+    /// Build the impedance matrix and return its condition number via
+    /// `cond = sigma_max / sigma_min`. Helper for the condition-number
+    /// regression test; not a public API.
+    ///
+    /// The `_port_tag` argument is reserved for future per-port conditioning
+    /// diagnostics; the matrix itself depends only on the mesh and the
+    /// excitation frequency, so it is intentionally unused today.
+    pub fn condition_number_at_freq(
+        mesh: &TriMesh,
+        _port_tag: u32,
+        freq_hz: f64,
+    ) -> Result<f64, Error> {
+        let basis = RwgBasis::from_mesh(mesh.clone())?;
+        let green = FreeSpaceGreen::new(freq_hz);
+        let z = impedance_matrix(&basis, &green);
+
+        // faer 0.23 ships a `MatRef::singular_values()` shortcut that
+        // computes the SVD and returns the singular values as a plain
+        // `Vec<f64>` (real, nonnegative, descending). This avoids juggling
+        // the lower-level `Svd::new(...).S()` / `DiagRef::column_vector()`
+        // chain — see
+        // https://docs.rs/faer/0.23/faer/struct.MatRef.html#method.singular_values.
+        let s = z
+            .as_ref()
+            .singular_values()
+            .map_err(|e| Error::Numerical(format!("SVD failed: {e:?}")))?;
+
+        let mut max_s: f64 = 0.0;
+        let mut min_s: f64 = f64::INFINITY;
+        for sv in s.iter().copied() {
+            if sv > max_s {
+                max_s = sv;
+            }
+            if sv > 0.0 && sv < min_s {
+                min_s = sv;
+            }
+        }
+        if min_s <= 0.0 || !min_s.is_finite() {
+            return Err(Error::Numerical("Z is singular".into()));
+        }
+        Ok(max_s / min_s)
+    }
+}
