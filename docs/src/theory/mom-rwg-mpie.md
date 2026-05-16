@@ -42,15 +42,16 @@ together:
 - the **MPIE matrix entries** (§3) — a symmetric vector- and
   scalar-potential pair, not the raw EFIE, so the $\nabla$ stays out
   of the singular kernel;
-- **Dunavant symmetric Gauss quadrature** for the well-separated
-  triangle pairs that dominate the matrix-fill cost (forthcoming §4);
-- **singularity-subtraction plus a Duffy-transform path** for the
-  same-triangle and shared-vertex pairs where the $1/R$ kernel goes
-  singular (forthcoming §§5–6).
+- **Dunavant symmetric Gauss quadrature** (§4) for the well-separated
+  triangle pairs that dominate the matrix-fill cost;
+- **singularity-subtraction plus a Duffy-transform path** (§5–§6) for
+  the same-triangle and shared-vertex pairs where the $1/R$ kernel
+  goes singular and ordinary Gauss quadrature diverges.
 
-The forthcoming sections cover the delta-gap port treatment that turns
-the dense solve into a one-port S-parameter, the pieces that are
-out of scope for this chapter, and the reference list.
+Section 7 covers the delta-gap port treatment that turns the dense
+solve into a one-port S-parameter. Section 8 lists the pieces that are
+**out of scope** for this chapter and which other Phase 1.x
+sub-projects own them.
 
 ## 2. RWG basis functions
 
@@ -172,6 +173,211 @@ kernel; the [`Greens`] trait abstraction (in `crates/yee-mom/src/greens.rs`)
 exists as the swap point for multilayer kernels and is consumed by
 the multilayer placeholder.
 
+## 4. Dunavant Gauss quadrature
+
+For triangle pairs that are well separated relative to the larger
+triangle's diameter, both integrands are smooth functions of
+$(\mathbf{r}, \mathbf{r}')$, and the obvious thing — symmetric Gauss
+quadrature on the triangle — works. Yee uses the **Dunavant rules**
+(Dunavant 1985): families of barycentric-symmetric quadrature points
+$\{(\xi_i, \eta_i, w_i)\}$ on the master triangle $T_0$ with vertices
+$(0,0), (1,0), (0,1)$, exact for polynomials up to a stated degree.
+
+For a triangle $T$ with vertices $\mathbf{v}_0, \mathbf{v}_1, \mathbf{v}_2$
+and area $A$, the affine map
+
+$$
+\mathbf{r}(\xi, \eta) = (1 - \xi - \eta)\mathbf{v}_0 + \xi \mathbf{v}_1 + \eta \mathbf{v}_2
+$$
+
+sends $T_0 \to T$ with Jacobian $2A$. A scalar integral transforms as
+
+$$
+\int_T g(\mathbf{r})\, dS = 2 A \int_{T_0} g(\mathbf{r}(\xi, \eta))\, d\xi\, d\eta \approx 2 A \sum_{i=1}^{N_q} w_i\, g\bigl(\mathbf{r}(\xi_i, \eta_i)\bigr).
+$$
+
+Yee implements three Dunavant orders, selected per pair by a
+distance heuristic on the centroid separation $d$ relative to the
+larger triangle diameter $h$:
+
+| Order | $N_q$ | Polynomial exact to | Use site |
+|-------|-------|---------------------|----------|
+| 3     | 4     | cubics              | far-field pairs, $d \gtrsim 5h$ |
+| 5     | 7     | quintics            | bulk default, near-pairs outer integral |
+| 7     | 13    | degree-7            | near-singular outer when inner uses Duffy |
+
+The bulk default is order 5; the matrix-fill module reaches for order
+7 on the outer integral whenever the inner integral has switched to
+the Duffy-transform path (§6) to keep the outer truncation error from
+becoming the bottleneck.
+
+## 5. Singularity handling: subtraction
+
+When the inner triangle $T_n$ overlaps the outer triangle $T_m$ or
+shares an edge or a vertex with it, $R \to 0$ within the inner
+integration domain, the kernel $1/R$ diverges, and tensor-product
+Gauss quadrature on the master triangle fails — either by literally
+sampling at the singularity (face self-term) or by converging
+painfully slowly (shared edge / shared vertex). Yee handles this in
+two complementary ways: **singularity subtraction** in the smooth path
+of the [`Greens`] trait (§5), and a **Duffy-transform reparametrisation**
+on the singular-pair fill path (§6).
+
+The subtraction split is
+
+$$
+G(\mathbf{r}, \mathbf{r}') = \underbrace{G(\mathbf{r}, \mathbf{r}') - \frac{1}{4\pi R}}_{G_{\text{smooth}}} + \underbrace{\frac{1}{4\pi R}}_{G_{\text{sing}}}.
+$$
+
+$G_{\text{smooth}}$ is bounded as $R \to 0$ — its limit is
+
+$$
+\lim_{R \to 0} G_{\text{smooth}}(\mathbf{r}, \mathbf{r}') = -\frac{j k_0}{4\pi},
+$$
+
+so an ordinary Gauss quadrature handles it (Wilton et al. 1984). The
+singular part $1/(4\pi R)$ has a closed-form analytic integral over a
+flat triangle — the standard Wilton–Rao–Glisson–Schaubert closed-form
+expressions, parameterised by the projection of the source vertex onto
+the target triangle's plane plus the three signed in-plane distances
+to the triangle's edges. The smooth and singular integrals are
+computed separately and summed.
+
+In `yee-mom`, `Greens::scalar_vector_smooth` and
+`Greens::scalar_scalar_smooth` return the subtracted kernel directly,
+including the $R \to 0$ limit so that callers do not have to handle
+the coincident-point branch themselves.
+
+## 6. Singular pairs: the Duffy transform
+
+Subtraction alone is not enough for the **shared-vertex** case. Even
+after $1/R$ is removed, the original $1/R$ integral still has to be
+evaluated on a pair of triangles meeting at a corner, and the corner
+singularity is too sharp for standard tensor-product quadrature on the
+master triangle to converge cleanly.
+
+The remedy is the **Duffy transform** (Duffy 1982). On a triangle
+$T$ with a singular vertex at $(0,0)$ in the master coordinates, the
+mapping
+
+$$
+(\xi, \eta) = (u, u v), \qquad u \in [0, 1], \quad v \in [0, 1],
+$$
+
+sends the unit square $[0,1]^2$ onto $T_0$ with Jacobian $u$. The
+$1/R$ singularity at the corner becomes proportional to $1/u$ in the
+new variables; the Jacobian's leading $u$ factor cancels it, leaving
+a bounded integrand of the form $\sin\theta \cdot (\text{bounded})$
+(after a final angular reinterpretation) that ordinary Gauss–Legendre
+on $[0,1]^2$ resolves in tens of points.
+
+In `yee-mom`, the singular-pair fill path applies the Duffy transform
+to the **full** Green's function $G$ — *not* `Greens::scalar_smooth`.
+Using the smooth kernel inside Duffy is a subtle bug: the Duffy
+Jacobian is the regulator that makes the $1/R$ part integrable, so
+subtracting $1/R$ first means the Duffy path then double-subtracts
+it. An early Phase 1.0 prototype hit exactly this trap; the dipole
+$\operatorname{Re}(Z)$ came in roughly 25% high until the singular
+fill path was switched to call `scalar` directly (with a bit-exact
+$r > 0$ guard returning the analytic $-j k_0 / (4\pi)$ limit at
+coincident points to keep the kernel bounded).
+
+The corresponding source guard in `greens.rs` is
+
+```rust,ignore
+pub fn scalar_smooth(&self, r1: Vector3<f64>, r2: Vector3<f64>) -> Complex64 {
+    let r = (r1 - r2).norm();
+    if r == 0.0 {
+        // Analytic limit of G - 1/(4πR) at R = 0.
+        return Complex64::new(0.0, -self.k0.re / (4.0 * std::f64::consts::PI));
+    }
+    let g = self.scalar(r1, r2);
+    g - Complex64::new(1.0 / (4.0 * std::f64::consts::PI * r), 0.0)
+}
+```
+
+— the coincident branch returns the analytic limit so that any caller
+who happens to evaluate `scalar_smooth` at $R = 0$ (the Gauss point
+on $T_0$ that exactly maps to the singular vertex, weighted by zero
+Jacobian) gets a finite number instead of `NaN`.
+
+## 7. Delta-gap port excitation
+
+Phase 1.0 ships exactly one port model: the **delta-gap**. A 1 V
+source is impressed across the port edge — concretely, across every
+edge whose `port_tag` matches the driven-port label. The right-hand-
+side vector of the dense linear system $Z \mathbf{i} = \mathbf{b}$
+is
+
+$$
+b_n =
+\begin{cases}
+V_{\text{port}} \cdot \ell_n, & n \in \mathcal{P}, \\
+0, & \text{otherwise,}
+\end{cases}
+$$
+
+where $\mathcal{P}$ is the set of basis indices whose RWG edge has
+the matching port tag and $V_{\text{port}} = 1\,\text{V}$ for the
+canonical excitation. Conceptually $b_n = \int \mathbf{f}_n \cdot
+\mathbf{E}^{\text{inc}}\, dS$, and the delta-gap model concentrates
+$\mathbf{E}^{\text{inc}}$ into a Dirac sheet across the port edge
+tuned so that the line integral across the gap equals $V_{\text{port}}$;
+the edge-length factor falls out of that line integral.
+
+After the LU solve produces $\mathbf{i}$, the **port current** is the
+Galerkin projection of the current onto the port edges,
+
+$$
+I_{\text{port}} = \sum_{n \in \mathcal{P}} \ell_n \cdot i_n,
+$$
+
+which is the same inner-product structure as the RHS by construction.
+The **input impedance** at the port is
+
+$$
+Z_{\text{in}} = \frac{V_{\text{port}}}{I_{\text{port}}},
+$$
+
+and the one-port reflection coefficient against the port reference
+impedance $Z_0$ (typically $50\,\Omega$) is
+$S_{11} = (Z_{\text{in}} - Z_0) / (Z_{\text{in}} + Z_0)$.
+
+The full Phase 1.0 dipole sweep is one call:
+
+```rust,ignore
+use yee_core::FreqRange;
+use yee_mom::{PlanarMoM, SParameters};
+use yee_mesh::TriMesh;
+
+let mesh: TriMesh = /* dipole cylinder mesh, centre triangles tagged 1/2 */;
+let freq: FreqRange = FreqRange::new(50e6, 500e6, 51)?;
+let solver = PlanarMoM::default();
+let s: SParameters = solver.run(&mesh, freq)?;
+// s.freq_hz / s.data carry the swept S₁₁; write to Touchstone via
+// SParameters::write_touchstone(&path, 50.0).
+```
+
+`PlanarMoM::default().run` wires up the canonical 1 V delta-gap on
+`port_tag = 1`, the free-space Green's function, the RWG basis builder,
+the dense LU, and the Touchstone wrapper. For multilayer / multi-port
+configurations where the kernel needs to vary by frequency or by
+substrate stack-up, the lower-level
+
+```rust,ignore
+use yee_mom::__internal::{z_in_with_greens, z_in_free_space};
+
+let z_in = z_in_free_space(&mesh, /*port_tag=*/ 1, /*freq_hz=*/ 1.5e9)?;
+```
+
+helpers expose the basis-build → fill → solve → port-extract path
+parameterised over any `Greens` implementation. The `z_in_with_greens`
+generic entry point is the integration-test surface used to validate
+the Phase 1.1 multilayer kernel against the free-space baseline on
+the same mesh, and it is where the Track RRR multi-port extension
+will hang the per-port-net excitation loop (forward-looking — RRR has
+not landed in `main` yet).
+
 ## 8. What's not in this chapter
 
 Several Phase 1.x deliverables touch the same code paths discussed
@@ -200,9 +406,9 @@ treatment. They are deliberately out of scope here:
   unaccelerated dense LU on `faer`.
 - **GPU matrix fill.** The Phase 1.5 cuSOLVER work shipped the LU
   step only (`Zgetrf` / `Zgetrs`); matrix fill remains on the CPU.
-  When the GPU fill lands, the quadrature scheme is the part that
-  ports first because it has no data-dependent branching; the
-  singular path is comparatively gnarly.
+  When the GPU fill lands, the quadrature scheme in §4 is the part
+  that ports first because it has no data-dependent branching;
+  the singular path in §6 is comparatively gnarly.
 
 ## 9. References
 
@@ -214,14 +420,15 @@ treatment. They are deliberately out of scope here:
   Uniform and Linear Source Distributions on Polygonal and
   Polyhedral Domains." *IEEE Trans. Antennas Propag.* 32.3 (March
   1984), pp. 276–281. — Closed-form $1/R$ integrals on flat
-  triangles; the singularity-subtraction reference.
+  triangles; the singularity-subtraction reference for §5.
 - Dunavant, D. A. "High Degree Efficient Symmetrical Gaussian
   Quadrature Rules for the Triangle." *Int. J. Numer. Methods Eng.*
   21.6 (1985), pp. 1129–1148. — The symmetric Gauss rules on the
-  master triangle used in the forthcoming quadrature section.
+  master triangle used in §4.
 - Duffy, M. G. "Quadrature Over a Pyramid or Cube of Integrands with
   a Singularity at a Vertex." *SIAM J. Numer. Anal.* 19.6 (December
-  1982), pp. 1260–1262. — The original Duffy-transform paper.
+  1982), pp. 1260–1262. — The original Duffy-transform paper that
+  §6 builds on.
 - Mosig, J. R. "Integral Equation Technique." In T. Itoh, ed.,
   *Numerical Techniques for Microwave and Millimeter Wave Passive
   Structures*, Wiley, 1989, ch. 3. — Early MPIE formulation
