@@ -1,17 +1,19 @@
-//! `yee-gui` — the Phase 1.gui.0 walking-skeleton studio shell.
+//! `yee-gui` — the Phase 1.gui.1 walking-skeleton studio shell.
 //!
-//! See [`crate::app`] for the application state and tab layout, and
-//! [`crate::plots`] for the math helpers behind the dB and Smith plots.
+//! See [`crate::app`] for the application state and tab layout,
+//! [`crate::plots`] for the math helpers behind the dB and Smith plots, and
+//! [`crate::viewport`] for the wgpu-backed 3D mesh viewport.
 //!
 //! Architectural notes:
 //!
-//! - The shell is intentionally minimal: a menu bar, a metadata side panel,
-//!   and two `egui_plot` tabs hosted by `egui_dock`.
+//! - The shell hosts a menu bar, a metadata + viewport-controls side panel,
+//!   two `egui_plot` tabs, and a third `egui_wgpu`-backed 3D viewport tab —
+//!   all hosted by `egui_dock`.
 //! - File ingestion is driven by a `--file <path>` CLI flag at startup; the
 //!   menu entry for `Open .s1p…` is surfaced for discoverability but defers
-//!   to that workflow. A real file picker (`rfd`) arrives in Phase 1.gui.1.
-//! - Future phases will add multi-port plots, a wgpu 3D viewport, and a live
-//!   solver hookup — none of that lives here yet.
+//!   to that workflow. A real file picker (`rfd`) is a Phase 1.gui.2+ task.
+//! - The 3D viewport renders a hand-coded thin-cylinder mesh; loading meshes
+//!   from disk arrives in Phase 1.gui.2 (Python bridge or CLI flag).
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -36,8 +38,10 @@ fn main() -> anyhow::Result<()> {
     let initial = parse_cli_args();
 
     let native_options = eframe::NativeOptions {
+        // Wgpu backend is required for the 3D mesh viewport paint callback.
+        renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
-            .with_title("Yee Studio (Phase 1.gui.0)")
+            .with_title("Yee Studio (Phase 1.gui.1)")
             .with_inner_size([1280.0, 800.0]),
         ..Default::default()
     };

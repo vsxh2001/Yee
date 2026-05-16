@@ -1,15 +1,18 @@
 //! Application state, dock layout, and top-level UI for the Yee studio shell.
 //!
-//! The shell hosts two tabs inside an `egui_dock::DockArea`:
+//! The shell hosts three tabs inside an `egui_dock::DockArea`:
 //!
-//! - `S11Db` — `20·log10|S11|` vs frequency
-//! - `Smith` — `S11` trajectory on a Smith-chart canvas (unit circle reference)
+//! - `S11Db`   — `20·log10|S11|` vs frequency
+//! - `Smith`   — `S11` trajectory on a Smith-chart canvas (unit circle reference)
+//! - `Mesh3D`  — wgpu-rendered 3D triangle mesh (Phase 1.gui.1)
 //!
-//! A left side panel exposes loaded-file metadata; the menu bar provides
-//! `File → Quit`. File opening is driven by a `--file` CLI flag at startup
-//! (Phase 1.gui.0 keeps the GUI free of `rfd`-based pickers — see README).
+//! A left side panel exposes loaded-file metadata + the 3D-viewport controls
+//! (wireframe toggle, camera readout). The menu bar provides `File → Quit`.
+//! File opening is driven by a `--file` CLI flag at startup (the GUI keeps
+//! `rfd`-based pickers out of scope through Phase 1.gui.1 — see README).
 
 use crate::plots::{show_s11_db_plot, show_smith_chart};
+use crate::viewport::{thin_cylinder, MeshCallback, ViewportState};
 use egui_dock::{DockArea, DockState, NodeIndex, Style};
 use yee_io::touchstone::{self, File as TsFile};
 
@@ -20,6 +23,8 @@ pub enum TabKind {
     S11Db,
     /// Smith-chart visualisation of `S11` in the complex plane.
     Smith,
+    /// Wgpu-rendered 3D triangle mesh viewport.
+    Mesh3D,
 }
 
 impl TabKind {
@@ -27,6 +32,7 @@ impl TabKind {
         match self {
             TabKind::S11Db => "S11 magnitude (dB)",
             TabKind::Smith => "Smith chart",
+            TabKind::Mesh3D => "Mesh 3D",
         }
     }
 }
@@ -39,20 +45,38 @@ pub struct YeeApp {
     load_error: Option<String>,
     /// Tab layout managed by `egui_dock`.
     dock: DockState<TabKind>,
+    /// 3D viewport state (orbit camera + active mesh + wireframe toggle).
+    viewport_state: ViewportState,
 }
 
 impl YeeApp {
     /// Build a fresh app, optionally pre-loading a Touchstone file from `path`.
+    ///
+    /// The dock layout starts with the two plot tabs at the top of the central
+    /// region and the Mesh 3D tab split off below. This keeps the Phase 1.gui.0
+    /// plot workflow visually identical while making the new viewport
+    /// immediately discoverable.
     pub fn new(initial_file: Option<std::path::PathBuf>) -> Self {
-        // Default layout: two tabs side-by-side in one node.
         let mut dock = DockState::new(vec![TabKind::S11Db]);
-        let surface = dock.main_surface_mut();
-        surface.split_right(NodeIndex::root(), 0.5, vec![TabKind::Smith]);
+        {
+            let surface = dock.main_surface_mut();
+            // Plot pair lives in the root node.
+            surface.split_right(NodeIndex::root(), 0.5, vec![TabKind::Smith]);
+            // Drop the 3D viewport below the plots so all three tabs are
+            // visible at once in the default layout.
+            surface.split_below(NodeIndex::root(), 0.55, vec![TabKind::Mesh3D]);
+        }
+
+        // Walking-skeleton mesh: a 0.5 m × 5 mm thin cylinder, tessellated
+        // finely enough for the lighting to read as smooth.
+        let mesh = thin_cylinder(0.5, 0.005, 16, 32);
+        let viewport_state = ViewportState::new(mesh);
 
         let mut app = Self {
             file: None,
             load_error: None,
             dock,
+            viewport_state,
         };
         if let Some(path) = initial_file {
             app.load_file(&path);
@@ -81,8 +105,8 @@ impl YeeApp {
         }
     }
 
-    /// Render the left-hand metadata panel.
-    fn metadata_panel(&self, ui: &mut egui::Ui) {
+    /// Render the left-hand metadata + viewport-controls panel.
+    fn metadata_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("File metadata");
         ui.separator();
         match &self.file {
@@ -115,6 +139,18 @@ impl YeeApp {
             ui.colored_label(egui::Color32::LIGHT_RED, "Load error:");
             ui.label(err);
         }
+
+        ui.separator();
+        ui.heading("Viewport");
+        ui.checkbox(&mut self.viewport_state.wireframe, "Wireframe overlay");
+        ui.label(format!(
+            "yaw / pitch: {:>5.1}° / {:>5.1}°",
+            self.viewport_state.camera_yaw_deg, self.viewport_state.camera_pitch_deg
+        ));
+        ui.label(format!(
+            "distance: {:.3} m",
+            self.viewport_state.camera_dist
+        ));
     }
 }
 
@@ -125,9 +161,9 @@ impl eframe::App for YeeApp {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Open .s1p… (use --file CLI flag)").clicked() {
-                        // Phase 1.gui.0 keeps the file picker out of scope; the
-                        // menu entry is still surfaced so the workflow is
-                        // discoverable.
+                        // The file picker stays out of scope through Phase
+                        // 1.gui.1; the menu entry is surfaced so the workflow
+                        // is discoverable.
                         ui.close();
                     }
                     ui.separator();
@@ -138,15 +174,16 @@ impl eframe::App for YeeApp {
             });
         });
 
-        // Metadata side panel.
+        // Metadata + viewport-controls side panel.
         egui::SidePanel::left("metadata").show(ctx, |ui| {
             self.metadata_panel(ui);
         });
 
-        // Central dock area with the two plot tabs.
+        // Central dock area with the three tabs.
         egui::CentralPanel::default().show(ctx, |ui| {
             let mut viewer = TabViewer {
                 file: self.file.as_ref(),
+                viewport_state: &mut self.viewport_state,
             };
             DockArea::new(&mut self.dock)
                 .style(Style::from_egui(ui.style().as_ref()))
@@ -155,10 +192,11 @@ impl eframe::App for YeeApp {
     }
 }
 
-/// `egui_dock` tab viewer. Borrows the loaded file (if any) so plots can
-/// render either real data or a placeholder.
+/// `egui_dock` tab viewer. Borrows the loaded file (for the plot tabs) and the
+/// viewport state (for the Mesh 3D tab) so each tab can render its content.
 struct TabViewer<'a> {
     file: Option<&'a TsFile>,
+    viewport_state: &'a mut ViewportState,
 }
 
 impl<'a> egui_dock::TabViewer for TabViewer<'a> {
@@ -169,22 +207,85 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
-        match self.file {
-            None => {
-                ui.centered_and_justified(|ui| {
-                    ui.label("Open a .s1p file to begin.");
-                });
-            }
-            Some(f) => {
-                // S11 lives at row-major slot 0 for any port count.
-                let s11: Vec<num_complex::Complex64> = f.data.iter().map(|m| m[0]).collect();
-                match tab {
-                    TabKind::S11Db => show_s11_db_plot(ui, &f.freq_hz, &s11),
-                    TabKind::Smith => show_smith_chart(ui, &s11),
+        match tab {
+            TabKind::S11Db | TabKind::Smith => match self.file {
+                None => {
+                    ui.centered_and_justified(|ui| {
+                        ui.label("Open a .s1p file to begin.");
+                    });
                 }
+                Some(f) => {
+                    // S11 lives at row-major slot 0 for any port count.
+                    let s11: Vec<num_complex::Complex64> =
+                        f.data.iter().map(|m| m[0]).collect();
+                    match tab {
+                        TabKind::S11Db => show_s11_db_plot(ui, &f.freq_hz, &s11),
+                        TabKind::Smith => show_smith_chart(ui, &s11),
+                        TabKind::Mesh3D => unreachable!(),
+                    }
+                }
+            },
+            TabKind::Mesh3D => {
+                show_mesh_viewport(ui, self.viewport_state);
             }
         }
     }
+}
+
+/// Render the wgpu-backed 3D mesh viewport into `ui`.
+///
+/// The function reserves the full available rect, wires drag-to-orbit and
+/// scroll-to-zoom interactions, then schedules an [`egui_wgpu`] paint
+/// callback that draws the mesh into that rect.
+///
+/// Interaction:
+/// - Drag (any mouse button): orbit camera (0.5° per pixel; pitch clamped to
+///   ±89° to avoid look-at-up degeneracy).
+/// - Mouse wheel while hovered: exponential zoom, clamped to `[0.01, 1e4]`
+///   metres so the camera can't slip through the origin or escape to
+///   infinity.
+fn show_mesh_viewport(ui: &mut egui::Ui, state: &mut ViewportState) {
+    let available = ui.available_size_before_wrap();
+    let (rect, response) =
+        ui.allocate_exact_size(available, egui::Sense::click_and_drag());
+
+    // Orbit interaction: drag to rotate.
+    if response.dragged() {
+        let drag = response.drag_delta();
+        state.camera_yaw_deg += drag.x * 0.5;
+        state.camera_pitch_deg = (state.camera_pitch_deg - drag.y * 0.5).clamp(-89.0, 89.0);
+    }
+
+    // Zoom: scroll wheel.
+    if response.hovered() {
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll != 0.0 {
+            // Exponential zoom so the perceived rate is constant in
+            // log-distance space.
+            let factor = (-scroll * 0.005).exp();
+            state.camera_dist = (state.camera_dist * factor).clamp(0.01, 1.0e4);
+        }
+    }
+
+    // Build the MVP for this frame.
+    let aspect = if rect.height() > 0.0 {
+        rect.width() / rect.height()
+    } else {
+        1.0
+    };
+    let mvp = state.view_proj(aspect);
+    let camera_pos = state.camera_position();
+
+    let callback = egui_wgpu::Callback::new_paint_callback(
+        rect,
+        MeshCallback {
+            mesh: state.mesh.clone(),
+            mvp,
+            camera_pos,
+            wireframe: state.wireframe,
+        },
+    );
+    ui.painter().add(callback);
 }
 
 // ----------------------------------------------------------------------------
@@ -212,5 +313,16 @@ mod tests {
             app.load_error.is_some(),
             "expected load_error to be set for a missing file"
         );
+    }
+
+    #[test]
+    fn new_app_has_default_viewport_state() {
+        let app = YeeApp::new(None);
+        // Default mesh is non-empty.
+        assert!(!app.viewport_state.mesh.vertices.is_empty());
+        assert!(!app.viewport_state.mesh.indices.is_empty());
+        // Camera distance follows the bbox-based default.
+        assert!(app.viewport_state.camera_dist > 0.0);
+        assert!(!app.viewport_state.wireframe);
     }
 }

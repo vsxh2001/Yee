@@ -1,8 +1,3 @@
-// Allow temporarily-unused items: the app-level wiring (Mesh 3D tab +
-// orbit-camera UI) consumes `ViewportState` and `MeshCallback` in the next
-// commit inside this same phase 1.gui.1 series.
-#![allow(dead_code)]
-
 //! Wgpu-rendered 3D triangle-mesh viewport for the Phase 1.gui.1 walking-skeleton shell.
 //!
 //! This module provides:
