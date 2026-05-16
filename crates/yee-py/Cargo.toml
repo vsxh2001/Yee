@@ -18,6 +18,7 @@ yee-mom       = { workspace = true }
 yee-fdtd      = { workspace = true }
 yee-io        = { workspace = true }
 yee-surrogate = { workspace = true }
+yee-validation = { workspace = true }
 pyo3        = { workspace = true }
 numpy       = { workspace = true }
 num-complex = { workspace = true }
