@@ -6186,6 +6186,8 @@ name = "yee-cuda"
 version = "0.0.0"
 dependencies = [
  "cudarc",
+ "num-complex",
+ "rand 0.9.4",
  "thiserror 1.0.69",
 ]
 

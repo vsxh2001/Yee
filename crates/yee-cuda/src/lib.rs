@@ -18,10 +18,15 @@
 //! feature the crate still builds (stub APIs return [`Error::NotEnabled`]) so CI on
 //! CPU-only hosts is green.
 
-#![forbid(unsafe_code)]
+// Phase 1.5 wires cuSOLVER's dense LU into `cusolver.rs`. The cudarc
+// `result::*` + `sys::*` functions for cuSOLVER are `unsafe fn`, so the
+// cusolver module locally opts back into unsafe. The rest of the crate still
+// denies it.
+#![deny(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod backend;
+pub mod cusolver;
 pub mod nvrtc;
 
 /// CUDA-layer errors.
