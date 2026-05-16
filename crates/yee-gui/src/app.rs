@@ -155,9 +155,11 @@ impl YeeApp {
 }
 
 impl eframe::App for YeeApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+
         // Menu bar.
-        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+        egui::Panel::top("menu_bar").show_inside(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Open .s1p… (use --file CLI flag)").clicked() {
@@ -175,12 +177,12 @@ impl eframe::App for YeeApp {
         });
 
         // Metadata + viewport-controls side panel.
-        egui::SidePanel::left("metadata").show(ctx, |ui| {
+        egui::Panel::left("metadata").show_inside(ui, |ui| {
             self.metadata_panel(ui);
         });
 
         // Central dock area with the three tabs.
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show_inside(ui, |ui| {
             let mut viewer = TabViewer {
                 file: self.file.as_ref(),
                 viewport_state: &mut self.viewport_state,

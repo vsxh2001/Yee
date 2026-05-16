@@ -216,8 +216,6 @@ When in doubt, read these first — they answer 80% of questions about what's al
 
 These are the things that will bite you if you skip them. Update this section whenever a new gotcha shows up.
 
-- **`egui` is pinned to 0.32, not the TECH_STACK target 0.34.** The 0.34 release requires `rustc 1.92+`, and the workspace pins `1.88`. Phase 1.gui.3 will bump both in lockstep; until then, do not unilaterally bump egui.
-- **`wgpu` was downgraded 26 → 25 to match `egui-wgpu 0.32`'s transitive requirement.** Same Phase 1.gui.3 follow-up. The downgrade is intentional, not a `cargo update` bug.
 - **`cudarc` self-describes as "pre-alpha"** in its own README and has shipped breaking minor releases (notably 0.13 → 0.14). We pin to `=0.19.x`. The internal `Backend` trait in `yee-cuda` exists as the swap point if cudarc ever forces our hand — keep it that way.
 - **`MultilayerGreens` (yee-mom) is a Phase 1.1.0 placeholder.** It implements a one-image Discrete Complex Image Method (DCIM) approximation only. `mom-002` (microstrip Z₀) and `mom-003` (2.4 GHz patch) will run with **loose tolerances** against this placeholder until Phase 1.1.1 ships real Sommerfeld-integral / multi-image DCIM extraction. Do not tighten the tolerances until then.
 - **`WavePort` (yee-mom Phase 1.3.0) is an API placeholder.** Its modal-distribution path currently matches the delta-gap behaviour bit-for-bit. The cross-section eigenmode solver lands in Phase 1.3.1; until then, a microstrip wave-port and a delta-gap excitation will produce identical results, which is expected.
