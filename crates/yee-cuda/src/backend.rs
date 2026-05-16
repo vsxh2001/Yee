@@ -22,6 +22,8 @@
 #[cfg(feature = "cuda")]
 const MAX_DEVICES: i32 = 256;
 
+use num_complex::Complex64;
+
 use crate::Result;
 
 /// Operations the CUDA layer needs from its underlying binding.
@@ -40,6 +42,35 @@ pub trait Backend {
 
     /// Compile a CUDA-C source string to PTX bytes.
     fn nvrtc_compile(src: &str, name: &str) -> Result<Vec<u8>>;
+
+    /// Dense complex-double LU factorization (`cusolverDnZgetrf`).
+    ///
+    /// Takes a column-major `n×n` matrix and returns its LU factors plus
+    /// the LAPACK pivot vector. The returned values can be fed back to
+    /// [`Backend::cusolver_zgetrs`] for triangular solves against new RHS.
+    ///
+    /// # Errors
+    /// - [`crate::Error::NotEnabled`] without `--features cuda`.
+    /// - [`crate::Error::Driver`] on any cuSOLVER/driver failure.
+    fn cusolver_zgetrf(a: &[Complex64], n: usize) -> Result<(Vec<Complex64>, Vec<i32>)>;
+
+    /// Dense complex-double triangular solve (`cusolverDnZgetrs`).
+    ///
+    /// `lu` and `pivots` must come from a prior successful
+    /// [`Backend::cusolver_zgetrf`] call on the same `n`. `b` is column-
+    /// major of shape `(n, nrhs)`. Returns the solution in the same
+    /// shape.
+    ///
+    /// # Errors
+    /// - [`crate::Error::NotEnabled`] without `--features cuda`.
+    /// - [`crate::Error::Driver`] on any cuSOLVER/driver failure.
+    fn cusolver_zgetrs(
+        lu: &[Complex64],
+        pivots: &[i32],
+        b: &[Complex64],
+        n: usize,
+        nrhs: usize,
+    ) -> Result<Vec<Complex64>>;
 }
 
 /// Cudarc-backed [`Backend`] implementation.
@@ -91,5 +122,19 @@ impl Backend for CudarcBackend {
 
     fn nvrtc_compile(src: &str, name: &str) -> Result<Vec<u8>> {
         crate::nvrtc::compile(src, name)
+    }
+
+    fn cusolver_zgetrf(a: &[Complex64], n: usize) -> Result<(Vec<Complex64>, Vec<i32>)> {
+        crate::cusolver::zgetrf_host(a, n)
+    }
+
+    fn cusolver_zgetrs(
+        lu: &[Complex64],
+        pivots: &[i32],
+        b: &[Complex64],
+        n: usize,
+        nrhs: usize,
+    ) -> Result<Vec<Complex64>> {
+        crate::cusolver::zgetrs_host(lu, pivots, b, n, nrhs)
     }
 }

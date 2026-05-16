@@ -250,6 +250,65 @@ mod imp {
         })
     }
 
+    /// One-shot Zgetrf that returns the LU factors and pivots to the host.
+    ///
+    /// Used by [`crate::backend::Backend::cusolver_zgetrf`]; not part of
+    /// the [`super::DenseLuComplex`] flow (which keeps everything on the
+    /// device for repeat solves).
+    pub(crate) fn zgetrf_host(
+        a: &[Complex64],
+        n: usize,
+    ) -> Result<(Vec<Complex64>, Vec<i32>)> {
+        let inner = factorize(a, n)?;
+        let lu_f64 = inner.stream.clone_dtoh(&inner.lu).map_err(drv)?;
+        let pivots = inner.stream.clone_dtoh(&inner.pivots).map_err(drv)?;
+        Ok((f64_vec_to_complex(lu_f64), pivots))
+    }
+
+    /// One-shot Zgetrs that uploads `lu`+`pivots` and solves for `x`.
+    ///
+    /// Used by [`crate::backend::Backend::cusolver_zgetrs`].
+    pub(crate) fn zgetrs_host(
+        lu: &[Complex64],
+        pivots: &[i32],
+        b: &[Complex64],
+        n: usize,
+        nrhs: usize,
+    ) -> Result<Vec<Complex64>> {
+        if n == 0 {
+            return Err(Error::Driver("n must be > 0".into()));
+        }
+        if lu.len() != n * n {
+            return Err(Error::Driver(format!(
+                "zgetrs_host: lu.len()={} but n*n={}",
+                lu.len(),
+                n * n
+            )));
+        }
+        if pivots.len() != n {
+            return Err(Error::Driver(format!(
+                "zgetrs_host: pivots.len()={} but n={}",
+                pivots.len(),
+                n
+            )));
+        }
+
+        let ctx = CudaContext::new(0).map_err(drv)?;
+        let stream = ctx.default_stream();
+        let handle = DnHandle::new(stream.clone()).map_err(solver)?;
+
+        let lu_dev = stream.clone_htod(complex_as_f64(lu)).map_err(drv)?;
+        let piv_dev = stream.clone_htod(pivots).map_err(drv)?;
+        let inner = Inner {
+            n,
+            lu: lu_dev,
+            pivots: piv_dev,
+            handle,
+            stream,
+        };
+        solve(&inner, b, nrhs)
+    }
+
     pub(super) fn solve(inner: &Inner, b: &[Complex64], nrhs: usize) -> Result<Vec<Complex64>> {
         if nrhs == 0 {
             return Err(Error::Driver("nrhs must be > 0".into()));
@@ -308,6 +367,27 @@ mod imp {
         let x_f64 = stream.clone_dtoh(&bx).map_err(drv)?;
         Ok(f64_vec_to_complex(x_f64))
     }
+}
+
+/// Backend-trait entry point: dense complex-double LU factorization,
+/// returning host-side LU factors and pivots. See
+/// [`crate::backend::Backend::cusolver_zgetrf`].
+#[cfg(feature = "cuda")]
+pub(crate) fn zgetrf_host(a: &[Complex64], n: usize) -> Result<(Vec<Complex64>, Vec<i32>)> {
+    imp::zgetrf_host(a, n)
+}
+
+/// Backend-trait entry point: triangular solve given host-side LU
+/// factors and pivots. See [`crate::backend::Backend::cusolver_zgetrs`].
+#[cfg(feature = "cuda")]
+pub(crate) fn zgetrs_host(
+    lu: &[Complex64],
+    pivots: &[i32],
+    b: &[Complex64],
+    n: usize,
+    nrhs: usize,
+) -> Result<Vec<Complex64>> {
+    imp::zgetrs_host(lu, pivots, b, n, nrhs)
 }
 
 #[cfg(test)]
