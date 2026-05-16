@@ -16,6 +16,7 @@ pub(crate) mod basis;
 pub(crate) mod fill;
 pub(crate) mod greens;
 pub(crate) mod multilayer;
+pub(crate) mod ports;
 pub(crate) mod quadrature;
 pub(crate) mod solve;
 
