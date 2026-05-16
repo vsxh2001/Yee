@@ -23,7 +23,7 @@
 #![allow(dead_code)]
 
 use nalgebra::Vector3;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use yee_mesh::TriMesh;
 
 /// One Rao–Wilton–Glisson edge in the triangulation.
@@ -34,15 +34,22 @@ use yee_mesh::TriMesh;
 /// [`TriMesh::vertices`]) of the free (non-shared) vertex on each adjacent
 /// triangle. `port_tag` is non-zero only when both adjacent triangles carry
 /// the same non-zero mesh tag.
+///
+/// Note: `tri_plus` is the first triangle in mesh-iteration order that
+/// touches this shared edge — it carries no geometric meaning. The
+/// `eval`/`div` sign conventions ensure the basis function is well-defined
+/// regardless of which side is called `+`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct RwgEdge {
     /// Lower-indexed shared-edge vertex (vertex index into the mesh).
     pub(crate) v0: u32,
     /// Higher-indexed shared-edge vertex (vertex index into the mesh).
     pub(crate) v1: u32,
-    /// Triangle index of the "+" adjacent triangle.
+    /// Triangle index of the "+" adjacent triangle. See struct-level note:
+    /// the `+`/`-` labeling is enumeration-order, not geometric.
     pub(crate) tri_plus: u32,
-    /// Triangle index of the "-" adjacent triangle.
+    /// Triangle index of the "-" adjacent triangle. See struct-level note:
+    /// the `+`/`-` labeling is enumeration-order, not geometric.
     pub(crate) tri_minus: u32,
     /// Free (non-shared) vertex index of the "+" triangle.
     pub(crate) free_plus: u32,
@@ -116,7 +123,13 @@ impl RwgBasis {
         }
 
         // Edge key: sorted (v_lo, v_hi). Value: list of (triangle_idx, free_vertex_idx).
-        let mut edge_map: HashMap<(u32, u32), Vec<(u32, u32)>> = HashMap::new();
+        //
+        // `BTreeMap` (not `HashMap`) so the resulting `edges` vector is
+        // ordered by sorted edge key and is therefore *deterministic*
+        // across runs and machines. Basis-function indices are derived
+        // from this iteration order, and downstream matrix-entry
+        // assertions need a stable mapping.
+        let mut edge_map: BTreeMap<(u32, u32), Vec<(u32, u32)>> = BTreeMap::new();
         for (t_idx, tri) in mesh.triangles.iter().enumerate() {
             let t = t_idx as u32;
             // Each of the three edges of the triangle is keyed by sorted
@@ -209,8 +222,16 @@ impl RwgBasis {
     }
 
     /// Evaluate the `k`-th RWG basis function at barycentric coordinates
-    /// `bary` on triangle `tri`. Returns `Vector3::zeros()` when `tri` is
-    /// not in the two-triangle support of basis `k`.
+    /// `bary` on triangle `tri`.
+    ///
+    /// Returns `Vector3::zeros()` if `tri` is neither `tri_plus` nor
+    /// `tri_minus` for basis `k` (i.e. `tri` lies outside the basis
+    /// function's two-triangle support). This includes sentinel/invalid
+    /// triangle indices.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `k >= self.n_basis()`.
     pub(crate) fn eval(&self, k: usize, tri: u32, bary: [f64; 3]) -> Vector3<f64> {
         let edge = &self.edges[k];
         // Reconstruct the spatial point from barycentric coordinates of the
@@ -240,6 +261,14 @@ impl RwgBasis {
     ///
     /// The RWG divergence is piecewise constant: `+length/area_plus` on
     /// `tri_plus`, `-length/area_minus` on `tri_minus`, and `0.0` elsewhere.
+    /// Returns `0.0` if `tri` is neither `tri_plus` nor `tri_minus` for
+    /// basis `k` (i.e. `tri` lies outside the basis function's
+    /// two-triangle support). This includes sentinel/invalid triangle
+    /// indices.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `k >= self.n_basis()`.
     pub(crate) fn div(&self, k: usize, tri: u32) -> f64 {
         let edge = &self.edges[k];
         if tri == edge.tri_plus {
