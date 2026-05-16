@@ -268,7 +268,11 @@ pub struct MlFitConfig {
     pub initial_sigma_n: f64,
     /// Maximum gradient-ascent iterations.
     pub max_iters: usize,
-    /// Learning rate applied to the log-space parameter vector.
+    /// Step magnitude in log-space. Used as a learning rate when the
+    /// gradient is small (‖grad‖ < 1) and as a maximum step magnitude
+    /// otherwise (the gradient is normalized to unit length, then scaled by
+    /// this value). The split protects against the very large gradients the
+    /// log marginal likelihood produces when started far from the optimum.
     pub gradient_step: f64,
     /// Convergence threshold on the L2 norm of the log-space gradient.
     pub tol: f64,
@@ -338,6 +342,15 @@ impl GaussianProcess {
             Ok(gp.log_marginal_likelihood())
         };
 
+        // Step-scaling regime: vanilla gradient ascent overshoots violently
+        // when starting far from the optimum because the log marginal
+        // likelihood has very large gradients in directions where the prior
+        // is mis-scaled (e.g. tiny sigma_f). We therefore treat
+        // `gradient_step` as the *maximum* log-space step per iteration: if
+        // ‖grad‖ exceeds 1 we scale the update by 1/‖grad‖, which preserves
+        // the gradient direction but caps the move at `gradient_step` in
+        // log-space. When ‖grad‖ < 1 the step is the raw gradient, so
+        // convergence near the optimum still feels the curvature.
         for _ in 0..cfg.max_iters {
             // Central-difference gradient: 2 K-builds per parameter = 6 total.
             let mut grad = [0.0_f64; 3];
@@ -356,9 +369,9 @@ impl GaussianProcess {
                 break;
             }
 
-            // Gradient ascent in log-space.
+            let scale = if gnorm > 1.0 { 1.0 / gnorm } else { 1.0 };
             for k in 0..3 {
-                theta[k] += cfg.gradient_step * grad[k];
+                theta[k] += cfg.gradient_step * scale * grad[k];
             }
         }
 
