@@ -178,17 +178,13 @@ fn run_mom_001_fast() -> CaseResult {
 
     let elapsed = t0.elapsed().as_secs_f64();
     let (status, message) = match result {
-        Ok((re, im)) => (
-            CaseStatus::Passed,
-            format!("Z_in = {re:.3} + j{im:.3} Ohm"),
-        ),
+        Ok((re, im)) => (CaseStatus::Passed, format!("Z_in = {re:.3} + j{im:.3} Ohm")),
         Err(e) => (CaseStatus::Skipped, format!("{e}")),
     };
     CaseResult {
         id: "mom-001-fast".into(),
-        description:
-            "Half-wave dipole, NEC-4 reference (Z ~= 87+j41), 24x24 mesh (fast variant)"
-                .into(),
+        description: "Half-wave dipole, NEC-4 reference (Z ~= 87+j41), 24x24 mesh (fast variant)"
+            .into(),
         status,
         message,
         wall_time_seconds: elapsed,
@@ -200,10 +196,9 @@ fn run_cpml_001() -> CaseResult {
         id: "cpml-001".into(),
         description: "CPML attenuates >= 30 dB vs PEC (FDTD)".into(),
         status: CaseStatus::Skipped,
-        message:
-            "Phase 1.validation.0: cpml_reflection is a yee-fdtd integration test; \
+        message: "Phase 1.validation.0: cpml_reflection is a yee-fdtd integration test; \
              aggregator integration deferred to Phase 1.validation.1"
-                .into(),
+            .into(),
         wall_time_seconds: 0.0,
     }
 }
@@ -213,10 +208,9 @@ fn run_ntff_001() -> CaseResult {
         id: "ntff-001".into(),
         description: "NTFF broadside/endfire null >= 20 dB".into(),
         status: CaseStatus::Skipped,
-        message:
-            "Phase 1.validation.0: ntff_dipole is a yee-fdtd integration test; \
+        message: "Phase 1.validation.0: ntff_dipole is a yee-fdtd integration test; \
              aggregator integration deferred to Phase 1.validation.1"
-                .into(),
+            .into(),
         wall_time_seconds: 0.0,
     }
 }
@@ -226,10 +220,9 @@ fn run_dispersive_001() -> CaseResult {
         id: "dispersive-001".into(),
         description: "Drude slab Fresnel reflection within 20%".into(),
         status: CaseStatus::Skipped,
-        message:
-            "Phase 1.validation.0: drude_slab is a yee-fdtd integration test; \
+        message: "Phase 1.validation.0: drude_slab is a yee-fdtd integration test; \
              aggregator integration deferred to Phase 1.validation.1"
-                .into(),
+            .into(),
         wall_time_seconds: 0.0,
     }
 }

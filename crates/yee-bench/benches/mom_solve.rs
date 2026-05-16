@@ -27,12 +27,7 @@ fn mom_solve(c: &mut Criterion) {
 /// the `yee-mom` test tree and is not exported on the crate's public surface.
 /// Keep in sync with the source-of-truth fixture if the tagging convention
 /// changes.
-fn thin_cylinder_inline(
-    length_m: f64,
-    radius_m: f64,
-    n_axial: usize,
-    n_around: usize,
-) -> TriMesh {
+fn thin_cylinder_inline(length_m: f64, radius_m: f64, n_axial: usize, n_around: usize) -> TriMesh {
     assert!(
         n_axial >= 2 && n_axial.is_multiple_of(2),
         "n_axial must be even and >= 2"
