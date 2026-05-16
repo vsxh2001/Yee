@@ -4,19 +4,20 @@
 //! walking skeleton**: a CPU-only, single-threaded, scalar (FP64) Yee solver
 //! that demonstrates leapfrog propagation in vacuum on a uniform grid.
 //!
-//! ## What is included (Phase 2.0)
+//! ## What is included (Phase 2.0 + 2.1)
 //!
 //! - `YeeGrid` with vacuum constructor, Courant stability limit
 //! - Scalar `update_e` / `update_h` kernels (Taflove & Hagness §3)
 //! - Gaussian-in-time point source on `E_z`
-//! - Hard PEC boundary on all six outer faces (tangential `E = 0`)
+//! - **CPML absorbing boundary on all six outer faces (Roden & Gedney 2000)**
+//!   via [`CpmlState`] / [`CpmlParams`]
+//! - Hard PEC fallback in [`boundary::apply_pec`] for cavity-style problems
 //! - [`WalkingSkeletonSolver`]: a tiny [`FdtdSolver`] impl that wires it all
-//!   together
+//!   together; choose absorbing vs reflecting boundaries via
+//!   [`WalkingSkeletonSolver::with_cpml`] / [`WalkingSkeletonSolver::new`]
 //!
 //! ## What is NOT included
 //!
-//! - **No CPML / absorbing boundaries.** Outer walls reflect. Real
-//!   convolutional PML is Phase 2.1+ work.
 //! - No GPU kernels, no multi-GPU domain decomposition.
 //! - No subgridding, no dispersive materials (Drude / Lorentz / Debye).
 //! - No conformal (Dey-Mittra) treatment of curved geometry.
@@ -72,24 +73,52 @@ pub trait FdtdSolver {
 /// The update order each step is:
 ///
 /// 1. `update_h` — magnetic field leapfrogs forward by `dt`
-/// 2. `apply_pec` — clamp tangential `E` on the outer faces to zero
+/// 2. CPML auxiliary update for H (if a [`CpmlState`] is configured), or PEC
+///    tangential-E clamp on the outer faces (legacy mode)
 /// 3. *(optional)* inject a source via [`Self::step_with_source`]
 /// 4. `update_e` — electric field leapfrogs forward by `dt`
-/// 5. re-apply PEC clamp on the newly updated tangential E
+/// 5. CPML auxiliary update for E, or PEC clamp again
 /// 6. increment step counter / simulation clock
 ///
-/// The PEC clamp is applied between the `H` and `E` half-steps so that the
-/// next `E` update reads consistent boundary values, and again after the `E`
-/// update to keep the tangential outer-face cells nailed to zero.
+/// Either the CPML state or the PEC clamp manages the outer faces — never
+/// both. CPML is preferred for open-domain problems; PEC is kept available
+/// for cavity-style runs and for the regression test in
+/// `tests/fdtd_propagation.rs`.
 pub struct WalkingSkeletonSolver {
     grid: YeeGrid,
     step: u64,
+    cpml: Option<CpmlState>,
 }
 
 impl WalkingSkeletonSolver {
-    /// Wrap a [`YeeGrid`] in a fresh solver at `t = 0`.
+    /// Wrap a [`YeeGrid`] in a fresh solver at `t = 0` with **hard PEC**
+    /// outer boundaries (reflecting). For absorbing CPML boundaries see
+    /// [`Self::with_cpml`].
     pub fn new(grid: YeeGrid) -> Self {
-        Self { grid, step: 0 }
+        Self {
+            grid,
+            step: 0,
+            cpml: None,
+        }
+    }
+
+    /// Wrap a [`YeeGrid`] in a fresh solver with a CPML absorbing boundary
+    /// on all six outer faces, configured via `params`.
+    ///
+    /// The CPML state is built from `grid.dt`, so callers must not change
+    /// `dt` after construction without rebuilding the solver.
+    pub fn with_cpml(grid: YeeGrid, params: CpmlParams) -> Self {
+        let cpml = CpmlState::new(&grid, params);
+        Self {
+            grid,
+            step: 0,
+            cpml: Some(cpml),
+        }
+    }
+
+    /// Borrow the CPML state, if one was configured via [`Self::with_cpml`].
+    pub fn cpml(&self) -> Option<&CpmlState> {
+        self.cpml.as_ref()
     }
 
     /// Immutable view of the underlying grid (e.g. for probing field values).
@@ -123,10 +152,20 @@ impl WalkingSkeletonSolver {
     pub fn step_with_source(&mut self, i: usize, j: usize, k: usize, t0: f64, sigma: f64) {
         let t = self.current_time();
         update::update_h(&mut self.grid);
-        boundary::apply_pec(&mut self.grid);
+        if let Some(cpml) = self.cpml.as_mut() {
+            cpml.update_h(&mut self.grid);
+        } else {
+            #[allow(deprecated)]
+            boundary::apply_pec(&mut self.grid);
+        }
         sources::gaussian_pulse_ez(&mut self.grid, i, j, k, t, t0, sigma);
         update::update_e(&mut self.grid);
-        boundary::apply_pec(&mut self.grid);
+        if let Some(cpml) = self.cpml.as_mut() {
+            cpml.update_e(&mut self.grid);
+        } else {
+            #[allow(deprecated)]
+            boundary::apply_pec(&mut self.grid);
+        }
         self.step += 1;
     }
 }
@@ -134,9 +173,19 @@ impl WalkingSkeletonSolver {
 impl FdtdSolver for WalkingSkeletonSolver {
     fn step(&mut self) {
         update::update_h(&mut self.grid);
-        boundary::apply_pec(&mut self.grid);
+        if let Some(cpml) = self.cpml.as_mut() {
+            cpml.update_h(&mut self.grid);
+        } else {
+            #[allow(deprecated)]
+            boundary::apply_pec(&mut self.grid);
+        }
         update::update_e(&mut self.grid);
-        boundary::apply_pec(&mut self.grid);
+        if let Some(cpml) = self.cpml.as_mut() {
+            cpml.update_e(&mut self.grid);
+        } else {
+            #[allow(deprecated)]
+            boundary::apply_pec(&mut self.grid);
+        }
         self.step += 1;
     }
 
