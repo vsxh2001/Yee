@@ -52,16 +52,23 @@ pub struct GmresResult {
     pub converged: bool,
 }
 
-/// Solve `A x = b` with restarted GMRES(m).
+/// Solve `A x = b` with restarted GMRES(m) and a left Jacobi (diagonal)
+/// preconditioner.
 ///
-/// This commit lands the unpreconditioned restarted GMRES(m) core
-/// (Modified Gram–Schmidt Arnoldi + accumulated Givens rotations). The
-/// Jacobi preconditioner is folded in by the next commit; for now `M = I`,
-/// so the function name is forward-compatible but the math is plain
-/// GMRES(m).
+/// `a` is `n×n` complex-double, `b` is `n×1`. The preconditioner is
+/// `M = diag(A)`; the iteration is run on the left-preconditioned system
+/// `M⁻¹ A x = M⁻¹ b`.
+///
+/// Returns a [`GmresResult`] with the solution, total Arnoldi iteration
+/// count, final relative residual, and convergence flag. The function
+/// never panics on a singular `M`; entries of `diag(A)` with zero norm
+/// are replaced by `1 + 0i` so the preconditioner is still well-defined
+/// (a singular diagonal indicates a pathological A and the iteration
+/// will not converge anyway).
 ///
 /// Algorithm reference: Saad, *Iterative Methods for Sparse Linear
-/// Systems* (2nd ed., 2003), §6.5 Algorithm 6.9 / 6.11.
+/// Systems* (2nd ed., 2003), §6.5 Algorithm 6.11 (restarted GMRES with
+/// left preconditioning).
 pub fn gmres_jacobi(
     a: faer::MatRef<Complex64>,
     b: faer::MatRef<Complex64>,
@@ -69,9 +76,18 @@ pub fn gmres_jacobi(
 ) -> GmresResult {
     let n = a.nrows();
 
-    // M = I (no preconditioning in this commit; Jacobi diagonal lands
-    // in the follow-up commit).
-    let m_inv: Vec<Complex64> = vec![Complex64::new(1.0, 0.0); n];
+    // Extract diagonal for Jacobi preconditioner. A zero diagonal entry
+    // is replaced by 1+0i so M⁻¹ is well-defined; this is a safety net,
+    // not a correctness path.
+    let mut m_inv = vec![Complex64::new(0.0, 0.0); n];
+    for i in 0..n {
+        let diag = a[(i, i)];
+        m_inv[i] = if diag.norm() > 0.0 {
+            Complex64::new(1.0, 0.0) / diag
+        } else {
+            Complex64::new(1.0, 0.0)
+        };
+    }
 
     // Initial guess x = 0. Then r = M⁻¹ (b - A·0) = b.
     let mut x = Mat::<Complex64>::zeros(n, 1);
@@ -329,4 +345,65 @@ fn givens(a: Complex64, b: Complex64) -> (f64, Complex64) {
     // holds.
     let s = (a / Complex64::new(abs_a, 0.0)) * b.conj() / Complex64::new(r, 0.0);
     (c, s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use faer::Mat;
+    use num_complex::Complex64;
+
+    #[test]
+    fn gmres_identity_converges_immediately() {
+        let n = 4;
+        let mut a = Mat::<Complex64>::zeros(n, n);
+        for i in 0..n {
+            a[(i, i)] = Complex64::new(1.0, 0.0);
+        }
+        let mut b = Mat::<Complex64>::zeros(n, 1);
+        for i in 0..n {
+            b[(i, 0)] = Complex64::new(i as f64 + 1.0, 0.0);
+        }
+        let r = gmres_jacobi(a.as_ref(), b.as_ref(), GmresParams::default());
+        assert!(r.converged, "identity should converge");
+        for i in 0..n {
+            assert!((r.x[(i, 0)] - b[(i, 0)]).norm() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn gmres_diagonal_dominant_converges() {
+        // 16x16 diagonal-dominant: A = 10·I + small off-diagonal.
+        let n = 16;
+        let mut a = Mat::<Complex64>::zeros(n, n);
+        for i in 0..n {
+            for j in 0..n {
+                a[(i, j)] = if i == j {
+                    Complex64::new(10.0, 0.0)
+                } else {
+                    Complex64::new(0.01 * ((i + j) as f64).sin(), 0.0)
+                };
+            }
+        }
+        let mut b = Mat::<Complex64>::zeros(n, 1);
+        for i in 0..n {
+            b[(i, 0)] = Complex64::new(1.0, 0.0);
+        }
+        let r = gmres_jacobi(a.as_ref(), b.as_ref(), GmresParams::default());
+        assert!(r.converged, "diagonal-dominant should converge");
+        assert!(r.final_residual < 1e-9);
+    }
+
+    #[test]
+    fn gmres_reports_iteration_count() {
+        let n = 4;
+        let mut a = Mat::<Complex64>::zeros(n, n);
+        for i in 0..n {
+            a[(i, i)] = Complex64::new(1.0, 0.0);
+        }
+        let mut b = Mat::<Complex64>::zeros(n, 1);
+        b[(0, 0)] = Complex64::new(1.0, 0.0);
+        let r = gmres_jacobi(a.as_ref(), b.as_ref(), GmresParams::default());
+        assert!(r.iterations <= 2, "identity should converge in 1 restart");
+    }
 }
