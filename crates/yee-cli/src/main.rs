@@ -9,13 +9,17 @@
 //!   `gmsh` feature this exits with code 2 and a guidance message.
 //! - `yee export <input> --format <touchstone|hdf5> <output>` — reads/writes
 //!   Touchstone via `yee-io`. `hdf5` is not yet enabled and exits with code 2.
+//! - `yee completions <shell>` — emits a shell completion script to stdout
+//!   (`bash`, `zsh`, `fish`).
 //! - `yee run <project>` — Phase 0 stub from the scaffold.
 
+use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::{Shell, generate};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -55,6 +59,13 @@ enum Command {
         format: ExportFormat,
         /// Output file path.
         output: PathBuf,
+    },
+    /// Generate a shell completion script on stdout.
+    ///
+    /// Pre-generated scripts live in `crates/yee-cli/completions/`.
+    Completions {
+        /// Target shell (`bash`, `zsh`, `fish`, ...).
+        shell: Shell,
     },
 }
 
@@ -105,6 +116,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
             format,
             output,
         } => run_export(&input, format, &output),
+        Command::Completions { shell } => {
+            let mut cmd = Cli::command();
+            let bin_name = cmd.get_name().to_string();
+            generate(shell, &mut cmd, bin_name, &mut io::stdout());
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 

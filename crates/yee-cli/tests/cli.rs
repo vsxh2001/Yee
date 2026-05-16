@@ -16,6 +16,7 @@ fn help_lists_every_subcommand() {
         .stdout(contains("validate"))
         .stdout(contains("mesh"))
         .stdout(contains("export"))
+        .stdout(contains("completions"))
         .stdout(contains("run"));
 }
 
@@ -154,6 +155,39 @@ fn unknown_subcommand_suggests() {
         stderr.contains("unrecognized") || stderr.contains("similar") || stderr.contains("error"),
         "expected an error/suggestion from clap, got: {stderr}"
     );
+}
+
+/// `yee completions bash` writes a bash completion script to stdout.
+#[test]
+fn completions_bash_emits_script() {
+    Command::cargo_bin("yee")
+        .unwrap()
+        .args(["completions", "bash"])
+        .assert()
+        .success()
+        .stdout(contains("yee"));
+}
+
+/// `yee completions zsh` writes a zsh completion script.
+#[test]
+fn completions_zsh_emits_script() {
+    Command::cargo_bin("yee")
+        .unwrap()
+        .args(["completions", "zsh"])
+        .assert()
+        .success()
+        .stdout(contains("yee"));
+}
+
+/// `yee completions fish` writes a fish completion script.
+#[test]
+fn completions_fish_emits_script() {
+    Command::cargo_bin("yee")
+        .unwrap()
+        .args(["completions", "fish"])
+        .assert()
+        .success()
+        .stdout(contains("yee"));
 }
 
 /// Helper: create a unique temp directory under `std::env::temp_dir()`.
