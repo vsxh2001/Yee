@@ -10,6 +10,7 @@
 | `yee mesh <input>` | Mesh STEP / IGES / KiCad PCB via Gmsh | 0 (stub) → 1 |
 | `yee run <project>` | Run a simulation from a TOML project file | 1 |
 | `yee export <results>` | Export Touchstone / HDF5 | 0 (stub) → 1 |
+| `yee bench <target>` | Run a `yee-bench` criterion benchmark | 3 |
 
 ## Installing (post-release)
 
@@ -49,6 +50,22 @@ Exit code is non-zero iff any included case is `Failed`; `Skipped`
 cases (Phase-deferred placeholders, see CLAUDE.md §10) never fail the
 run. The `mom-001` solve takes ~7-8 min in `--release`, so prefer the
 release profile when running locally.
+
+## Bench
+
+`yee bench` shells out to `cargo bench -p yee-bench` for the chosen
+criterion target. Stdout/stderr are inherited so criterion's live
+progress display is preserved.
+
+Run a specific bench:
+
+    yee bench mom        # MoM dipole solve
+    yee bench gp         # GP fit + fit_ml
+    yee bench all        # everything in yee-bench
+
+Pass criterion args after `--`:
+
+    yee bench bo -- --warm-up-time 1
 
 ## Roadmap
 
