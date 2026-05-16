@@ -13,7 +13,7 @@ use numpy::{PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use yee_surrogate::Error as SurrogateError;
-use yee_surrogate::gp::GaussianProcess as RustGp;
+use yee_surrogate::gp::{GaussianProcess as RustGp, MlFitConfig};
 
 /// Map `yee_surrogate::Error` into the appropriate Python exception.
 ///
@@ -83,6 +83,59 @@ impl PyGaussianProcess {
         let xm = numpy_to_dmatrix(&x);
         let yv = numpy_to_dvector(&y);
         let inner = RustGp::fit(xm, yv, length_scale, sigma_f, sigma_n).map_err(surrogate_to_py)?;
+        Ok(Self { inner })
+    }
+
+    /// Maximum-likelihood fit: optimize `(length_scale, sigma_f, sigma_n)`
+    /// by gradient ascent on the log marginal likelihood.
+    ///
+    /// All `initial_*` arguments default to the values in
+    /// [`yee_surrogate::gp::MlFitConfig::default`] when omitted (`None`).
+    ///
+    /// Args:
+    ///     x: (n, d) ndarray of training inputs.
+    ///     y: (n,) ndarray of training targets.
+    ///     initial_length_scale: starting length scale (must be > 0).
+    ///     initial_sigma_f: starting signal stddev (must be > 0).
+    ///     initial_sigma_n: starting noise stddev (must be > 0).
+    ///     max_iters: maximum gradient-ascent iterations.
+    ///
+    /// Raises:
+    ///     ValueError: as for `fit`, plus if any K-build along the
+    ///         optimization trajectory is non-PSD.
+    #[staticmethod]
+    #[pyo3(signature = (
+        x,
+        y,
+        initial_length_scale = None,
+        initial_sigma_f = None,
+        initial_sigma_n = None,
+        max_iters = None,
+    ))]
+    fn fit_ml<'py>(
+        x: PyReadonlyArray2<'py, f64>,
+        y: PyReadonlyArray1<'py, f64>,
+        initial_length_scale: Option<f64>,
+        initial_sigma_f: Option<f64>,
+        initial_sigma_n: Option<f64>,
+        max_iters: Option<usize>,
+    ) -> PyResult<Self> {
+        let xm = numpy_to_dmatrix(&x);
+        let yv = numpy_to_dvector(&y);
+        let mut cfg = MlFitConfig::default();
+        if let Some(v) = initial_length_scale {
+            cfg.initial_length_scale = v;
+        }
+        if let Some(v) = initial_sigma_f {
+            cfg.initial_sigma_f = v;
+        }
+        if let Some(v) = initial_sigma_n {
+            cfg.initial_sigma_n = v;
+        }
+        if let Some(v) = max_iters {
+            cfg.max_iters = v;
+        }
+        let inner = RustGp::fit_ml(xm, yv, cfg).map_err(surrogate_to_py)?;
         Ok(Self { inner })
     }
 
