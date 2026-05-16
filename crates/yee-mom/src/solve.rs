@@ -3,9 +3,9 @@
 #![allow(dead_code)]
 // PlanarMoM::run (Task 10) consumes these.
 
+use crate::GreensSpec;
 use crate::basis::RwgBasis;
 use crate::fill::impedance_matrix;
-use crate::greens::FreeSpaceGreen;
 use crate::iterative::{GmresParams, gmres_jacobi};
 use crate::ports::{DeltaGapPort, Port};
 use crate::roughness::{RoughnessModel, SIGMA_COPPER};
@@ -72,7 +72,7 @@ pub(crate) fn delta_gap_rhs(basis: &RwgBasis, port_tag: u32) -> Mat<Complex64> {
 /// Solve at a single frequency and return S11 referenced to `z0_ref`.
 ///
 /// Pipeline:
-/// 1. Build the free-space Green's function at `freq_hz`.
+/// 1. Build the Green's function specified by `greens` at `freq_hz`.
 /// 2. Assemble the MPIE impedance matrix `Z` over the RWG basis.
 /// 3. Build the RHS `b = port.rhs(basis, freq_hz)`.
 /// 4. Factorise `Z = L U` (partial pivoting) and solve `Z i = b`.
@@ -91,6 +91,7 @@ pub(crate) fn s_parameters_at_freq(
     freq_hz: f64,
     z0_ref: f64,
     roughness: Option<&RoughnessModel>,
+    greens: &GreensSpec,
 ) -> Result<Complex64, Error> {
     s_parameters_at_freq_with_solver(
         basis,
@@ -99,6 +100,7 @@ pub(crate) fn s_parameters_at_freq(
         z0_ref,
         roughness,
         LinearSolver::Direct,
+        greens,
     )
 }
 
@@ -117,8 +119,9 @@ pub(crate) fn s_parameters_at_freq_with_solver(
     z0_ref: f64,
     roughness: Option<&RoughnessModel>,
     solver: LinearSolver,
+    greens: &GreensSpec,
 ) -> Result<Complex64, Error> {
-    let green = FreeSpaceGreen::new(freq_hz);
+    let green = greens.build(freq_hz);
     let mut z = impedance_matrix(basis, &green);
     if let Some(rough) = roughness {
         apply_roughness(&mut z, rough, freq_hz);
@@ -173,11 +176,12 @@ pub(crate) fn s_parameters_sweep(
     freq_range: FreqRange,
     z0_ref: f64,
     roughness: Option<&RoughnessModel>,
+    greens: &GreensSpec,
 ) -> Result<TouchstoneFile, Error> {
     let mut freq_hz = Vec::new();
     let mut data: Vec<Vec<Complex64>> = Vec::new();
     for f in freq_range.iter() {
-        let s11 = s_parameters_at_freq(basis, port, f, z0_ref, roughness)?;
+        let s11 = s_parameters_at_freq(basis, port, f, z0_ref, roughness, greens)?;
         freq_hz.push(f);
         data.push(vec![s11]);
     }
@@ -235,7 +239,8 @@ mod tests {
             tag: 1,
             voltage: Complex64::new(1.0, 0.0),
         };
-        let file = s_parameters_sweep(&basis, &port, freq, 50.0, None).expect("sweep");
+        let file = s_parameters_sweep(&basis, &port, freq, 50.0, None, &GreensSpec::FreeSpace)
+            .expect("sweep");
         assert_eq!(file.freq_hz.len(), 3);
         assert_eq!(file.data.len(), 3);
         assert_eq!(file.n_ports, 1);
