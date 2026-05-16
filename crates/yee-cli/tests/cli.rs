@@ -32,43 +32,21 @@ fn version_prints_workspace_version() {
         .stdout(contains("0.0.0"));
 }
 
-/// `yee validate mom` exits 0 and prints the three planned mom cases.
+/// `yee validate --help` lists the supported `mom`/`fdtd`/`all` targets
+/// and the `--json` flag. This is fast: clap renders help without running
+/// the aggregator. The real-aggregator smoke tests live (ignored) in
+/// `tests/cli_validate.rs`.
 #[test]
-fn validate_mom_prints_planned_cases() {
+fn validate_help_lists_targets_and_json_flag() {
     Command::cargo_bin("yee")
         .unwrap()
-        .args(["validate", "mom"])
+        .args(["validate", "--help"])
         .assert()
         .success()
-        .stdout(contains("yee validate mom"))
-        .stdout(contains("planned cases"))
-        .stdout(contains("mom-001"))
-        .stdout(contains("mom-002"))
-        .stdout(contains("mom-003"));
-}
-
-/// `yee validate fdtd` exits 0 and prints the Phase 2 deliverable notice.
-#[test]
-fn validate_fdtd_prints_phase2_notice() {
-    Command::cargo_bin("yee")
-        .unwrap()
-        .args(["validate", "fdtd"])
-        .assert()
-        .success()
-        .stdout(contains("Phase 2 deliverable"))
-        .stdout(contains("yee-fdtd"));
-}
-
-/// `yee validate all` exits 0, runs both, and stdout includes the Phase 2 line.
-#[test]
-fn validate_all_runs_both() {
-    Command::cargo_bin("yee")
-        .unwrap()
-        .args(["validate", "all"])
-        .assert()
-        .success()
-        .stdout(contains("mom-001"))
-        .stdout(contains("Phase 2 deliverable"));
+        .stdout(contains("mom"))
+        .stdout(contains("fdtd"))
+        .stdout(contains("all"))
+        .stdout(contains("--json"));
 }
 
 /// `yee mesh` without the `gmsh` feature exits with code 2 and mentions gmsh.
