@@ -108,6 +108,79 @@ The returned `GaussianProcess` is a fresh refit with the optimized
 hyperparameters, so its cached `α` and Cholesky factor are consistent with
 the returned `(length_scale, sigma_f, sigma_n)` accessors.
 
+## Bayesian optimization
+
+`bo::minimize` runs a single-objective Bayesian-optimization loop on top of
+`GaussianProcess`. Each iteration refits a GP via `fit_ml` on the running
+evaluation history, then maximizes Expected Improvement over a uniform
+random candidate set to pick the next point. The implementation is
+~150 LOC plus tests and adds no new crate dependencies — the standard
+normal CDF/PDF used by EI are inlined via the Abramowitz & Stegun 7.1.26
+rational approximation to `erf`, and randomness comes from a small inline
+`xorshift64` seeded by `BoConfig::seed` for reproducibility.
+
+### Acquisition: Expected Improvement (minimization)
+
+For current best `f_best`, predictive mean `μ`, stddev `σ`, exploration `ξ`:
+
+```text
+improvement = f_best - μ - ξ
+z           = improvement / σ                        if σ > 0
+ei          = improvement · Φ(z) + σ · φ(z)          if σ > 0
+            = max(improvement, 0)                    if σ == 0
+```
+
+The exploration parameter `xi` (default `0.01`) biases toward higher-variance
+candidates; raise it if BO converges too eagerly to a local minimum.
+
+### Initial design
+
+`n_initial` Latin-hypercube points (default 5). Each dimension is split into
+`n_initial` equal strata, one stratified value is drawn per stratum, then
+strata are permuted independently across dimensions. This produces a
+space-filling initial design without the clustering that pure-random
+sampling can exhibit at small `n`.
+
+### Usage
+
+```rust,ignore
+use nalgebra::DVector;
+use yee_surrogate::{minimize, BoConfig};
+
+let objective = |x: &DVector<f64>| (x[0] - 3.0).powi(2) + (5.0 * x[0]).sin();
+let bounds = vec![(0.0, 6.0)];
+let cfg = BoConfig {
+    n_initial: 5,
+    n_iters: 20,
+    n_candidates: 1024,
+    xi: 0.01,
+    seed: 0xC0FFEE,
+};
+let res = minimize(objective, bounds, cfg);
+println!("best x = {:?}, y = {}", res.x_best, res.y_best);
+// res.history holds every (x, y) evaluation in order.
+```
+
+### Validation
+
+`tests/bo_synthetic.rs` runs the deceptive 1-D objective
+`f(x) = (x - 3)² + sin(5x)` on `[0, 6]` with budget 5 + 20 and asserts
+BO `y_best < 0.0` (a fine sweep places the global minimum at `x ≈ 3.422`,
+`y ≈ -0.8077`). A 25-call pure-random baseline run from the same seed set
+is required to lose head-to-head against BO on the best `y` across seeds.
+
+### Scope and out-of-scope
+
+In:
+- Single-objective minimization with continuous bounded parameters.
+- EI acquisition on a uniform random candidate set.
+
+Out (Phase 3.bo.1+):
+- L-BFGS / multi-start gradient acquisition optimization.
+- Multi-objective Pareto fronts (NSGA-II).
+- Constrained optimization.
+- Batch BO.
+
 ## Future direction (Phase 3.1+)
 
 - Anisotropic RBF / Matérn kernels for the GP backend.
