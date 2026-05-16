@@ -10,7 +10,9 @@ description  = "Yee meshing layer: in-tree bindgen FFI to Gmsh + safe Rust wrapp
 [features]
 default = []
 # Off by default so contributors without Gmsh SDK installed can still build.
-gmsh    = []
+# Enabling `gmsh` pulls in the optional `bindgen` build-dep used by build.rs
+# to generate FFI bindings against `$GMSH_SDK_ROOT/include/gmshc.h`.
+gmsh    = ["dep:bindgen"]
 
 [dependencies]
 yee-core  = { workspace = true }
