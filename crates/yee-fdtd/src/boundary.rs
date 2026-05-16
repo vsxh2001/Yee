@@ -2,20 +2,18 @@
 //!
 //! # Status
 //!
-//! **This is a *reflecting* hard PEC boundary**, not an absorbing one. Tangential
+//! **Deprecated** in favor of [`crate::cpml::CpmlState`].
+//!
+//! This module ships a *reflecting* hard PEC boundary: tangential
 //! electric-field components on the six outer faces are clamped to zero each
 //! step, so any energy that reaches the walls bounces back into the
-//! computational domain.
+//! computational domain. It is kept around for the regression test in
+//! `tests/fdtd_propagation.rs` (which exercises propagation in a closed
+//! cavity) and for diagnostic comparisons against CPML.
 //!
-//! That is the wrong long-term behavior for an open-domain antenna or
-//! radar-cross-section simulation, where the outer faces must *absorb*
-//! outgoing waves. A real **CPML** (convolutional perfectly matched layer,
-//! Roden & Gedney 2000) implementation is **Phase 2.1+ work** and is
-//! deliberately out of scope for the walking skeleton.
-//!
-//! For now: pick a domain large enough that the wavefront does not reach the
-//! walls during the simulation window, or accept the reflections for
-//! resonant / cavity-style problems.
+//! For an absorbing boundary (correct long-term behavior for open-domain
+//! antenna or radar-cross-section runs) use the Roden–Gedney 2000 CPML
+//! implementation in [`crate::cpml`].
 
 use crate::grid::YeeGrid;
 
@@ -26,6 +24,7 @@ use crate::grid::YeeGrid;
 /// `E_z`. On the `y = 0` and `y = ny` faces they are `E_x` and `E_z`. On the
 /// `z = 0` and `z = nz` faces they are `E_x` and `E_y`. Normal `E` and all
 /// `H` components are left untouched.
+#[deprecated(note = "use CpmlState for production; PEC is reflecting and only suitable for cavities")]
 pub fn apply_pec(grid: &mut YeeGrid) {
     let nx = grid.nx;
     let ny = grid.ny;
