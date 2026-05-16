@@ -23,7 +23,7 @@
 pub mod bo;
 pub mod gp;
 
-pub use bo::{ei, minimize, BoConfig, BoResult};
+pub use bo::{BoConfig, BoResult, ei, minimize};
 pub use gp::{GaussianProcess, GpSurrogate, MlFitConfig};
 
 use num_complex::Complex64;

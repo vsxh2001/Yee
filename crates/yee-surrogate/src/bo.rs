@@ -151,10 +151,7 @@ where
 {
     assert!(!bounds.is_empty(), "minimize: bounds must be non-empty");
     for (i, (lo, hi)) in bounds.iter().enumerate() {
-        assert!(
-            hi > lo,
-            "minimize: bounds[{i}] has hi ({hi}) <= lo ({lo})"
-        );
+        assert!(hi > lo, "minimize: bounds[{i}] has hi ({hi}) <= lo ({lo})");
     }
     assert!(
         cfg.n_initial >= 2,
@@ -287,7 +284,11 @@ impl Xorshift64 {
     /// Construct a new PRNG. A zero seed is replaced by a non-zero constant so
     /// the recurrence does not collapse to `state = 0`.
     pub(crate) fn new(seed: u64) -> Self {
-        let s = if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed };
+        let s = if seed == 0 {
+            0x9E37_79B9_7F4A_7C15
+        } else {
+            seed
+        };
         Self { state: s }
     }
 
