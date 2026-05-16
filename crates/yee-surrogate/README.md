@@ -67,10 +67,52 @@ let gp = GaussianProcess::fit(x, y, /*length_scale=*/ 0.5, /*sigma_f=*/ 1.0, /*s
 let (mean, var) = gp.predict(&DVector::from_row_slice(&[x_star]));
 ```
 
+## Hyperparameter optimization
+
+`GaussianProcess::fit_ml` maximizes the log marginal likelihood
+
+```text
+log p(y | X, θ) = -0.5 · yᵀ K⁻¹ y - 0.5 · log|K| - (n/2) · log(2π)
+```
+
+over `θ = (length_scale, sigma_f, sigma_n)` via gradient ascent in log-space
+(so each hyperparameter stays strictly positive by construction). Gradients
+are computed by **central differences** on `log_marginal_likelihood`, not
+analytically: the analytic gradient requires `tr(K⁻¹ ∂K/∂θ)`, which is
+O(n³) per parameter and easy to get wrong. Central differences cost 6
+K-builds per iteration, which is the simpler tradeoff for the small-n (≲ 50)
+problems this surrogate targets. The optimizer caps per-iteration step
+magnitude in log-space so the very large gradients near a poorly-scaled
+starting point can't overshoot into underflow.
+
+Usage:
+
+```rust,ignore
+use nalgebra::{DMatrix, DVector};
+use yee_surrogate::{GaussianProcess, MlFitConfig};
+
+let x = DMatrix::from_column_slice(n, 1, &x_train);
+let y = DVector::from_row_slice(&y_train);
+let cfg = MlFitConfig {
+    initial_length_scale: 1.0,
+    initial_sigma_f: 1.0,
+    initial_sigma_n: 1e-3,
+    ..Default::default()
+};
+let gp = GaussianProcess::fit_ml(x, y, cfg)?;
+println!("optimized log marginal likelihood = {}", gp.log_marginal_likelihood());
+let (mean, var) = gp.predict(&DVector::from_row_slice(&[x_star]));
+```
+
+The returned `GaussianProcess` is a fresh refit with the optimized
+hyperparameters, so its cached `α` and Cholesky factor are consistent with
+the returned `(length_scale, sigma_f, sigma_n)` accessors.
+
 ## Future direction (Phase 3.1+)
 
-- Anisotropic RBF / Matérn kernels and marginal-likelihood hyperparameter
-  tuning for the GP backend.
+- Anisotropic RBF / Matérn kernels for the GP backend.
+- Analytic-gradient + L-BFGS hyperparameter optimization for n ≫ 50 where
+  the numerical-gradient cost dominates.
 - MLP / residual-MLP backend for medium-dimensional spaces and amortized
   inference.
 - Fourier neural operator (FNO) / DeepONet for field-level outputs, not just

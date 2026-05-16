@@ -20,6 +20,20 @@
 //! - `sigma_f` — signal standard deviation. Controls the prior amplitude.
 //! - `sigma_n` — observation-noise standard deviation. Acts as a Tikhonov
 //!   regularizer (`sigma_n^2 I` added to the diagonal of `K`).
+//!
+//! ## Hyperparameter optimization
+//!
+//! [`GaussianProcess::fit_ml`] maximizes the log marginal likelihood
+//! `log p(y | X, θ)` over `θ = (length_scale, sigma_f, sigma_n)` via gradient
+//! ascent in log-space (so positivity of each hyperparameter is preserved by
+//! construction). The gradient is computed by **central differences** rather
+//! than analytically: the analytic gradient requires `tr(K⁻¹ ∂K/∂θ)` which is
+//! O(n³) per parameter and easy to get wrong. Central differences cost
+//! 6 K-builds per iteration (two per parameter), but for the small
+//! problems this surrogate is intended for (n ≲ 50) the simplicity of the
+//! numerical path is the better tradeoff. Each K-build is itself O(n³), so
+//! callers with larger `n` should expect optimization to dominate training
+//! time.
 
 use nalgebra::{Cholesky, DMatrix, DVector, Dyn};
 use num_complex::Complex64;
@@ -34,7 +48,6 @@ pub struct GaussianProcess {
     /// Training input matrix, shape (n, d).
     x_train: DMatrix<f64>,
     /// Training output vector, shape (n,).
-    #[allow(dead_code)]
     y_train: DVector<f64>,
     /// RBF kernel length scale.
     length_scale: f64,
@@ -205,6 +218,168 @@ impl GaussianProcess {
     pub fn sigma_n(&self) -> f64 {
         self.sigma_n
     }
+
+    /// Log marginal likelihood of the training data under the fitted GP:
+    ///
+    /// ```text
+    /// log p(y | X, θ) = -0.5 · yᵀ K⁻¹ y - 0.5 · log|K| - (n/2) · log(2π)
+    /// ```
+    ///
+    /// Computed from cached state:
+    ///
+    /// - The **data-fit** term `-0.5 · yᵀ α` reuses the cached `α = K⁻¹ y`.
+    /// - The **complexity** term `-0.5 · log|K| = -sum(log diag(L))` reuses
+    ///   the cached lower-triangular Cholesky factor `L` of `K + σ_n² I`,
+    ///   exploiting `log|K| = 2 · sum(log diag(L))`.
+    /// - The **normalizer** is `-(n/2) · log(2π)`.
+    ///
+    /// Higher is better; useful for model selection between fitted GPs and
+    /// as the objective for hyperparameter optimization via
+    /// [`GaussianProcess::fit_ml`].
+    pub fn log_marginal_likelihood(&self) -> f64 {
+        let n = self.x_train.nrows();
+        // -0.5 * y^T alpha
+        let data_fit = -0.5 * self.y_train.dot(&self.k_inv_y);
+        // -0.5 * log|K| = -sum(log diag(L))
+        let l = self.k_chol.l();
+        let mut log_diag_sum = 0.0;
+        for i in 0..n {
+            log_diag_sum += l[(i, i)].ln();
+        }
+        let complexity = -log_diag_sum;
+        // -(n/2) log(2π)
+        let norm = -0.5 * (n as f64) * (2.0 * std::f64::consts::PI).ln();
+        data_fit + complexity + norm
+    }
+}
+
+/// Configuration for marginal-likelihood hyperparameter optimization.
+///
+/// Passed to [`GaussianProcess::fit_ml`]. Defaults are tuned for the
+/// low-dimensional, small-n surrogate problems this crate targets; expect to
+/// tune `gradient_step` and `max_iters` for larger problems.
+#[derive(Debug, Clone)]
+pub struct MlFitConfig {
+    /// Starting length scale (linear-space, not log-space).
+    pub initial_length_scale: f64,
+    /// Starting signal stddev.
+    pub initial_sigma_f: f64,
+    /// Starting noise stddev.
+    pub initial_sigma_n: f64,
+    /// Maximum gradient-ascent iterations.
+    pub max_iters: usize,
+    /// Step magnitude in log-space. Used as a learning rate when the
+    /// gradient is small (‖grad‖ < 1) and as a maximum step magnitude
+    /// otherwise (the gradient is normalized to unit length, then scaled by
+    /// this value). The split protects against the very large gradients the
+    /// log marginal likelihood produces when started far from the optimum.
+    pub gradient_step: f64,
+    /// Convergence threshold on the L2 norm of the log-space gradient.
+    pub tol: f64,
+}
+
+impl Default for MlFitConfig {
+    fn default() -> Self {
+        Self {
+            initial_length_scale: 1.0,
+            initial_sigma_f: 1.0,
+            initial_sigma_n: 1e-3,
+            max_iters: 200,
+            gradient_step: 0.05,
+            tol: 1e-4,
+        }
+    }
+}
+
+impl GaussianProcess {
+    /// Fit a GP by maximizing the log marginal likelihood over
+    /// `(length_scale, sigma_f, sigma_n)`.
+    ///
+    /// Optimizes in log-space (`θ = (log ℓ, log σ_f, log σ_n)`) so the three
+    /// hyperparameters stay strictly positive without an explicit constraint.
+    /// The gradient is computed by central differences (step `1e-3` in
+    /// log-space) on [`Self::log_marginal_likelihood`]; the optimizer is
+    /// plain gradient ascent. See the module-level docs for the rationale.
+    ///
+    /// Iteration halts when the L2 norm of the log-space gradient drops
+    /// below `cfg.tol` or `cfg.max_iters` is exhausted, whichever comes
+    /// first. The returned [`GaussianProcess`] is a fresh refit with the
+    /// optimized hyperparameters, so its cached `α` and Cholesky factor are
+    /// consistent.
+    ///
+    /// Returns [`Error::FitFailed`] if any K-build along the optimization
+    /// trajectory is non-PSD (i.e. Cholesky-factor fails). In that case the
+    /// last successful fit is *not* returned; the caller should widen the
+    /// initial `sigma_n` and retry.
+    pub fn fit_ml(x: DMatrix<f64>, y: DVector<f64>, cfg: MlFitConfig) -> Result<Self> {
+        if cfg.initial_length_scale <= 0.0
+            || cfg.initial_sigma_f <= 0.0
+            || cfg.initial_sigma_n <= 0.0
+        {
+            return Err(Error::FitFailed(format!(
+                "fit_ml: initial hyperparameters must be strictly positive, got \
+                 (length_scale={}, sigma_f={}, sigma_n={})",
+                cfg.initial_length_scale, cfg.initial_sigma_f, cfg.initial_sigma_n
+            )));
+        }
+
+        // Log-space parameter vector: (log ℓ, log σ_f, log σ_n).
+        let mut theta = [
+            cfg.initial_length_scale.ln(),
+            cfg.initial_sigma_f.ln(),
+            cfg.initial_sigma_n.ln(),
+        ];
+        let h = 1e-3_f64; // central-difference step in log-space
+
+        // Evaluate the log marginal likelihood at a candidate θ. Wrapped so
+        // we can call it repeatedly inside the central-difference loop
+        // without re-deriving the (ℓ, σ_f, σ_n) decoding each time.
+        let lml_at = |theta: [f64; 3]| -> Result<f64> {
+            let l = theta[0].exp();
+            let sf = theta[1].exp();
+            let sn = theta[2].exp();
+            let gp = GaussianProcess::fit(x.clone(), y.clone(), l, sf, sn)?;
+            Ok(gp.log_marginal_likelihood())
+        };
+
+        // Step-scaling regime: vanilla gradient ascent overshoots violently
+        // when starting far from the optimum because the log marginal
+        // likelihood has very large gradients in directions where the prior
+        // is mis-scaled (e.g. tiny sigma_f). We therefore treat
+        // `gradient_step` as the *maximum* log-space step per iteration: if
+        // ‖grad‖ exceeds 1 we scale the update by 1/‖grad‖, which preserves
+        // the gradient direction but caps the move at `gradient_step` in
+        // log-space. When ‖grad‖ < 1 the step is the raw gradient, so
+        // convergence near the optimum still feels the curvature.
+        for _ in 0..cfg.max_iters {
+            // Central-difference gradient: 2 K-builds per parameter = 6 total.
+            let mut grad = [0.0_f64; 3];
+            for k in 0..3 {
+                let mut tp = theta;
+                let mut tm = theta;
+                tp[k] += h;
+                tm[k] -= h;
+                let lp = lml_at(tp)?;
+                let lm = lml_at(tm)?;
+                grad[k] = (lp - lm) / (2.0 * h);
+            }
+
+            let gnorm = (grad[0] * grad[0] + grad[1] * grad[1] + grad[2] * grad[2]).sqrt();
+            if gnorm < cfg.tol {
+                break;
+            }
+
+            let scale = if gnorm > 1.0 { 1.0 / gnorm } else { 1.0 };
+            for k in 0..3 {
+                theta[k] += cfg.gradient_step * scale * grad[k];
+            }
+        }
+
+        let length_scale = theta[0].exp();
+        let sigma_f = theta[1].exp();
+        let sigma_n = theta[2].exp();
+        Self::fit(x, y, length_scale, sigma_f, sigma_n)
+    }
 }
 
 /// Squared Euclidean distance between row `i` of `a` and row `j` of `b`.
@@ -357,6 +532,51 @@ mod tests {
             GaussianProcess::fit(x, y, 1.0, 1.0, 1e-3),
             Err(Error::FitFailed(_))
         ));
+    }
+
+    #[test]
+    fn log_marginal_likelihood_matches_textbook_decomposition() {
+        // Tiny n=3 problem: re-derive log p(y|X,θ) from raw K and compare.
+        let x = DMatrix::<f64>::from_row_slice(3, 1, &[0.0, 1.0, 2.0]);
+        let y = DVector::<f64>::from_row_slice(&[0.0, 1.0, 0.0]);
+        let length_scale = 0.5;
+        let sigma_f = 1.0;
+        let sigma_n = 1e-2;
+        let gp = GaussianProcess::fit(x.clone(), y.clone(), length_scale, sigma_f, sigma_n)
+            .expect("fit");
+
+        // Rebuild K + sigma_n^2 I directly and compute log p(y|X,θ) by the
+        // textbook expression: -0.5 y^T K^-1 y - 0.5 log|K| - n/2 log(2π).
+        let n = 3;
+        let mut k = DMatrix::<f64>::zeros(n, n);
+        let two_l2 = 2.0 * length_scale * length_scale;
+        let sf2 = sigma_f * sigma_f;
+        let sn2 = sigma_n * sigma_n;
+        for i in 0..n {
+            for j in 0..n {
+                let dx = x[(i, 0)] - x[(j, 0)];
+                k[(i, j)] = sf2 * (-(dx * dx) / two_l2).exp();
+            }
+            k[(i, i)] += sn2;
+        }
+        let chol = k.clone().cholesky().expect("PSD");
+        let alpha = chol.solve(&y);
+        let data_fit = -0.5 * y.dot(&alpha);
+        // log|K| = 2 sum(log diag(L))
+        let l = chol.l();
+        let mut log_diag = 0.0;
+        for i in 0..n {
+            log_diag += l[(i, i)].ln();
+        }
+        let complexity = -log_diag;
+        let norm = -0.5 * (n as f64) * (2.0 * std::f64::consts::PI).ln();
+        let expected = data_fit + complexity + norm;
+
+        let got = gp.log_marginal_likelihood();
+        assert!(
+            (got - expected).abs() < 1e-10,
+            "log_marginal_likelihood = {got}, expected {expected}"
+        );
     }
 
     #[test]
