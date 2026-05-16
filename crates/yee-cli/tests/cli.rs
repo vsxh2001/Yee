@@ -111,9 +111,9 @@ fn export_hdf5_exits_2() {
 /// `yee export --format touchstone` reads a real Touchstone file and writes a new one.
 #[test]
 fn export_touchstone_roundtrip() {
-    let dir = tempdir();
-    let input = dir.join("in.s1p");
-    let output = dir.join("out.s1p");
+    let tmp = TempDir::new();
+    let input = tmp.path().join("in.s1p");
+    let output = tmp.path().join("out.s1p");
     std::fs::write(
         &input,
         "! example one-port\n# GHz S RI R 50\n1.0 0.5 -0.25\n2.0 0.4 -0.20\n",
@@ -190,13 +190,35 @@ fn completions_fish_emits_script() {
         .stdout(contains("yee"));
 }
 
-/// Helper: create a unique temp directory under `std::env::temp_dir()`.
-fn tempdir() -> std::path::PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let pid = std::process::id();
-    let path = std::env::temp_dir().join(format!("yee-cli-test-{pid}-{n}"));
-    std::fs::create_dir_all(&path).unwrap();
-    path
+/// RAII wrapper around a unique scratch directory under `std::env::temp_dir()`.
+///
+/// The directory and all of its contents are removed when the `TempDir` is
+/// dropped (test exit, scope exit, or panic-unwind) so repeated CI runs
+/// don't accumulate `yee-cli-test-<pid>-<n>` directories in `$TMPDIR`.
+/// `remove_dir_all` errors are ignored on drop — a leak in a failure path is
+/// preferable to a destructor that panics inside an unwinding test.
+struct TempDir {
+    path: std::path::PathBuf,
+}
+
+impl TempDir {
+    fn new() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let pid = std::process::id();
+        let path = std::env::temp_dir().join(format!("yee-cli-test-{pid}-{n}"));
+        std::fs::create_dir_all(&path).unwrap();
+        Self { path }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
 }
