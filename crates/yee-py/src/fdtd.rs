@@ -14,7 +14,7 @@
 
 use numpy::{IntoPyArray, PyArray1};
 use pyo3::prelude::*;
-use yee_fdtd::FdtdDriverConfig as RustCfg;
+use yee_fdtd::{FdtdDriver as RustDriver, FdtdDriverConfig as RustCfg, YeeGrid};
 
 /// Python wrapper for [`yee_fdtd::FdtdDriverConfig`].
 ///
@@ -102,7 +102,6 @@ impl PyFdtdDriverConfig {
 
 impl PyFdtdDriverConfig {
     /// Internal: convert this config into the Rust `FdtdDriverConfig`.
-    #[allow(dead_code)]
     pub(crate) fn to_rust(&self) -> RustCfg {
         RustCfg {
             n_steps: self.n_steps,
@@ -155,15 +154,10 @@ impl PyRadiationPattern {
 /// independent simulation.
 #[pyclass(name = "FdtdDriver", module = "yee._yee")]
 pub struct PyFdtdDriver {
-    #[allow(dead_code)]
     pub(crate) nx: usize,
-    #[allow(dead_code)]
     pub(crate) ny: usize,
-    #[allow(dead_code)]
     pub(crate) nz: usize,
-    #[allow(dead_code)]
     pub(crate) dx: f64,
-    #[allow(dead_code)]
     pub(crate) cfg: PyFdtdDriverConfig,
 }
 
@@ -187,5 +181,32 @@ impl PyFdtdDriver {
             dx,
             cfg,
         }
+    }
+
+    /// Run the FDTD simulation to completion and return the far-field
+    /// radiation pattern.
+    ///
+    /// This method does **not** consume the Python driver: a single
+    /// `FdtdDriver` instance may be `.run()` multiple times, each call
+    /// building a fresh underlying [`yee_fdtd::FdtdDriver`] from the
+    /// stored grid and configuration parameters.
+    ///
+    /// Returns:
+    ///     `FdtdRadiationPattern` — `.theta_deg` and `.e_theta_phi0` are
+    ///     1-D `float64` numpy arrays of length 37 (5° steps from 0 to
+    ///     180 inclusive).
+    fn run(&self, py: Python<'_>) -> PyRadiationPattern {
+        // Release the GIL while running the FDTD time loop: the inner
+        // call is pure-Rust CPU work and can take several seconds for
+        // realistic grids.
+        py.detach(|| {
+            let grid = YeeGrid::vacuum(self.nx, self.ny, self.nz, self.dx);
+            let driver = RustDriver::new(grid, self.cfg.to_rust());
+            let pat = driver.run();
+            PyRadiationPattern {
+                theta_deg: pat.theta_deg,
+                e_theta_phi0: pat.e_theta_phi0,
+            }
+        })
     }
 }
