@@ -209,11 +209,7 @@ pub(crate) fn crowding_distance(front: &[usize], objectives: &[DVector<f64>]) ->
 /// `crowding[i]` is the crowding distance of member `i` within its front.
 ///
 /// Returns the index of the tournament winner.
-pub(crate) fn tournament_select(
-    rank: &[usize],
-    crowding: &[f64],
-    rng: &mut Xorshift64,
-) -> usize {
+pub(crate) fn tournament_select(rank: &[usize], crowding: &[f64], rng: &mut Xorshift64) -> usize {
     let n = rank.len();
     debug_assert_eq!(n, crowding.len());
     debug_assert!(n >= 2);
@@ -417,10 +413,27 @@ where
         while offspring.len() < n {
             let p1 = tournament_select(&rank, &crowding, &mut rng);
             let p2 = tournament_select(&rank, &crowding, &mut rng);
-            let (mut c1, mut c2) =
-                sbx_crossover(&population[p1], &population[p2], &bounds, cfg.crossover_eta, &mut rng);
-            polynomial_mutation(&mut c1, &bounds, cfg.mutation_eta, cfg.mutation_probability, &mut rng);
-            polynomial_mutation(&mut c2, &bounds, cfg.mutation_eta, cfg.mutation_probability, &mut rng);
+            let (mut c1, mut c2) = sbx_crossover(
+                &population[p1],
+                &population[p2],
+                &bounds,
+                cfg.crossover_eta,
+                &mut rng,
+            );
+            polynomial_mutation(
+                &mut c1,
+                &bounds,
+                cfg.mutation_eta,
+                cfg.mutation_probability,
+                &mut rng,
+            );
+            polynomial_mutation(
+                &mut c2,
+                &bounds,
+                cfg.mutation_eta,
+                cfg.mutation_probability,
+                &mut rng,
+            );
             offspring.push(c1);
             if offspring.len() < n {
                 offspring.push(c2);
@@ -457,7 +470,9 @@ where
                 let cd = crowding_distance(front, &combined_objs);
                 let mut order: Vec<usize> = (0..front.len()).collect();
                 order.sort_by(|&a, &b| {
-                    cd[b].partial_cmp(&cd[a]).unwrap_or(std::cmp::Ordering::Equal)
+                    cd[b]
+                        .partial_cmp(&cd[a])
+                        .unwrap_or(std::cmp::Ordering::Equal)
                 });
                 let need = n - new_pop.len();
                 for &k in order.iter().take(need) {
@@ -629,7 +644,11 @@ mod tests {
             let mut x = DVector::from_row_slice(&[0.1, 0.5, 0.9, 0.0, 1.0]);
             polynomial_mutation(&mut x, &bounds, 20.0, 1.0, &mut rng);
             for i in 0..5 {
-                assert!(x[i] >= 0.0 && x[i] <= 1.0, "gene {i} out of bounds: {}", x[i]);
+                assert!(
+                    x[i] >= 0.0 && x[i] <= 1.0,
+                    "gene {i} out of bounds: {}",
+                    x[i]
+                );
             }
         }
     }
