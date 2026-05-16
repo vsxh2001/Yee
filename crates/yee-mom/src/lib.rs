@@ -18,7 +18,10 @@ pub(crate) mod greens;
 pub(crate) mod multilayer;
 pub(crate) mod ports;
 pub(crate) mod quadrature;
+pub mod roughness;
 pub(crate) mod solve;
+
+pub use roughness::{RoughnessModel, SIGMA_COPPER};
 
 use num_complex::Complex64;
 use yee_core::{FreqRange, Solver};
@@ -138,7 +141,7 @@ impl Solver for PlanarMoM {
             tag: 1,
             voltage: Complex64::new(1.0, 0.0),
         };
-        let file = solve::s_parameters_sweep(&basis, &port, freq, 50.0)?;
+        let file = solve::s_parameters_sweep(&basis, &port, freq, 50.0, None)?;
         Ok(SParameters::from_touchstone(&file))
     }
 }
