@@ -271,7 +271,8 @@ fn parse(text: &str, n_ports: usize) -> Result<File> {
         });
     }
     if tokens.len() % per_record != 0 {
-        let (line, col, _) = *tokens.last().unwrap();
+        // Safe: we already returned above when `tokens.is_empty()`.
+        let (line, col, _) = tokens.last().copied().unwrap_or((0, 0, 0.0));
         return Err(Error::TouchstoneParse {
             line,
             col,
