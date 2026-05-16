@@ -1,6 +1,8 @@
 """Yee electromagnetic simulation — Python bindings."""
 
 from yee._yee import (
+    AlConfig,
+    AlResult,
     BoConfig,
     BoResult,
     FdtdDriver,
@@ -8,10 +10,14 @@ from yee._yee import (
     FdtdRadiationPattern,
     FreqRange,
     GaussianProcess,
+    Nsga2Config,
+    Nsga2Result,
     PlanarMoM,
     SParameters,
     TriMesh,
     __version__,
+    active_learn,
+    nsga2_minimize,
     s11_db,
     s11_phase,
     smith_xy,
@@ -20,6 +26,8 @@ from yee._yee import (
 from yee._yee import minimize as bo_minimize
 
 __all__ = [
+    "AlConfig",
+    "AlResult",
     "BoConfig",
     "BoResult",
     "FdtdDriver",
@@ -27,11 +35,15 @@ __all__ = [
     "FdtdRadiationPattern",
     "FreqRange",
     "GaussianProcess",
+    "Nsga2Config",
+    "Nsga2Result",
     "PlanarMoM",
     "SParameters",
     "TriMesh",
     "__version__",
+    "active_learn",
     "bo_minimize",
+    "nsga2_minimize",
     "s11_db",
     "s11_phase",
     "smith_xy",

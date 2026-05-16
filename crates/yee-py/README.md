@@ -242,6 +242,70 @@ print(result.history_x.shape)            # (25, 1) -- chronological evals
 
 ---
 
+## Multi-objective optimization (NSGA-II)
+
+`yee.nsga2_minimize` wraps `yee_surrogate::nsga2::minimize`: a
+non-dominated-sorting genetic algorithm (Deb 2002) for minimizing `m`
+objectives over a hyper-rectangle. The objective is any Python callable
+that accepts a 1-D `float64` numpy array of length `d` and returns a
+length-`m` sequence of floats.
+
+```python
+import numpy as np
+import yee
+
+def zdt1(x, d=30):
+    f1 = x[0]
+    g = 1.0 + 9.0 / (d - 1) * np.sum(x[1:])
+    return [f1, g * (1.0 - np.sqrt(f1 / g))]
+
+result = yee.nsga2_minimize(
+    zdt1, [(0.0, 1.0)] * 30, 2,
+    yee.Nsga2Config(population_size=100, n_generations=100, seed=42),
+)
+print(result.population.shape, result.objectives.shape)  # (100, 30) (100, 2)
+print(len(result.pareto_indices), "non-dominated solutions")
+```
+
+`Nsga2Config` defaults match `yee_surrogate::nsga2::Nsga2Config::default`:
+`population_size=100`, `n_generations=100`, `crossover_eta=20`,
+`mutation_eta=20`, `mutation_probability=None` (resolves to `1/d`),
+`seed=0xC0FFEE`. The returned `Nsga2Result` exposes `population`
+(`float64[N, d]`), `objectives` (`float64[N, m]`), and `pareto_indices`
+(`int64[|F0|]`) — row indices for the non-dominated set.
+
+---
+
+## Active learning
+
+`yee.active_learn` wraps `yee_surrogate::al::active_learn`: a
+variance-acquisition active-learning loop on a GP surrogate. Starting from
+a Latin-hypercube initial design, each iteration refits the GP on the
+running history and queries the candidate of maximum predictive variance.
+
+```python
+import math
+import numpy as np
+import yee
+
+result = yee.active_learn(
+    lambda x: math.sin(x[0]),
+    [(0.0, 2 * math.pi)],
+    yee.AlConfig(n_initial=5, n_iters=20, seed=42),
+)
+print(result.history_x.shape, result.history_y.shape)  # (25, 1) (25,)
+gp = result.final_gp()
+print(gp.predict_mean(np.array([1.7])))                # near sin(1.7)
+```
+
+`AlConfig` defaults match `yee_surrogate::al::AlConfig::default`:
+`n_initial=5`, `n_iters=20`, `n_candidates=1024`, `seed=0xC0FFEE`. The
+returned `AlResult` exposes `history_x` (`float64[n_evals, d]`),
+`history_y` (`float64[n_evals]`), and `final_gp()` returning a
+`yee.GaussianProcess` trained on the full evaluation history.
+
+---
+
 ## Public API at a glance
 
 | Symbol | Description |
@@ -257,6 +321,12 @@ print(result.history_x.shape)            # (25, 1) -- chronological evals
 | `yee.BoConfig(n_initial, n_iters, n_candidates, xi, seed)` | Bayesian-optimization budget + RNG seed. Defaults match `yee_surrogate::bo::BoConfig::default`. |
 | `yee.bo_minimize(objective, bounds, config=None)` | Minimize a black-box scalar objective over a hyper-rectangle via GP + Expected Improvement. Returns a `BoResult`. |
 | `yee.BoResult` | `.x_best` (`float64[d]`), `.y_best` (`float`), `.history_x` (`float64[n_evals, d]`), `.history_y` (`float64[n_evals]`). |
+| `yee.Nsga2Config(population_size, n_generations, crossover_eta, mutation_eta, mutation_probability, seed)` | NSGA-II budget + operator parameters + RNG seed. Defaults match `yee_surrogate::nsga2::Nsga2Config::default`. |
+| `yee.nsga2_minimize(objectives, bounds, n_objectives, config=None)` | Minimize `m` objectives over a hyper-rectangle via NSGA-II. Returns an `Nsga2Result`. |
+| `yee.Nsga2Result` | `.population` (`float64[N, d]`), `.objectives` (`float64[N, m]`), `.pareto_indices` (`int64[|F0|]`). |
+| `yee.AlConfig(n_initial, n_iters, n_candidates, seed)` | Active-learning budget + RNG seed. Defaults match `yee_surrogate::al::AlConfig::default`. |
+| `yee.active_learn(objective, bounds, config=None)` | Variance-acquisition active learning on a GP surrogate. Returns an `AlResult`. |
+| `yee.AlResult` | `.history_x` (`float64[n_evals, d]`), `.history_y` (`float64[n_evals]`), `.final_gp()` → `yee.GaussianProcess`. |
 | `yee.touchstone.read(path)` | Read a Touchstone v1.1 file; returns a dict with keys `z0`, `freq_unit`, `format`, `n_ports`, `freq_hz`, `data`, `comments`. |
 | `yee.touchstone.write(path, file_dict)` | Write a Touchstone v1.1 file from the same dict schema. |
 

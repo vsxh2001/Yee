@@ -7,11 +7,13 @@
 
 use pyo3::prelude::*;
 
+mod al;
 mod bo;
 mod errors;
 mod fdtd;
 mod freq;
 mod helpers;
+mod nsga2;
 mod solver;
 mod sparams;
 mod surrogate;
@@ -32,6 +34,12 @@ fn _yee(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<bo::PyBoConfig>()?;
     m.add_class::<bo::PyBoResult>()?;
     m.add_function(wrap_pyfunction!(bo::minimize, m)?)?;
+    m.add_class::<nsga2::PyNsga2Config>()?;
+    m.add_class::<nsga2::PyNsga2Result>()?;
+    m.add_function(wrap_pyfunction!(nsga2::nsga2_minimize, m)?)?;
+    m.add_class::<al::PyAlConfig>()?;
+    m.add_class::<al::PyAlResult>()?;
+    m.add_function(wrap_pyfunction!(al::active_learn, m)?)?;
     m.add_function(wrap_pyfunction!(helpers::s11_db, m)?)?;
     m.add_function(wrap_pyfunction!(helpers::s11_phase, m)?)?;
     m.add_function(wrap_pyfunction!(helpers::smith_xy, m)?)?;
