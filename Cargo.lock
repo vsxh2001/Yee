@@ -6547,6 +6547,7 @@ dependencies = [
  "yee-io",
  "yee-mesh",
  "yee-mom",
+ "yee-plotters",
 ]
 
 [[package]]

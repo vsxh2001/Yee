@@ -25,6 +25,7 @@
 
 use num_complex::Complex64;
 use serde::Serialize;
+use std::path::PathBuf;
 use std::time::Instant;
 
 /// Outcome of a single validation case.
@@ -58,6 +59,13 @@ pub struct CaseResult {
     pub notes: String,
     /// Wall time spent inside the case body, in seconds.
     pub wall_time_seconds: f64,
+    /// Filesystem paths to any plot artifacts (PNGs / SVGs) the case
+    /// emitted. Empty for `Skipped` cases and for `Failed` cases whose
+    /// solver errored before reaching the plot step. Paths are
+    /// CWD-relative when written under `validation/results/`, matching
+    /// the CI artifact-upload glob.
+    #[serde(default)]
+    pub plot_paths: Vec<PathBuf>,
 }
 
 /// Aggregated report over all registered validation cases.
@@ -317,6 +325,7 @@ fn run_mom_001() -> CaseResult {
         status,
         notes,
         wall_time_seconds: elapsed,
+        plot_paths: Vec::new(),
     }
 }
 
@@ -335,6 +344,7 @@ fn run_mom_002() -> CaseResult {
              before a meaningful tolerance can be asserted."
             .into(),
         wall_time_seconds: 0.0,
+        plot_paths: Vec::new(),
     }
 }
 
@@ -350,6 +360,7 @@ fn run_mom_003() -> CaseResult {
              before a meaningful tolerance can be asserted."
             .into(),
         wall_time_seconds: 0.0,
+        plot_paths: Vec::new(),
     }
 }
 
@@ -362,6 +373,7 @@ fn run_cpml_001() -> CaseResult {
              aggregator integration deferred to Phase 1.validation.2"
             .into(),
         wall_time_seconds: 0.0,
+        plot_paths: Vec::new(),
     }
 }
 
@@ -374,6 +386,7 @@ fn run_ntff_001() -> CaseResult {
              aggregator integration deferred to Phase 1.validation.2"
             .into(),
         wall_time_seconds: 0.0,
+        plot_paths: Vec::new(),
     }
 }
 
@@ -386,6 +399,7 @@ fn run_dispersive_001() -> CaseResult {
              aggregator integration deferred to Phase 1.validation.2"
             .into(),
         wall_time_seconds: 0.0,
+        plot_paths: Vec::new(),
     }
 }
 
