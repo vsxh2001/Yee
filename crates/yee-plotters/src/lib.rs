@@ -233,13 +233,34 @@ pub fn plot_s11_phase(
 }
 
 /// Plot `S₁₁` on the complex unit disk (Smith-chart style).
-/// Stub — implementation lands in the next commit.
+///
+/// We don't render the full Smith-chart constant-resistance / constant-
+/// reactance arc family — for now the chart is just:
+///
+/// 1. A light-grey reference unit circle (200 samples).
+/// 2. An origin crosshair through `(0, 0)`.
+/// 3. The `S₁₁(f)` trajectory as a connected red line.
+///
+/// The aspect ratio is locked to 1:1 by giving both axes the range
+/// `[-1.1, 1.1]`; downstream callers should pick `width_px ≈ height_px`
+/// for a round circle.
 pub fn plot_smith_chart(
-    _s11: &[Complex64],
-    _out_path: &Path,
-    _config: &PlotConfig,
+    s11: &[Complex64],
+    out_path: &Path,
+    config: &PlotConfig,
 ) -> Result<(), Error> {
-    Err(Error::Render("plot_smith_chart: not yet implemented".into()))
+    match config.format {
+        PlotFormat::Png => {
+            let root = BitMapBackend::new(out_path, (config.width_px, config.height_px))
+                .into_drawing_area();
+            draw_smith(&root, &config.title, s11)
+        }
+        PlotFormat::Svg => {
+            let root = SVGBackend::new(out_path, (config.width_px, config.height_px))
+                .into_drawing_area();
+            draw_smith(&root, &config.title, s11)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -287,6 +308,75 @@ where
     let series: Vec<(f64, f64)> = xs.iter().copied().zip(ys.iter().copied()).collect();
     chart
         .draw_series(LineSeries::new(series, RED.stroke_width(2)))
+        .map_err(map_render_err)?;
+
+    root.present().map_err(map_render_err)?;
+    Ok(())
+}
+
+/// Render a Smith-style chart (reference unit circle + crosshair + S₁₁
+/// trajectory) into `root`.
+fn draw_smith<DB>(
+    root: &DrawingArea<DB, plotters::coord::Shift>,
+    title: &str,
+    s11: &[Complex64],
+) -> Result<(), Error>
+where
+    DB: DrawingBackend,
+    DB::ErrorType: 'static,
+{
+    root.fill(&WHITE).map_err(map_render_err)?;
+
+    let lim = 1.1_f64;
+    let mut chart = ChartBuilder::on(root)
+        .caption(title, ("sans-serif", 24).into_font())
+        .margin(10)
+        .x_label_area_size(40)
+        .y_label_area_size(40)
+        .build_cartesian_2d(-lim..lim, -lim..lim)
+        .map_err(map_render_err)?;
+
+    chart
+        .configure_mesh()
+        .x_desc("Re S₁₁")
+        .y_desc("Im S₁₁")
+        .draw()
+        .map_err(map_render_err)?;
+
+    // Origin crosshair (light grey).
+    let crosshair_style = RGBColor(200, 200, 200).stroke_width(1);
+    chart
+        .draw_series(LineSeries::new(
+            [(-1.0_f64, 0.0_f64), (1.0, 0.0)],
+            crosshair_style,
+        ))
+        .map_err(map_render_err)?;
+    chart
+        .draw_series(LineSeries::new(
+            [(0.0_f64, -1.0_f64), (0.0, 1.0)],
+            crosshair_style,
+        ))
+        .map_err(map_render_err)?;
+
+    // Reference unit circle (200 samples, closed).
+    let n = 200usize;
+    let unit: Vec<(f64, f64)> = (0..=n)
+        .map(|i| {
+            let theta = (i as f64) * std::f64::consts::TAU / (n as f64);
+            (theta.cos(), theta.sin())
+        })
+        .collect();
+    chart
+        .draw_series(LineSeries::new(
+            unit,
+            RGBColor(160, 160, 160).stroke_width(1),
+        ))
+        .map_err(map_render_err)?;
+
+    // S₁₁ trajectory in red.
+    let traj: Vec<(f64, f64)> = s11.iter().map(|z| (z.re, z.im)).collect();
+    chart
+        .draw_series(LineSeries::new(traj, RED.stroke_width(2)))
         .map_err(map_render_err)?;
 
     root.present().map_err(map_render_err)?;
