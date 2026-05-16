@@ -22,15 +22,55 @@ background to backfill the dataset.
 - `Sample` — `(params: Vec<f64>, output: Vec<Complex64>)` pair.
 - `Dataset` — append-only collection of samples.
 - `Surrogate` trait — `train(&Dataset)` + `predict(&[f64])`.
-- `NearestNeighbor` — returns the output of the closest training sample by
-  Euclidean L2 distance in parameter space. Useful as a sanity check and as a
-  fallback when the model is undertrained.
+
+## Backends
+
+| Backend           | Output | Uncertainty | When to use                                                              |
+|-------------------|--------|-------------|--------------------------------------------------------------------------|
+| `NearestNeighbor` | any    | none        | Sanity check, undertrained-fallback, or coarse last-resort interpolation |
+| `GaussianProcess` | scalar | posterior variance via RBF kernel | Low-dimensional designs (≲ 20 params), small N, calibrated uncertainty for active learning |
+
+### `NearestNeighbor`
+
+Returns the output of the closest training sample by Euclidean L2 distance in
+parameter space. Always defined, no hyperparameters, no failure modes other
+than empty/inconsistent input. Useful as a sanity check and as a fallback when
+the model is undertrained.
+
+### `GaussianProcess`
+
+Squared-exponential (RBF) kernel GP regressor, scalar output:
+
+```text
+k(x, x') = sigma_f² · exp(-‖x - x'‖² / (2 · length_scale²))
+```
+
+Training Cholesky-factors `K + sigma_n² I` once and caches both `α = K⁻¹ y`
+(for fast mean queries) and the Cholesky factor (for variance queries via a
+single triangular solve per query). Per-query cost: O(n·d) mean, O(n²·d)
+variance.
+
+Surrogate-trait coverage is provided by `GpSurrogate`, which adapts the
+scalar GP to the existing `Dataset` shape by treating the real part of
+`sample.output[0]` as the regression target. For multi-output use cases,
+call `GaussianProcess::fit` directly per output channel.
+
+Usage:
+
+```rust,ignore
+use nalgebra::{DMatrix, DVector};
+use yee_surrogate::GaussianProcess;
+
+let x = DMatrix::from_column_slice(n, 1, &x_train);
+let y = DVector::from_row_slice(&y_train);
+let gp = GaussianProcess::fit(x, y, /*length_scale=*/ 0.5, /*sigma_f=*/ 1.0, /*sigma_n=*/ 1e-4)?;
+let (mean, var) = gp.predict(&DVector::from_row_slice(&[x_star]));
+```
 
 ## Future direction (Phase 3.1+)
 
-- Gaussian-process regression with anisotropic RBF / Matérn kernels for
-  low-dimensional design spaces (<= ~20 parameters) with calibrated
-  uncertainty for active-learning sample acquisition.
+- Anisotropic RBF / Matérn kernels and marginal-likelihood hyperparameter
+  tuning for the GP backend.
 - MLP / residual-MLP backend for medium-dimensional spaces and amortized
   inference.
 - Fourier neural operator (FNO) / DeepONet for field-level outputs, not just
