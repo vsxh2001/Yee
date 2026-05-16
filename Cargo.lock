@@ -6524,6 +6524,7 @@ dependencies = [
  "yee-mesh",
  "yee-mom",
  "yee-surrogate",
+ "yee-validation",
 ]
 
 [[package]]
