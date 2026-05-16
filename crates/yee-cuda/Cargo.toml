@@ -10,10 +10,10 @@ description  = "Yee CUDA layer: thin safe wrapper over cudarc + NVRTC kernel loa
 [features]
 default = []
 # Off by default so CI on non-CUDA hosts still builds.
-cuda    = []
+cuda    = ["dep:cudarc"]
 
 [dependencies]
-yee-core = { workspace = true }
-cudarc   = { workspace = true }
+yee-core  = { workspace = true }
+cudarc    = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tracing   = { workspace = true }

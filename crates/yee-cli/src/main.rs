@@ -7,7 +7,11 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
-#[command(name = "yee", version, about = "Yee — GPU-accelerated electromagnetic simulation studio")]
+#[command(
+    name = "yee",
+    version,
+    about = "Yee — GPU-accelerated electromagnetic simulation studio"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,

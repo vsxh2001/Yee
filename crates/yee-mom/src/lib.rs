@@ -55,6 +55,8 @@ impl Solver for PlanarMoM {
     type Output = SParameters;
 
     fn run(&self, _geometry: &Self::Geometry, _freq: FreqRange) -> yee_core::Result<Self::Output> {
-        Err(yee_core::Error::Unimplemented("PlanarMoM::run not implemented in phase 0"))
+        Err(yee_core::Error::Unimplemented(
+            "PlanarMoM::run not implemented in phase 0",
+        ))
     }
 }

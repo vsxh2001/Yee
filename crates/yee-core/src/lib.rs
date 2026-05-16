@@ -38,7 +38,7 @@ pub mod units {
     /// Speed of light in vacuum (m/s).
     pub const C0: f64 = 299_792_458.0;
     /// Vacuum permittivity (F/m).
-    pub const EPS0: f64 = 8.854_187_8128e-12;
+    pub const EPS0: f64 = 8.854_187_812_8e-12;
     /// Vacuum permeability (H/m), CODATA 2018.
     pub const MU0: f64 = 1.256_637_062_12e-6;
     /// Free-space impedance (Ω).

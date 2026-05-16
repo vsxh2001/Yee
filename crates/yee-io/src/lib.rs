@@ -49,11 +49,15 @@ pub mod touchstone {
 
     /// Read a Touchstone file. Phase 0 stub.
     pub fn read(_path: &std::path::Path) -> Result<File> {
-        Err(Error::TouchstoneParse("Touchstone reader not yet implemented".into()))
+        Err(Error::TouchstoneParse(
+            "Touchstone reader not yet implemented".into(),
+        ))
     }
 
     /// Write a Touchstone file. Phase 0 stub.
     pub fn write(_path: &std::path::Path, _file: &File) -> Result<()> {
-        Err(Error::TouchstoneParse("Touchstone writer not yet implemented".into()))
+        Err(Error::TouchstoneParse(
+            "Touchstone writer not yet implemented".into(),
+        ))
     }
 }

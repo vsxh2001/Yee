@@ -53,7 +53,9 @@ impl Device {
         #[cfg(feature = "cuda")]
         {
             // TODO(phase-0): use `cudarc::driver::CudaContext::count` + `name`.
-            Err(Error::Driver("device enumeration not yet implemented".into()))
+            Err(Error::Driver(
+                "device enumeration not yet implemented".into(),
+            ))
         }
     }
 }
