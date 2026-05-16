@@ -171,6 +171,37 @@ impl WalkingSkeletonSolver {
         self.step += 1;
     }
 
+    /// Like [`Self::step_with_source`], but additionally feeds the
+    /// post-step fields into a [`crate::ntff::NtffState`] DFT
+    /// accumulator.
+    ///
+    /// After the E and H updates (and CPML / source) have completed,
+    /// the solver calls `ntff.sample(grid, t_after)` with the simulation
+    /// time at the *end* of the step. The accumulator records one bin
+    /// of the discrete-time Fourier transform at `ntff.params().f_probe`.
+    ///
+    /// Call this in a loop:
+    ///
+    /// ```ignore
+    /// let mut ntff = NtffState::new(solver.grid(), params);
+    /// for _ in 0..n_steps {
+    ///     solver.step_with_source_and_ntff(i, j, k, t0, sigma, &mut ntff);
+    /// }
+    /// let e_far = ntff.far_field();
+    /// ```
+    pub fn step_with_source_and_ntff(
+        &mut self,
+        i: usize,
+        j: usize,
+        k: usize,
+        t0: f64,
+        sigma: f64,
+        ntff: &mut ntff::NtffState,
+    ) {
+        self.step_with_source(i, j, k, t0, sigma);
+        let t_after = self.current_time();
+        ntff.sample(&self.grid, t_after);
+    }
 }
 
 impl FdtdSolver for WalkingSkeletonSolver {
