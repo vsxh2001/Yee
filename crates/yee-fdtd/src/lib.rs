@@ -31,10 +31,12 @@
 #![warn(missing_docs)]
 
 pub mod boundary;
+pub mod cpml;
 pub mod grid;
 pub mod sources;
 pub mod update;
 
+pub use cpml::CpmlParams;
 pub use grid::YeeGrid;
 
 /// FDTD-layer errors.
