@@ -20,6 +20,7 @@ use std::path::PathBuf;
 
 mod app;
 mod plots;
+mod viewport;
 
 use crate::app::YeeApp;
 
