@@ -42,6 +42,17 @@ jobs:
       - name: cargo test (workspace, no-default-features)
         run: cargo test --workspace --no-default-features
 
+      - name: Upload validation artifacts
+        # github.sha is a 40-char hex SHA, not attacker-controlled, so
+        # interpolating it directly into the artifact name is safe.
+        if: always() # upload even if tests fail
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-results-${{ github.sha }}
+          path: validation/results/
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: cargo doc (workspace, no-default-features, no-deps)
         run: cargo doc --workspace --no-default-features --no-deps
 

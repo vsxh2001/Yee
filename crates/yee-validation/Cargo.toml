@@ -11,13 +11,14 @@ description  = "Validation case aggregator for Yee electromagnetic simulation."
 unsafe_code = "forbid"
 
 [dependencies]
-yee-core    = { workspace = true }
-yee-mom     = { workspace = true }
-yee-fdtd    = { workspace = true }
-yee-mesh    = { workspace = true }
-yee-io      = { workspace = true }
-nalgebra    = { workspace = true }
-num-complex = { workspace = true }
-serde       = { workspace = true, features = ["derive"] }
-serde_json  = { workspace = true }
-thiserror   = { workspace = true }
+yee-core     = { workspace = true }
+yee-mom      = { workspace = true }
+yee-fdtd     = { workspace = true }
+yee-mesh     = { workspace = true }
+yee-io       = { workspace = true }
+yee-plotters = { workspace = true }
+nalgebra     = { workspace = true }
+num-complex  = { workspace = true }
+serde        = { workspace = true, features = ["derive"] }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
