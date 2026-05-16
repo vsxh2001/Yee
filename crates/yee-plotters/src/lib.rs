@@ -408,3 +408,98 @@ fn finite_range(xs: &[f64], default_min: f64, default_max: f64) -> (f64, f64) {
     }
     (min, max)
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::NamedTempFile;
+
+    /// Synthetic 21-point S₁₁ sweep with a resonant dip near the middle.
+    /// Used as input for the file-writing tests.
+    fn synthetic_sweep() -> (Vec<f64>, Vec<Complex64>) {
+        let n = 21;
+        let f0 = 1.0e9;
+        let f1 = 3.0e9;
+        let fr = 2.0e9;
+        let bw = 0.2e9;
+        let freq: Vec<f64> = (0..n)
+            .map(|i| f0 + (f1 - f0) * (i as f64) / ((n - 1) as f64))
+            .collect();
+        let s11: Vec<Complex64> = freq
+            .iter()
+            .map(|&f| {
+                // Lorentzian-ish dip in magnitude with a phase swing.
+                let x = (f - fr) / bw;
+                let mag = (x * x / (1.0 + x * x)).sqrt(); // 0 at fr, → 1 far away
+                let phase = (-2.0 * x).atan();
+                Complex64::from_polar(mag, phase)
+            })
+            .collect();
+        (freq, s11)
+    }
+
+    #[test]
+    fn test_plot_s11_db_writes_png() {
+        let (freq, s11) = synthetic_sweep();
+        let tmp = NamedTempFile::with_suffix(".png").expect("tempfile");
+        let cfg = PlotConfig {
+            width_px: 640,
+            height_px: 480,
+            title: "S11 dB test".to_string(),
+            format: PlotFormat::Png,
+        };
+        plot_s11_db(&freq, &s11, tmp.path(), &cfg).expect("plot_s11_db");
+        let len = fs::metadata(tmp.path()).expect("metadata").len();
+        assert!(len > 1024, "PNG file is too small: {len} bytes");
+    }
+
+    #[test]
+    fn test_plot_smith_chart_writes_svg() {
+        let (_freq, s11) = synthetic_sweep();
+        let tmp = NamedTempFile::with_suffix(".svg").expect("tempfile");
+        let cfg = PlotConfig {
+            width_px: 600,
+            height_px: 600,
+            title: "Smith test".to_string(),
+            format: PlotFormat::Svg,
+        };
+        plot_smith_chart(&s11, tmp.path(), &cfg).expect("plot_smith_chart");
+        let body = fs::read_to_string(tmp.path()).expect("read svg");
+        assert!(body.contains("<svg"), "SVG missing <svg tag: {body:.200}");
+        assert!(body.len() > 256, "SVG body too short: {} bytes", body.len());
+    }
+
+    #[test]
+    fn test_plot_s11_phase_within_range() {
+        let (_freq, s11) = synthetic_sweep();
+        for z in &s11 {
+            let p = phase_degrees(*z);
+            assert!((-180.0..=180.0).contains(&p), "phase out of range: {p}");
+        }
+    }
+
+    #[test]
+    fn test_db_clamp_at_zero_magnitude() {
+        // |0+0j| -> MIN_DB, not -inf.
+        let db = db_clamped(Complex64::new(0.0, 0.0));
+        assert!(db.is_finite(), "clamped dB must be finite, got {db}");
+        assert_eq!(db, MIN_DB, "expected exact clamp at MIN_DB, got {db}");
+
+        // Tiny but non-zero magnitudes should also stay clamped.
+        let db_tiny = db_clamped(Complex64::new(1.0e-300, 0.0));
+        assert!(db_tiny.is_finite() && db_tiny >= MIN_DB - 1e-9);
+        assert_eq!(db_tiny, MIN_DB);
+    }
+
+    #[test]
+    fn test_db_clamp_normal_value() {
+        // Sanity: |0.5+0j| → 20·log10(0.5) ≈ -6.0206 dB (well above MIN_DB).
+        let db = db_clamped(Complex64::new(0.5, 0.0));
+        assert!((db - (-6.020_599_913_279_624)).abs() < 1e-9, "db = {db}");
+    }
+}
