@@ -94,12 +94,20 @@ impl YeeApp {
             validation_panel: ValidationPanel::default(),
         };
         if let Some(path) = initial_file {
-            app.load_file(&path);
+            app.load_touchstone(&path);
         }
         app
     }
 
-    fn load_file(&mut self, path: &std::path::Path) {
+    /// Parse a Touchstone file from `path` via [`yee_io::touchstone::read`]
+    /// and store the result on the app.
+    ///
+    /// On success the loaded file replaces any previously held one and
+    /// `load_error` is cleared; the existing S11 and Smith-chart tabs read
+    /// from `self.file` on every frame, so a repaint will pick up the new
+    /// data automatically. On failure the file slot is cleared and the
+    /// error message is surfaced in the side panel as a red banner.
+    pub fn load_touchstone(&mut self, path: &std::path::Path) {
         match touchstone::read(path) {
             Ok(f) => {
                 tracing::info!(
