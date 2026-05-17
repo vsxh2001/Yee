@@ -8,9 +8,9 @@
 //! - `Validation`  — yee-validation aggregator runner + sortable result table
 //!
 //! A left side panel exposes loaded-file metadata + the 3D-viewport controls
-//! (wireframe toggle, camera readout). The menu bar provides `File → Quit`.
-//! File opening is driven by a `--file` CLI flag at startup (the GUI keeps
-//! `rfd`-based pickers out of scope through Phase 1.gui.1 — see README).
+//! (wireframe toggle, camera readout). The menu bar provides
+//! `File → Open Touchstone…` (native `rfd` picker) and `File → Quit`.
+//! Files may also be pre-loaded via the `--file` CLI flag at startup.
 
 use crate::plots::{show_s11_db_plot, show_smith_chart};
 use crate::validation::ValidationPanel;
@@ -136,7 +136,8 @@ impl YeeApp {
             None => {
                 ui.label("No file loaded.");
                 ui.label("");
-                ui.label("Open a .s1p file to begin:");
+                ui.label("Open a Touchstone (.sNp) file via");
+                ui.label("File → Open Touchstone…, or pass");
                 ui.code("cargo run -p yee-gui --release -- \\\n    --file path/to/dipole.s1p");
             }
             Some(f) => {
@@ -185,10 +186,19 @@ impl eframe::App for YeeApp {
         egui::Panel::top("menu_bar").show_inside(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    if ui.button("Open .s1p… (use --file CLI flag)").clicked() {
-                        // The file picker stays out of scope through Phase
-                        // 1.gui.1; the menu entry is surfaced so the workflow
-                        // is discoverable.
+                    if ui.button("Open Touchstone…").clicked() {
+                        // Native picker (xdg-portal on Linux, AppKit on
+                        // macOS, Win32 on Windows). Synchronous `pick_file`
+                        // blocks the UI thread for the duration of the
+                        // dialog, which matches the file-picker UX users
+                        // expect and keeps the call site simple.
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Touchstone", &["s1p", "s2p", "s3p", "s4p", "snp"])
+                            .add_filter("All files", &["*"])
+                            .pick_file()
+                        {
+                            self.load_touchstone(&path);
+                        }
                         ui.close();
                     }
                     ui.separator();
