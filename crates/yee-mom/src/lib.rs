@@ -17,7 +17,7 @@ pub(crate) mod fill;
 pub(crate) mod greens;
 pub mod iterative;
 pub(crate) mod multilayer;
-pub(crate) mod ports;
+pub mod ports;
 pub(crate) mod quadrature;
 pub mod roughness;
 pub(crate) mod solve;
