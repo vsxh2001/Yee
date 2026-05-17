@@ -9,6 +9,7 @@ use pyo3::prelude::*;
 
 mod al;
 mod bo;
+mod eigensolver;
 mod errors;
 mod fdtd;
 mod freq;
@@ -58,5 +59,11 @@ fn _yee(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     py.import("sys")?
         .getattr("modules")?
         .set_item("yee.touchstone", &ts_mod)?;
+    let eig_mod = PyModule::new(py, "yee.eigensolver")?;
+    eigensolver::register(&eig_mod)?;
+    m.add_submodule(&eig_mod)?;
+    py.import("sys")?
+        .getattr("modules")?
+        .set_item("yee.eigensolver", &eig_mod)?;
     Ok(())
 }
