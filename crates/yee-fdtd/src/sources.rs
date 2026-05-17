@@ -1474,14 +1474,22 @@ impl PlaneWaveSource {
                     grid.hy[(self.i1, j, k)] += cx * einc_z_b;
                 }
             }
-            // H_z[i,j,k] cross-section: (j ∈ [j0, j1-1], k ∈ [k0, k1])
+            // H_z[i,j,k] cross-section: (j ∈ [j0, j1-1], k ∈ [k0, k1+1])
             // — H_z at (i+½, j+½, k); j+½ must lie in [j0, j1]
             // → j ∈ [j0, j1-1]. E_inc_y sampled at Ey[i_face,j,k] =
             // (i_face·dx, (j+½)·dy, k·dz).
             // H_z has shape [nx, ny, nz+1].
+            //
+            // Phase 2.fdtd.5.3.2: k range is [k0..=k1+1] (not [k0..=k1])
+            // — the legacy z-convention places the TF E_y back face at
+            // z = (k1+1)·dz (Ey[*, *, k1+1] is TF on the boundary), so
+            // the H_z[*, *, k1+1] curl read of E_y[*, *, k1+1] also
+            // straddles the i-face when i = i0 - 1 or i = i1. Missing
+            // this row contributed materially to the oblique 30°/45°
+            // hi-z SF leakage.
             if self.j1 >= 1 {
                 let j_hi_hz = self.j1.saturating_sub(1).min(grid.ny.saturating_sub(1));
-                let k_hi_hz = self.k1.min(grid.nz);
+                let k_hi_hz = (self.k1 + 1).min(grid.nz);
                 for j in self.j0..=j_hi_hz {
                     let y = (j as f64 + 0.5) * dy;
                     for k in self.k0..=k_hi_hz {
@@ -1518,12 +1526,16 @@ impl PlaneWaveSource {
                 }
             }
             // H_z[i,j,k] cross-section across j-face: (i ∈ [i0, i1-1],
-            // k ∈ [k0, k1]). E_inc_x at Ex[i, j_face, k] =
+            // k ∈ [k0, k1+1]). E_inc_x at Ex[i, j_face, k] =
             // ((i+½)·dx, j_face·dy, k·dz).
             // H_z shape [nx, ny, nz+1].
+            //
+            // Phase 2.fdtd.5.3.2: k range extended to [k0..=k1+1] for
+            // the same reason as the i-face H_z block above (TF E_x
+            // back face is at z = (k1+1)·dz in the legacy z-convention).
             if self.i1 >= 1 {
                 let i_hi_hz = self.i1.saturating_sub(1).min(grid.nx.saturating_sub(1));
-                let k_hi_hz = self.k1.min(grid.nz);
+                let k_hi_hz = (self.k1 + 1).min(grid.nz);
                 for i in self.i0..=i_hi_hz {
                     let x = (i as f64 + 0.5) * dx;
                     for k in self.k0..=k_hi_hz {
