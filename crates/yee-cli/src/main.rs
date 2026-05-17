@@ -177,11 +177,8 @@ enum Command {
 /// Arguments to [`run_fdtd`], mirroring the [`Command::FdtdRun`] variant.
 ///
 /// Held in a struct so the handler signature stays manageable and so the
-/// `clap`-parsed variant can be passed through one field at a time. The
-/// skeleton commit doesn't read every field yet; `allow(dead_code)` keeps
-/// `cargo clippy -D warnings` green until the real handler lands.
+/// `clap`-parsed variant can be passed through one field at a time.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct FdtdArgs {
     grid: Vec<usize>,
     dx: f64,
@@ -324,12 +321,45 @@ fn run(cli: Cli) -> Result<ExitCode> {
     }
 }
 
-/// Stub handler for [`Command::FdtdRun`]. The real implementation lands in
-/// the follow-up commit; this skeleton exists so the new clap variant
-/// type-checks and the `--help` text is visible.
-fn run_fdtd(_args: FdtdArgs) -> Result<ExitCode> {
-    eprintln!("fdtd-run: handler not yet implemented");
-    Ok(ExitCode::from(2))
+/// Drive [`yee_fdtd::FdtdDriver`] end-to-end and emit the resulting
+/// [`yee_fdtd::RadiationPattern`] as JSON.
+///
+/// The JSON shape is built by hand (not via `serde::Serialize` on the
+/// pattern struct) so this handler is robust against future changes to the
+/// `RadiationPattern` derives: only the two public `Vec<f64>` fields
+/// (`theta_deg`, `e_theta_phi0`) are touched. When `args.output` is set
+/// the JSON is written to that path and a confirmation line is printed;
+/// otherwise the JSON is sent to stdout so callers can pipe it.
+fn run_fdtd(args: FdtdArgs) -> Result<ExitCode> {
+    use yee_fdtd::{FdtdDriver, FdtdDriverConfig, YeeGrid};
+
+    let (nx, ny, nz) = (args.grid[0], args.grid[1], args.grid[2]);
+    let (i, j, k) = (args.source[0], args.source[1], args.source[2]);
+    let grid = YeeGrid::vacuum(nx, ny, nz, args.dx);
+    let cfg = FdtdDriverConfig {
+        n_steps: args.steps,
+        dipole_center_cells: (i, j, k),
+        dipole_length_cells: args.dipole_length,
+        source_freq_hz: args.freq,
+        ntff_surface_pad_cells: args.ntff_pad,
+        cpml_thickness_cells: args.cpml,
+    };
+    let pattern = FdtdDriver::new(grid, cfg).run();
+
+    let payload = serde_json::json!({
+        "theta_deg": pattern.theta_deg,
+        "e_theta_phi0": pattern.e_theta_phi0,
+    });
+    let text = serde_json::to_string_pretty(&payload)?;
+
+    if let Some(path) = args.output {
+        std::fs::write(&path, &text)?;
+        println!("Wrote {}", path.display());
+    } else {
+        println!("{text}");
+    }
+
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Shell out to `cargo bench -p yee-bench [--bench <name>] [-- <extra>...]`.
