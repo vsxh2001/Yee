@@ -554,6 +554,37 @@ const MOM_002_SUBSTRATE_EPS_R: f64 = 4.4;
 /// Substrate thickness `h` (m) for the FR-4 microstrip case.
 const MOM_002_SUBSTRATE_H_M: f64 = 1.6e-3;
 
+/// Width-direction spacing law for the strip-mesh builder.
+///
+/// The microstrip surface-current density has a `1/√d` integrable
+/// singularity at the two longitudinal edges (`y = ±w/2`), so a
+/// uniform `n_width` subdivision wastes resolution in the strip
+/// interior where the current is smooth and starves it at the edges
+/// where it diverges. [`StripSpacing::EdgeClustered`] concentrates
+/// nodes near `y = ±w/2` via a Chebyshev / cosine spacing law that
+/// matches the singular density to first order.
+///
+/// `Uniform` is the Phase 1.1.1.0 builder's behaviour, retained
+/// here behind the spacing enum for the uniform-vs-clustered
+/// comparison sweep
+/// ([`tests::mom_002_strip_width_refinement_sweep_uniform`]) and
+/// the structural-invariant unit test.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // Uniform is only constructed in tests; kept for parity.
+enum StripSpacing {
+    /// Equal cell widths across `y ∈ [-w/2, w/2]`. Matches the Phase
+    /// 1.1.1.0 builder bit-for-bit and is retained as the back-compat
+    /// path for the structural-invariants unit test and the
+    /// uniform-spacing comparison sweep.
+    Uniform,
+    /// Chebyshev-clustered nodes: `y_j = -(w/2) · cos(π · j / n_width)`
+    /// for `j ∈ 0..=n_width`. Cell widths near `y = ±w/2` shrink as
+    /// `O(1/n_width²)` while interior cells stay `O(1/n_width)`, which
+    /// captures the `1/√d` edge singularity an order of magnitude more
+    /// efficiently than uniform refinement at the same RWG-basis cost.
+    EdgeClustered,
+}
+
 /// Build a rectangular strip mesh in the `z = 0` plane, length along
 /// `x ∈ [0, L]`, width along `y ∈ [-w/2, w/2]`.
 ///
@@ -564,11 +595,18 @@ const MOM_002_SUBSTRATE_H_M: f64 = 1.6e-3;
 /// delta-gap port that `RwgBasis::from_mesh` picks up via the
 /// "different non-zero tags" convention — identical to the dipole
 /// fixture's central-ring port mechanism.
-fn mom_002_strip_mesh(
+///
+/// The length direction is always uniformly subdivided. The width
+/// direction obeys `spacing`: [`StripSpacing::Uniform`] reproduces the
+/// Phase 1.1.1.0 builder; [`StripSpacing::EdgeClustered`] uses a
+/// Chebyshev cosine law that concentrates nodes near the longitudinal
+/// edges where the RWG current density diverges as `1/√d`.
+fn mom_002_strip_mesh_with_spacing(
     length_m: f64,
     width_m: f64,
     n_length: usize,
     n_width: usize,
+    spacing: StripSpacing,
 ) -> yee_mesh::TriMesh {
     use nalgebra::Vector3;
 
@@ -579,12 +617,31 @@ fn mom_002_strip_mesh(
     let ny = n_width + 1;
     let mut vertices: Vec<Vector3<f64>> = Vec::with_capacity(nx * ny);
     let dx = length_m / (n_length as f64);
-    let dy = width_m / (n_width as f64);
-    let y0 = -width_m / 2.0;
+
+    // Width-direction node coordinates. Both spacings span the closed
+    // interval `[-w/2, w/2]`; only the interior distribution differs.
+    let y_nodes: Vec<f64> = match spacing {
+        StripSpacing::Uniform => {
+            let dy = width_m / (n_width as f64);
+            let y0 = -width_m / 2.0;
+            (0..=n_width).map(|j| y0 + (j as f64) * dy).collect()
+        }
+        StripSpacing::EdgeClustered => {
+            // Chebyshev nodes on `[-w/2, +w/2]`. j = 0 maps to -w/2;
+            // j = n_width maps to +w/2; interior j cluster toward the
+            // ends because cos is densest near 0 and π.
+            (0..=n_width)
+                .map(|j| {
+                    let theta = std::f64::consts::PI * (j as f64) / (n_width as f64);
+                    -(width_m / 2.0) * theta.cos()
+                })
+                .collect()
+        }
+    };
+
     for i in 0..nx {
         let x = (i as f64) * dx;
-        for j in 0..ny {
-            let y = y0 + (j as f64) * dy;
+        for &y in &y_nodes {
             vertices.push(Vector3::new(x, y, 0.0));
         }
     }
@@ -612,6 +669,19 @@ fn mom_002_strip_mesh(
     }
 
     yee_mesh::TriMesh::new(vertices, triangles, tags).expect("strip mesh invariants")
+}
+
+/// Back-compat shim around [`mom_002_strip_mesh_with_spacing`]:
+/// defaults to [`StripSpacing::Uniform`] so callers that predate the
+/// spacing-enum split (Phase 1.1.1.0 [`run_mom_002`], the structural
+/// unit test) see bit-for-bit identical numerics.
+fn mom_002_strip_mesh(
+    length_m: f64,
+    width_m: f64,
+    n_length: usize,
+    n_width: usize,
+) -> yee_mesh::TriMesh {
+    mom_002_strip_mesh_with_spacing(length_m, width_m, n_length, n_width, StripSpacing::Uniform)
 }
 
 /// mom-002: 50 Ω microstrip line characteristic-impedance gate.
@@ -967,5 +1037,175 @@ mod tests {
         // First column: 2 cells * 2 triangles = 4. Same for second.
         assert_eq!(tagged_1, 4);
         assert_eq!(tagged_2, 4);
+    }
+
+    /// Edge-clustered strip mesh has the same connectivity / port-tag
+    /// invariants as the uniform mesh — only the interior y-coordinate
+    /// distribution changes. This is a sanity check that the spacing
+    /// switch is purely geometric.
+    #[test]
+    fn mom_002_strip_mesh_edge_clustered_structure() {
+        let n_length = 30;
+        let n_width = 16;
+        let width_m = 2.94e-3;
+        let mesh = mom_002_strip_mesh_with_spacing(
+            30.0e-3,
+            width_m,
+            n_length,
+            n_width,
+            StripSpacing::EdgeClustered,
+        );
+        assert_eq!(mesh.n_tris(), 2 * n_length * n_width);
+        assert_eq!(mesh.vertices.len(), (n_length + 1) * (n_width + 1));
+        let tagged_1 = mesh.tags.iter().filter(|&&t| t == 1).count();
+        let tagged_2 = mesh.tags.iter().filter(|&&t| t == 2).count();
+        // First column: 16 cells * 2 triangles = 32. Same for second.
+        assert_eq!(tagged_1, 2 * n_width);
+        assert_eq!(tagged_2, 2 * n_width);
+
+        // Confirm Chebyshev clustering: cells nearest the edges are
+        // smaller than the central cells. Read the actual node
+        // coordinates off the first axial column (i = 0) — vertex j
+        // sits at (x = 0, y = y_j, z = 0).
+        let ny = n_width + 1;
+        let y_node = |j: usize| -> f64 { mesh.vertices[j].y };
+        let dy_edge = y_node(1) - y_node(0);
+        let dy_centre = y_node(n_width / 2 + 1) - y_node(n_width / 2);
+        assert!(
+            dy_edge > 0.0 && dy_centre > 0.0,
+            "Chebyshev y-spacing must be monotonically increasing: \
+             dy_edge={dy_edge:.4e}, dy_centre={dy_centre:.4e}"
+        );
+        assert!(
+            dy_edge < dy_centre,
+            "Chebyshev clustering inverted: edge dy={dy_edge:.4e}, centre dy={dy_centre:.4e} \
+             (edge cells should be smaller than centre cells)"
+        );
+        // First and last y-nodes pin the strip width.
+        let y_first = y_node(0);
+        let y_last = y_node(ny - 1);
+        assert!((y_first + width_m / 2.0).abs() < 1e-12);
+        assert!((y_last - width_m / 2.0).abs() < 1e-12);
+    }
+
+    /// Uniform-spacing counterpart of
+    /// [`mom_002_strip_width_refinement_sweep`]. Ignored by default;
+    /// only useful for comparing the edge-clustered vs uniform
+    /// convergence rates. The N=2 result is identical to the Phase
+    /// 1.1.1.0 baseline by construction (Chebyshev with 2 nodes
+    /// degenerates to `[-w/2, +w/2]` with no interior).
+    #[test]
+    #[ignore = "sweep harness: uniform-spacing comparison; minutes wall time"]
+    fn mom_002_strip_width_refinement_sweep_uniform() {
+        use num_complex::Complex64;
+        use yee_core::{FreqRange, Solver};
+        use yee_mom::{GreensSpec, PlanarMoM};
+
+        let nz_values = [2usize, 4, 8, 16, 24, 32];
+        let mut rows: Vec<(usize, Complex64, f64)> = Vec::new();
+        for &nz in &nz_values {
+            let mesh = mom_002_strip_mesh_with_spacing(
+                MOM_002_STRIP_LENGTH_M,
+                MOM_002_STRIP_WIDTH_M,
+                MOM_002_N_LENGTH,
+                nz,
+                StripSpacing::Uniform,
+            );
+            let freq = FreqRange::new(MOM_002_F_HZ, MOM_002_F_HZ + 1.0, 1).expect("freq range");
+            let solver = PlanarMoM::default().with_greens(GreensSpec::microstrip_dcim(
+                MOM_002_SUBSTRATE_EPS_R,
+                MOM_002_SUBSTRATE_H_M,
+                MOM_002_DCIM_N_IMAGES,
+            ));
+            let s = solver.run(&mesh, freq).expect("solve");
+            let s11 = s.data[0][0];
+            let z_in = z_in_from_s11(s11, MOM_002_Z0_REF);
+            let z_mag = z_in.norm();
+            eprintln!(
+                "uniform nz={nz:>3}  Z_in = {:>10.3} + j{:>10.3}  |Z| = {:>10.3} Ohm",
+                z_in.re, z_in.im, z_mag
+            );
+            rows.push((nz, z_in, z_mag));
+        }
+        eprintln!("\n=== mom-002 width-refinement sweep (uniform) ===");
+        eprintln!("nz | Re(Z) [Ohm] | Im(Z) [Ohm] | |Z| [Ohm]");
+        eprintln!("---+-------------+-------------+----------");
+        for (nz, z, m) in &rows {
+            eprintln!("{:>2} | {:>11.3} | {:>11.3} | {:>8.3}", nz, z.re, z.im, m);
+        }
+    }
+
+    /// Width-direction refinement sweep for mom-002. Iterates `n_width
+    /// ∈ {2, 4, 8, 16, 24, 32}` against the edge-clustered builder
+    /// and records `|Z_in|` per value. Used to choose the production
+    /// `MOM_002_N_WIDTH` and tolerance band per the Phase 1.1.1.1
+    /// brief. Ignored by default because it runs 6 solves of which
+    /// the largest (`n_width = 32`) takes ~minute; the total budget
+    /// is several minutes, well below the 8-min mom-001 budget but
+    /// enough to keep out of the default `cargo test` path.
+    ///
+    /// Phase 1.1.1.1 measurement at base SHA `f9e63c7`:
+    ///
+    /// ```text
+    /// nz | Re(Z) [Ohm] | Im(Z) [Ohm] | |Z| [Ohm]
+    /// ---+-------------+-------------+----------
+    ///  2 |    2325.959 |   -1308.575 | 2668.793
+    ///  4 |    2350.452 |   -1479.010 | 2777.066
+    ///  8 |      -5.275 |   -2068.119 | 2068.126
+    /// 16 |     -67.067 |   -2219.578 | 2220.592
+    /// 24 |     -42.616 |   -2144.837 | 2145.261
+    /// 32 |     -51.905 |   -2092.100 | 2092.744
+    /// ```
+    ///
+    /// `Re(Z)` collapses by `n_width ≈ 8` and converges to `≈ −50 Ω`;
+    /// `Im(Z)` plateaus at `≈ −2.1 kΩ` regardless of refinement,
+    /// which is the surface-wave-pole signature deferred to Phase
+    /// 1.1.1.2.
+    #[test]
+    #[ignore = "sweep harness: runs 6 mom-002 solves; minutes wall time"]
+    fn mom_002_strip_width_refinement_sweep() {
+        use num_complex::Complex64;
+        use yee_core::{FreqRange, Solver};
+        use yee_mom::{GreensSpec, PlanarMoM};
+
+        let z0_ref = MOM_002_Z0_REF;
+        let length_m = MOM_002_STRIP_LENGTH_M;
+        let width_m = MOM_002_STRIP_WIDTH_M;
+        let n_length = MOM_002_N_LENGTH;
+        let f_hz = MOM_002_F_HZ;
+        let eps_r = MOM_002_SUBSTRATE_EPS_R;
+        let h_m = MOM_002_SUBSTRATE_H_M;
+        let n_images = MOM_002_DCIM_N_IMAGES;
+
+        let nz_values = [2usize, 4, 8, 16, 24, 32];
+        let mut rows: Vec<(usize, Complex64, f64)> = Vec::new();
+        for &nz in &nz_values {
+            let mesh = mom_002_strip_mesh_with_spacing(
+                length_m,
+                width_m,
+                n_length,
+                nz,
+                StripSpacing::EdgeClustered,
+            );
+            let freq = FreqRange::new(f_hz, f_hz + 1.0, 1).expect("freq range");
+            let solver =
+                PlanarMoM::default().with_greens(GreensSpec::microstrip_dcim(eps_r, h_m, n_images));
+            let s = solver.run(&mesh, freq).expect("solve");
+            let s11 = s.data[0][0];
+            let z_in = z_in_from_s11(s11, z0_ref);
+            let z_mag = z_in.norm();
+            eprintln!(
+                "nz={nz:>3}  Z_in = {:>10.3} + j{:>10.3}  |Z| = {:>10.3} Ohm",
+                z_in.re, z_in.im, z_mag
+            );
+            rows.push((nz, z_in, z_mag));
+        }
+        // Pretty-print summary table.
+        eprintln!("\n=== mom-002 width-refinement sweep (edge-clustered) ===");
+        eprintln!("nz | Re(Z) [Ohm] | Im(Z) [Ohm] | |Z| [Ohm]");
+        eprintln!("---+-------------+-------------+----------");
+        for (nz, z, m) in &rows {
+            eprintln!("{:>2} | {:>11.3} | {:>11.3} | {:>8.3}", nz, z.re, z.im, m);
+        }
     }
 }
