@@ -137,11 +137,16 @@ fn plane_wave_propagates_with_tfsf_quiet_outside_box() {
         "expected TF region to carry incident wave, got {inside_amp}"
     );
     assert!(
-        outside_amp < 0.1,
+        outside_amp < 0.01,
         "expected SF region to be quiet, got {outside_amp}"
     );
+    // 1000× gate (Phase 2.fdtd.5.2 DoD). The slab configuration is
+    // CPML-bounded on the j/k faces; the only sources of SF amplitude
+    // are i-face round-off and CPML reflection. Empirical value
+    // ~2676× (~68 dB). The 1000× threshold guards against a
+    // regression in either the i-face TF/SF kernel or the CPML.
     assert!(
-        contrast > 10.0,
-        "TF/SF contrast {contrast:.2} too low (expected > 10)"
+        contrast > 1000.0,
+        "slab TF/SF contrast {contrast:.2} too low (expected > 1000)"
     );
 }

@@ -1,4 +1,4 @@
-//! TF/SF finite-box (not slab) contrast validation (Phase 2.fdtd.5.1).
+//! TF/SF finite-box (not slab) contrast validation (Phase 2.fdtd.5.2).
 //!
 //! Phase 2.fdtd.5 (Track OO) shipped the `+x` `E_z` polarized TF/SF
 //! plane-wave source with the TF region spanning the full `j`, `k`
@@ -9,26 +9,28 @@
 //! (bounded on all six faces). Naïve polarization analysis says the
 //! `j0`/`j1`/`k0`/`k1` faces should need no corrections at normal
 //! `+x` `E_z` incidence (since `H_inc_x = H_inc_z = E_inc_x = E_inc_y = 0`),
-//! but the discrete `H_x` stencil at `j = j0 ± 1/2` reads `E_z`
-//! across the TF/SF boundary, and `E_inc_z ≠ 0`. The standard
-//! Yee update there does not pick up an "incident-H_x" curl term
-//! to cancel — but the *scattered* `H_x` it produces from the
-//! `E_z` jump is a real (and spurious) artefact of the finite-box
-//! geometry that the slab case avoids by terminating those faces
-//! in CPML.
+//! but in fact two more pairs of corrections are needed:
 //!
-//! Empirically (this test), the finite-box configuration achieves
-//! ~6× contrast — well above the 5× **prose** gate documented in
-//! the Phase 2.fdtd.5.1 brief, but substantially below the slab
-//! configuration's 2676×. This confirms the brief's expectation
-//! that the corners are "imperfect" without full side-face
-//! corrections; the missing physics is the j/k-face `E_z`
-//! discontinuity correction described above.
+//! - `H_x` at the j-faces (`j = j0 - 1` and `j = j1`) needs the
+//!   `−∂E_z/∂y` term corrected for the TF/SF discontinuity in `E_z`
+//!   across the j-face. This is the same physics as the existing
+//!   i-face `H_y` correction, applied to a different curl component.
+//! - `E_x` at the k-faces (`k = k0` and `k = k1 + 1`) needs the
+//!   `−∂H_y/∂z` term corrected for the TF/SF discontinuity in `H_y`
+//!   across the k-face.
 //!
-//! Side-face physics corrections — the proper Phase 2.fdtd.5.2
-//! deliverable — are deferred. This test pins the present
-//! behaviour with the loose 5× bound so any regression in the
-//! existing i0/i1 kernel is caught.
+//! With those four extra face corrections in place (Phase 2.fdtd.5.2),
+//! the finite-box configuration measures contrast at machine
+//! precision — the SF "quiet zone" outside the TF box drops to
+//! ~1e-15 (the same `f64` roundoff floor the slab case bottoms out
+//! at if CPML weren't the dominant residual).
+//!
+//! This test pins the finite-box contrast at ≥ 100× — that's the
+//! Phase 2.fdtd.5.2 deliverable gate. The empirical value with all
+//! six-face corrections in place is ~7×10¹⁴ (~298 dB; effectively
+//! roundoff-limited), so the 100× gate is a *very* loose guardrail
+//! whose only purpose is to catch a regression that re-introduces
+//! incident-leakage at the j/k faces.
 //!
 //! Setup mirrors `plane_wave_propagation.rs` but with a tightly
 //! bounded TF box in `y` and `z`.
@@ -146,23 +148,22 @@ fn finite_box_tfsf_preserves_contrast() {
         inside_amp > 0.5,
         "expected TF region to carry incident wave, got {inside_amp}"
     );
-    // Finite-box outside-amplitude bound is *loose* (0.5) — see module
-    // docstring. The slab geometry would pin this at well under 1e-3
-    // because all four transverse faces sit in CPML; here, the j/k
-    // side faces emit scattered fields the i-only correction kernel
-    // cannot cancel. Tightening this requires Phase 2.fdtd.5.2
-    // side-face corrections.
+    // Finite-box outside-amplitude bound. With the Phase 2.fdtd.5.2
+    // j/k-face corrections in place the empirical value is at
+    // roundoff (~1e-15); we leave the 0.01 guardrail so a regression
+    // that takes the outside amplitude back into the visible range
+    // is caught loudly.
     assert!(
-        outside_amp < 0.5,
-        "expected SF region to be relatively quiet, got {outside_amp}"
+        outside_amp < 0.01,
+        "expected SF region to be quiet, got {outside_amp}"
     );
-    // 5× prose gate from the Phase 2.fdtd.5.1 brief. Empirical value
-    // is ~6× (~15.6 dB). This is the pinning test for the existing
-    // i0/i1-only correction kernel applied to a finite TF box; any
-    // regression in the i-face corrections (or in CPML, which has to
-    // hold up the outside-box ambient) will break it.
+    // 100× gate from the Phase 2.fdtd.5.2 brief. Empirical value with
+    // all six-face corrections in place is ~7×10¹⁴ (effectively
+    // floating-point roundoff-limited). The 100× threshold is a
+    // *very* loose guardrail whose only job is to detect a regression
+    // that re-introduces incident-leakage at the j- or k-faces.
     assert!(
-        contrast > 5.0,
-        "finite-box TF/SF contrast {contrast:.2} too low (expected > 5)"
+        contrast > 100.0,
+        "finite-box TF/SF contrast {contrast:.2} too low (expected > 100)"
     );
 }
