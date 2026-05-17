@@ -27,3 +27,7 @@ num-complex = { workspace = true }
 anyhow      = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+# Native file-open dialog for the `File → Open Touchstone…` menu entry.
+# Defaults to xdg-portal + wayland on Linux (no GTK system dep required);
+# falls back to AppKit / Win32 on macOS / Windows.
+rfd = "0.17"
