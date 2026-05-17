@@ -34,3 +34,7 @@
 - [ADR-0012: NSGA-II as a separate module from BO](decisions/0012-multi-objective-nsga2.md)
 - [ADR-0013: Active learning via variance acquisition](decisions/0013-active-learning-variance-acquisition.md)
 - [ADR-0014: TF/SF slab geometry, finite box deferred](decisions/0014-tfsf-slab-not-finite-box.md)
+- [ADR-0015: PlanarMoM GreensSpec builder](decisions/0015-planar-mom-greens-spec-builder.md)
+- [ADR-0016: yee-py validation binding (slow path gated)](decisions/0016-yee-py-validation-binding-slow-path-gated.md)
+- [ADR-0017: FDTD lumped RLC port](decisions/0017-fdtd-lumped-rlc-port.md)
+- [ADR-0018: yee-gui validation panel](decisions/0018-yee-gui-validation-panel.md)
