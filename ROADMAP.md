@@ -8,13 +8,15 @@ Conventions used below:
 - ✅ **Validation** — benchmark cases that must pass before the phase is called "done"
 - ⚠️ **Risks / dependencies** — what could derail this phase
 
-## Status snapshot (2026-05-17)
+## Status snapshot (2026-05-18)
 
 **Shipped:**
 - Phase 0 walking skeleton (`phase-0-done` tag)
 - Phase 1.0 free-space MoM dipole, NEC-4 87+j41 Ω reference passing (`phase-1-0-mom-dipole` tag)
-- Phase 1.1.0 multilayer Greens placeholder (one-image DCIM); Phase 1.1.1 Sommerfeld extraction still pending
-- Phase 1.3.0 wave-port skeleton (matches delta-gap); Phase 1.3.1 cross-section eigenmode still pending
+- Phase 1.1.0 multilayer Greens placeholder (one-image DCIM); Phase 1.1.1 Sommerfeld extraction in flight
+- Phase 1.3.0 wave-port skeleton (matches delta-gap)
+- Phase 1.3.1.1 step 2-3 Nedelec edge-element + nodal Lagrange E_z assembly + dense eigen on `TriMesh2D`; WR-90 TE10 cutoff gate passing at 0.055% error
+- Phase 1.3.1.1 step 6 `yee.eigensolver` Python binding (PyTriMesh2D + PyNumericalCrossSection; 7 pytest cases; WR-90 cutoff sweep notebook)
 - Phase 1.4 surface roughness (Hammerstad-Jensen, Groiss, Huray)
 - Phase 1.5 cuSOLVER LU (hardware-gated)
 - Phase 1.6 GMRES iterative
@@ -32,12 +34,23 @@ Conventions used below:
 - Phase 3.al.0 (variance-acquisition active learning)
 
 **Pending (high priority):**
-- Phase 1.1.1 real Sommerfeld / multi-image DCIM extraction
-- Phase 1.3.1 wave-port cross-section eigenmode solver
-- Phase 2.fdtd.5.1/5.2/5.3 finite-box / oblique / multi-polarization TF/SF
-- Phase 2.fdtd.7 subgridding (roadmap-deferred)
-- Phase 3.nl.0 NL design surface (LLM)
-- Phase 4 FEM / eigenmode
+
+*In-flight (this session):*
+- Phase 1.1.1.2 Sommerfeld pole extraction implementation (JJJJJ)
+- Phase 2.fdtd.5.3.2 oblique TF/SF face-stencil audit (KKKKK)
+- Phase 1.3.1.1 step 4 sparse arpack-rs / LOBPCG eigensolver (queued post-JJJJJ to avoid yee-mom lane conflict)
+- Phase 1.3.1.1 step 5 longitudinal block for quasi-TEM microstrip wave-ports
+
+*Design-coverage shipped, impl pending:*
+- Phase 2.fdtd.7 subgridding — spec + plan + ADR 0027/0030 landed; Q1-Q7 tracks ready to dispatch
+- Phase 3.nl.0 NL design surface — spec + plan + ADR 0028/0031 landed; R1-R7 tracks ready to dispatch
+- Phase 4 FEM / eigenmode — spec + plan + ADR 0029/0032 landed; T1-T9 tracks ready to dispatch
+
+**Outstanding validation gates:**
+- mom-002 microstrip Z₀ and mom-003 2.4 GHz patch — loose tolerances until Phase 1.1.1.2 Sommerfeld lands
+- fdtd-007 Maloney-Smith oblique TF/SF — gates Phase 2.fdtd.5.3.2
+- fem-eig-001 WR-90 rectangular cavity — gates Phase 4 FEM eigenmode
+- nl-001 10-prompt sweep — gates Phase 3.nl.0 NL design surface
 
 ---
 
