@@ -8,6 +8,7 @@
 - [RWG Basis, MPIE, and Phase 1.0 Quadrature](theory/mom-rwg-mpie.md)
 - [Finite-Difference Time-Domain](theory/fdtd.md)
 - [FDTD: CPML, NTFF, TF/SF, lumped, dispersive](theory/fdtd-details.md)
+- [CUDA backend](theory/cuda-backend.md)
 - [Touchstone v1.1 File Format](theory/touchstone-format.md)
 - [GP Surrogates and Bayesian Optimization](theory/surrogate-gp-bo.md)
 - [Multi-objective Optimization and Active Learning](theory/multi-objective-and-active-learning.md)
