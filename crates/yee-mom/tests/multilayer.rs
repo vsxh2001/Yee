@@ -1,9 +1,11 @@
-//! Phase 1.1.0 multilayer Green's function integration tests.
+//! Multilayer Green's function integration tests.
 //!
 //! These exercise the trait-dispatch plumbing and the limit behaviour of
-//! the one-image DCIM placeholder; they are NOT a physics validation gate
-//! for microstrip or patch antennas (Phase 1.1.1+ will add those once a
-//! real Sommerfeld / DCIM extraction lands).
+//! both the Phase 1.1.0 one-image DCIM placeholder and the Phase 1.1.1.0
+//! N-image DCIM extension. They are NOT a physics validation gate for
+//! microstrip or patch antennas (Phase 1.1.1.1+ will tighten those once
+//! real Sommerfeld-integral extraction with surface-wave pole subtraction
+//! lands).
 
 #[path = "fixtures/mod.rs"]
 mod fixtures;
@@ -86,6 +88,152 @@ fn multilayer_large_h_matches_free_space() {
         z_in_fs.im,
         rel
     );
+}
+
+/// Diagnostic-only: PEC-mirror image at `b = -1`, `a = -2h` (the N=1
+/// limit of the PEC-backed slab in the thin-substrate limit). Compare
+/// against the GPOF-fitted N-image result; if the simple PEC mirror
+/// gives a number close to the GPOF result, that is evidence the
+/// substrate is "too thin" for the additional images to add
+/// information at this geometry.
+#[test]
+#[ignore = "diagnostic-only: PEC mirror Z at the microstrip"]
+fn dcim_pec_mirror_microstrip() {
+    use nalgebra::Vector3;
+    use num_complex::Complex64;
+    use yee_mom::__internal::{MultilayerGreens, z_in_with_greens};
+
+    let length_m = 30.0e-3;
+    let width_m = 2.94e-3;
+    let n_length = 30usize;
+    let n_width = 2usize;
+    let h = 1.6e-3;
+    let f_hz = 1.0e9;
+
+    let nx = n_length + 1;
+    let ny = n_width + 1;
+    let mut vertices: Vec<Vector3<f64>> = Vec::new();
+    let dx = length_m / (n_length as f64);
+    let dy = width_m / (n_width as f64);
+    let y0 = -width_m / 2.0;
+    for i in 0..nx {
+        let x = (i as f64) * dx;
+        for j in 0..ny {
+            let y = y0 + (j as f64) * dy;
+            vertices.push(Vector3::new(x, y, 0.0));
+        }
+    }
+    let mut triangles: Vec<[u32; 3]> = Vec::new();
+    let mut tags: Vec<u32> = Vec::new();
+    for i in 0..n_length {
+        for j in 0..n_width {
+            let a = (i * ny + j) as u32;
+            let b = ((i + 1) * ny + j) as u32;
+            let c = ((i + 1) * ny + (j + 1)) as u32;
+            let d = (i * ny + (j + 1)) as u32;
+            triangles.push([a, b, c]);
+            triangles.push([a, c, d]);
+            let tag = if i == 0 {
+                1
+            } else if i == 1 {
+                2
+            } else {
+                0
+            };
+            tags.push(tag);
+            tags.push(tag);
+        }
+    }
+    let mesh = yee_mesh::TriMesh::new(vertices, triangles, tags).unwrap();
+
+    // Build MultilayerGreens with manually-set N=1 PEC-mirror image.
+    let mut mg = MultilayerGreens::new_microstrip(f_hz, 4.4, h);
+    // Replace placeholder dielectric-mirror with PEC-mirror image.
+    mg.vector_images = vec![(Complex64::new(-1.0, 0.0), Complex64::new(-2.0 * h, 0.0))];
+    mg.scalar_images = vec![(Complex64::new(-1.0, 0.0), Complex64::new(-2.0 * h, 0.0))];
+
+    let z_in = z_in_with_greens(&mesh, 1, &mg).unwrap();
+    let s11 = (z_in - Complex64::new(50.0, 0.0)) / (z_in + Complex64::new(50.0, 0.0));
+    println!(
+        "  PEC-mirror b=-1 at a=-2h: Z_in = {:.3} + j{:.3} Ohm, |Z| = {:.3}, |S11| = {:.4}",
+        z_in.re,
+        z_in.im,
+        z_in.norm(),
+        s11.norm(),
+    );
+}
+
+/// Diagnostic-only: sweep `n_images` for the FR-4 microstrip strip
+/// from `mom-002` (30 mm × 2.94 mm at 1 GHz) and report the recovered
+/// `|Z_in|`. Used to characterise the GPOF fit's stability under the
+/// spec escape hatch ("fall back to N=3 if N=5 unstable"). Not part
+/// of the gated CI surface; ignored so the regular fast tests stay
+/// silent.
+#[test]
+#[ignore = "diagnostic-only: sweep n_images on the microstrip"]
+fn dcim_n_sweep_microstrip() {
+    use yee_core::{FreqRange, Solver};
+    use yee_mom::{GreensSpec, PlanarMoM};
+
+    let length_m = 30.0e-3;
+    let width_m = 2.94e-3;
+    let n_length = 30usize;
+    let n_width = 2usize;
+    let eps_r = 4.4;
+    let h = 1.6e-3;
+    let f_hz = 1.0e9;
+
+    let nx = n_length + 1;
+    let ny = n_width + 1;
+    use nalgebra::Vector3;
+    let mut vertices: Vec<Vector3<f64>> = Vec::new();
+    let dx = length_m / (n_length as f64);
+    let dy = width_m / (n_width as f64);
+    let y0 = -width_m / 2.0;
+    for i in 0..nx {
+        let x = (i as f64) * dx;
+        for j in 0..ny {
+            let y = y0 + (j as f64) * dy;
+            vertices.push(Vector3::new(x, y, 0.0));
+        }
+    }
+    let mut triangles: Vec<[u32; 3]> = Vec::new();
+    let mut tags: Vec<u32> = Vec::new();
+    for i in 0..n_length {
+        for j in 0..n_width {
+            let a = (i * ny + j) as u32;
+            let b = ((i + 1) * ny + j) as u32;
+            let c = ((i + 1) * ny + (j + 1)) as u32;
+            let d = (i * ny + (j + 1)) as u32;
+            triangles.push([a, b, c]);
+            triangles.push([a, c, d]);
+            let tag = if i == 0 {
+                1
+            } else if i == 1 {
+                2
+            } else {
+                0
+            };
+            tags.push(tag);
+            tags.push(tag);
+        }
+    }
+    let mesh = yee_mesh::TriMesh::new(vertices, triangles, tags).unwrap();
+
+    let freq = FreqRange::new(f_hz, f_hz + 1.0, 1).unwrap();
+    for n in [1usize, 2, 3, 5, 7, 10] {
+        let solver = PlanarMoM::default().with_greens(GreensSpec::microstrip_dcim(eps_r, h, n));
+        let s = solver.run(&mesh, freq).unwrap();
+        let s11 = s.data[0][0];
+        let z = Complex64::new(50.0, 0.0) * (Complex64::new(1.0, 0.0) + s11)
+            / (Complex64::new(1.0, 0.0) - s11);
+        println!(
+            "  N={n}: Z_in = {:.3} + j{:.3} Ohm, |Z| = {:.3} Ohm",
+            z.re,
+            z.im,
+            z.norm()
+        );
+    }
 }
 
 /// Spec-mandated 10% bound: build the substrate stack at the exact

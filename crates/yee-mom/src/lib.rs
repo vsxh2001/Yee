@@ -14,6 +14,7 @@
 
 pub(crate) mod basis;
 pub(crate) mod fill;
+pub(crate) mod gpof;
 pub(crate) mod greens;
 pub mod iterative;
 pub(crate) mod multilayer;
@@ -72,12 +73,34 @@ pub enum GreensSpec {
     /// permittivity `eps_r` and thickness `h_m` over a PEC ground
     /// plane, evaluated with the one-image DCIM approximation in
     /// [`crate::multilayer::MultilayerGreens`]. The TE / TM split is
-    /// collapsed; real Sommerfeld extraction lands in Phase 1.1.1.
+    /// collapsed; the N-image fit lives under
+    /// [`GreensSpec::MicrostripDcim`].
     Microstrip {
         /// Relative permittivity of the substrate slab.
         eps_r: f64,
         /// Substrate thickness in metres; PEC ground at `z = -h_m`.
         h_m: f64,
+    },
+    /// Phase 1.1.1.0 multi-image DCIM: same substrate geometry as
+    /// [`GreensSpec::Microstrip`] but the [`MultilayerGreens`] kernel
+    /// is built with `n_images` complex image pairs fitted via GPOF
+    /// against the slab's TE / TM spectral reflection coefficients
+    /// ([`MultilayerGreens::new_microstrip_with_n_images`]). The
+    /// TE/TM split that Phase 1.1.0 collapsed is resolved here, so
+    /// the vector and scalar potentials use independent image trains.
+    ///
+    /// `n_images = 1` reduces to the [`GreensSpec::Microstrip`] path
+    /// bit-for-bit; the recommended value for FR-4 microstrip is
+    /// `n_images = 5` (Aksun 1996). Phase 1.1.1.1 (real Sommerfeld
+    /// extraction with surface-wave pole subtraction) supersedes
+    /// this; until then this is the preferred multilayer spec.
+    MicrostripDcim {
+        /// Relative permittivity of the substrate slab.
+        eps_r: f64,
+        /// Substrate thickness in metres; PEC ground at `z = -h_m`.
+        h_m: f64,
+        /// Number of DCIM image pairs to fit. Typical: 5.
+        n_images: usize,
     },
 }
 
@@ -89,6 +112,19 @@ impl GreensSpec {
         Self::Microstrip { eps_r, h_m }
     }
 
+    /// Convenience constructor for the N-image DCIM microstrip kernel.
+    /// Routes through
+    /// [`MultilayerGreens::new_microstrip_with_n_images`] at sweep time.
+    /// `n_images = 1` is functionally identical to
+    /// [`Self::microstrip`]; values in `2..=10` exercise the GPOF fit.
+    pub fn microstrip_dcim(eps_r: f64, h_m: f64, n_images: usize) -> Self {
+        Self::MicrostripDcim {
+            eps_r,
+            h_m,
+            n_images,
+        }
+    }
+
     /// Build a concrete [`Greens`] kernel at `freq_hz`. Used by the
     /// per-frequency hot loop inside `s_parameters_sweep`.
     pub(crate) fn build(&self, freq_hz: f64) -> Box<dyn Greens + Send + Sync> {
@@ -97,6 +133,13 @@ impl GreensSpec {
             Self::Microstrip { eps_r, h_m } => {
                 Box::new(MultilayerGreens::new_microstrip(freq_hz, eps_r, h_m))
             }
+            Self::MicrostripDcim {
+                eps_r,
+                h_m,
+                n_images,
+            } => Box::new(MultilayerGreens::new_microstrip_with_n_images(
+                eps_r, h_m, freq_hz, n_images,
+            )),
         }
     }
 }
