@@ -29,6 +29,8 @@
 use crate::basis::RwgBasis;
 use faer::Mat;
 use num_complex::Complex64;
+use std::collections::HashMap;
+use yee_mesh::{MaterialTag, TriMesh2D};
 
 /// Excitation source contract for the MoM solver.
 ///
@@ -98,9 +100,12 @@ impl Port for DeltaGapPort {
 ///
 /// Phase 1.3.1.0 ships [`ModalDistribution::Te10`] for rectangular
 /// waveguides; the default [`ModalDistribution::Uniform`] preserves the
-/// Phase 1.3.0 delta-gap-equivalent placeholder behaviour. A future
-/// `Numerical2D` variant will hold the result of a 2-D cross-section
-/// eigensolve once Phase 1.3.1.1 lands.
+/// Phase 1.3.0 delta-gap-equivalent placeholder behaviour. Phase 1.3.1.1
+/// step 0-1 adds [`ModalDistribution::Numerical2D`] as a typed slot for
+/// the numerical 2-D cross-section eigensolver; the eigensolve itself
+/// lands in Phase 1.3.1.1 step 2-5, until which point the RHS falls
+/// back to the uniform / delta-gap-equivalent behaviour of
+/// [`ModalDistribution::Uniform`].
 pub enum ModalDistribution {
     /// Uniform (TEM-like) dominant-mode amplitude across the port edges.
     /// Galerkin-tested into edge-length-weighted RWG basis functions this
@@ -110,6 +115,91 @@ pub enum ModalDistribution {
     /// Closed-form TE10 mode of a rectangular waveguide cross-section.
     /// See [`RectangularWaveguideTe10`].
     Te10(RectangularWaveguideTe10),
+    /// Numerical 2-D cross-section mode, computed by FEM eigensolve on
+    /// an externally supplied [`TriMesh2D`]. See [`NumericalCrossSection`].
+    ///
+    /// **Status (Phase 1.3.1.1 step 0-1 stub):** the variant carries the
+    /// mesh + material data and a (currently unfilled) cache of `β` /
+    /// `Z_w`, but the eigensolve itself is not implemented. Until step
+    /// 2-5 lands, [`WavePort::rhs`] falls back to the uniform
+    /// distribution for this variant, so a `Numerical2D` port is
+    /// bit-for-bit equivalent to a `Uniform` port at the same voltage
+    /// and tag. This preserves the mom-001 gate and the existing
+    /// wave-port test suite.
+    ///
+    /// Boxed because a [`NumericalCrossSection`] carries a full
+    /// [`TriMesh2D`] (potentially hundreds of triangles) — keeping the
+    /// payload behind an indirection prevents the enum from being
+    /// dominated by a single rarely-built variant. Constructed via
+    /// [`WavePort::with_numerical_cross_section`].
+    Numerical2D(Box<NumericalCrossSection>),
+}
+
+/// Numerical 2-D cross-section mode for a [`WavePort`].
+///
+/// Phase 1.3.1.1 (full): runs a vector Helmholtz FEM eigensolve over a
+/// `TriMesh2D` of the port cross-section to extract the dominant
+/// quasi-TEM / quasi-TE mode, then caches `β` (propagation constant)
+/// and `Z_w` (wave impedance) for use during RHS assembly.
+///
+/// Phase 1.3.1.1 step 0-1 (this commit): ships the type and the
+/// [`WavePort::with_numerical_cross_section`] builder so the public API
+/// freezes before the assembly code is written. [`Self::solve`] is a
+/// stub that returns `Error::Unimplemented`. The `β` / `Z_w` cache
+/// fields are `None` until a successful solve fills them.
+///
+/// Material data is keyed by [`MaterialTag`] (matching the tag in
+/// [`TriMesh2D::triangle_material`]) — the caller supplies one
+/// permittivity / permeability per distinct tag rather than per
+/// triangle, which is how dielectric stack-ups are conventionally
+/// described.
+pub struct NumericalCrossSection {
+    /// 2-D triangular mesh of the port cross-section.
+    pub mesh: TriMesh2D,
+    /// Complex relative permittivity per material tag.
+    pub eps_r: HashMap<MaterialTag, Complex64>,
+    /// Complex relative permeability per material tag.
+    pub mu_r: HashMap<MaterialTag, Complex64>,
+    /// Propagation constant `β` cached at the most recent
+    /// [`Self::solve`] frequency. `None` before any successful solve.
+    pub beta: Option<Complex64>,
+    /// Wave impedance `Z_w` cached at the most recent [`Self::solve`]
+    /// frequency. `None` before any successful solve.
+    pub z_w: Option<Complex64>,
+}
+
+impl NumericalCrossSection {
+    /// Build a cross-section mode descriptor with empty caches. The
+    /// eigensolve is deferred to [`Self::solve`]; until that call (and
+    /// until Phase 1.3.1.1 step 2-5 implements the eigensolve), `beta`
+    /// and `z_w` remain `None`.
+    pub fn new(
+        mesh: TriMesh2D,
+        eps_r: HashMap<MaterialTag, Complex64>,
+        mu_r: HashMap<MaterialTag, Complex64>,
+    ) -> Self {
+        Self {
+            mesh,
+            eps_r,
+            mu_r,
+            beta: None,
+            z_w: None,
+        }
+    }
+
+    /// Run the 2-D eigensolve at `freq_hz`.
+    ///
+    /// **Phase 1.3.1.1 step 0-1 stub:** returns
+    /// [`yee_core::Error::Unimplemented`]. The full implementation
+    /// (Nedelec edge-element assembly + dense or sparse eigensolve)
+    /// lands in Phase 1.3.1.1 step 2-5. Callers that need a working
+    /// wave-port mode today should use
+    /// [`WavePort::with_rectangular_te10`] (Phase 1.3.1.0) instead.
+    pub fn solve(&mut self, _freq_hz: f64) -> yee_core::Result<()> {
+        Err(yee_core::Error::Unimplemented(
+            "Phase 1.3.1.1 step 0-1 stub: NumericalCrossSection::solve eigensolve not yet implemented",
+        ))
+    }
 }
 
 /// Closed-form TE10 mode of a rectangular waveguide of inner dimensions
@@ -225,6 +315,19 @@ impl WavePort {
         self.modal_distribution = ModalDistribution::Te10(mode);
         self
     }
+
+    /// Attach a numerical 2-D cross-section mode to this wave-port.
+    ///
+    /// **Phase 1.3.1.1 step 0-1 stub:** the builder accepts the mesh +
+    /// material maps and stores them on the port, but the eigensolve
+    /// itself is not yet implemented. Until Phase 1.3.1.1 step 2-5
+    /// ships the assembly + solve, [`WavePort::rhs`] falls back to the
+    /// uniform / delta-gap-equivalent behaviour for this variant, so
+    /// the existing mom-001 / Phase 1.3.0 numerics are preserved.
+    pub fn with_numerical_cross_section(mut self, mode: NumericalCrossSection) -> Self {
+        self.modal_distribution = ModalDistribution::Numerical2D(Box::new(mode));
+        self
+    }
 }
 
 impl Port for WavePort {
@@ -268,6 +371,19 @@ impl Port for WavePort {
                     let mid_y = 0.5 * (p0.y + p1.y);
                     let profile = mode.e_y_profile(mid_x, mid_y);
                     b[(k, 0)] = self.voltage * Complex64::new(edge.length * profile, 0.0);
+                }
+            }
+            ModalDistribution::Numerical2D(_mode) => {
+                // Phase 1.3.1.1 step 0-1 stub: until the eigensolver
+                // lands (step 2-5) the numerical-cross-section variant
+                // has no mode profile to sample, so we degenerate to
+                // the uniform / delta-gap-equivalent path. The mesh and
+                // material maps are still carried on the port so the
+                // eventual step-2 implementation can light up without
+                // an API change. mom-001 and the existing wave-port
+                // tests are bit-for-bit unaffected.
+                for k in basis.port_basis_indices(self.tag) {
+                    b[(k, 0)] = self.voltage * Complex64::new(basis.edges[k].length, 0.0);
                 }
             }
         }
@@ -338,5 +454,88 @@ mod tests {
         for k in 0..n {
             assert!((b1[(k, 0)] - b2[(k, 0)]).norm() < 1e-15);
         }
+    }
+
+    fn unit_square_cross_section() -> NumericalCrossSection {
+        // Trivial 2-tri cross-section spanning the unit square; the
+        // contents don't matter for the stub-equivalence test (the
+        // eigensolve is not run), only that the type constructs.
+        let vertices = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let triangles = vec![[0, 1, 2], [0, 2, 3]];
+        let mesh = TriMesh2D::new(vertices, triangles, None, None).unwrap();
+        let mut eps = HashMap::new();
+        eps.insert(0u32, Complex64::new(1.0, 0.0));
+        let mut mu = HashMap::new();
+        mu.insert(0u32, Complex64::new(1.0, 0.0));
+        NumericalCrossSection::new(mesh, eps, mu)
+    }
+
+    #[test]
+    fn numerical_cross_section_new_initializes_caches_to_none() {
+        let m = unit_square_cross_section();
+        assert!(m.beta.is_none());
+        assert!(m.z_w.is_none());
+    }
+
+    #[test]
+    fn numerical_cross_section_solve_returns_unimplemented() {
+        let mut m = unit_square_cross_section();
+        match m.solve(10e9) {
+            Err(yee_core::Error::Unimplemented(msg)) => {
+                assert!(msg.contains("Phase 1.3.1.1"), "got: {msg}");
+            }
+            other => panic!("expected Unimplemented stub, got {other:?}"),
+        }
+        // Caches must remain unfilled on a failed solve.
+        assert!(m.beta.is_none());
+        assert!(m.z_w.is_none());
+    }
+
+    #[test]
+    fn wave_port_numerical_stub_matches_uniform_before_solve() {
+        // The Numerical2D RHS path is a stub that degenerates to the
+        // uniform / delta-gap-equivalent form until the eigensolve
+        // lands. This is the gate that protects mom-001 and the
+        // existing wave-port suite from a stub-time regression.
+        let basis = RwgBasis::from_mesh(two_tri_mesh_with_port()).unwrap();
+        let uniform = WavePort {
+            tag: 1,
+            voltage: Complex64::new(1.0, 0.0),
+            mode_phase_velocity_factor: 1.0,
+            modal_distribution: ModalDistribution::Uniform,
+        };
+        let numerical = WavePort {
+            tag: 1,
+            voltage: Complex64::new(1.0, 0.0),
+            mode_phase_velocity_factor: 1.0,
+            modal_distribution: ModalDistribution::Numerical2D(Box::new(
+                unit_square_cross_section(),
+            )),
+        };
+        let b_uniform = uniform.rhs(&basis, 1.0e9);
+        let b_numerical = numerical.rhs(&basis, 1.0e9);
+        let n = basis.n_basis();
+        for k in 0..n {
+            assert!(
+                (b_uniform[(k, 0)] - b_numerical[(k, 0)]).norm() < 1e-15,
+                "stub Numerical2D RHS must equal Uniform RHS bit-for-bit at k={k}"
+            );
+        }
+    }
+
+    #[test]
+    fn wave_port_with_numerical_cross_section_builder_sets_variant() {
+        let wp = WavePort {
+            tag: 7,
+            voltage: Complex64::new(1.0, 0.0),
+            mode_phase_velocity_factor: 1.0,
+            modal_distribution: ModalDistribution::Uniform,
+        }
+        .with_numerical_cross_section(unit_square_cross_section());
+        assert!(matches!(
+            wp.modal_distribution,
+            ModalDistribution::Numerical2D(_)
+        ));
+        assert_eq!(wp.tag, 7);
     }
 }
