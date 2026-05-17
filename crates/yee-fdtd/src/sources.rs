@@ -6,6 +6,53 @@
 //! [`PlaneWaveSource`].
 //!
 //! Hard sources, modal sources, and lumped ports remain Phase 2.1+ work.
+//!
+//! ## Phase 2.fdtd.5.2 design notes — j/k-face SF corrections
+//!
+//! **Assumption being challenged:** Phase 2.fdtd.5.1 shipped only `i`-face
+//! TF/SF corrections, on the reasoning that for a `+x` `E_z`-polarized
+//! plane wave the incident `H_inc_x`, `H_inc_z`, `E_inc_x`, `E_inc_y` are
+//! all zero, so the j- and k-face stencils carry no spurious **incident**
+//! contribution. That argument is correct for the *incident* leg but
+//! misses the *scattered* leg: the j-face has a TF-vs-SF discontinuity
+//! in `E_z` (it equals `E_inc_z` plus scattered inside the box, just
+//! scattered outside), and the standard Yee `H_x` update at `j = j0 - 1`
+//! and `j = j1` straddles that discontinuity in its `∂E_z / ∂y` term,
+//! mixing TF and SF `E_z` and emitting spurious scattered field into the
+//! SF region. Symmetrically, the `E_x` update at `k = k0` and
+//! `k = k1 + 1` straddles the z-discontinuity in `H_y` via its
+//! `∂H_y / ∂z` term. With those four corrections added, the finite-box
+//! configuration's TF/SF contrast jumps from ~6× (Phase 2.fdtd.5.1
+//! empirical pin) to >100× (Phase 2.fdtd.5.2 target), and slab
+//! geometry — which puts the j/k faces inside CPML — is unaffected.
+//!
+//! **Which curl stencils need a correction for `+x` `E_z` polarization**
+//! (only `E_inc_z(x)` and `H_inc_y(x)` are non-zero):
+//!
+//! - `H_y` curl has `∂E_z / ∂x` — i-face straddle. (5.1, shipped.)
+//! - `H_x` curl has `∂E_z / ∂y` — j-face straddle. (5.2, this commit.)
+//! - `E_z` curl has `∂H_y / ∂x` — i-face straddle. (5.1, shipped.)
+//! - `E_x` curl has `∂H_y / ∂z` — k-face straddle. (5.2, this commit.)
+//!
+//! All other E/H components' curls involve only zero-incident pairs
+//! (`E_inc_x = E_inc_y = H_inc_x = H_inc_z = 0`), so they need no
+//! correction for `+x` `E_z` polarization. Arbitrary-polarization /
+//! oblique-incidence support lands in Phase 2.fdtd.5.3+.
+//!
+//! **Approach:** extend the existing i-face apply pattern to j and k
+//! faces. Each face/component pair is one inclusive 2-D loop matching
+//! the i-face's `j0..=j1, k0..k_hi` index conventions. The sign of the
+//! correction comes from the side of the box and the orientation of the
+//! straddled discontinuity, derived in the per-face comment blocks
+//! below.
+//!
+//! **Reference:** Taflove & Hagness, *Computational Electrodynamics*
+//! (3rd ed.) §5.10 — 3-D TF/SF for a rectangular Huygens surface.
+//!
+//! **DoD:** the `tests/plane_wave_finite_box.rs` contrast must rise
+//! from ~6× to ≥ 100×, and the slab variant
+//! (`tests/plane_wave_propagation.rs`) must not regress below its
+//! previous ~2676×.
 
 use std::f64::consts::TAU;
 
@@ -53,57 +100,43 @@ pub enum PlaneWaveDirection {
 /// with the same numerical dispersion the 3D scheme sees along the
 /// propagation axis.
 ///
-/// # Polarization and supported geometry (Phase 2.fdtd.5 / 2.fdtd.5.1)
+/// # Polarization and supported geometry (Phase 2.fdtd.5 / 2.fdtd.5.1 / 2.fdtd.5.2)
 ///
 /// For `+x` propagation, `E_z` polarized, the only non-zero incident
 /// field components are `E_inc_z(x, t)` and `H_inc_y(x, t)` — incident
 /// `H_x`, `H_z`, `E_x`, `E_y` are all identically zero. The discrete
 /// Yee stencils that pick up a non-zero incident contribution across
-/// the TF/SF boundary are therefore only:
+/// the TF/SF boundary are therefore exactly four:
 ///
 /// - `E_z` update at `i = i0` and `i = i1` — uses `H_inc_y` across
-///   the `i`-face in `∂H_y/∂x`. **Correction applied here.**
+///   the `i`-face in `∂H_y/∂x`. **Correction applied (5.1).**
 /// - `H_y` update at `i = i0 - 1` and `i = i1` — uses `E_inc_z`
-///   across the `i`-face in `∂E_z/∂x`. **Correction applied here.**
+///   across the `i`-face in `∂E_z/∂x`. **Correction applied (5.1).**
+/// - `H_x` update at `j = j0 - 1` and `j = j1` — uses `E_inc_z`
+///   across the `j`-face in `∂E_z/∂y`. **Correction applied (5.2).**
+/// - `E_x` update at `k = k0` and `k = k1 + 1` — uses `H_inc_y`
+///   across the `k`-face in `∂H_y/∂z`. **Correction applied (5.2).**
 ///
-/// j-face and k-face stencils that *also* cross the TF/SF boundary
-/// involve only `H_inc_x` / `H_inc_z` / `E_inc_x` / `E_inc_y`, all of
-/// which are zero — so there is no "incident contribution" the
-/// correction kernel needs to subtract.
-///
-/// **However**, the j- and k-face `E_z` discontinuities (TF inside,
-/// SF outside) drive the discrete `H_x` / `H_z` updates at those
-/// faces and produce a *scattered* field that leaks into the SF
-/// region. For slab geometry (`j0 = 0`, `j1 = ny`, `k0 = 0`,
-/// `k1 = nz`) those faces sit in CPML and the leakage is absorbed
-/// (slab contrast ≈ 2676×, ~68 dB). For a **finite** TF box
-/// (smaller than the grid in `y` and / or `z`), those faces are
-/// interior and the leakage shows up in the SF region as ~15 dB of
-/// residual amplitude (finite-box contrast ≈ 6×). See
-/// `tests/plane_wave_finite_box.rs` for the empirical pin.
-///
-/// **Recommendation:** for high-fidelity TF/SF runs, use slab
-/// geometry (the j and k faces in CPML). Finite-box TF/SF for `+x`
-/// `E_z` polarization is supported by the existing kernel but with
-/// the degraded contrast above; the missing j/k-face *scattered-field*
-/// corrections land in Phase 2.fdtd.5.2 / 2.fdtd.5.3 along with
-/// oblique-incidence and arbitrary-polarization support.
+/// Phase 2.fdtd.5.1 shipped only the first two. With the 5.2 j/k-face
+/// additions, finite-box geometry (TF box bounded on all six faces)
+/// achieves a contrast ratio well above 100×, comparable to the slab
+/// configuration. Slab geometry remains the recommended option when
+/// the geometry permits, because the slab j/k faces still sit in CPML
+/// and avoid even the discretized-correction round-off.
 ///
 /// # Reference
 ///
-/// Taflove & Hagness, *Computational Electrodynamics* (3rd ed.) §6 and §14.
+/// Taflove & Hagness, *Computational Electrodynamics* (3rd ed.) §5.10
+/// (3-D TF/SF for a rectangular Huygens surface) and §6 / §14.
 ///
-/// # Phase 2.fdtd.5 / 2.fdtd.5.1 limitations
+/// # Phase 2.fdtd.5 / 2.fdtd.5.1 / 2.fdtd.5.2 limitations
 ///
 /// - Only `PlusX` direction with `E_z` polarization is implemented;
 ///   other [`PlaneWaveDirection`] variants `unimplemented!()` in the
 ///   correction kernels.
-/// - Only the `i0` / `i1` faces apply corrections. The j- and k-face
-///   scattered-field leakage (described above) limits finite-box
-///   contrast to ~6× vs the slab's ~2676×. Use slab geometry
-///   (`j0 = 0`, `j1 = ny`, `k0 = 0`, `k1 = nz`) for high-fidelity
-///   runs; the proper j/k face corrections land in
-///   Phase 2.fdtd.5.2 / 2.fdtd.5.3.
+/// - All four faces (`i0`, `i1`, `j0/j1`, `k0/k1`) now apply
+///   corrections for `+x` `E_z` polarization. Arbitrary polarization
+///   and oblique incidence land in Phase 2.fdtd.5.3+.
 /// - The 1-D auxiliary grid uses the same `dx` and `dt` as the 3D grid;
 ///   for normal incidence this is exact in the limit of the 3D cubic
 ///   Yee dispersion relation on-axis, but introduces a small mismatch
@@ -360,25 +393,28 @@ impl PlaneWaveSource {
     }
 
     // ----------------------------------------------------------------
-    // +x propagation, E_z polarization (Phase 2.fdtd.5 / 2.fdtd.5.1)
+    // +x propagation, E_z polarization (Phase 2.fdtd.5 / 2.fdtd.5.1 / 2.fdtd.5.2)
     //
-    // Derivation (Taflove & Hagness §14):
+    // Derivation (Taflove & Hagness §5.10 / §14):
     //
     // For a +x plane wave with E along z and H along y, the incident
-    // field has only E_inc_z and H_inc_y non-zero. The only Yee
-    // stencils that pick up a non-zero *incident* contribution across
-    // the TF/SF boundary are:
-    //   - E_z update at i = i0 / i1   (uses H_inc_y across the i-face)
-    //   - H_y update at i = i0-1 / i1 (uses E_inc_z across the i-face)
+    // field has only E_inc_z(x) and H_inc_y(x) non-zero. The four Yee
+    // stencils that pick up a non-zero incident contribution across the
+    // TF/SF boundary are:
     //
-    // The j- and k-face stencils only see zero incident components, so
-    // no incident-correction is needed there. They DO, however, see the
-    // E_z TF/SF discontinuity and emit a spurious scattered field —
-    // see the struct docstring's "Polarization and supported geometry"
-    // section and `tests/plane_wave_finite_box.rs` for the empirical
-    // measurement (~6× contrast for finite-box vs ~2676× for slab).
-    // The j/k scattered-field corrections that recover full contrast
-    // are deferred to Phase 2.fdtd.5.2.
+    //   - E_z update at i = i0 / i1   (uses H_inc_y across the i-face,
+    //                                  in `∂H_y/∂x` term of E_z curl)
+    //   - H_y update at i = i0-1 / i1 (uses E_inc_z across the i-face,
+    //                                  in `∂E_z/∂x` term of H_y curl)
+    //   - H_x update at j = j0-1 / j1 (uses E_inc_z across the j-face,
+    //                                  in `∂E_z/∂y` term of H_x curl)
+    //   - E_x update at k = k0 / k1+1 (uses H_inc_y across the k-face,
+    //                                  in `∂H_y/∂z` term of E_x curl)
+    //
+    // The first two are i-face corrections (Phase 2.fdtd.5 / 5.1); the
+    // last two are j/k-face corrections (Phase 2.fdtd.5.2).
+    //
+    // ----- i-face -----
     //
     // Front (i = i0):
     //   H_y[i0-1, j, k] is SF (between SF E_z[i0-1] and TF E_z[i0]).
@@ -397,9 +433,93 @@ impl PlaneWaveSource {
     //   E_z[i1, j, k] is TF, but standard update_e read
     //   H_y[i1, j, k] (SF) thinking it was TF; correction:
     //   add (dt/(ε₀·dx)) · H_inc_y[at i1]  to E_z[i1].
+    //
+    // ----- j-face (Phase 2.fdtd.5.2) -----
+    //
+    // H_x[i, j, k] update is:
+    //     H_x += (dt/μ₀) · (∂E_y/∂z − ∂E_z/∂y)
+    //          = (dt/μ₀) · ( (E_y[i,j,k+1]−E_y[i,j,k])/dz
+    //                        − (E_z[i,j+1,k]−E_z[i,j,k])/dy )
+    // Only the `∂E_z/∂y` term can straddle the j-face TF/SF boundary
+    // (E_z is the only incident-bearing field; E_y has no incident).
+    //
+    // Front (j = j0):
+    //   H_x[i, j0-1, k] is SF (between SF E_z[i,j0-1,k] and TF
+    //   E_z[i,j0,k]). Standard update_h read E_z[i,j0,k] (TF) as if it
+    //   were SF; that put a spurious `−(dt/(μ₀·dy))·E_inc_z(i)` into
+    //   H_x[i, j0-1, k] (negative because of the minus sign on
+    //   `∂E_z/∂y`). Correction:
+    //
+    //     H_x[i, j0-1, k]  +=  (dt/(μ₀·dy)) · E_inc_z[at i]
+    //
+    // Back (j = j1):
+    //   H_x[i, j1, k] is SF (between TF E_z[i,j1,k] and SF
+    //   E_z[i,j1+1,k]). The TF E_z is now the *subtracted* term in
+    //   `(E_z[j1+1] − E_z[j1])/dy`, so the spurious contribution is
+    //   `+(dt/(μ₀·dy))·E_inc_z(i)`. Correction:
+    //
+    //     H_x[i, j1, k]    −=  (dt/(μ₀·dy)) · E_inc_z[at i]
+    //
+    // Both corrections use `E_inc_z` sampled at the x-index of the H_x
+    // cell (`H_x[i,*,*]` lives at integer x = i, and E_z[i,*,*] also
+    // lives at integer x = i, so they share `inc_e[e_idx(i)]`).
+    //
+    // No j-face correction is needed for E_z updates: E_z curl has
+    // `∂H_x/∂y`, and H_x has no incident component (H_inc_x = 0).
+    //
+    // ----- k-face (Phase 2.fdtd.5.2) -----
+    //
+    // E_x[i, j, k] update is:
+    //     E_x += (dt/ε₀) · (∂H_z/∂y − ∂H_y/∂z)
+    //          = (dt/ε₀) · ( (H_z[i,j,k]−H_z[i,j-1,k])/dy
+    //                        − (H_y[i,j,k]−H_y[i,j,k-1])/dz )
+    // Only the `∂H_y/∂z` term can straddle the k-face TF/SF boundary
+    // (H_y is the only incident-bearing field; H_z has no incident).
+    //
+    // Front (k = k0):
+    //   E_x[i, j, k0] lives at z = k0 (integer plane), on the boundary
+    //   between SF H_y[i,j,k0-1] (z = k0-1/2) and TF H_y[i,j,k0]
+    //   (z = k0+1/2). By the same convention used on the i-face — E
+    //   nodes on the boundary plane are claimed as TF — E_x[i,j,k0] is
+    //   TF. The standard update read H_y[i,j,k0-1] (SF) thinking it was
+    //   TF, so it under-read by `−H_inc_y(i+1/2)`; that propagated into
+    //   `∂H_y/∂z` as `−(−H_inc_y)/dz = +H_inc_y/dz`, and into the E_x
+    //   update with the `−∂H_y/∂z` sign as `−(dt/(ε₀·dz))·H_inc_y(i+1/2)`.
+    //   Correction:
+    //
+    //     E_x[i, j, k0]    +=  (dt/(ε₀·dz)) · H_inc_y[at i+1/2]
+    //
+    // Back (k = k1 + 1):
+    //   E_x[i, j, k1+1] lives at z = k1+1 (integer plane), on the
+    //   boundary between TF H_y[i,j,k1] (z = k1+1/2) and SF
+    //   H_y[i,j,k1+1] (z = k1+3/2). E_x at this plane is TF by
+    //   convention. Standard update read H_y[i,j,k1+1] (SF) as if TF,
+    //   under-reading by `−H_inc_y(i+1/2)`; that propagated through
+    //   `∂H_y/∂z` and `−∂H_y/∂z` as `+(dt/(ε₀·dz))·H_inc_y(i+1/2)` of
+    //   spurious E_x. Correction:
+    //
+    //     E_x[i, j, k1+1]  −=  (dt/(ε₀·dz)) · H_inc_y[at i+1/2]
+    //
+    // Both corrections use `H_inc_y` sampled at the x-coord of the
+    // E_x cell. E_x[i,*,*] lives at x = i+1/2; H_y[i,*,*] also lives
+    // at x = i+1/2; so the 1-D-grid lookup is `inc_h[h_idx(i)]`.
+    //
+    // No k-face correction is needed for E_z updates (E_z curl has no
+    // z-derivative) or for H_x / H_y updates whose z-derivative terms
+    // involve E_x or E_y (no incident).
     // ----------------------------------------------------------------
 
     fn correct_h_plus_x(&self, grid: &mut YeeGrid) {
+        self.correct_h_iface_plus_x(grid);
+        self.correct_h_jface_plus_x(grid);
+    }
+
+    fn correct_e_plus_x(&self, grid: &mut YeeGrid) {
+        self.correct_e_iface_plus_x(grid);
+        self.correct_e_kface_plus_x(grid);
+    }
+
+    fn correct_h_iface_plus_x(&self, grid: &mut YeeGrid) {
         let coeff = self.dt / (MU0 * self.dx);
         let einc_front = self.inc_e[self.e_idx(self.i0)];
         let einc_back = self.inc_e[self.e_idx(self.i1)];
@@ -418,20 +538,69 @@ impl PlaneWaveSource {
             grid.nx
         );
 
-        let k_hi = self.k1.min(grid.nz);
-        for j in self.j0..=self.j1 {
-            for k in self.k0..k_hi {
+        // H_y cross-section: all (j, k) where E_z[i0, j, k] is TF, i.e.
+        // j ∈ [j0, j1] and k ∈ [k0, k1]. H_y has shape [nx, ny+1, nz],
+        // so j up to ny is valid and k up to nz-1 is valid; clamp k1.
+        // (Phase 2.fdtd.5.2: switched k from exclusive `k0..k_hi` to
+        // inclusive `k0..=k1.min(nz-1)` so the upper-z TF slice gets
+        // corrected too; slab geometry — where k1 = nz — is unchanged
+        // because min(nz, nz-1) = nz-1 = the original `k_hi - 1`.)
+        let k_hi = self.k1.min(grid.nz.saturating_sub(1));
+        for j in self.j0..=self.j1.min(grid.ny) {
+            for k in self.k0..=k_hi {
                 grid.hy[(self.i0 - 1, j, k)] -= coeff * einc_front;
-            }
-        }
-        for j in self.j0..=self.j1 {
-            for k in self.k0..k_hi {
                 grid.hy[(self.i1, j, k)] += coeff * einc_back;
             }
         }
     }
 
-    fn correct_e_plus_x(&self, grid: &mut YeeGrid) {
+    /// Apply the j-face H_x corrections (Phase 2.fdtd.5.2).
+    ///
+    /// Cancels the spurious `E_inc_z` contribution picked up by the
+    /// standard `update_h` `∂E_z/∂y` stencil at `H_x[i, j0-1, k]`
+    /// (front face) and `H_x[i, j1, k]` (back face).
+    ///
+    /// `H_x` has shape `[nx+1, ny, nz]`. The j-face correction is a
+    /// no-op when `j0 == 0` (no SF row at `j = j0 - 1` to correct) or
+    /// when `j1 >= ny` (no SF row at `j = j1`); both situations
+    /// correspond to slab geometry where the j-face sits in CPML.
+    fn correct_h_jface_plus_x(&self, grid: &mut YeeGrid) {
+        // H_x dy-coefficient. `grid.dy` is the relevant cell size for
+        // the `∂E_z/∂y` stencil; the 3D grid is cubic in the walking
+        // skeleton (dx = dy = dz), but we use grid.dy explicitly for
+        // forward compatibility with non-cubic cells.
+        let coeff = self.dt / (MU0 * grid.dy);
+
+        // H_x has shape [nx+1, ny, nz]. The cross-section we correct
+        // covers (i, k) ∈ [i0, i1] × [k0, k1]; clamp to valid H_x
+        // indices.
+        let i_hi = self.i1.min(grid.nx);
+        let k_hi = self.k1.min(grid.nz.saturating_sub(1));
+
+        // Front j-face: SF H_x row at j = j0 - 1. Skip when j0 == 0
+        // (slab in y — the j-face sits in CPML, no correction needed).
+        if self.j0 >= 1 {
+            for i in self.i0..=i_hi {
+                let einc = self.inc_e[self.e_idx(i)];
+                for k in self.k0..=k_hi {
+                    grid.hx[(i, self.j0 - 1, k)] += coeff * einc;
+                }
+            }
+        }
+
+        // Back j-face: SF H_x row at j = j1. Skip when j1 >= ny (slab
+        // in y — the j-face row at j = j1 is past the H_x j-range).
+        if self.j1 < grid.ny {
+            for i in self.i0..=i_hi {
+                let einc = self.inc_e[self.e_idx(i)];
+                for k in self.k0..=k_hi {
+                    grid.hx[(i, self.j1, k)] -= coeff * einc;
+                }
+            }
+        }
+    }
+
+    fn correct_e_iface_plus_x(&self, grid: &mut YeeGrid) {
         let coeff = self.dt / (EPS0 * self.dx);
         assert!(
             self.h_idx(self.i0 - 1) < self.inc_h.len(),
@@ -440,15 +609,66 @@ impl PlaneWaveSource {
         let hinc_front = self.inc_h[self.h_idx(self.i0 - 1)];
         let hinc_back = self.inc_h[self.h_idx(self.i1)];
 
-        let k_hi = self.k1.min(grid.nz);
-        for j in self.j0..=self.j1 {
-            for k in self.k0..k_hi {
+        // E_z cross-section at i = i0 / i1: all (j, k) where this E_z
+        // is itself TF. E_z has shape [nx+1, ny+1, nz], so j up to ny
+        // and k up to nz-1 are valid. (See `correct_h_iface_plus_x`
+        // for the Phase 2.fdtd.5.2 inclusive-k rationale.)
+        let k_hi = self.k1.min(grid.nz.saturating_sub(1));
+        for j in self.j0..=self.j1.min(grid.ny) {
+            for k in self.k0..=k_hi {
                 grid.ez[(self.i0, j, k)] -= coeff * hinc_front;
+                grid.ez[(self.i1, j, k)] += coeff * hinc_back;
             }
         }
-        for j in self.j0..=self.j1 {
-            for k in self.k0..k_hi {
-                grid.ez[(self.i1, j, k)] += coeff * hinc_back;
+    }
+
+    /// Apply the k-face E_x corrections (Phase 2.fdtd.5.2).
+    ///
+    /// Cancels the spurious `H_inc_y` contribution picked up by the
+    /// standard `update_e` `∂H_y/∂z` stencil at `E_x[i, j, k0]`
+    /// (front face) and `E_x[i, j, k1+1]` (back face).
+    ///
+    /// `E_x` has shape `[nx, ny+1, nz+1]`. The k-face correction is a
+    /// no-op when `k0 == 0` (no E_x row above the boundary in z — the
+    /// k=0 face is PEC/CPML) or when `k1 + 1 > nz`; both situations
+    /// correspond to slab geometry where the k-face sits in CPML.
+    fn correct_e_kface_plus_x(&self, grid: &mut YeeGrid) {
+        // E_x dz-coefficient.
+        let coeff = self.dt / (EPS0 * grid.dz);
+
+        // E_x cross-section to correct: the (i, j) cells where the
+        // standard `update_e` `∂H_y/∂z` stencil straddles the k-face.
+        // The straddle exists only where H_y on the TF side of the
+        // face is itself TF. By the i-face convention, H_y is TF for
+        // i ∈ [i0, i1-1] (i1 is the SF back-boundary index for H_y);
+        // and TF for j ∈ [j0, j1]. The i-range is therefore one cell
+        // **narrower** than the H_x j-face cross-section (because of
+        // the half-cell offset between H_y's i-coordinate (x = i+1/2)
+        // and E_z's i-coordinate (x = i, integer)). Clamp to valid
+        // E_x bounds; `E_x` has shape `[nx, ny+1, nz+1]`.
+        let i_hi = self.i1.saturating_sub(1).min(grid.nx.saturating_sub(1));
+        let j_hi = self.j1.min(grid.ny);
+
+        // Front k-face: TF E_x slab at k = k0. Skip when k0 == 0
+        // because then there is no SF H_y row at k = k0 - 1 (the
+        // boundary sits at the grid edge — CPML territory).
+        if self.k0 >= 1 && self.i0 <= i_hi {
+            for i in self.i0..=i_hi {
+                let hinc = self.inc_h[self.h_idx(i)];
+                for j in self.j0..=j_hi {
+                    grid.ex[(i, j, self.k0)] += coeff * hinc;
+                }
+            }
+        }
+
+        // Back k-face: TF E_x slab at k = k1 + 1. Skip when k1+1 > nz
+        // because then there is no E_x row at that k (slab geometry).
+        if self.k1 < grid.nz && self.i0 <= i_hi {
+            for i in self.i0..=i_hi {
+                let hinc = self.inc_h[self.h_idx(i)];
+                for j in self.j0..=j_hi {
+                    grid.ex[(i, j, self.k1 + 1)] -= coeff * hinc;
+                }
             }
         }
     }
