@@ -28,6 +28,28 @@ Every solver feature is held against a canonical published benchmark before it s
 | `mom-105` | Inset-fed patch on RO4003C | figure-for-figure match |
 | `mom-106` | Cross-validation vs openEMS (microstrip + patch) | ±3% at resonance |
 
+## Wave-port mode solver (Phase 1.3.1.1)
+
+| ID | Case | Tolerance |
+|----|------|-----------|
+| `eigensolver-001` | WR-90 TE10 at 10 GHz, coarse 6×6-quad mesh, free-space fill, dense `nalgebra` fallback | β within 1 %, \|Z_w\| within 5 % vs `RectangularWaveguideTe10` |
+
+Notes:
+
+- The Phase 1.3.1.1 step 3 implementation uses a **dense generalized
+  eigensolve** via `nalgebra::DMatrix::eigenvalues` on `B⁻¹ A` (O(n³) in
+  the interior-edge DoF count). Sparse shift-and-invert via `arpack-rs`
+  is escape-hatched per the design spec and remains a Phase 1.3.1.1
+  step 4 placeholder. The coarse WR-90 mesh comfortably resolves the
+  TE10 mode at the 1 % / 5 % tolerance shown above.
+- The 0.1 % β / 1 % `Z_w` / 1 % L2 mode-profile gates from the design
+  spec (case `eigensolver-001` "tight") will land in Phase 1.3.1.1
+  step 5 alongside the refined-mesh integration and the numerical
+  `Z_w` line-integral extraction. The current Z_w cache uses the
+  TE-mode dispersion-relation approximation
+  `η₀ / √(1 − (β/k₀)²)`, which is exact for the TE10 air-filled
+  rectangular case.
+
 ## Running
 
 ```bash

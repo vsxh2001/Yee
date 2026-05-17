@@ -13,6 +13,7 @@
 #![warn(missing_docs)]
 
 pub(crate) mod basis;
+pub(crate) mod eigensolver;
 pub(crate) mod fill;
 pub(crate) mod gpof;
 pub(crate) mod greens;
