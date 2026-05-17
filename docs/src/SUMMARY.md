@@ -8,6 +8,7 @@
 - [RWG Basis, MPIE, and Phase 1.0 Quadrature](theory/mom-rwg-mpie.md)
 - [Finite-Difference Time-Domain](theory/fdtd.md)
 - [FDTD: CPML, NTFF, TF/SF, lumped, dispersive](theory/fdtd-details.md)
+- [FDTD Subgridding](theory/fdtd-subgridding.md)
 - [Waveguide Cross-Section Eigenmode Solver](theory/waveguide-eigenmode.md)
 - [CUDA backend](theory/cuda-backend.md)
 - [Touchstone v1.1 File Format](theory/touchstone-format.md)
