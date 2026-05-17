@@ -189,16 +189,54 @@ impl NumericalCrossSection {
 
     /// Run the 2-D eigensolve at `freq_hz`.
     ///
-    /// **Phase 1.3.1.1 step 0-1 stub:** returns
-    /// [`yee_core::Error::Unimplemented`]. The full implementation
-    /// (Nedelec edge-element assembly + dense or sparse eigensolve)
-    /// lands in Phase 1.3.1.1 step 2-5. Callers that need a working
-    /// wave-port mode today should use
-    /// [`WavePort::with_rectangular_te10`] (Phase 1.3.1.0) instead.
-    pub fn solve(&mut self, _freq_hz: f64) -> yee_core::Result<()> {
-        Err(yee_core::Error::Unimplemented(
-            "Phase 1.3.1.1 step 0-1 stub: NumericalCrossSection::solve eigensolve not yet implemented",
-        ))
+    /// **Phase 1.3.1.1 step 2-3 (this commit):** assembles the
+    /// transverse-only (`E_t`-block) Nedelec generalized eigenproblem
+    /// `A x = β² B x` on [`Self::mesh`] with `eps_r` / `mu_r` looked up
+    /// per [`yee_mesh::MaterialTag`], then runs a dense
+    /// `nalgebra`-backed eigensolve on `B⁻¹ A`. Picks the largest
+    /// physically valid `β²` (smallest cutoff, dominant guided mode)
+    /// and caches `β = √β²` plus a TE-mode approximation
+    /// `Z_w ≈ η₀ / √(1 − (β/k₀)²)` on the struct.
+    ///
+    /// The dense path is `O(n³)` in the interior-edge DoF count `n`,
+    /// so this is only viable for coarse cross-sections
+    /// (≤ a few hundred DoF). The WR-90 TE10 validation case lands
+    /// at `n ≈ 60`, well inside that envelope. Sparse shift-and-invert
+    /// is Phase 1.3.1.1 step 4 (escape-hatched).
+    ///
+    /// The full mixed (`E_t`, `E_z`) Lee-Sun-Cendes formulation
+    /// (`local_a_zz` / `local_b_zz` / `local_b_ze`) is staged inside the
+    /// crate-private `eigensolver::assembly` module but is unused by the
+    /// transverse-only solve below; it will be wired in once non-trivial
+    /// dielectric stack-ups need quasi-TEM mode extraction.
+    pub fn solve(&mut self, freq_hz: f64) -> yee_core::Result<()> {
+        use crate::eigensolver::{assembly::assemble_transverse, mesh::EdgeTable, solve_dense};
+        let table = EdgeTable::build(&self.mesh);
+        let asm = assemble_transverse(&self.mesh, &self.eps_r, &self.mu_r, &table);
+        let sol = solve_dense(&asm, freq_hz)?;
+        // β = √(β²). Lossless inputs give real β² ≥ 0; take the
+        // principal square root (positive real branch).
+        let beta_sq = sol.beta_sq;
+        let beta = if beta_sq.im.abs() < 1e-9 * beta_sq.re.abs() {
+            Complex64::new(beta_sq.re.max(0.0).sqrt(), 0.0)
+        } else {
+            beta_sq.sqrt()
+        };
+        self.beta = Some(beta);
+
+        // TE-mode wave-impedance approximation `Z_TE = ω μ₀ / β`,
+        // i.e. `η₀ · k₀ / β`. Exact for the air-filled rectangular-
+        // waveguide TE10 case the validation gate uses; matches the
+        // closed-form [`RectangularWaveguideTe10::wave_impedance`] at
+        // the analytic β. The full numerical Z_w extraction
+        // (line-integral of E across the conductor pair on the solved
+        // eigenvector) is Phase 1.3.1.1 step 5.
+        let omega = std::f64::consts::TAU * freq_hz;
+        let k0 = omega / yee_core::units::C0;
+        let eta0_k0 = Complex64::new(yee_core::units::ETA0 * k0, 0.0);
+        self.z_w = Some(eta0_k0 / beta);
+
+        Ok(())
     }
 }
 
@@ -478,17 +516,31 @@ mod tests {
     }
 
     #[test]
-    fn numerical_cross_section_solve_returns_unimplemented() {
+    fn numerical_cross_section_solve_fills_caches_on_unit_square() {
+        // Phase 1.3.1.1 step 3: the eigensolve now runs on the
+        // unit-square 2-tri fixture. With only 1 interior edge the
+        // result is not physically meaningful, but the call must
+        // succeed without panicking and populate the caches with
+        // finite values — or return an `Error::Numerical` if the
+        // single-DoF problem admits no positive β². Either is
+        // acceptable as a smoke gate; what we explicitly forbid is
+        // the old `Unimplemented` stub.
         let mut m = unit_square_cross_section();
         match m.solve(10e9) {
-            Err(yee_core::Error::Unimplemented(msg)) => {
-                assert!(msg.contains("Phase 1.3.1.1"), "got: {msg}");
+            Ok(()) => {
+                let beta = m.beta.expect("β should be cached on success");
+                let z_w = m.z_w.expect("Z_w should be cached on success");
+                assert!(beta.re.is_finite() && beta.im.is_finite());
+                assert!(z_w.re.is_finite() && z_w.im.is_finite());
             }
-            other => panic!("expected Unimplemented stub, got {other:?}"),
+            Err(yee_core::Error::Numerical(_)) => {
+                // Degenerate single-DoF case — no physically valid β².
+                // Caches must remain unfilled on a failed solve.
+                assert!(m.beta.is_none());
+                assert!(m.z_w.is_none());
+            }
+            other => panic!("unexpected solve outcome: {other:?}"),
         }
-        // Caches must remain unfilled on a failed solve.
-        assert!(m.beta.is_none());
-        assert!(m.z_w.is_none());
     }
 
     #[test]

@@ -1,10 +1,10 @@
 //! 2-D FEM eigensolver for wave-port cross-section modal analysis.
 //!
-//! **Phase 1.3.1.1 step 2 (this commit):** Nedelec edge-element +
+//! **Phase 1.3.1.1 step 2-3 (this lane):** Nedelec edge-element +
 //! nodal-Lagrange `E_z` element-matrix assembly on a
-//! [`yee_mesh::TriMesh2D`]. The dense generalized-eigensolve fallback
-//! that consumes the assembled matrices lands as a follow-up commit
-//! (step 3) under a `solve` submodule. Used internally by
+//! [`yee_mesh::TriMesh2D`] (step 2), plus a dense
+//! [`nalgebra::SymmetricEigen`]-backed generalized-eigensolve fallback
+//! (step 3). Used internally by
 //! [`crate::ports::NumericalCrossSection::solve`] to extract the
 //! dominant propagation constant `β` and wave impedance `Z_w` of an
 //! arbitrary cross-section at a single frequency.
@@ -25,12 +25,8 @@
 //! constant follows from `β² = k_0² − k_c²`. Sparse shift-and-invert
 //! is Phase 1.3.1.1 step 4 (escape-hatched away from `arpack-rs`).
 
-// The assembly path lands in this commit but is consumed by
-// `NumericalCrossSection::solve` only after the Phase 1.3.1.1 step 3
-// (dense eigensolve) commit follows. Until then the assembly items
-// are unreferenced outside their own unit tests, so we allow dead-code
-// at the module root rather than tagging every helper individually.
-#![allow(dead_code)]
-
 pub(crate) mod assembly;
 pub(crate) mod mesh;
+pub(crate) mod solve;
+
+pub(crate) use solve::solve_dense;
