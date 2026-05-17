@@ -47,8 +47,16 @@ fn _yee(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<validation::PyValidationCase>()?;
     m.add_class::<validation::PyValidationReport>()?;
     m.add_function(wrap_pyfunction!(validation::run_validation, m)?)?;
-    let ts_mod = PyModule::new(py, "touchstone")?;
+    let ts_mod = PyModule::new(py, "yee.touchstone")?;
     touchstone::register(&ts_mod)?;
     m.add_submodule(&ts_mod)?;
+    // PyO3's `add_submodule` only sets the child as an attribute of the parent;
+    // it does NOT register the child in `sys.modules`. Without that registration,
+    // `from yee.touchstone import read` raises `ModuleNotFoundError` even though
+    // `yee.touchstone.read` (attribute access) works. Manually insert the child
+    // so both import paths succeed.
+    py.import("sys")?
+        .getattr("modules")?
+        .set_item("yee.touchstone", &ts_mod)?;
     Ok(())
 }
