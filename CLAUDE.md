@@ -39,7 +39,7 @@ docs/             — mdBook (theory + tutorials) + superpowers/specs + superpow
 
 Other root files worth knowing: `ROADMAP.md`, `TECH_STACK.md`, `CONTRIBUTING.md`, `THIRD_PARTY_LICENSES.md`, `rust-toolchain.toml` (pins 1.92), `rustfmt.toml`, `Cargo.toml` (workspace).
 
-A `yee-surrogate` crate is on the Phase-3 roadmap but **has not landed** as of the current `main` (`33e28db`). Do not assume it exists.
+`crates/yee-surrogate/` has landed (Phase 3.gp.0/1 + 3.bo.0/1 + 3.al.0 shipped per `ROADMAP.md`). It is wired into the workspace `Cargo.toml` and exposed via `yee-py`'s `yee.surrogate` Python module.
 
 ---
 
