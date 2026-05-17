@@ -135,6 +135,60 @@ enum Command {
         #[arg(last = true)]
         extra: Vec<String>,
     },
+    /// Run an FDTD simulation end-to-end and emit the radiation pattern as JSON.
+    ///
+    /// Composes [`yee_fdtd::FdtdDriver`] from a vacuum [`yee_fdtd::YeeGrid`]
+    /// with the supplied grid / source / NTFF parameters, runs the time
+    /// loop to completion, and writes the θ-cut of `|E_θ|` at `φ = 0` as
+    /// JSON to `--output` (or stdout when unset). The JSON shape is
+    /// `{"theta_deg": [...], "e_theta_phi0": [...]}` with both vectors of
+    /// equal length; angles span `[0°, 180°]` in 5° steps.
+    FdtdRun {
+        /// Grid dimensions (Nx, Ny, Nz) — `--grid 60 60 60`.
+        #[arg(long, num_args = 3, default_values_t = [60_usize, 60, 60])]
+        grid: Vec<usize>,
+        /// Cell size in meters.
+        #[arg(long, default_value_t = 5.0e-3)]
+        dx: f64,
+        /// Number of timesteps.
+        #[arg(long, default_value_t = 800)]
+        steps: usize,
+        /// Source center cell (i, j, k).
+        #[arg(long, num_args = 3, default_values_t = [30_usize, 30, 30])]
+        source: Vec<usize>,
+        /// Dipole length in cells.
+        #[arg(long, default_value_t = 5)]
+        dipole_length: usize,
+        /// Source frequency in Hz.
+        #[arg(long, default_value_t = 1.0e9)]
+        freq: f64,
+        /// NTFF surface pad in cells.
+        #[arg(long, default_value_t = 4)]
+        ntff_pad: usize,
+        /// CPML thickness in cells.
+        #[arg(long, default_value_t = 10)]
+        cpml: usize,
+        /// Output JSON path. If unset, write to stdout.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+}
+
+/// Arguments to [`run_fdtd`], mirroring the [`Command::FdtdRun`] variant.
+///
+/// Held in a struct so the handler signature stays manageable and so the
+/// `clap`-parsed variant can be passed through one field at a time.
+#[derive(Debug, Clone)]
+struct FdtdArgs {
+    grid: Vec<usize>,
+    dx: f64,
+    steps: usize,
+    source: Vec<usize>,
+    dipole_length: usize,
+    freq: f64,
+    ntff_pad: usize,
+    cpml: usize,
+    output: Option<PathBuf>,
 }
 
 /// Which `yee-bench` criterion target to invoke.
@@ -243,7 +297,69 @@ fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Bench { target, extra } => run_bench(target, extra),
+        Command::FdtdRun {
+            grid,
+            dx,
+            steps,
+            source,
+            dipole_length,
+            freq,
+            ntff_pad,
+            cpml,
+            output,
+        } => run_fdtd(FdtdArgs {
+            grid,
+            dx,
+            steps,
+            source,
+            dipole_length,
+            freq,
+            ntff_pad,
+            cpml,
+            output,
+        }),
     }
+}
+
+/// Drive [`yee_fdtd::FdtdDriver`] end-to-end and emit the resulting
+/// [`yee_fdtd::RadiationPattern`] as JSON.
+///
+/// The JSON shape is built by hand (not via `serde::Serialize` on the
+/// pattern struct) so this handler is robust against future changes to the
+/// `RadiationPattern` derives: only the two public `Vec<f64>` fields
+/// (`theta_deg`, `e_theta_phi0`) are touched. When `args.output` is set
+/// the JSON is written to that path and a confirmation line is printed;
+/// otherwise the JSON is sent to stdout so callers can pipe it.
+fn run_fdtd(args: FdtdArgs) -> Result<ExitCode> {
+    use yee_fdtd::{FdtdDriver, FdtdDriverConfig, YeeGrid};
+
+    let (nx, ny, nz) = (args.grid[0], args.grid[1], args.grid[2]);
+    let (i, j, k) = (args.source[0], args.source[1], args.source[2]);
+    let grid = YeeGrid::vacuum(nx, ny, nz, args.dx);
+    let cfg = FdtdDriverConfig {
+        n_steps: args.steps,
+        dipole_center_cells: (i, j, k),
+        dipole_length_cells: args.dipole_length,
+        source_freq_hz: args.freq,
+        ntff_surface_pad_cells: args.ntff_pad,
+        cpml_thickness_cells: args.cpml,
+    };
+    let pattern = FdtdDriver::new(grid, cfg).run();
+
+    let payload = serde_json::json!({
+        "theta_deg": pattern.theta_deg,
+        "e_theta_phi0": pattern.e_theta_phi0,
+    });
+    let text = serde_json::to_string_pretty(&payload)?;
+
+    if let Some(path) = args.output {
+        std::fs::write(&path, &text)?;
+        println!("Wrote {}", path.display());
+    } else {
+        println!("{text}");
+    }
+
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Shell out to `cargo bench -p yee-bench [--bench <name>] [-- <extra>...]`.
