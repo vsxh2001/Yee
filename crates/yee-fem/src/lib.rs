@@ -35,3 +35,5 @@
 pub mod assembly;
 pub mod element;
 pub mod solve;
+
+pub use assembly::{AssembledMatrices, FemEigenAssembly};

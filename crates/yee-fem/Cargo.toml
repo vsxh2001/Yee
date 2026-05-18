@@ -11,8 +11,13 @@ description  = "Yee 3-D Finite Element Method solver. Phase 4 eigenmode beachhea
 default = []
 
 [dependencies]
-yee-core  = { workspace = true }
-yee-mesh  = { workspace = true }
-nalgebra  = { workspace = true }
-thiserror = { workspace = true }
-tracing   = { workspace = true }
+yee-core        = { workspace = true }
+yee-mesh        = { workspace = true }
+nalgebra        = { workspace = true }
+# `nalgebra-sparse` is not in `[workspace.dependencies]` at the base SHA
+# (Phase 4 T4 lane brief notes the gap as an out-of-lane finding); declared
+# here directly so the crate can build. Pinned to the latest minor that
+# tracks `nalgebra` 0.34, matching the workspace `nalgebra` version.
+nalgebra-sparse = "0.11"
+thiserror       = { workspace = true }
+tracing         = { workspace = true }
