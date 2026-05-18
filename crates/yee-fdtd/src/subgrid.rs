@@ -32,6 +32,7 @@
 //! - Chevalier, M. W., Luebbers, R. J., Cable, V. P., "FDTD local grid with
 //!   material traverse", *IEEE Trans. Antennas Propag.* 45(3), 1997.
 
+use ndarray::Array2;
 use yee_core::Error;
 
 use crate::WalkingSkeletonSolver;
@@ -40,6 +41,29 @@ use crate::grid::YeeGrid;
 /// Coarse-cell `(lo, hi)` extent of an axis-aligned box, inclusive-low /
 /// exclusive-high. Used for the TF/SF-box placement check.
 pub type CoarseBox = ((usize, usize, usize), (usize, usize, usize));
+
+/// Which bracketing snapshot — start- or end-of-coarse-step — a copy
+/// targets. Internal helper for the Q3 snapshot pair.
+#[derive(Debug, Clone, Copy)]
+enum SnapshotKind {
+    /// Parent `E_t` just before the coarse E-update.
+    Start,
+    /// Parent `E_t` just after the coarse E-update.
+    End,
+}
+
+/// 2D linear interpolation on the unit square with weights
+/// `w_a, w_b ∈ [0, 1]` along the two axes.
+///
+/// The four samples are `f00, f01, f10, f11` where the first index is the
+/// `w_a` axis and the second is the `w_b` axis (so `f01` sits at
+/// `(w_a, w_b) = (0, 1)`).
+#[inline]
+fn bilerp(f00: f64, f01: f64, f10: f64, f11: f64, w_a: f64, w_b: f64) -> f64 {
+    let lo = (1.0 - w_b) * f00 + w_b * f01;
+    let hi = (1.0 - w_b) * f10 + w_b * f11;
+    (1.0 - w_a) * lo + w_a * hi
+}
 
 /// Optional context for validating the placement of a [`SubgridRegion`]
 /// against parent-domain features (CPML thickness, TF/SF box) that are not
@@ -64,6 +88,59 @@ pub struct SubgridContext {
     pub tfsf_box: Option<CoarseBox>,
 }
 
+/// Per-face start/end snapshots of the parent grid's tangential E field on
+/// the six interface planes of a [`SubgridRegion`].
+///
+/// Each face owns two 2D arrays (one per tangential `E` component). The
+/// arrays are sized to *match the parent's natural-grid samples* on the
+/// interface plane (one coarse cell per coarse edge), not the fine-grid
+/// resolution — spatial interpolation onto the fine grid happens inside
+/// [`SubgridRegion::interpolate_coarse_e_to_fine`].
+///
+/// "Start" is the parent `E_t` at the beginning of the coarse step (before
+/// `parent.update_e_only`); "end" is the parent `E_t` after the coarse
+/// E-update. Linear-in-time blending between them gives the fine-grid
+/// boundary `E_t` at fractional time `frac ∈ (0, 1)`.
+///
+/// Cf. Chevalier 1997 §III — spatial part — and Okoniewski 1997 — the
+/// 2× temporal-subcycling pattern that motivates the two-sample blend.
+#[derive(Debug, Clone, Default)]
+pub struct InterfaceSnapshots {
+    /// `(start, end)` snapshots of `E_y` on the ±x faces.
+    /// Shape `[hi.1 - lo.1, hi.2 - lo.2 + 1]` — one entry per coarse
+    /// `E_y` edge incident on the face plane.
+    pub xmin_ey: (Array2<f64>, Array2<f64>),
+    /// `(start, end)` snapshots of `E_z` on the −x face.
+    /// Shape `[hi.1 - lo.1 + 1, hi.2 - lo.2]`.
+    pub xmin_ez: (Array2<f64>, Array2<f64>),
+    /// `(start, end)` snapshots of `E_y` on the +x face.
+    pub xmax_ey: (Array2<f64>, Array2<f64>),
+    /// `(start, end)` snapshots of `E_z` on the +x face.
+    pub xmax_ez: (Array2<f64>, Array2<f64>),
+
+    /// `(start, end)` snapshots of `E_x` on the −y face.
+    /// Shape `[hi.0 - lo.0, hi.2 - lo.2 + 1]`.
+    pub ymin_ex: (Array2<f64>, Array2<f64>),
+    /// `(start, end)` snapshots of `E_z` on the −y face.
+    /// Shape `[hi.0 - lo.0 + 1, hi.2 - lo.2]`.
+    pub ymin_ez: (Array2<f64>, Array2<f64>),
+    /// `(start, end)` snapshots of `E_x` on the +y face.
+    pub ymax_ex: (Array2<f64>, Array2<f64>),
+    /// `(start, end)` snapshots of `E_z` on the +y face.
+    pub ymax_ez: (Array2<f64>, Array2<f64>),
+
+    /// `(start, end)` snapshots of `E_x` on the −z face.
+    /// Shape `[hi.0 - lo.0, hi.1 - lo.1 + 1]`.
+    pub zmin_ex: (Array2<f64>, Array2<f64>),
+    /// `(start, end)` snapshots of `E_y` on the −z face.
+    /// Shape `[hi.0 - lo.0 + 1, hi.1 - lo.1]`.
+    pub zmin_ey: (Array2<f64>, Array2<f64>),
+    /// `(start, end)` snapshots of `E_x` on the +z face.
+    pub zmax_ex: (Array2<f64>, Array2<f64>),
+    /// `(start, end)` snapshots of `E_y` on the +z face.
+    pub zmax_ey: (Array2<f64>, Array2<f64>),
+}
+
 /// Axis-aligned, cuboidal sub-region nested at 2× resolution inside a parent
 /// [`YeeGrid`].
 ///
@@ -72,10 +149,9 @@ pub struct SubgridContext {
 /// `(2·(hi.0 − lo.0), 2·(hi.1 − lo.1), 2·(hi.2 − lo.2))` cells. The fine
 /// grid inherits the parent's scalar `eps_r` and `mu_r`.
 ///
-/// At Phase 2.fdtd.7.0 Q2 (this step) the region carries no coupling state;
-/// coarse ↔ fine `E_t` interpolation and `H_t` area-averaging land in Q3,
-/// Q4. The fine grid is therefore inert until Q5 wires it into
-/// [`SubgriddedSolver::step`].
+/// Carries `InterfaceSnapshots` (Q3) for coarse → fine `E_t` interpolation
+/// during fine sub-steps. The fine → coarse `H_t` area-averaging closure
+/// (Q4) and the seven-stage `step` (Q5) plug into this same state.
 #[derive(Debug, Clone)]
 pub struct SubgridRegion {
     /// Coarse-cell index of the nest corner (inclusive lower bound).
@@ -85,6 +161,9 @@ pub struct SubgridRegion {
     /// The fine grid backing this region. `dx_fine = dx_coarse / 2`;
     /// `dt_fine = dt_coarse / 2`.
     fine: YeeGrid,
+    /// Bracketing parent `E_t` snapshots on the six interface faces,
+    /// blended linearly in time during each fine sub-step.
+    snapshots: InterfaceSnapshots,
 }
 
 impl SubgridRegion {
@@ -150,7 +229,68 @@ impl SubgridRegion {
         fine.eps_r = parent.eps_r;
         fine.mu_r = parent.mu_r;
 
-        Ok(Self { lo, hi, fine })
+        let snapshots = Self::allocate_snapshots(lo, hi);
+        Ok(Self {
+            lo,
+            hi,
+            fine,
+            snapshots,
+        })
+    }
+
+    /// Allocate zero-initialised parent `E_t` snapshot buffers sized to
+    /// match the coarse-grid sample count on each of the six interface
+    /// faces. Shapes follow the parent's natural Yee staggering, not the
+    /// fine resolution.
+    fn allocate_snapshots(
+        lo: (usize, usize, usize),
+        hi: (usize, usize, usize),
+    ) -> InterfaceSnapshots {
+        let nx_c = hi.0 - lo.0;
+        let ny_c = hi.1 - lo.1;
+        let nz_c = hi.2 - lo.2;
+
+        let face_x_ey = (
+            Array2::<f64>::zeros((ny_c, nz_c + 1)),
+            Array2::<f64>::zeros((ny_c, nz_c + 1)),
+        );
+        let face_x_ez = (
+            Array2::<f64>::zeros((ny_c + 1, nz_c)),
+            Array2::<f64>::zeros((ny_c + 1, nz_c)),
+        );
+
+        let face_y_ex = (
+            Array2::<f64>::zeros((nx_c, nz_c + 1)),
+            Array2::<f64>::zeros((nx_c, nz_c + 1)),
+        );
+        let face_y_ez = (
+            Array2::<f64>::zeros((nx_c + 1, nz_c)),
+            Array2::<f64>::zeros((nx_c + 1, nz_c)),
+        );
+
+        let face_z_ex = (
+            Array2::<f64>::zeros((nx_c, ny_c + 1)),
+            Array2::<f64>::zeros((nx_c, ny_c + 1)),
+        );
+        let face_z_ey = (
+            Array2::<f64>::zeros((nx_c + 1, ny_c)),
+            Array2::<f64>::zeros((nx_c + 1, ny_c)),
+        );
+
+        InterfaceSnapshots {
+            xmin_ey: face_x_ey.clone(),
+            xmin_ez: face_x_ez.clone(),
+            xmax_ey: face_x_ey,
+            xmax_ez: face_x_ez,
+            ymin_ex: face_y_ex.clone(),
+            ymin_ez: face_y_ez.clone(),
+            ymax_ex: face_y_ex,
+            ymax_ez: face_y_ez,
+            zmin_ex: face_z_ex.clone(),
+            zmin_ey: face_z_ey.clone(),
+            zmax_ex: face_z_ex,
+            zmax_ey: face_z_ey,
+        }
     }
 
     /// Immutable borrow of the fine [`YeeGrid`] backing this region.
@@ -184,6 +324,463 @@ impl SubgridRegion {
             )));
         }
         Ok(())
+    }
+
+    /// Read-only borrow of the cached interface E-field snapshots. Useful
+    /// for diagnostics, energy-balance probes, and the Q5 step driver.
+    pub fn snapshots(&self) -> &InterfaceSnapshots {
+        &self.snapshots
+    }
+
+    // ----------------------------------------------------------------
+    // Q3 — coarse → fine E_t spatial + temporal interpolation
+    // ----------------------------------------------------------------
+
+    /// Cache the parent grid's tangential `E` field on the six interface
+    /// faces as the **start-of-coarse-step** snapshot.
+    ///
+    /// Call once at the top of each coarse step before `parent.update_e_only`.
+    /// Pair with [`Self::snapshot_coarse_e_t_end`] after the coarse E-update
+    /// so the two snapshots bracket the time interval over which the fine
+    /// sub-steps interpolate.
+    pub fn snapshot_coarse_e_t(&mut self, parent: &YeeGrid) {
+        Self::copy_face_e_t(
+            &mut self.snapshots,
+            parent,
+            self.lo,
+            self.hi,
+            SnapshotKind::Start,
+        );
+    }
+
+    /// Cache the parent grid's tangential `E` field on the six interface
+    /// faces as the **end-of-coarse-step** snapshot.
+    ///
+    /// Call once after `parent.update_e_only` (and any source / CPML / PEC
+    /// closure on the coarse grid) so the cached pair brackets the coarse
+    /// E-update interval. Linear blending between the two snapshots at the
+    /// fine sub-step fractions `frac ∈ {0.25, 0.75}` yields the Dirichlet
+    /// fine boundary `E_t` per Okoniewski 1997.
+    pub fn snapshot_coarse_e_t_end(&mut self, parent: &YeeGrid) {
+        Self::copy_face_e_t(
+            &mut self.snapshots,
+            parent,
+            self.lo,
+            self.hi,
+            SnapshotKind::End,
+        );
+    }
+
+    /// Write Dirichlet `E_t` values on the six outer fine-grid faces by
+    /// blending the start/end coarse snapshots in time at fraction `frac`
+    /// (typically `0.25` for the first fine sub-step and `0.75` for the
+    /// second) and linearly interpolating in space between bracketing
+    /// coarse edges per Chevalier 1997 §III.
+    ///
+    /// `frac` is clamped to `[0, 1]`; values outside the unit interval
+    /// would imply extrapolation across a coarse interval, which is
+    /// outside the Phase 2.fdtd.7.0 scope.
+    pub fn interpolate_coarse_e_to_fine(&mut self, frac: f64) {
+        let frac = frac.clamp(0.0, 1.0);
+        let lo = self.lo;
+        let hi = self.hi;
+        let nx_c = hi.0 - lo.0;
+        let ny_c = hi.1 - lo.1;
+        let nz_c = hi.2 - lo.2;
+        let fine_nx = 2 * nx_c;
+        let fine_ny = 2 * ny_c;
+        let fine_nz = 2 * nz_c;
+
+        // ±x faces — write fine E_y and E_z at fine_i ∈ {0, fine_nx}.
+        Self::interp_face_x(
+            &mut self.fine,
+            &self.snapshots.xmin_ey,
+            &self.snapshots.xmin_ez,
+            0,
+            fine_ny,
+            fine_nz,
+            frac,
+        );
+        Self::interp_face_x(
+            &mut self.fine,
+            &self.snapshots.xmax_ey,
+            &self.snapshots.xmax_ez,
+            fine_nx,
+            fine_ny,
+            fine_nz,
+            frac,
+        );
+
+        // ±y faces — write fine E_x and E_z at fine_j ∈ {0, fine_ny}.
+        Self::interp_face_y(
+            &mut self.fine,
+            &self.snapshots.ymin_ex,
+            &self.snapshots.ymin_ez,
+            0,
+            fine_nx,
+            fine_nz,
+            frac,
+        );
+        Self::interp_face_y(
+            &mut self.fine,
+            &self.snapshots.ymax_ex,
+            &self.snapshots.ymax_ez,
+            fine_ny,
+            fine_nx,
+            fine_nz,
+            frac,
+        );
+
+        // ±z faces — write fine E_x and E_y at fine_k ∈ {0, fine_nz}.
+        Self::interp_face_z(
+            &mut self.fine,
+            &self.snapshots.zmin_ex,
+            &self.snapshots.zmin_ey,
+            0,
+            fine_nx,
+            fine_ny,
+            frac,
+        );
+        Self::interp_face_z(
+            &mut self.fine,
+            &self.snapshots.zmax_ex,
+            &self.snapshots.zmax_ey,
+            fine_nz,
+            fine_nx,
+            fine_ny,
+            frac,
+        );
+    }
+
+    /// Copy the coarse `E_t` on the six interface faces into the
+    /// matching `start` or `end` snapshot buffer.
+    fn copy_face_e_t(
+        snap: &mut InterfaceSnapshots,
+        parent: &YeeGrid,
+        lo: (usize, usize, usize),
+        hi: (usize, usize, usize),
+        which: SnapshotKind,
+    ) {
+        let nx_c = hi.0 - lo.0;
+        let ny_c = hi.1 - lo.1;
+        let nz_c = hi.2 - lo.2;
+
+        // ±x faces (E_y, E_z; i_c ∈ {lo.0, hi.0}).
+        for (face_i_c, ey_slot, ez_slot) in [
+            (lo.0, &mut snap.xmin_ey, &mut snap.xmin_ez),
+            (hi.0, &mut snap.xmax_ey, &mut snap.xmax_ez),
+        ] {
+            let ey_buf = match which {
+                SnapshotKind::Start => &mut ey_slot.0,
+                SnapshotKind::End => &mut ey_slot.1,
+            };
+            for j_c in 0..ny_c {
+                for k_c in 0..=nz_c {
+                    ey_buf[(j_c, k_c)] = parent.ey[(face_i_c, lo.1 + j_c, lo.2 + k_c)];
+                }
+            }
+            let ez_buf = match which {
+                SnapshotKind::Start => &mut ez_slot.0,
+                SnapshotKind::End => &mut ez_slot.1,
+            };
+            for j_c in 0..=ny_c {
+                for k_c in 0..nz_c {
+                    ez_buf[(j_c, k_c)] = parent.ez[(face_i_c, lo.1 + j_c, lo.2 + k_c)];
+                }
+            }
+        }
+
+        // ±y faces (E_x, E_z; j_c ∈ {lo.1, hi.1}).
+        for (face_j_c, ex_slot, ez_slot) in [
+            (lo.1, &mut snap.ymin_ex, &mut snap.ymin_ez),
+            (hi.1, &mut snap.ymax_ex, &mut snap.ymax_ez),
+        ] {
+            let ex_buf = match which {
+                SnapshotKind::Start => &mut ex_slot.0,
+                SnapshotKind::End => &mut ex_slot.1,
+            };
+            for i_c in 0..nx_c {
+                for k_c in 0..=nz_c {
+                    ex_buf[(i_c, k_c)] = parent.ex[(lo.0 + i_c, face_j_c, lo.2 + k_c)];
+                }
+            }
+            let ez_buf = match which {
+                SnapshotKind::Start => &mut ez_slot.0,
+                SnapshotKind::End => &mut ez_slot.1,
+            };
+            for i_c in 0..=nx_c {
+                for k_c in 0..nz_c {
+                    ez_buf[(i_c, k_c)] = parent.ez[(lo.0 + i_c, face_j_c, lo.2 + k_c)];
+                }
+            }
+        }
+
+        // ±z faces (E_x, E_y; k_c ∈ {lo.2, hi.2}).
+        for (face_k_c, ex_slot, ey_slot) in [
+            (lo.2, &mut snap.zmin_ex, &mut snap.zmin_ey),
+            (hi.2, &mut snap.zmax_ex, &mut snap.zmax_ey),
+        ] {
+            let ex_buf = match which {
+                SnapshotKind::Start => &mut ex_slot.0,
+                SnapshotKind::End => &mut ex_slot.1,
+            };
+            for i_c in 0..nx_c {
+                for j_c in 0..=ny_c {
+                    ex_buf[(i_c, j_c)] = parent.ex[(lo.0 + i_c, lo.1 + j_c, face_k_c)];
+                }
+            }
+            let ey_buf = match which {
+                SnapshotKind::Start => &mut ey_slot.0,
+                SnapshotKind::End => &mut ey_slot.1,
+            };
+            for i_c in 0..=nx_c {
+                for j_c in 0..ny_c {
+                    ey_buf[(i_c, j_c)] = parent.ey[(lo.0 + i_c, lo.1 + j_c, face_k_c)];
+                }
+            }
+        }
+    }
+
+    /// Linear blend in time between the start and end snapshot pair at
+    /// fractional offset `frac` along the coarse interval.
+    #[inline]
+    fn blend_time(start: f64, end: f64, frac: f64) -> f64 {
+        (1.0 - frac) * start + frac * end
+    }
+
+    /// Linear-interpolation bracket for a half-integer fine-edge position
+    /// against the coarse half-integer edge grid.
+    ///
+    /// Returns `(lo_idx, hi_idx, w_hi)` where the interpolated value is
+    /// `snap[lo_idx] * (1 - w_hi) + snap[hi_idx] * w_hi`. Inside the
+    /// subgrid domain `(lo_idx, hi_idx)` is the natural floor/ceil
+    /// bracket and `w_hi ∈ [0, 1]`. Outside the domain the bracket is
+    /// pinned to the boundary pair `(0, 1)` or `(n_coarse - 2, n_coarse - 1)`
+    /// and `w_hi` is the **linear-extrapolation** weight against that
+    /// pair, so a linear field in the parent reproduces exactly through
+    /// the boundary cells (Chevalier 1997 §III). `n_coarse` must be ≥ 2.
+    ///
+    /// `t` is the position in coarse-cell units measured from the
+    /// snapshot's first half-integer edge (`snap[0]` lives at `t = 0`).
+    #[inline]
+    fn bracket_half(t: f64, n_coarse: usize) -> (usize, usize, f64) {
+        if n_coarse <= 1 {
+            // Degenerate: collapse to the single sample. The caller's
+            // bilerp then ignores the second tap.
+            return (0, 0, 0.0);
+        }
+        let max_idx = n_coarse - 1;
+        let lo_f = t.floor();
+        if lo_f < 0.0 {
+            // Linear extrapolation off the low end against (0, 1).
+            return (0, 1, t);
+        }
+        let lo_i = lo_f as usize;
+        if lo_i + 1 > max_idx {
+            // Linear extrapolation off the high end against (max-1, max).
+            let lo_i = max_idx - 1;
+            return (lo_i, max_idx, t - (lo_i as f64));
+        }
+        let w_hi = t - lo_f;
+        (lo_i, lo_i + 1, w_hi)
+    }
+
+    /// Linear-interpolation bracket for an integer fine-edge position
+    /// (lives on a coarse node) against the coarse-node grid.
+    ///
+    /// Returns `(lo_idx, hi_idx, w_hi)` analogously to [`Self::bracket_half`].
+    /// At even fine indices the bracket collapses (`w_hi = 0`); at odd
+    /// fine indices the bracket spans one coarse cell with `w_hi = 0.5`.
+    /// At the high end (fine_idx = 2·(n_coarse_nodes - 1), the last
+    /// coarse node) it pins to (`max-1`, `max`) with `w_hi = 1` so the
+    /// caller still gets a valid pair.
+    #[inline]
+    fn bracket_int(fine_idx: usize, n_coarse_nodes: usize) -> (usize, usize, f64) {
+        if n_coarse_nodes <= 1 {
+            return (0, 0, 0.0);
+        }
+        let max_idx = n_coarse_nodes - 1;
+        let lo_i_natural = fine_idx / 2;
+        if lo_i_natural >= max_idx {
+            return (max_idx - 1, max_idx, 1.0);
+        }
+        let w_hi = if fine_idx.is_multiple_of(2) { 0.0 } else { 0.5 };
+        (lo_i_natural, lo_i_natural + 1, w_hi)
+    }
+
+    /// Interpolate ±x face: write fine `E_y` and `E_z` at column
+    /// `fine_i_face` using the snapshot pair on that face. The fine
+    /// boundary edges along this face vary in `(j_f, k_f)`; spatial
+    /// interpolation is in `j_f` (and `k_f`) against the coarse-edge grid
+    /// stored in the snapshot, temporal blending is at `frac`.
+    fn interp_face_x(
+        fine: &mut YeeGrid,
+        ey_snap: &(Array2<f64>, Array2<f64>),
+        ez_snap: &(Array2<f64>, Array2<f64>),
+        fine_i_face: usize,
+        fine_ny: usize,
+        fine_nz: usize,
+        frac: f64,
+    ) {
+        let (ny_c, nz_c_p1) = ey_snap.0.dim();
+        let (ny_c_p1, nz_c) = ez_snap.0.dim();
+
+        // E_y on the face: fine_i = fine_i_face, j_f in [0, fine_ny),
+        // k_f in [0, fine_nz + 1). Spatial interp: half-integer in y,
+        // integer (on node) in z.
+        for j_f in 0..fine_ny {
+            // Half-integer fine-y position (in coarse units relative to
+            // the snapshot origin): (j_f + 0.5)/2; coarse E_y edges sit
+            // at coarse-y = j_c + 0.5, so the bracket target is
+            // (j_f + 0.5)/2 - 0.5 = (j_f as f64 - 0.5) / 2.0.
+            let t_y = ((j_f as f64) - 0.5) / 2.0;
+            let (j_lo, j_hi, w_jy) = Self::bracket_half(t_y, ny_c);
+            for k_f in 0..=fine_nz {
+                let (k_lo, k_hi, w_kz) = Self::bracket_int(k_f, nz_c_p1);
+                let s00 = ey_snap.0[(j_lo, k_lo)];
+                let s01 = ey_snap.0[(j_lo, k_hi)];
+                let s10 = ey_snap.0[(j_hi, k_lo)];
+                let s11 = ey_snap.0[(j_hi, k_hi)];
+                let e00 = ey_snap.1[(j_lo, k_lo)];
+                let e01 = ey_snap.1[(j_lo, k_hi)];
+                let e10 = ey_snap.1[(j_hi, k_lo)];
+                let e11 = ey_snap.1[(j_hi, k_hi)];
+                let start = bilerp(s00, s01, s10, s11, w_jy, w_kz);
+                let end = bilerp(e00, e01, e10, e11, w_jy, w_kz);
+                fine.ey[(fine_i_face, j_f, k_f)] = Self::blend_time(start, end, frac);
+            }
+        }
+
+        // E_z on the face: fine_i = fine_i_face, j_f in [0, fine_ny + 1),
+        // k_f in [0, fine_nz). Integer in y, half-integer in z.
+        for j_f in 0..=fine_ny {
+            let (j_lo, j_hi, w_jy) = Self::bracket_int(j_f, ny_c_p1);
+            for k_f in 0..fine_nz {
+                let t_z = ((k_f as f64) - 0.5) / 2.0;
+                let (k_lo, k_hi, w_kz) = Self::bracket_half(t_z, nz_c);
+                let s00 = ez_snap.0[(j_lo, k_lo)];
+                let s01 = ez_snap.0[(j_lo, k_hi)];
+                let s10 = ez_snap.0[(j_hi, k_lo)];
+                let s11 = ez_snap.0[(j_hi, k_hi)];
+                let e00 = ez_snap.1[(j_lo, k_lo)];
+                let e01 = ez_snap.1[(j_lo, k_hi)];
+                let e10 = ez_snap.1[(j_hi, k_lo)];
+                let e11 = ez_snap.1[(j_hi, k_hi)];
+                let start = bilerp(s00, s01, s10, s11, w_jy, w_kz);
+                let end = bilerp(e00, e01, e10, e11, w_jy, w_kz);
+                fine.ez[(fine_i_face, j_f, k_f)] = Self::blend_time(start, end, frac);
+            }
+        }
+    }
+
+    /// Interpolate ±y face: write fine `E_x` and `E_z` at row
+    /// `fine_j_face`. Spatial interp varies in `(i_f, k_f)`.
+    fn interp_face_y(
+        fine: &mut YeeGrid,
+        ex_snap: &(Array2<f64>, Array2<f64>),
+        ez_snap: &(Array2<f64>, Array2<f64>),
+        fine_j_face: usize,
+        fine_nx: usize,
+        fine_nz: usize,
+        frac: f64,
+    ) {
+        let (nx_c, nz_c_p1) = ex_snap.0.dim();
+        let (nx_c_p1, nz_c) = ez_snap.0.dim();
+
+        // E_x: half-integer in x, integer in z.
+        for i_f in 0..fine_nx {
+            let t_x = ((i_f as f64) - 0.5) / 2.0;
+            let (i_lo, i_hi, w_ix) = Self::bracket_half(t_x, nx_c);
+            for k_f in 0..=fine_nz {
+                let (k_lo, k_hi, w_kz) = Self::bracket_int(k_f, nz_c_p1);
+                let s00 = ex_snap.0[(i_lo, k_lo)];
+                let s01 = ex_snap.0[(i_lo, k_hi)];
+                let s10 = ex_snap.0[(i_hi, k_lo)];
+                let s11 = ex_snap.0[(i_hi, k_hi)];
+                let e00 = ex_snap.1[(i_lo, k_lo)];
+                let e01 = ex_snap.1[(i_lo, k_hi)];
+                let e10 = ex_snap.1[(i_hi, k_lo)];
+                let e11 = ex_snap.1[(i_hi, k_hi)];
+                let start = bilerp(s00, s01, s10, s11, w_ix, w_kz);
+                let end = bilerp(e00, e01, e10, e11, w_ix, w_kz);
+                fine.ex[(i_f, fine_j_face, k_f)] = Self::blend_time(start, end, frac);
+            }
+        }
+
+        // E_z: integer in x, half-integer in z.
+        for i_f in 0..=fine_nx {
+            let (i_lo, i_hi, w_ix) = Self::bracket_int(i_f, nx_c_p1);
+            for k_f in 0..fine_nz {
+                let t_z = ((k_f as f64) - 0.5) / 2.0;
+                let (k_lo, k_hi, w_kz) = Self::bracket_half(t_z, nz_c);
+                let s00 = ez_snap.0[(i_lo, k_lo)];
+                let s01 = ez_snap.0[(i_lo, k_hi)];
+                let s10 = ez_snap.0[(i_hi, k_lo)];
+                let s11 = ez_snap.0[(i_hi, k_hi)];
+                let e00 = ez_snap.1[(i_lo, k_lo)];
+                let e01 = ez_snap.1[(i_lo, k_hi)];
+                let e10 = ez_snap.1[(i_hi, k_lo)];
+                let e11 = ez_snap.1[(i_hi, k_hi)];
+                let start = bilerp(s00, s01, s10, s11, w_ix, w_kz);
+                let end = bilerp(e00, e01, e10, e11, w_ix, w_kz);
+                fine.ez[(i_f, fine_j_face, k_f)] = Self::blend_time(start, end, frac);
+            }
+        }
+    }
+
+    /// Interpolate ±z face: write fine `E_x` and `E_y` at plane
+    /// `fine_k_face`. Spatial interp varies in `(i_f, j_f)`.
+    fn interp_face_z(
+        fine: &mut YeeGrid,
+        ex_snap: &(Array2<f64>, Array2<f64>),
+        ey_snap: &(Array2<f64>, Array2<f64>),
+        fine_k_face: usize,
+        fine_nx: usize,
+        fine_ny: usize,
+        frac: f64,
+    ) {
+        let (nx_c, ny_c_p1) = ex_snap.0.dim();
+        let (nx_c_p1, ny_c) = ey_snap.0.dim();
+
+        // E_x: half-integer in x, integer in y.
+        for i_f in 0..fine_nx {
+            let t_x = ((i_f as f64) - 0.5) / 2.0;
+            let (i_lo, i_hi, w_ix) = Self::bracket_half(t_x, nx_c);
+            for j_f in 0..=fine_ny {
+                let (j_lo, j_hi, w_jy) = Self::bracket_int(j_f, ny_c_p1);
+                let s00 = ex_snap.0[(i_lo, j_lo)];
+                let s01 = ex_snap.0[(i_lo, j_hi)];
+                let s10 = ex_snap.0[(i_hi, j_lo)];
+                let s11 = ex_snap.0[(i_hi, j_hi)];
+                let e00 = ex_snap.1[(i_lo, j_lo)];
+                let e01 = ex_snap.1[(i_lo, j_hi)];
+                let e10 = ex_snap.1[(i_hi, j_lo)];
+                let e11 = ex_snap.1[(i_hi, j_hi)];
+                let start = bilerp(s00, s01, s10, s11, w_ix, w_jy);
+                let end = bilerp(e00, e01, e10, e11, w_ix, w_jy);
+                fine.ex[(i_f, j_f, fine_k_face)] = Self::blend_time(start, end, frac);
+            }
+        }
+
+        // E_y: integer in x, half-integer in y.
+        for i_f in 0..=fine_nx {
+            let (i_lo, i_hi, w_ix) = Self::bracket_int(i_f, nx_c_p1);
+            for j_f in 0..fine_ny {
+                let t_y = ((j_f as f64) - 0.5) / 2.0;
+                let (j_lo, j_hi, w_jy) = Self::bracket_half(t_y, ny_c);
+                let s00 = ey_snap.0[(i_lo, j_lo)];
+                let s01 = ey_snap.0[(i_lo, j_hi)];
+                let s10 = ey_snap.0[(i_hi, j_lo)];
+                let s11 = ey_snap.0[(i_hi, j_hi)];
+                let e00 = ey_snap.1[(i_lo, j_lo)];
+                let e01 = ey_snap.1[(i_lo, j_hi)];
+                let e10 = ey_snap.1[(i_hi, j_lo)];
+                let e11 = ey_snap.1[(i_hi, j_hi)];
+                let start = bilerp(s00, s01, s10, s11, w_ix, w_jy);
+                let end = bilerp(e00, e01, e10, e11, w_ix, w_jy);
+                fine.ey[(i_f, j_f, fine_k_face)] = Self::blend_time(start, end, frac);
+            }
+        }
     }
 
     /// Reject regions that touch a CPML cell on any face. The interior
