@@ -33,7 +33,7 @@
 //! points push the dense MoM LU `O(N³)` past the 10-minute wall-clock
 //! budget of this agent's harness on a four-thread dev laptop. Per the
 //! brief's escape hatch ("drop the top L value to 80 mm if blocked
-//! > 15 min"), the sweep is truncated to three points. An out-of-band
+//! &gt; 15 min"), the sweep is truncated to three points. An out-of-band
 //! 4-point run that included L = 80 mm produced
 //! `|Z_in| = {2303.126, 2232.707, 2195.487, 2155.821} Ω` — i.e. the
 //! same monotonic-decreasing trend the 3-point sweep records. The
