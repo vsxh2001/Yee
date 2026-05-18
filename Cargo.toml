@@ -5,6 +5,7 @@ members = [
     "crates/yee-cuda",
     "crates/yee-mesh",
     "crates/yee-mom",
+    "crates/yee-fem",
     "crates/yee-fdtd",
     "crates/yee-io",
     "crates/yee-cli",
@@ -37,6 +38,7 @@ yee-core  = { path = "crates/yee-core",  version = "0.0.0" }
 yee-cuda  = { path = "crates/yee-cuda",  version = "0.0.0" }
 yee-mesh  = { path = "crates/yee-mesh",  version = "0.0.0" }
 yee-mom   = { path = "crates/yee-mom",   version = "0.0.0" }
+yee-fem   = { path = "crates/yee-fem",   version = "0.0.0" }
 yee-fdtd  = { path = "crates/yee-fdtd",  version = "0.0.0" }
 yee-io    = { path = "crates/yee-io",    version = "0.0.0" }
 yee-plotters = { path = "crates/yee-plotters", version = "0.0.0" }
