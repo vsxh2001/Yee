@@ -8,13 +8,15 @@ Conventions used below:
 - ✅ **Validation** — benchmark cases that must pass before the phase is called "done"
 - ⚠️ **Risks / dependencies** — what could derail this phase
 
-## Status snapshot (2026-05-18)
+## Status snapshot (2026-05-19)
 
 **Shipped:**
 - Phase 0 walking skeleton (`phase-0-done` tag)
 - Phase 1.0 free-space MoM dipole, NEC-4 87+j41 Ω reference passing (`phase-1-0-mom-dipole` tag)
 - Phase 1.1.0 multilayer Greens placeholder (one-image DCIM)
 - Phase 1.1.1.2 Sommerfeld pole extraction implementation (Newton-Raphson TM_0/TE_1, pole-subtracted GPOF, Hankel reconstruction; ADR-0033, merge `a22d622`)
+- Phase 1.1.1.2.1 Sommerfeld surface-wave prefactor canonical correction (Michalski-Mosig 1997 eq. 25 / Felsen-Marcuvitz §5.5; Track EEEEEE merge `ca0e7bb`)
+- Phase 1.1.1.2.2 `sommerfeld::residue()` sign + factor-of-2 fix (Michalski-Mosig 1997 eq. 19 form `-N₁/(2·D')`; Track TTTTTT merge `a4f98a4`; verified by contour-integral diagnostic Track SSSSSS)
 - Phase 1.3.0 wave-port skeleton (matches delta-gap)
 - Phase 1.3.1.1 step 2-3 Nedelec edge-element + nodal Lagrange E_z assembly + dense eigen on `TriMesh2D`; WR-90 TE10 cutoff gate passing at 0.055% error
 - Phase 1.3.1.1 step 6 `yee.eigensolver` Python binding (PyTriMesh2D + PyNumericalCrossSection; 7 pytest cases; WR-90 cutoff sweep notebook)
@@ -31,26 +33,44 @@ Conventions used below:
 - Phase 1.frontend.0/1/2/3 (yee-py: GP, FdtdDriver, BO, NSGA-II + AL, validation aggregator)
 - Phase 2.fdtd.0..6 (walking skeleton, CPML, NTFF, dispersive ADE, end-to-end driver, TF/SF slab, lumped RLC)
 - Phase 2.fdtd.5.3.2 cubic Lagrange aux-grid interpolation; oblique TF/SF clears >1000× DoD at 1027× / 60.2 dB (ADR-0034, merge `f878bdd`)
+- Phase 2.fdtd.7 Q1 `WalkingSkeletonSolver::step` refactor into composable helpers (Track FFFFFF merge `1301623`)
+- Phase 2.fdtd.7 Q2 `SubgridRegion` + 2× sub-Yee-grid scaffold (Track IIIIII merge `65ea3df`)
+- Phase 2.fdtd.7 Q3 coarse→fine E_t spatial + temporal interpolation (Track MMMMMM merge `817955a`)
+- Phase 2.fdtd.7 Q4 fine→coarse H_t area-average + E_t overwrite closures (Track OOOOOO merge `6ded764`)
+- Phase 2.fdtd.7 Q4.1 `snapshot_fine_h_mid_step` time-centering helper (Track VVVVVV merge `a2abb4c`)
+- Phase 2.fdtd.7 Q5 time-subcycling step (Track RRRRRR merge `426a36c`; strict 0.5% gate `#[ignore]`'d — see Pending)
 - Phase 3.gp.0/1 (GP regression + ML hyperparameter fit)
 - Phase 3.bo.0/1 (Expected-Improvement BO, NSGA-II multi-objective)
 - Phase 3.al.0 (variance-acquisition active learning)
+- Phase 4.fem.eig.0 walking-skeleton FEM eigenmode end-to-end:
+  - T1+T2: yee-fem scaffold + `TetMesh3D` (Track GGGGGG merge `84a6632`)
+  - T3: 6-edge Nedelec local K+M matrices, 4-pt Gauss quadrature (Track HHHHHH merge `f92fb59`)
+  - T4: global sparse K+M assembly + PEC Dirichlet elimination (Track KKKKKK merge `aebb2a1`)
+  - T5: `SparseEigen` trait + `InverseIterEigen` shift-invert via faer sparse LU (Track NNNNNN merge `fb6be04`; lobpcg crate fallback)
+  - T6: `TetMesh3D::cavity_uniform` + Kuhn 6-tet brick decomposition (Track LLLLLL merge `ce899c3`)
+  - **T7: fem-eig-001 production gate — TE_{101} 0.09% rel err vs Pozar §6.3 analytic at WR-90 (a=22.86, b=10.16, d=30) mm; mode-10 RMS 0.37% on (12,9,15) mesh; wall-time ~7 s release (Track QQQQQQ merge `d42aefc`)**
+  - T8: `yee.fem.solve_cavity` Python binding, 3 pytest cases (Track UUUUUU merge `cb0e15f`)
+  - T9: mdBook tutorial `docs/src/tutorials/04-fem-cavity-eigenmode.md` (Track WWWWWW merge `06e72f2`)
 
 **Pending (high priority):**
 
 *In-flight (this session):*
 - Phase 1.3.1.1 step 4 sparse arpack-rs / LOBPCG eigensolver
 - Phase 1.3.1.1 step 5 longitudinal block for quasi-TEM microstrip wave-ports
+- mom-002 ~30× residual gap root cause — five diagnostics landed (EEEEEE / JJJJJJ / PPPPPP / SSSSSS / XXXXXX), each rules out one candidate; XXXXXX flagged `Re(Z) = −67 Ω` unphysical → next candidate is MPIE matrix singularity quadrature, delta-gap port model, or DCIM TM-channel GPOF fit (queued Track YYYYYY)
 
 *Design-coverage shipped, impl pending:*
-- Phase 2.fdtd.7 subgridding — spec + plan + ADR 0027/0030 landed; Q1-Q7 tracks ready to dispatch
+- Phase 2.fdtd.7 Q6 stability/reciprocity gate (10000-step round-trip energy drift)
+- Phase 2.fdtd.7 Q7 fdtd-007 Maloney-Smith production gate
+- Phase 2.fdtd.7.x Berenger 2006 Huygens-surface fine↔coarse coupling — VVVVVV diagnosed the spec §3 Okoniewski-style closure as discrete-energy-balance-unstable when combined with linear E_t interpolation; queued (Track ZZZZZZ) to ship the documented Berenger fallback that retires the Q5 strict 0.5% gate
 - Phase 3.nl.0 NL design surface — spec + plan + ADR 0028/0031 landed; R1-R7 tracks ready to dispatch
-- Phase 4 FEM / eigenmode — spec + plan + ADR 0029/0032 landed; T1-T9 tracks ready to dispatch
+- Phase 4.fem.eig.1+ — dispersive ε_r(ω), real waveguide ports, absorbing boundaries — designs not yet drafted
 
 **Outstanding validation gates:**
-- mom-002 microstrip Z₀ tolerance tighten to Hammerstad-Jensen `[35, 75] Ω` — actionable now that Phase 1.1.1.2 Sommerfeld has shipped (ADR-0033); next priority validation track
+- mom-002 microstrip Z₀ tolerance tighten to Hammerstad-Jensen `[35, 75] Ω` — five kernel-side root causes ruled out; remaining candidates are formulation-level (Track YYYYYY in queue)
 - mom-003 2.4 GHz patch — loose tolerance pending re-run through `GreensSpec::MicrostripSommerfeld`
-- fem-eig-001 WR-90 rectangular cavity — gates Phase 4 FEM eigenmode
-- fdtd-007 Maloney-Smith oblique TF/SF — forward gate for Phase 2.fdtd.7 subgridding
+- fem-eig-001 WR-90 rectangular cavity — **GATE PASSES** (TE_{101} 0.09% rel err, mode-10 RMS 0.37%, Track QQQQQQ)
+- fdtd-007 Maloney-Smith oblique TF/SF — forward gate for Phase 2.fdtd.7 subgridding (gated on Q6 + Q7 + Berenger coupling)
 - nl-001 10-prompt sweep — gates Phase 3.nl.0 NL design surface
 
 ---
