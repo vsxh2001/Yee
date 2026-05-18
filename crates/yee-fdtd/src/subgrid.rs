@@ -35,8 +35,10 @@
 use ndarray::Array2;
 use yee_core::Error;
 
+use crate::FdtdSolver;
 use crate::WalkingSkeletonSolver;
 use crate::grid::YeeGrid;
+use crate::update;
 
 /// Coarse-cell `(lo, hi)` extent of an axis-aligned box, inclusive-low /
 /// exclusive-high. Used for the TF/SF-box placement check.
@@ -304,6 +306,27 @@ impl SubgridRegion {
     /// material state or seed initial fields before stepping.
     pub fn fine_grid_mut(&mut self) -> &mut YeeGrid {
         &mut self.fine
+    }
+
+    /// Apply the bulk H-field Yee update to the fine grid.
+    ///
+    /// Companion to [`WalkingSkeletonSolver::update_h_only`], specialised
+    /// to the fine sub-grid. Pure spatial-curl update with no boundary,
+    /// no source, no clock advance — the fine grid's "boundary" is the
+    /// Dirichlet `E_t` written by [`Self::interpolate_coarse_e_to_fine`]
+    /// just before this call.
+    pub fn update_fine_h(&mut self) {
+        update::update_h(&mut self.fine);
+    }
+
+    /// Apply the bulk E-field Yee update to the fine grid.
+    ///
+    /// Companion to [`Self::update_fine_h`]; closes the fine half-step.
+    /// Phase 2.fdtd.7.0 carries no CPML or PEC closure on the fine grid
+    /// (the fine region sits strictly interior to any coarse CPML); the
+    /// Dirichlet boundary `E_t` is fixed by the prior interpolation.
+    pub fn update_fine_e(&mut self) {
+        update::update_e(&mut self.fine);
     }
 
     /// Base bounds validation: `lo < hi` per axis, `hi` inside the parent.
@@ -1190,17 +1213,157 @@ impl SubgriddedSolver {
 
     /// Advance the simulation by one coarse step.
     ///
-    /// **Q2 placeholder:** this delegates to the wrapped
-    /// [`WalkingSkeletonSolver`]'s helper sequence; the fine grid is
-    /// dormant. Q5 will replace this body with the seven-stage spec §3
-    /// sequence (update_h_only → apply_cpml_h → fine k=1 → update_e_only
-    /// → apply_cpml_e → fine k=2 → average fine→coarse → advance_clock).
+    /// Implements the seven-stage spec §3 time-step sequence:
+    ///
+    /// 1. Coarse `update_h_only`.
+    /// 2. Coarse `apply_cpml_h` (no-op outside any configured CPML face).
+    /// 3. Snapshot the coarse `E_t` on the six interface faces (start).
+    /// 4. Fine sub-step `k = 1`: interpolate coarse `E_t` at `frac = 0.25`
+    ///    onto the fine boundary, then bulk `update_h` and `update_e` on
+    ///    the fine grid.
+    /// 5. Coarse `update_e_only`, then `apply_cpml_e`.
+    /// 6. Snapshot the coarse `E_t` again (end-of-coarse-step) so the
+    ///    second fine sub-step blends against the post-E-update parent.
+    /// 7. Fine sub-step `k = 2`: interpolate at `frac = 0.75`, then bulk
+    ///    `update_h` and `update_e` on the fine grid.
+    /// 8. Average the fine `H_t` onto the coarse interface layer
+    ///    (`average_fine_h_to_coarse`) and overwrite the coarse `E_t` on
+    ///    the interface planes (`overwrite_coarse_e_from_fine`) —
+    ///    Chevalier 1997 §IV closure of the discrete energy balance.
+    /// 9. Advance the coarse clock by one `dt_coarse`.
+    ///
+    /// When no [`SubgridRegion`] is attached this collapses to the
+    /// bare `WalkingSkeletonSolver` helper sequence, matching
+    /// [`WalkingSkeletonSolver::step`] bit-for-bit.
     pub fn step(&mut self) {
-        // Region present but dormant at Q2; Q5 wires the fine sub-steps.
+        let Some(region) = self.region.as_mut() else {
+            self.inner.update_h_only();
+            self.inner.apply_cpml_h();
+            self.inner.update_e_only();
+            self.inner.apply_cpml_e();
+            self.inner.advance_clock();
+            return;
+        };
+
+        // Per the brief, the two fine sub-steps bracket the coarse
+        // E-update with frac = 0.25 / 0.75 against the start/end
+        // snapshots. The start snapshot is taken at t = n (after the
+        // coarse H-half-step but before the coarse E-half-step) and the
+        // end snapshot at t = n + 1 (after the coarse E-half-step). On
+        // the first sub-step the not-yet-written end buffer carries the
+        // previous coarse interval's end value, which by construction
+        // equals the current start value — so the 0.25 blend collapses
+        // to the start value, leaving the fine sub-step momentarily
+        // first-order in time at the boundary while sub-step 2 recovers
+        // second order. See spec §3.
+
+        // 1–2. Coarse H half-step and outer-boundary closure.
         self.inner.update_h_only();
         self.inner.apply_cpml_h();
+
+        // 3. Snapshot the parent E_t at the start of the coarse step.
+        region.snapshot_coarse_e_t(self.inner.grid());
+
+        // 4. Fine sub-step k = 1 (interpolate at t = n + 1/4).
+        region.interpolate_coarse_e_to_fine(0.25);
+        region.update_fine_h();
+        region.update_fine_e();
+
+        // 5. Coarse E half-step and outer-boundary closure.
         self.inner.update_e_only();
         self.inner.apply_cpml_e();
+
+        // 6. Snapshot the parent E_t at the end of the coarse step.
+        region.snapshot_coarse_e_t_end(self.inner.grid());
+
+        // 7. Fine sub-step k = 2 (interpolate at t = n + 3/4).
+        region.interpolate_coarse_e_to_fine(0.75);
+        region.update_fine_h();
+        region.update_fine_e();
+
+        // 8. Close the energy balance: fine → coarse H area-average plus
+        //    coarse E_t overwrite on the interface planes.
+        {
+            let (parent_grid, _) = self.inner.grid_and_cpml_mut();
+            region.average_fine_h_to_coarse(parent_grid);
+            region.overwrite_coarse_e_from_fine(parent_grid);
+        }
+
+        // 9. Advance the coarse clock.
+        self.inner.advance_clock();
+    }
+
+    /// Advance the simulation by one coarse step while injecting a
+    /// Gaussian-in-time pulse on the coarse `E_z` array at cell
+    /// `(i, j, k)`.
+    ///
+    /// The source is added **only to the coarse grid**, between the
+    /// coarse H-update / CPML-H closure and the coarse E-update — the
+    /// same leapfrog timing that [`WalkingSkeletonSolver::step_with_source`]
+    /// uses. The fine grid in Phase 2.fdtd.7.0 is sourceless; energy
+    /// crosses into the fine region exclusively through the Dirichlet
+    /// boundary `E_t` interpolation, which is the property exercised by
+    /// the `subgrid_plane_wave_traversal` integration gate.
+    ///
+    /// The Gaussian is sampled at the current simulation time (before
+    /// this step advances the coarse clock).
+    pub fn step_with_gaussian_source_ez(
+        &mut self,
+        i: usize,
+        j: usize,
+        k: usize,
+        t0: f64,
+        sigma: f64,
+    ) {
+        let t = self.inner.current_time();
+        let Some(region) = self.region.as_mut() else {
+            self.inner.update_h_only();
+            self.inner.apply_cpml_h();
+            self.inner.apply_gaussian_source_ez(i, j, k, t, t0, sigma);
+            self.inner.update_e_only();
+            self.inner.apply_cpml_e();
+            self.inner.advance_clock();
+            return;
+        };
+
+        // 1–2. Coarse H half-step.
+        self.inner.update_h_only();
+        self.inner.apply_cpml_h();
+
+        // 3. Start-of-step snapshot. Done before the source contribution
+        //    so the snapshot reflects the parent's pre-source E_t. The
+        //    source landing on a cell strictly interior to the subgrid
+        //    region would in principle want to advance the snapshot, but
+        //    the integration gate places the source upstream of the
+        //    region so this ordering is correct for the v7.0 scope.
+        region.snapshot_coarse_e_t(self.inner.grid());
+
+        // 4. Fine sub-step k = 1.
+        region.interpolate_coarse_e_to_fine(0.25);
+        region.update_fine_h();
+        region.update_fine_e();
+
+        // 5. Coarse source injection and E half-step.
+        self.inner.apply_gaussian_source_ez(i, j, k, t, t0, sigma);
+        self.inner.update_e_only();
+        self.inner.apply_cpml_e();
+
+        // 6. End-of-step snapshot (after the source-modulated coarse E).
+        region.snapshot_coarse_e_t_end(self.inner.grid());
+
+        // 7. Fine sub-step k = 2.
+        region.interpolate_coarse_e_to_fine(0.75);
+        region.update_fine_h();
+        region.update_fine_e();
+
+        // 8. Close the energy balance.
+        {
+            let (parent_grid, _) = self.inner.grid_and_cpml_mut();
+            region.average_fine_h_to_coarse(parent_grid);
+            region.overwrite_coarse_e_from_fine(parent_grid);
+        }
+
+        // 9. Advance the coarse clock.
         self.inner.advance_clock();
     }
 
