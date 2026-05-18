@@ -211,7 +211,7 @@
 //! correct discriminator: deterministic, immune to the trivial-root
 //! attractor, converges in O(50) iterations to `|f| < 1e-12`.
 //!
-//! [`compute_aux_step`] implements both bisection steps (3-D `k`
+//! `compute_aux_step` (private) implements both bisection steps (3-D `k`
 //! solve, then 1-D `ds_aux` solve). [`PlaneWaveSource::with_oblique_incidence`]
 //! invokes it; the new
 //! [`PlaneWaveSource::with_oblique_incidence_match`] takes an explicit
@@ -816,7 +816,7 @@ impl PlaneWaveSource {
     /// All arguments match [`Self::with_oblique_incidence`] except
     /// the trailing `dispersion_match: bool` flag. When `true`
     /// (the default for [`Self::with_oblique_incidence`]) the aux
-    /// step is computed by [`compute_aux_step`] to match the 3-D
+    /// step is computed internally to match the 3-D
     /// numerical phase velocity along `k_hat` at the source carrier
     /// frequency (Taflove §5.10.5). When `false` the aux step is
     /// hard-coded to `ds_aux = dx`, reproducing the Phase 2.fdtd.5.3
