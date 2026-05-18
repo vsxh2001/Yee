@@ -13,7 +13,8 @@ Conventions used below:
 **Shipped:**
 - Phase 0 walking skeleton (`phase-0-done` tag)
 - Phase 1.0 free-space MoM dipole, NEC-4 87+j41 Ω reference passing (`phase-1-0-mom-dipole` tag)
-- Phase 1.1.0 multilayer Greens placeholder (one-image DCIM); Phase 1.1.1 Sommerfeld extraction in flight
+- Phase 1.1.0 multilayer Greens placeholder (one-image DCIM)
+- Phase 1.1.1.2 Sommerfeld pole extraction implementation (Newton-Raphson TM_0/TE_1, pole-subtracted GPOF, Hankel reconstruction; ADR-0033, merge `a22d622`)
 - Phase 1.3.0 wave-port skeleton (matches delta-gap)
 - Phase 1.3.1.1 step 2-3 Nedelec edge-element + nodal Lagrange E_z assembly + dense eigen on `TriMesh2D`; WR-90 TE10 cutoff gate passing at 0.055% error
 - Phase 1.3.1.1 step 6 `yee.eigensolver` Python binding (PyTriMesh2D + PyNumericalCrossSection; 7 pytest cases; WR-90 cutoff sweep notebook)
@@ -29,6 +30,7 @@ Conventions used below:
 - Phase 1.examples.0/2/4 (Rust examples, BO notebook, NSGA-II + AL notebooks)
 - Phase 1.frontend.0/1/2/3 (yee-py: GP, FdtdDriver, BO, NSGA-II + AL, validation aggregator)
 - Phase 2.fdtd.0..6 (walking skeleton, CPML, NTFF, dispersive ADE, end-to-end driver, TF/SF slab, lumped RLC)
+- Phase 2.fdtd.5.3.2 cubic Lagrange aux-grid interpolation; oblique TF/SF clears >1000× DoD at 1027× / 60.2 dB (ADR-0034, merge `f878bdd`)
 - Phase 3.gp.0/1 (GP regression + ML hyperparameter fit)
 - Phase 3.bo.0/1 (Expected-Improvement BO, NSGA-II multi-objective)
 - Phase 3.al.0 (variance-acquisition active learning)
@@ -36,9 +38,7 @@ Conventions used below:
 **Pending (high priority):**
 
 *In-flight (this session):*
-- Phase 1.1.1.2 Sommerfeld pole extraction implementation (JJJJJ)
-- Phase 2.fdtd.5.3.2 oblique TF/SF face-stencil audit (KKKKK)
-- Phase 1.3.1.1 step 4 sparse arpack-rs / LOBPCG eigensolver (queued post-JJJJJ to avoid yee-mom lane conflict)
+- Phase 1.3.1.1 step 4 sparse arpack-rs / LOBPCG eigensolver
 - Phase 1.3.1.1 step 5 longitudinal block for quasi-TEM microstrip wave-ports
 
 *Design-coverage shipped, impl pending:*
@@ -47,9 +47,10 @@ Conventions used below:
 - Phase 4 FEM / eigenmode — spec + plan + ADR 0029/0032 landed; T1-T9 tracks ready to dispatch
 
 **Outstanding validation gates:**
-- mom-002 microstrip Z₀ and mom-003 2.4 GHz patch — loose tolerances until Phase 1.1.1.2 Sommerfeld lands
-- fdtd-007 Maloney-Smith oblique TF/SF — gates Phase 2.fdtd.5.3.2
+- mom-002 microstrip Z₀ tolerance tighten to Hammerstad-Jensen `[35, 75] Ω` — actionable now that Phase 1.1.1.2 Sommerfeld has shipped (ADR-0033); next priority validation track
+- mom-003 2.4 GHz patch — loose tolerance pending re-run through `GreensSpec::MicrostripSommerfeld`
 - fem-eig-001 WR-90 rectangular cavity — gates Phase 4 FEM eigenmode
+- fdtd-007 Maloney-Smith oblique TF/SF — forward gate for Phase 2.fdtd.7 subgridding
 - nl-001 10-prompt sweep — gates Phase 3.nl.0 NL design surface
 
 ---
