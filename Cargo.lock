@@ -6473,6 +6473,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "yee-fem"
+version = "0.0.0"
+dependencies = [
+ "nalgebra 0.34.2",
+ "thiserror 1.0.69",
+ "tracing",
+ "yee-core",
+ "yee-mesh",
+]
+
+[[package]]
 name = "yee-gui"
 version = "0.0.0"
 dependencies = [

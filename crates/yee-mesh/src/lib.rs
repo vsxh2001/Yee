@@ -19,9 +19,11 @@ use nalgebra::Vector3;
 
 pub mod kicad;
 mod session;
+mod tetmesh;
 
 pub use kicad::{KiCadBoard, KiCadError, LayerInfo, Segment, Zone};
 pub use session::Session;
+pub use tetmesh::TetMesh3D;
 
 /// Meshing errors.
 #[derive(Debug, thiserror::Error)]

@@ -1,0 +1,18 @@
+[package]
+name         = "yee-fem"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "Yee 3-D Finite Element Method solver. Phase 4 eigenmode beachhead (Nedelec edge elements on tetrahedra)."
+
+[features]
+default = []
+
+[dependencies]
+yee-core  = { workspace = true }
+yee-mesh  = { workspace = true }
+nalgebra  = { workspace = true }
+thiserror = { workspace = true }
+tracing   = { workspace = true }
