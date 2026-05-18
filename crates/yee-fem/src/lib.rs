@@ -37,3 +37,4 @@ pub mod element;
 pub mod solve;
 
 pub use assembly::{AssembledMatrices, FemEigenAssembly};
+pub use solve::{EigenpairList, InverseIterEigen, SparseEigen};
