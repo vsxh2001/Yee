@@ -6486,6 +6486,7 @@ dependencies = [
 name = "yee-fem"
 version = "0.0.0"
 dependencies = [
+ "faer",
  "nalgebra 0.34.2",
  "nalgebra-sparse",
  "thiserror 1.0.69",
