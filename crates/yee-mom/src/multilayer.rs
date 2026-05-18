@@ -380,7 +380,8 @@ impl MultilayerGreens {
             let sommerfeld_weight = p.k_rho / kz0_p;
             // Canonical Michalski-Mosig form:
             //   G_sw = -(j/4) · Res · (k_ρ/k_z0) · H_0^{(2)}(k_ρ ρ) · ψψ.
-            acc += -j * Complex64::new(0.25, 0.0)
+            acc += -j
+                * Complex64::new(0.25, 0.0)
                 * p.residue
                 * sommerfeld_weight
                 * hankel
