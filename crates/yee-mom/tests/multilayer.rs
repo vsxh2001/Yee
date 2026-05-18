@@ -236,6 +236,176 @@ fn dcim_n_sweep_microstrip() {
     }
 }
 
+/// ADR-0020 tripwire at the `GreensSpec` enum level: building a
+/// `PlanarMoM` with `GreensSpec::MicrostripSommerfeld { ..,
+/// n_surface_wave_poles: 0 }` must produce the *same* S-matrix as
+/// `GreensSpec::MicrostripDcim { .. }` with matching `eps_r`, `h_m`,
+/// `n_images`. The constructor-level tripwire lives in
+/// `multilayer::tests::sommerfeld_n_sw_poles_zero_matches_phase_1_1_1_0`
+/// — this one closes the loop on the *public* enum dispatch path so a
+/// later refactor of the `build` match arm cannot silently regress.
+///
+/// Uses the short FR-4 strip from `dcim_n_sweep_microstrip` minus the
+/// frequency loop. The 1e-12 tolerance is the same element-wise budget
+/// the constructor tripwire enforces; anything tighter is below LU
+/// residual noise on the ~120-edge mesh.
+#[test]
+fn greens_spec_sommerfeld_zero_poles_matches_dcim() {
+    use nalgebra::Vector3;
+    use yee_core::{FreqRange, Solver};
+    use yee_mom::{GreensSpec, PlanarMoM};
+
+    let length_m = 30.0e-3;
+    let width_m = 2.94e-3;
+    let n_length = 10usize;
+    let n_width = 2usize;
+    let eps_r = 4.4;
+    let h = 1.6e-3;
+    let n_images = 5usize;
+    let f_hz = 1.0e9;
+
+    let nx = n_length + 1;
+    let ny = n_width + 1;
+    let mut vertices: Vec<Vector3<f64>> = Vec::new();
+    let dx = length_m / (n_length as f64);
+    let dy = width_m / (n_width as f64);
+    let y0 = -width_m / 2.0;
+    for i in 0..nx {
+        let x = (i as f64) * dx;
+        for j in 0..ny {
+            let y = y0 + (j as f64) * dy;
+            vertices.push(Vector3::new(x, y, 0.0));
+        }
+    }
+    let mut triangles: Vec<[u32; 3]> = Vec::new();
+    let mut tags: Vec<u32> = Vec::new();
+    for i in 0..n_length {
+        for j in 0..n_width {
+            let a = (i * ny + j) as u32;
+            let b = ((i + 1) * ny + j) as u32;
+            let c = ((i + 1) * ny + (j + 1)) as u32;
+            let d = (i * ny + (j + 1)) as u32;
+            triangles.push([a, b, c]);
+            triangles.push([a, c, d]);
+            // Port edge convention: tag=1 / tag=2 across the first column
+            // boundary creates a delta-gap port (basis::port_basis_indices
+            // expects DIFFERENT non-zero tags on adjacent triangles).
+            let tag = if i == 0 {
+                1
+            } else if i == 1 {
+                2
+            } else {
+                0
+            };
+            tags.push(tag);
+            tags.push(tag);
+        }
+    }
+    let mesh = yee_mesh::TriMesh::new(vertices, triangles, tags).unwrap();
+    let freq = FreqRange::new(f_hz, f_hz + 1.0, 1).unwrap();
+
+    let dcim = PlanarMoM::default()
+        .with_greens(GreensSpec::microstrip_dcim(eps_r, h, n_images))
+        .run(&mesh, freq)
+        .expect("dcim solve");
+    let somm0 = PlanarMoM::default()
+        .with_greens(GreensSpec::microstrip_sommerfeld(eps_r, h, n_images, 0))
+        .run(&mesh, freq)
+        .expect("sommerfeld n_sw=0 solve");
+
+    let s_dcim = dcim.data[0][0];
+    let s_somm = somm0.data[0][0];
+    let diff = (s_dcim - s_somm).norm();
+    assert!(
+        diff <= 1.0e-12,
+        "GreensSpec::MicrostripSommerfeld {{ n_surface_wave_poles: 0 }} \
+         must reduce to MicrostripDcim bit-for-bit (ADR-0020 tripwire): \
+         |ΔS11| = {diff:.3e}, S_dcim = {s_dcim}, S_somm0 = {s_somm}"
+    );
+}
+
+/// Sanity check that the Sommerfeld pole-subtraction is actually
+/// exercised: with `n_surface_wave_poles = 1` on FR-4 / 1.6 mm / 1 GHz
+/// the TM₀ pole is found and the analytic Hankel residue is added back
+/// to the kernel, so the S-matrix must differ from the
+/// `n_surface_wave_poles = 0` (pure DCIM) path by a non-trivial margin.
+/// Guards against a regression that silently routes the `n_sw > 0` arm
+/// through the unsubtracted code path.
+#[test]
+fn greens_spec_sommerfeld_one_pole_differs_from_zero() {
+    use nalgebra::Vector3;
+    use yee_core::{FreqRange, Solver};
+    use yee_mom::{GreensSpec, PlanarMoM};
+
+    let length_m = 30.0e-3;
+    let width_m = 2.94e-3;
+    let n_length = 10usize;
+    let n_width = 2usize;
+    let eps_r = 4.4;
+    let h = 1.6e-3;
+    let n_images = 5usize;
+    let f_hz = 1.0e9;
+
+    let nx = n_length + 1;
+    let ny = n_width + 1;
+    let mut vertices: Vec<Vector3<f64>> = Vec::new();
+    let dx = length_m / (n_length as f64);
+    let dy = width_m / (n_width as f64);
+    let y0 = -width_m / 2.0;
+    for i in 0..nx {
+        let x = (i as f64) * dx;
+        for j in 0..ny {
+            let y = y0 + (j as f64) * dy;
+            vertices.push(Vector3::new(x, y, 0.0));
+        }
+    }
+    let mut triangles: Vec<[u32; 3]> = Vec::new();
+    let mut tags: Vec<u32> = Vec::new();
+    for i in 0..n_length {
+        for j in 0..n_width {
+            let a = (i * ny + j) as u32;
+            let b = ((i + 1) * ny + j) as u32;
+            let c = ((i + 1) * ny + (j + 1)) as u32;
+            let d = (i * ny + (j + 1)) as u32;
+            triangles.push([a, b, c]);
+            triangles.push([a, c, d]);
+            // Port edge convention: tag=1 / tag=2 across the first column
+            // boundary creates a delta-gap port (basis::port_basis_indices
+            // expects DIFFERENT non-zero tags on adjacent triangles).
+            let tag = if i == 0 {
+                1
+            } else if i == 1 {
+                2
+            } else {
+                0
+            };
+            tags.push(tag);
+            tags.push(tag);
+        }
+    }
+    let mesh = yee_mesh::TriMesh::new(vertices, triangles, tags).unwrap();
+    let freq = FreqRange::new(f_hz, f_hz + 1.0, 1).unwrap();
+
+    let somm0 = PlanarMoM::default()
+        .with_greens(GreensSpec::microstrip_sommerfeld(eps_r, h, n_images, 0))
+        .run(&mesh, freq)
+        .expect("sommerfeld n_sw=0 solve");
+    let somm1 = PlanarMoM::default()
+        .with_greens(GreensSpec::microstrip_sommerfeld(eps_r, h, n_images, 1))
+        .run(&mesh, freq)
+        .expect("sommerfeld n_sw=1 solve");
+
+    let s0 = somm0.data[0][0];
+    let s1 = somm1.data[0][0];
+    let diff = (s0 - s1).norm();
+    assert!(
+        diff > 1.0e-6,
+        "n_surface_wave_poles=1 must differ from n_surface_wave_poles=0 \
+         on FR-4 / 1 GHz (TM₀ pole subtraction is non-trivial): \
+         |ΔS11| = {diff:.3e}, S_n0 = {s0}, S_n1 = {s1}"
+    );
+}
+
 /// Spec-mandated 10% bound: build the substrate stack at the exact
 /// parameters called out in the Phase 1.1 plan
 /// (`MultilayerGreens::new_microstrip(150 MHz, 1.0, 100 mm)`), run the

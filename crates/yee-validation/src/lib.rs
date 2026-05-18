@@ -13,10 +13,10 @@
 //! 5%/10% tolerance on Re/Im).
 //!
 //! `mom-002` (50 Ω microstrip Z₀ on FR-4) is wired up against the
-//! Phase 1.1.1.2 Sommerfeld pole-subtracted DCIM kernel
-//! ([`yee_mom::__internal::MultilayerGreens::new_microstrip_sommerfeld`]
-//! with `n_images = 5`, `n_surface_wave_poles = 1`) on the Phase
-//! 1.1.1.1 refined strip mesh: `30 × 16` cells with Chebyshev
+//! Phase 1.1.1.2 Sommerfeld pole-subtracted DCIM kernel via the
+//! public [`yee_mom::GreensSpec::MicrostripSommerfeld`] enum variant
+//! (Track DDDDDD; `n_images = 5`, `n_surface_wave_poles = 1`) on the
+//! Phase 1.1.1.1 refined strip mesh: `30 × 16` cells with Chebyshev
 //! (edge-clustered) width-direction spacing
 //! ([`StripSpacing::EdgeClustered`]) to resolve the `1/√d` RWG
 //! current singularity at the strip edges.
@@ -541,9 +541,10 @@ const MOM_002_Z_MIN: f64 = 1.0;
 /// and the resistive part converged to `Re(Z) ≈ −67 Ω` (consistent
 /// with a low-loss line driven well below `λ/4` resonance). The
 /// remaining `Im(Z) ≈ −2.2 kΩ` plateau was the surface-wave-pole
-/// signature; Track CCCCCC (Phase 1.1.1.2 retest) routes mom-002
-/// through [`yee_mom::__internal::MultilayerGreens::new_microstrip_sommerfeld`]
-/// with `n_surface_wave_poles = 1` (TM₀ only — FR-4 at 1 GHz has no
+/// signature; Track CCCCCC (Phase 1.1.1.2 retest) and Track DDDDDD
+/// (public-enum wiring) route mom-002 through
+/// [`yee_mom::GreensSpec::MicrostripSommerfeld`] with
+/// `n_surface_wave_poles = 1` (TM₀ only — FR-4 at 1 GHz has no
 /// second surface-wave mode below ~27 GHz). The pole correction
 /// moves `Z_in` by only ~10 Ω (78 Ω resistive, 11 Ω reactive), not
 /// the ~2 kΩ that would be required to land in the analytic
@@ -600,9 +601,9 @@ const MOM_002_PLOT_N_POINTS: usize = 21;
 
 /// Substrate relative permittivity for the FR-4 microstrip case
 /// (Hammerstad-Jensen reference geometry). Passed into the
-/// Phase 1.1.1.2 Sommerfeld kernel
-/// ([`yee_mom::__internal::MultilayerGreens::new_microstrip_sommerfeld`])
-/// so mom-002 exercises pole-subtracted multi-image DCIM with
+/// Phase 1.1.1.2 Sommerfeld kernel via
+/// [`yee_mom::GreensSpec::MicrostripSommerfeld`] so mom-002 exercises
+/// pole-subtracted multi-image DCIM with
 /// `n_images = 5` and the dominant TM₀ surface-wave pole extracted.
 /// The pole subtraction did not close the analytic gap — see the
 /// [`MOM_002_Z_IN_MEASURED_OHM`] constant for the empirical landing.
@@ -746,12 +747,11 @@ fn mom_002_strip_mesh(
 /// Builds a rectangular strip mesh (length 30 mm, width 2.94 mm, the
 /// Hammerstad-Jensen 50 Ω geometry on FR-4 `h = 1.6 mm, ε_r = 4.4`),
 /// solves the MPIE delta-gap problem at 1 GHz with the Phase 1.1.1.2
-/// Sommerfeld kernel
-/// ([`yee_mom::__internal::MultilayerGreens::new_microstrip_sommerfeld`])
+/// Sommerfeld kernel via [`yee_mom::GreensSpec::MicrostripSommerfeld`]
 /// — `n_images = 5` complex-image DCIM with `n_surface_wave_poles = 1`
-/// (TM₀, the only mode FR-4 at 1 GHz supports) — and extracts
-/// `Z_in = V_port / I_port` directly. Passes iff
-/// `MOM_002_Z_MIN ≤ |Z_in| ≤ MOM_002_Z_MAX`.
+/// (TM₀, the only mode FR-4 at 1 GHz supports) — and converts the
+/// returned `S11` to `Z_in` via `Z₀ · (1 + S11) / (1 − S11)`. Passes
+/// iff `MOM_002_Z_MIN ≤ |Z_in| ≤ MOM_002_Z_MAX`.
 ///
 /// Track CCCCCC retest finding (Phase 1.1.1.2): the empirical `|Z_in|`
 /// (`≈ 2232 Ω`, see [`MOM_002_Z_IN_MEASURED_OHM`]) is still ~30× above
@@ -769,7 +769,8 @@ fn mom_002_strip_mesh(
 /// `[0.5, 1.5] GHz`.
 fn run_mom_002() -> CaseResult {
     use num_complex::Complex64;
-    use yee_mom::__internal::{MultilayerGreens, z_in_with_greens};
+    use yee_core::{FreqRange, Solver};
+    use yee_mom::{GreensSpec, PlanarMoM};
 
     let t0 = Instant::now();
     let result: Result<Complex64, Error> = (|| -> Result<Complex64, Error> {
@@ -783,25 +784,29 @@ fn run_mom_002() -> CaseResult {
             MOM_002_N_WIDTH,
             StripSpacing::EdgeClustered,
         );
-        // Phase 1.1.1.2: route through MultilayerGreens with the
-        // Sommerfeld pole-subtracted N-image DCIM. The TE/TM split is
-        // resolved (separate image trains per channel) and the dominant
-        // TM₀ surface-wave residue is added analytically via
-        // `(j/4) · R_p · H_0^{(2)}(k_p · ρ)` (per ADR-0033). The
-        // `__internal::MultilayerGreens` re-export is used because
-        // `GreensSpec` does not yet expose a `MicrostripSommerfeld`
-        // variant — see the Track CCCCCC finding in the commit body.
-        let green = MultilayerGreens::new_microstrip_sommerfeld(
+        // Phase 1.1.1.2: route through the public `GreensSpec` enum's
+        // Sommerfeld pole-subtracted N-image DCIM variant (Track DDDDDD;
+        // ADR-0033). The TE/TM split is resolved (separate image trains
+        // per channel) and the dominant TM₀ surface-wave residue is
+        // added analytically via `(j/4) · R_p · H_0^{(2)}(k_p · ρ)`.
+        // Replaces the `__internal::z_in_with_greens` workaround from
+        // Track CCCCCC; numerics are unchanged (the workaround was the
+        // same kernel constructed under a different code path).
+        let freq = FreqRange::new(MOM_002_F_HZ, MOM_002_F_HZ + 1.0, 1)
+            .map_err(|e| Error::Solver(format!("FreqRange::new (mom-002): {e}")))?;
+        let solver = PlanarMoM::default().with_greens(GreensSpec::microstrip_sommerfeld(
             MOM_002_SUBSTRATE_EPS_R,
             MOM_002_SUBSTRATE_H_M,
-            MOM_002_F_HZ,
             MOM_002_DCIM_N_IMAGES,
             MOM_002_SOMMERFELD_N_POLES,
-        );
-        // Delta-gap port_tag 1: matches the column-0 cell-tag in
-        // mom_002_strip_mesh_with_spacing.
-        let z_in: Complex64 = z_in_with_greens(&mesh, 1, &green)
-            .map_err(|e| Error::Solver(format!("z_in_with_greens: {e}")))?;
+        ));
+        let s = solver
+            .run(&mesh, freq)
+            .map_err(|e| Error::Solver(format!("PlanarMoM::run (mom-002): {e}")))?;
+        let s11 = s.data[0][0];
+        let z0 = Complex64::new(MOM_002_Z0_REF, 0.0);
+        let one = Complex64::new(1.0, 0.0);
+        let z_in: Complex64 = z0 * (one + s11) / (one - s11);
         Ok(z_in)
     })();
 
@@ -874,21 +879,21 @@ fn run_mom_002() -> CaseResult {
 
 /// Generate the S₁₁ dB + Smith chart PNGs for mom-002 under
 /// `validation/results/` (CWD-relative). Mirrors the mom-001 plot
-/// path; differences are (a) the strip mesh instead of the cylinder,
-/// (b) the 0.5..1.5 GHz sweep instead of the 100..200 MHz one, and
-/// (c) the explicit per-frequency loop through
-/// [`yee_mom::__internal::z_in_with_greens`] with a fresh
-/// `MultilayerGreens::new_microstrip_sommerfeld` kernel at each point
-/// (the [`yee_mom::GreensSpec`] enum does not yet expose the Sommerfeld
-/// variant, so the `PlanarMoM::run` sweep wrapper cannot be used).
+/// path; differences are (a) the strip mesh instead of the cylinder
+/// and (b) the 0.5..1.5 GHz sweep instead of the 100..200 MHz one.
+/// Track DDDDDD switched this sweep from the
+/// `__internal::z_in_with_greens` workaround to the public
+/// [`yee_mom::GreensSpec::MicrostripSommerfeld`] enum + `PlanarMoM::run`
+/// — the Sommerfeld kernel is now rebuilt per frequency via the
+/// stable `GreensSpec::build` dispatch path.
 ///
 /// Returns the list of paths written on success, or an [`Error`] if
 /// the solver or the plotter failed. The caller folds either into the
 /// `CaseResult` notes; plot failures do not flip a Passed status to
 /// Failed.
 fn generate_mom_002_plots() -> Result<Vec<PathBuf>, Error> {
-    use yee_core::FreqRange;
-    use yee_mom::__internal::{MultilayerGreens, z_in_with_greens};
+    use yee_core::{FreqRange, Solver};
+    use yee_mom::{GreensSpec, PlanarMoM};
     use yee_plotters::{PlotConfig, PlotFormat, plot_s11_db, plot_smith_chart};
 
     // Same edge-clustered builder the headline gate uses, so the PNGs
@@ -907,23 +912,22 @@ fn generate_mom_002_plots() -> Result<Vec<PathBuf>, Error> {
     )
     .map_err(|e| Error::Solver(format!("FreqRange::new (plot sweep): {e}")))?;
 
-    let freq_hz: Vec<f64> = freq.iter().collect();
-    let z0 = Complex64::new(MOM_002_Z0_REF, 0.0);
-    let mut s11: Vec<Complex64> = Vec::with_capacity(freq_hz.len());
-    for &f in &freq_hz {
-        // Rebuild the Sommerfeld kernel per frequency (k₀ is baked in).
-        let green = MultilayerGreens::new_microstrip_sommerfeld(
-            MOM_002_SUBSTRATE_EPS_R,
-            MOM_002_SUBSTRATE_H_M,
-            f,
-            MOM_002_DCIM_N_IMAGES,
-            MOM_002_SOMMERFELD_N_POLES,
-        );
-        let z_in = z_in_with_greens(&mesh, 1, &green)
-            .map_err(|e| Error::Solver(format!("z_in_with_greens (plot sweep): {e}")))?;
-        // S11 = (Z_in − Z0) / (Z_in + Z0).
-        s11.push((z_in - z0) / (z_in + z0));
-    }
+    // Track DDDDDD: `PlanarMoM::run` sweeps the entire `FreqRange` in
+    // one shot, rebuilding the Sommerfeld kernel per frequency via
+    // `GreensSpec::build` (the spec is frequency-agnostic by design).
+    // Replaces the previous per-frequency loop through
+    // `__internal::z_in_with_greens`.
+    let solver = PlanarMoM::default().with_greens(GreensSpec::microstrip_sommerfeld(
+        MOM_002_SUBSTRATE_EPS_R,
+        MOM_002_SUBSTRATE_H_M,
+        MOM_002_DCIM_N_IMAGES,
+        MOM_002_SOMMERFELD_N_POLES,
+    ));
+    let sweep = solver
+        .run(&mesh, freq)
+        .map_err(|e| Error::Solver(format!("PlanarMoM::run (plot sweep): {e}")))?;
+    let freq_hz: Vec<f64> = sweep.freq_hz.clone();
+    let s11: Vec<Complex64> = sweep.data.iter().map(|row| row[0]).collect();
 
     let dir = validation_results_dir();
     std::fs::create_dir_all(&dir).map_err(|e| Error::Io(format!("create_dir_all: {e}")))?;
@@ -1106,7 +1110,8 @@ mod tests {
     #[test]
     fn mom_002_headline_gate_passes() {
         use num_complex::Complex64;
-        use yee_mom::__internal::{MultilayerGreens, z_in_with_greens};
+        use yee_core::{FreqRange, Solver};
+        use yee_mom::{GreensSpec, PlanarMoM};
 
         let mesh = mom_002_strip_mesh_with_spacing(
             MOM_002_STRIP_LENGTH_M,
@@ -1115,14 +1120,23 @@ mod tests {
             MOM_002_N_WIDTH,
             StripSpacing::EdgeClustered,
         );
-        let green = MultilayerGreens::new_microstrip_sommerfeld(
+        // Track DDDDDD: drive the headline gate through the public
+        // `GreensSpec::MicrostripSommerfeld` enum + `PlanarMoM::run`
+        // rather than the `__internal::z_in_with_greens` workaround.
+        // The kernel construction is identical so the empirical
+        // `MOM_002_Z_IN_MEASURED_OHM` tripwire still applies.
+        let freq = FreqRange::new(MOM_002_F_HZ, MOM_002_F_HZ + 1.0, 1).expect("FreqRange::new");
+        let solver = PlanarMoM::default().with_greens(GreensSpec::microstrip_sommerfeld(
             MOM_002_SUBSTRATE_EPS_R,
             MOM_002_SUBSTRATE_H_M,
-            MOM_002_F_HZ,
             MOM_002_DCIM_N_IMAGES,
             MOM_002_SOMMERFELD_N_POLES,
-        );
-        let z_in: Complex64 = z_in_with_greens(&mesh, 1, &green).expect("solve");
+        ));
+        let s = solver.run(&mesh, freq).expect("solve");
+        let s11 = s.data[0][0];
+        let z0 = Complex64::new(MOM_002_Z0_REF, 0.0);
+        let one = Complex64::new(1.0, 0.0);
+        let z_in: Complex64 = z0 * (one + s11) / (one - s11);
         let z_mag = z_in.norm();
         assert!(
             (MOM_002_Z_MIN..=MOM_002_Z_MAX).contains(&z_mag),
