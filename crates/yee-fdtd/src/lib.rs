@@ -46,6 +46,7 @@ pub mod lumped;
 pub mod material;
 pub mod ntff;
 pub mod sources;
+pub mod subgrid;
 pub mod update;
 
 pub use cpml::{CpmlParams, CpmlState};
@@ -56,6 +57,7 @@ pub use lumped::{LumpedRlcPort, SourceWaveform};
 pub use material::{Material, MaterialMap};
 pub use ntff::{NtffParams, NtffState};
 pub use sources::{PlaneWaveDirection, PlaneWaveSource};
+pub use subgrid::{CoarseBox, SubgridContext, SubgridRegion, SubgriddedSolver};
 
 /// FDTD-layer errors.
 #[derive(Debug, thiserror::Error)]
