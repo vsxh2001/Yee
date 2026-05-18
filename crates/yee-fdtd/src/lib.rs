@@ -57,7 +57,10 @@ pub use lumped::{LumpedRlcPort, SourceWaveform};
 pub use material::{Material, MaterialMap};
 pub use ntff::{NtffParams, NtffState};
 pub use sources::{PlaneWaveDirection, PlaneWaveSource};
-pub use subgrid::{CoarseBox, SubgridContext, SubgridRegion, SubgriddedSolver};
+pub use subgrid::{
+    BerengerHuygensFace, CoarseBox, SubgridContext, SubgridRegion, SubgriddedSolver,
+    assign_edge_to_face,
+};
 
 /// FDTD-layer errors.
 #[derive(Debug, thiserror::Error)]
