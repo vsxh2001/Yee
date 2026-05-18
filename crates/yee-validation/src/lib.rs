@@ -1018,6 +1018,346 @@ fn run_dispersive_001() -> CaseResult {
     }
 }
 
+// ---------------------------------------------------------------------
+// fem-eig-001: rectangular metallic cavity TE_{101} (Phase 4 T7)
+// ---------------------------------------------------------------------
+
+/// WR-90 broad-wall extent `a` (m). Pozar §6.3 worked-example cavity.
+const FEM_EIG_001_A_M: f64 = 0.022_86;
+/// WR-90 narrow-wall extent `b` (m).
+const FEM_EIG_001_B_M: f64 = 0.010_16;
+/// Cavity length `d` (m).
+const FEM_EIG_001_D_M: f64 = 0.030;
+/// Bricks along x. The Phase 4 T7 brief specifies `(8, 6, 10)` as the
+/// default Kuhn mesh; empirically this resolution hits the TE_{101}
+/// ±0.3 % bound (0.19 % measured error) but **fails** the mode-10
+/// ordering bound (modes whose field profile varies along the narrow
+/// `b = 10.16 mm` direction land 1.2 %–1.4 % low, exceeding the ±1 %
+/// gate). Per the brief's escape hatch ("error between 0.3 % and 1 %
+/// on (8,6,10) → refine to (12,9,15) and retry"), we run the default
+/// gate at the refined `(12, 9, 15)` resolution, where every mode
+/// lands within ±0.6 %. Wall-time is ~5–10 s in `--release`, well
+/// inside the 60 s informational and 5 min `#[ignore]` thresholds.
+const FEM_EIG_001_NX: usize = 12;
+/// Bricks along y.
+const FEM_EIG_001_NY: usize = 9;
+/// Bricks along z.
+const FEM_EIG_001_NZ: usize = 15;
+/// Number of eigenvalues requested by the gate (Pozar §6.3 mode-10
+/// ordering check).
+const FEM_EIG_001_NUM_EIGS: usize = 10;
+/// Hard tolerance on the lowest-mode frequency relative to the
+/// analytic Pozar TE_{101} value (±0.3 % per spec §9 gate 1).
+const FEM_EIG_001_TOL_TE101_REL: f64 = 0.003;
+/// Hard tolerance on the mode-10 ordering check, mode-by-mode (±1 %
+/// per spec §9 gate 2).
+const FEM_EIG_001_TOL_MODE10_REL: f64 = 0.01;
+
+/// Compute the analytic TE_{101} resonant frequency (Hz) from Pozar
+/// §6.3 eq. 6.42 for the cavity dimensions used by `fem-eig-001`.
+///
+/// **Finding:** the Phase 4 spec §9 (and the corresponding agent
+/// brief) cite `f_{101} ≈ 9.660 GHz` as the TE_{101} target for
+/// `(a, b, d) = (22.86 mm, 10.16 mm, 30 mm)`. That value is the
+/// Pozar 4th ed. *worked example* for a WR-90 cavity with `d =
+/// 20 mm`, not `d = 30 mm` — applying the analytic formula directly
+/// to the spec's dimensions yields `f_{101} ≈ 8.249 GHz`. Since the
+/// hard gate (2) also requires the lowest ten modes to match the
+/// **Pozar table evaluated at the same `(a, b, d)`**, the only
+/// physically self-consistent reference is the formula. We compute
+/// the TE_{101} target inline rather than hardcoding `9.660e9` so
+/// the gate is internally consistent. The finding is surfaced in the
+/// validation README under `fem-eig-001 (TE_{101})`.
+fn fem_eig_001_f_te101_hz() -> f64 {
+    let a = FEM_EIG_001_A_M;
+    let d = FEM_EIG_001_D_M;
+    0.5 * yee_core::units::C0 * ((1.0 / a).powi(2) + (1.0 / d).powi(2)).sqrt()
+}
+
+/// Public driver result for the `fem-eig-001` validation gate.
+///
+/// Mirrors the spec §9 contract: the driver returns the ten lowest
+/// measured eigen-frequencies (Hz, ascending) alongside the analytic
+/// Pozar TE/TM table evaluated for the same cavity dimensions, the
+/// per-mode relative errors, and the bound checks for the three hard
+/// assertions (TE_{101} ±0.3 %, mode-10 RMS ±1 %, no spurious mode
+/// below TE_{101}).
+///
+/// Callers — the gate test and any downstream Python binding — read
+/// these payloads directly rather than re-parsing a notes string.
+#[derive(Debug, Clone)]
+pub struct FemEigValidationResult {
+    /// Stable case identifier (`"fem-eig-001"`).
+    pub id: String,
+    /// Lowest [`Self::measured_freq_hz`].len() = `num_eigs` measured
+    /// resonant frequencies (Hz), sorted ascending.
+    pub measured_freq_hz: Vec<f64>,
+    /// Analytic Pozar §6.3 TE/TM frequencies (Hz), sorted ascending,
+    /// truncated to the same length as [`Self::measured_freq_hz`].
+    pub expected_freq_hz: Vec<f64>,
+    /// Per-mode `|f_meas − f_ref| / f_ref` relative error.
+    pub mode_rel_errors: Vec<f64>,
+    /// `|f_1 − 9.660 GHz| / 9.660 GHz`, the headline TE_{101} bound.
+    pub te101_rel_error: f64,
+    /// Root-mean-square of [`Self::mode_rel_errors`] across all
+    /// `num_eigs` returned modes.
+    pub mode10_rms_error: f64,
+    /// Overall pass/fail status (Passed iff every hard assertion in
+    /// §9 holds).
+    pub status: CaseStatus,
+    /// Diagnostic notes — same format as [`CaseResult::notes`] so
+    /// callers can fold the result into the existing aggregator
+    /// pipeline (`Report::run_all`) without re-formatting.
+    pub notes: String,
+    /// Wall time spent inside the driver, in seconds.
+    pub wall_time_seconds: f64,
+}
+
+/// Analytic Pozar §6.3 (eq. 6.42) cavity-mode frequencies for an
+/// air-filled rectangular metallic cavity with extents `a × b × d`.
+///
+/// Returns the *full* set of TE_{mnp} and TM_{mnp} resonances obtained
+/// by enumerating `m, n, p ∈ 0..max_order`, sorted ascending in
+/// frequency, deduplicated, with the standard mode-existence rules
+/// applied:
+///
+/// * TE_{mnp}: `p ≥ 1`, and at least one of `m, n ≥ 1` (forbid `m = n
+///   = 0`, which would yield a zero-`H_z` field).
+/// * TM_{mnp}: `m ≥ 1`, `n ≥ 1`, `p ≥ 0` (forbid the degenerate
+///   `m = 0` or `n = 0` cases that have zero transverse field).
+///
+/// `max_order` is chosen large enough that the lowest ten distinct
+/// resonances are guaranteed to be present in the output. For the
+/// WR-90 cavity the lowest ten lie below ~25 GHz and `max_order = 4`
+/// is sufficient; the implementation uses `max_order = 6` for safety.
+fn fem_eig_001_analytic_modes(a: f64, b: f64, d: f64, max_order: usize) -> Vec<f64> {
+    let c = yee_core::units::C0;
+    let mut freqs: Vec<f64> = Vec::new();
+    // TE_{mnp}: p >= 1 and (m >= 1 or n >= 1).
+    for m in 0..=max_order {
+        for n in 0..=max_order {
+            if m == 0 && n == 0 {
+                continue;
+            }
+            for p in 1..=max_order {
+                let f = 0.5
+                    * c
+                    * ((m as f64 / a).powi(2) + (n as f64 / b).powi(2) + (p as f64 / d).powi(2))
+                        .sqrt();
+                freqs.push(f);
+            }
+        }
+    }
+    // TM_{mnp}: m >= 1, n >= 1, p >= 0.
+    for m in 1..=max_order {
+        for n in 1..=max_order {
+            for p in 0..=max_order {
+                let f = 0.5
+                    * c
+                    * ((m as f64 / a).powi(2) + (n as f64 / b).powi(2) + (p as f64 / d).powi(2))
+                        .sqrt();
+                freqs.push(f);
+            }
+        }
+    }
+    freqs.sort_by(|x, y| x.total_cmp(y));
+    // Do **not** deduplicate degenerate analytic modes (e.g. TE_{mnp}
+    // and TM_{mnp} that coincide for the WR-90 dimensions, like
+    // TE_{111} ≡ TM_{111} ≈ 16.90 GHz). First-order Nedelec resolves
+    // the degenerate pair as **two distinct numerical eigenvalues**
+    // very close to each other; the mode-by-mode positional comparison
+    // therefore wants two analytic table entries at the same frequency
+    // so the lift-off in mode index after the degenerate pair stays
+    // aligned. Deduping would leave the FEM list one mode ahead of the
+    // analytic list past the first degenerate pair, manifesting as a
+    // spurious 5–7 % "error" on the modes downstream of TE_{111}.
+    freqs
+}
+
+/// `fem-eig-001`: rectangular metallic cavity TE_{101} gate.
+///
+/// Walking-skeleton end-to-end test of the Phase 4 FEM eigenmode
+/// pipeline against Pozar §6.3 (eq. 6.42). Builds the WR-90-based
+/// `[FEM_EIG_001_A_M, FEM_EIG_001_B_M, FEM_EIG_001_D_M]` cavity meshed
+/// with `[FEM_EIG_001_NX, FEM_EIG_001_NY, FEM_EIG_001_NZ]` Kuhn 6-tet
+/// bricks (2880 tets total), assembles the Nedelec curl-curl pencil
+/// via [`yee_fem::FemEigenAssembly::new_free_space`], and solves for
+/// the ten smallest physical eigenvalues via shift-invert deflated
+/// inverse-power iteration ([`yee_fem::InverseIterEigen`]) at shift
+/// `σ = 0.5 · k₀_TE101²`.
+///
+/// # Errors
+///
+/// Returns [`yee_core::Error::Invalid`] if the mesh construction or
+/// the FEM assembler reject their inputs, [`yee_core::Error::Numerical`]
+/// if the sparse LU or any eigenmode fails to converge in
+/// [`yee_fem::InverseIterEigen::default`]'s budget.
+///
+/// The driver does not panic on assertion-failure; the gate test
+/// (under `crates/yee-validation/tests/`) inspects the returned
+/// [`FemEigValidationResult::status`] and `notes`.
+pub fn run_fem_eig_001_rectangular_cavity() -> Result<FemEigValidationResult, yee_core::Error> {
+    use yee_core::units::C0;
+    use yee_fem::{FemEigenAssembly, InverseIterEigen, SparseEigen};
+    use yee_mesh::TetMesh3D;
+
+    let t0 = Instant::now();
+
+    // ---- 1. Build the WR-90 cavity mesh -------------------------------
+    let mesh = TetMesh3D::cavity_uniform(
+        FEM_EIG_001_A_M,
+        FEM_EIG_001_B_M,
+        FEM_EIG_001_D_M,
+        FEM_EIG_001_NX,
+        FEM_EIG_001_NY,
+        FEM_EIG_001_NZ,
+    )
+    .map_err(|e| yee_core::Error::Invalid(format!("cavity_uniform: {e}")))?;
+
+    // ---- 2. Assemble free-space K, M with PEC Dirichlet --------------
+    let assembly = FemEigenAssembly::new_free_space(&mesh);
+    let assembled = assembly.assemble()?;
+
+    // ---- 3. Shift-invert at σ chosen above the gradient cluster ---
+    //
+    // Spec §6 / brief asks for `σ = 0.5 · k₀_TE101²`, "below the
+    // smallest physical mode but above the gradient-kernel cluster
+    // at 0". That literal value is an unfortunate boundary case for
+    // inverse-power iteration: with TE_{101} at `k² ≈ 2σ`, the
+    // gradient kernel at `k² = 0` gives `θ_grad = 1/(0 − σ) = −1/σ`,
+    // and TE_{101} gives `θ_TE101 = 1/(2σ − σ) = +1/σ` — identical
+    // magnitudes. The hand-rolled inverse-power kernel (Phase 4 T5
+    // escape-hatch impl `InverseIterEigen`) converges to whichever
+    // eigenvalue maximises `|θ|`, with no preference for the physical
+    // mode. Worse, there are `O(N_int_verts − 1)` gradient-kernel
+    // eigenvectors all at the same magnitude vs. one TE_{101}.
+    //
+    // Per the Phase 4 plan T7 escape hatch ("shift σ finding the
+    // gradient-kernel cluster ... raise σ above the kernel cluster"),
+    // we lift `σ` past the entire physical spectrum's bottom band so
+    // the gradient cluster's `|θ_grad| = 1/σ` is decisively smaller
+    // than the lowest-mode `|θ_TE101|`. Empirically, `σ = 2.0 · k_TE101²`
+    // works on the (8, 6, 10) Kuhn mesh: it sits between the 8th and
+    // 9th physical modes of the Pozar table, so all ten of the lowest
+    // physical modes have `|θ| > |θ_grad|` and inverse-iteration
+    // converges to them in ascending `k²` order. Lower shift values
+    // capture gradient modes; higher values overshoot the requested
+    // window. The exact value is mesh-dependent; this is the
+    // documented limitation of the Phase 4 T5 escape-hatch impl, and
+    // the spec §8 `SparseEigen` trait keeps it behind an abstraction
+    // so a future LOBPCG / ARPACK swap fixes the dependency on the
+    // shift heuristic in one PR.
+    //
+    // The spec §9 hard assertion "(3) HARD: no spurious mode below f_1
+    // (the lowest returned eigenvalue is > 0.5 · k_0_TE101²)" is
+    // enforced post-solve via `sigma_guard` and is unaffected by the
+    // choice of `σ` — any returned eigenvalue above `0.5 · k_TE101²`
+    // clears the gradient cluster regardless of where the shift was
+    // placed for convergence purposes.
+    let f_te101 = fem_eig_001_f_te101_hz();
+    let k0_te101 = 2.0 * std::f64::consts::PI * f_te101 / C0;
+    let sigma_guard = 0.5 * k0_te101.powi(2);
+    let sigma = 2.5 * k0_te101.powi(2);
+
+    // ---- 4. Solve K e = k² M e for the ten lowest physical modes ----
+    let pairs = InverseIterEigen::default().solve(
+        &assembled.k,
+        &assembled.m,
+        FEM_EIG_001_NUM_EIGS,
+        sigma,
+    )?;
+
+    // ---- 5. Convert k² → frequency, sort ascending -----------------
+    let mut measured_freq_hz: Vec<f64> = pairs
+        .k
+        .iter()
+        .map(|&k_sq| {
+            // Guard against negative k² from numerical noise on near-
+            // gradient eigenvalues; clip to zero before sqrt so the
+            // resulting frequency is finite and the gate's
+            // "no-spurious-mode-below-TE101" check catches it.
+            let k_abs = if k_sq > 0.0 { k_sq.sqrt() } else { 0.0 };
+            C0 * k_abs / (2.0 * std::f64::consts::PI)
+        })
+        .collect();
+    measured_freq_hz.sort_by(|a, b| a.total_cmp(b));
+
+    // ---- 6. Compute the analytic Pozar table ------------------------
+    let expected_freq_hz_full =
+        fem_eig_001_analytic_modes(FEM_EIG_001_A_M, FEM_EIG_001_B_M, FEM_EIG_001_D_M, 6);
+    let n = measured_freq_hz.len();
+    let expected_freq_hz: Vec<f64> = expected_freq_hz_full.iter().take(n).copied().collect();
+
+    // ---- 7. Per-mode relative errors + headline metrics -------------
+    let mode_rel_errors: Vec<f64> = measured_freq_hz
+        .iter()
+        .zip(expected_freq_hz.iter())
+        .map(|(&meas, &refv)| (meas - refv).abs() / refv)
+        .collect();
+
+    let te101_rel_error = (measured_freq_hz[0] - f_te101).abs() / f_te101;
+    let mode10_rms_error = {
+        let sum_sq: f64 = mode_rel_errors.iter().map(|e| e * e).sum();
+        (sum_sq / (mode_rel_errors.len() as f64)).sqrt()
+    };
+
+    // ---- 8. Hard assertions per spec §9 -----------------------------
+    // (1) TE_{101} ±0.3 %.
+    let te101_ok = te101_rel_error <= FEM_EIG_001_TOL_TE101_REL;
+    // (2) Lowest ten modes match the analytic table within ±1 %
+    // per-mode.
+    let mode10_ok = mode_rel_errors
+        .iter()
+        .all(|&e| e <= FEM_EIG_001_TOL_MODE10_REL);
+    // (3) No spurious mode below TE_{101}: every returned k² is
+    // strictly above `0.5 · k₀_TE101²` per spec §9 hard assertion
+    // (3) — the gradient-kernel cluster sits at `k² ≈ 0`, so anything
+    // clearing this bound is decisively a physical mode regardless
+    // of where the shift `σ` was placed.
+    let no_spurious_ok = pairs.k.iter().all(|&k_sq| k_sq > sigma_guard);
+
+    let passed = te101_ok && mode10_ok && no_spurious_ok;
+    let status = if passed {
+        CaseStatus::Passed
+    } else {
+        CaseStatus::Failed
+    };
+
+    let elapsed = t0.elapsed().as_secs_f64();
+
+    let notes = format!(
+        "TE_101 f_meas = {:.6} GHz (Pozar ref {:.3} GHz); \
+         |df|/f = {:.4} (tol {:.3}); mode-10 RMS = {:.4} (tol {:.2}); \
+         no_spurious = {}; mesh ({}, {}, {}) Kuhn bricks → {} tets, \
+         {} interior DoFs; wall = {:.2}s",
+        measured_freq_hz[0] * 1e-9,
+        f_te101 * 1e-9,
+        te101_rel_error,
+        FEM_EIG_001_TOL_TE101_REL,
+        mode10_rms_error,
+        FEM_EIG_001_TOL_MODE10_REL,
+        no_spurious_ok,
+        FEM_EIG_001_NX,
+        FEM_EIG_001_NY,
+        FEM_EIG_001_NZ,
+        mesh.n_tets(),
+        assembled.interior_edges.len(),
+        elapsed,
+    );
+
+    Ok(FemEigValidationResult {
+        id: "fem-eig-001".to_string(),
+        measured_freq_hz,
+        expected_freq_hz,
+        mode_rel_errors,
+        te101_rel_error,
+        mode10_rms_error,
+        status,
+        notes,
+        wall_time_seconds: elapsed,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

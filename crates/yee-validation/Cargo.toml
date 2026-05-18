@@ -14,6 +14,7 @@ unsafe_code = "forbid"
 yee-core     = { workspace = true }
 yee-mom      = { workspace = true }
 yee-fdtd     = { workspace = true }
+yee-fem      = { workspace = true }
 yee-mesh     = { workspace = true }
 yee-io       = { workspace = true }
 yee-plotters = { workspace = true }
