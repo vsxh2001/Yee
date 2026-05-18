@@ -163,9 +163,7 @@ fn run_oblique_face_probe_steps(dispersion_match: bool, n_steps: usize) -> (f64,
 fn oblique_face_leakage_probe_match() {
     let (inside_amp, leaks) = run_oblique_face_probe(true);
     let names = ["lo-x", "hi-x", "lo-y", "hi-y", "lo-z", "hi-z"];
-    eprintln!(
-        "oblique-30°/45° (dispersion match=true) inside amp = {inside_amp:.6e}"
-    );
+    eprintln!("oblique-30°/45° (dispersion match=true) inside amp = {inside_amp:.6e}");
     for (name, leak) in names.iter().zip(leaks.iter()) {
         let frac = leak / inside_amp.max(1e-30);
         eprintln!(
@@ -204,9 +202,7 @@ fn oblique_face_leakage_probe_match_sweep_steps() {
 fn oblique_face_leakage_probe_no_match() {
     let (inside_amp, leaks) = run_oblique_face_probe(false);
     let names = ["lo-x", "hi-x", "lo-y", "hi-y", "lo-z", "hi-z"];
-    eprintln!(
-        "oblique-30°/45° (dispersion match=false) inside amp = {inside_amp:.6e}"
-    );
+    eprintln!("oblique-30°/45° (dispersion match=false) inside amp = {inside_amp:.6e}");
     for (name, leak) in names.iter().zip(leaks.iter()) {
         let frac = leak / inside_amp.max(1e-30);
         eprintln!(
