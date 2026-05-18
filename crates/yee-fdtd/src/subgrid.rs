@@ -90,6 +90,102 @@ pub struct SubgridContext {
     pub tfsf_box: Option<CoarseBox>,
 }
 
+/// Identifier for one of the six Huygens-surface faces of a cuboidal
+/// [`SubgridRegion`], used by the Berenger 2006 fine → coarse closure to
+/// enumerate per-face equivalent-current injections.
+///
+/// The naming convention is `<axis><Low|High>` where the axis is the
+/// direction of the outward unit normal `n̂`:
+///
+/// - `XLow`  — outward normal `−x̂`, coarse cells with `i_c = lo.0 − 1`
+///   (the cell layer of the parent grid just outside the fine box).
+/// - `XHigh` — outward normal `+x̂`, coarse cells with `i_c = hi.0`.
+/// - `YLow`  — outward normal `−ŷ`, `j_c = lo.1 − 1`.
+/// - `YHigh` — outward normal `+ŷ`, `j_c = hi.1`.
+/// - `ZLow`  — outward normal `−ẑ`, `k_c = lo.2 − 1`.
+/// - `ZHigh` — outward normal `+ẑ`, `k_c = hi.2`.
+///
+/// The axis index (`X = 0`, `Y = 1`, `Z = 2`) is used by the
+/// edge-ownership rule (lower-numbered axis wins the shared edge) — see
+/// [`SubgridRegion::face_index_table`].
+///
+/// Spec: `docs/superpowers/specs/2026-05-19-phase-2-fdtd-7-x-berenger-huygens-design.md`.
+/// ADR: `docs/src/decisions/0035-berenger-huygens-subgridding.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BerengerHuygensFace {
+    /// `−x̂` face (outward normal points in the −x direction).
+    XLow,
+    /// `+x̂` face.
+    XHigh,
+    /// `−ŷ` face.
+    YLow,
+    /// `+ŷ` face.
+    YHigh,
+    /// `−ẑ` face.
+    ZLow,
+    /// `+ẑ` face.
+    ZHigh,
+}
+
+impl BerengerHuygensFace {
+    /// Axis index (`X = 0`, `Y = 1`, `Z = 2`) that this face's outward
+    /// normal is parallel to. Used by the lower-axis-wins edge-ownership
+    /// rule — see [`SubgridRegion::face_index_table`] and
+    /// [`assign_edge_to_face`].
+    pub fn axis(self) -> usize {
+        match self {
+            Self::XLow | Self::XHigh => 0,
+            Self::YLow | Self::YHigh => 1,
+            Self::ZLow | Self::ZHigh => 2,
+        }
+    }
+
+    /// All six face identifiers, ordered `[XLow, XHigh, YLow, YHigh, ZLow,
+    /// ZHigh]`. Stable across calls; matches the layout returned by
+    /// [`SubgridRegion::face_index_table`].
+    pub fn all() -> [Self; 6] {
+        [
+            Self::XLow,
+            Self::XHigh,
+            Self::YLow,
+            Self::YHigh,
+            Self::ZLow,
+            Self::ZHigh,
+        ]
+    }
+}
+
+/// Given two faces of the cuboidal Huygens surface that share an edge,
+/// return the face that **owns** the edge under the spec's
+/// "lower-numbered-axis-wins" rule (see
+/// `docs/superpowers/specs/2026-05-19-phase-2-fdtd-7-x-berenger-huygens-design.md`
+/// §3 risks register, item 2).
+///
+/// Two faces share an edge iff their axes differ; if they have the same
+/// axis they are either identical (`XLow` ≡ `XLow`) or opposite (`XLow`,
+/// `XHigh`) and do not share an edge. In those degenerate cases this
+/// helper returns the first argument unchanged — callers that care
+/// should not invoke it on a same-axis pair (the unit tests enumerate
+/// only the 12 axis-distinct cuboid edges).
+///
+/// Example:
+///
+/// ```text
+/// assign_edge_to_face(XLow, YLow)  == XLow   (X axis 0 < Y axis 1)
+/// assign_edge_to_face(YLow, ZLow)  == YLow   (Y axis 1 < Z axis 2)
+/// assign_edge_to_face(XHigh, ZLow) == XHigh  (X axis 0 < Z axis 2)
+/// ```
+pub fn assign_edge_to_face(
+    face_a: BerengerHuygensFace,
+    face_b: BerengerHuygensFace,
+) -> BerengerHuygensFace {
+    if face_a.axis() <= face_b.axis() {
+        face_a
+    } else {
+        face_b
+    }
+}
+
 /// Per-face start/end snapshots of the parent grid's tangential E field on
 /// the six interface planes of a [`SubgridRegion`].
 ///
@@ -1254,6 +1350,118 @@ impl SubgridRegion {
             }
         }
         Ok(())
+    }
+
+    // ----------------------------------------------------------------
+    // Phase 2.fdtd.7.x B1 — Berenger Huygens-surface skeleton
+    // ----------------------------------------------------------------
+
+    /// Inject equivalent surface currents `J = +n̂ × H_tot` and
+    /// `M = −n̂ × E_tot` from the fine subdomain onto the six Huygens
+    /// faces of the parent coarse grid (Berenger 2006, *IEEE T-AP*
+    /// 54(12), pp. 3797–3804, §III).
+    ///
+    /// One-directional, post-coarse-update closure: the fine grid's
+    /// storage is read only; the coarse grid's `E` and `H` arrays are
+    /// mutated in-place at the Huygens surface only. Concretely the
+    /// final pipeline (Step B2) will add
+    /// `E_coarse += (dt / ε₀) · J_S` and `H_coarse += (dt / μ₀) · M_S`
+    /// on the coarse cells enumerated by [`Self::face_index_table`].
+    ///
+    /// **Phase 2.fdtd.7.x B1 status — stub.** This call is currently a
+    /// no-op; the per-face surface-current accumulation lands in B2
+    /// (see `docs/superpowers/plans/2026-05-19-phase-2-fdtd-7-x-berenger-huygens.md`).
+    /// B1 ships only the API surface, the face enumeration
+    /// ([`Self::face_index_table`]), and the lower-axis-wins
+    /// edge-ownership rule ([`assign_edge_to_face`]) so downstream
+    /// integration tests can be written against a stable signature.
+    ///
+    /// Spec: `docs/superpowers/specs/2026-05-19-phase-2-fdtd-7-x-berenger-huygens-design.md`.
+    /// ADR: `docs/src/decisions/0035-berenger-huygens-subgridding.md`.
+    pub fn inject_equivalent_currents_to_coarse(&self, _parent: &mut YeeGrid) {
+        // Phase 2.fdtd.7.x B1: no-op stub. The per-face accumulation
+        // of (J, M) onto the coarse (E, H) arrays is wired in B2.
+    }
+
+    /// Enumerate the coarse-cell `(i, j, k)` triples on each of the six
+    /// Huygens faces of this subgrid region, returned in the order
+    /// `[XLow, XHigh, YLow, YHigh, ZLow, ZHigh]` matching
+    /// [`BerengerHuygensFace::all`].
+    ///
+    /// Each face is a 2-D slice of coarse cells in the parent grid: the
+    /// cells immediately *outside* the fine box in the direction of the
+    /// outward normal. Concretely:
+    ///
+    /// - `XLow`  — `i_c = lo.0 − 1`, `j_c ∈ [lo.1, hi.1)`, `k_c ∈ [lo.2, hi.2)`.
+    /// - `XHigh` — `i_c = hi.0`,     `j_c ∈ [lo.1, hi.1)`, `k_c ∈ [lo.2, hi.2)`.
+    /// - `YLow`  — `j_c = lo.1 − 1`, `i_c ∈ [lo.0, hi.0)`, `k_c ∈ [lo.2, hi.2)`.
+    /// - `YHigh` — `j_c = hi.1`,     `i_c ∈ [lo.0, hi.0)`, `k_c ∈ [lo.2, hi.2)`.
+    /// - `ZLow`  — `k_c = lo.2 − 1`, `i_c ∈ [lo.0, hi.0)`, `j_c ∈ [lo.1, hi.1)`.
+    /// - `ZHigh` — `k_c = hi.2`,     `i_c ∈ [lo.0, hi.0)`, `j_c ∈ [lo.1, hi.1)`.
+    ///
+    /// Each face owns
+    /// `(hi.a − lo.a) · (hi.b − lo.b)` cells, where `a`, `b` are the two
+    /// tangential axes for that face. For a `3 × 3 × 3` coarse subgrid
+    /// (e.g. `lo = (2, 2, 2)`, `hi = (5, 5, 5)`) every face has 9 cells.
+    ///
+    /// Cuboid edges (where two faces meet) are owned by exactly one of
+    /// the two adjacent faces under the lower-numbered-axis-wins rule
+    /// — see [`assign_edge_to_face`]. This per-face index table
+    /// enumerates each face's full tangential extent independently;
+    /// the edge-ownership tie-break is consumed at the J/M
+    /// accumulation site in B2 to avoid double-counting at the 12
+    /// cuboid edges.
+    ///
+    /// **Note on `XLow`/`YLow`/`ZLow` indices** — `lo.a − 1` is the
+    /// outward-side coarse cell. If `lo.a == 0` the subgrid would touch
+    /// the parent grid boundary, which the constructor already rejects
+    /// under CPML co-location (see [`SubgridContext::cpml_thickness`])
+    /// for any physically meaningful run. This helper does not guard
+    /// against that case and would underflow if `lo.a == 0`; callers
+    /// invoking it on a degenerate region get an arithmetic-underflow
+    /// panic, which is the desired loud-failure mode in debug builds.
+    pub fn face_index_table(&self) -> [Vec<(usize, usize, usize)>; 6] {
+        let lo = self.lo;
+        let hi = self.hi;
+
+        let mut x_low = Vec::with_capacity((hi.1 - lo.1) * (hi.2 - lo.2));
+        let mut x_high = Vec::with_capacity((hi.1 - lo.1) * (hi.2 - lo.2));
+        let mut y_low = Vec::with_capacity((hi.0 - lo.0) * (hi.2 - lo.2));
+        let mut y_high = Vec::with_capacity((hi.0 - lo.0) * (hi.2 - lo.2));
+        let mut z_low = Vec::with_capacity((hi.0 - lo.0) * (hi.1 - lo.1));
+        let mut z_high = Vec::with_capacity((hi.0 - lo.0) * (hi.1 - lo.1));
+
+        // XLow / XHigh — outward-side i_c, tangential (j, k).
+        let i_low = lo.0 - 1;
+        let i_high = hi.0;
+        for j_c in lo.1..hi.1 {
+            for k_c in lo.2..hi.2 {
+                x_low.push((i_low, j_c, k_c));
+                x_high.push((i_high, j_c, k_c));
+            }
+        }
+
+        // YLow / YHigh — outward-side j_c, tangential (i, k).
+        let j_low = lo.1 - 1;
+        let j_high = hi.1;
+        for i_c in lo.0..hi.0 {
+            for k_c in lo.2..hi.2 {
+                y_low.push((i_c, j_low, k_c));
+                y_high.push((i_c, j_high, k_c));
+            }
+        }
+
+        // ZLow / ZHigh — outward-side k_c, tangential (i, j).
+        let k_low = lo.2 - 1;
+        let k_high = hi.2;
+        for i_c in lo.0..hi.0 {
+            for j_c in lo.1..hi.1 {
+                z_low.push((i_c, j_c, k_low));
+                z_high.push((i_c, j_c, k_high));
+            }
+        }
+
+        [x_low, x_high, y_low, y_high, z_low, z_high]
     }
 }
 
