@@ -105,6 +105,36 @@ pub enum GreensSpec {
         /// Number of DCIM image pairs to fit. Typical: 5.
         n_images: usize,
     },
+    /// Phase 1.1.1.2 microstrip Greens with full Sommerfeld surface-wave
+    /// pole subtraction: same substrate geometry as
+    /// [`GreensSpec::MicrostripDcim`], but each per-frequency
+    /// [`MultilayerGreens`] kernel is built via
+    /// [`MultilayerGreens::new_microstrip_sommerfeld`] (ADR-0033). The
+    /// constructor seeds Newton-Raphson at the thin-slab quasi-static
+    /// guess, records the dominant TM₀ (and optional higher-mode) surface
+    /// wave residues, then re-runs GPOF on the pole-subtracted spectral
+    /// function so the image sum stays smooth across the integration
+    /// contour. The analytic Hankel-function contribution from each
+    /// recorded pole is added back on top of the image sum at evaluation
+    /// time.
+    ///
+    /// `n_surface_wave_poles = 0` reduces to
+    /// [`GreensSpec::MicrostripDcim`] with the same `n_images`
+    /// bit-for-bit (ADR-0020 tripwire); `n_surface_wave_poles = 1` is
+    /// the recommended FR-4 microstrip value (the dominant TM₀ closes
+    /// the `Im(Z_in)` plateau that the placeholder DCIM leaves open).
+    /// This is the preferred multilayer spec from Phase 1.1.1.2 onward.
+    MicrostripSommerfeld {
+        /// Relative permittivity of the substrate slab.
+        eps_r: f64,
+        /// Substrate thickness in metres; PEC ground at `z = -h_m`.
+        h_m: f64,
+        /// Number of DCIM image pairs to fit per channel. Typical: 5.
+        n_images: usize,
+        /// Number of surface-wave poles to extract per channel before
+        /// the GPOF fit. `0` collapses to [`Self::MicrostripDcim`].
+        n_surface_wave_poles: usize,
+    },
 }
 
 impl GreensSpec {
@@ -128,6 +158,26 @@ impl GreensSpec {
         }
     }
 
+    /// Convenience constructor for the Phase 1.1.1.2 Sommerfeld
+    /// pole-subtracted DCIM microstrip kernel. Routes through
+    /// [`MultilayerGreens::new_microstrip_sommerfeld`] at sweep time.
+    /// `n_surface_wave_poles = 0` collapses to [`Self::microstrip_dcim`]
+    /// bit-for-bit (ADR-0020 tripwire); `n_surface_wave_poles = 1` is
+    /// the recommended FR-4 microstrip value.
+    pub fn microstrip_sommerfeld(
+        eps_r: f64,
+        h_m: f64,
+        n_images: usize,
+        n_surface_wave_poles: usize,
+    ) -> Self {
+        Self::MicrostripSommerfeld {
+            eps_r,
+            h_m,
+            n_images,
+            n_surface_wave_poles,
+        }
+    }
+
     /// Build a concrete [`Greens`] kernel at `freq_hz`. Used by the
     /// per-frequency hot loop inside `s_parameters_sweep`.
     pub(crate) fn build(&self, freq_hz: f64) -> Box<dyn Greens + Send + Sync> {
@@ -142,6 +192,18 @@ impl GreensSpec {
                 n_images,
             } => Box::new(MultilayerGreens::new_microstrip_with_n_images(
                 eps_r, h_m, freq_hz, n_images,
+            )),
+            Self::MicrostripSommerfeld {
+                eps_r,
+                h_m,
+                n_images,
+                n_surface_wave_poles,
+            } => Box::new(MultilayerGreens::new_microstrip_sommerfeld(
+                eps_r,
+                h_m,
+                freq_hz,
+                n_images,
+                n_surface_wave_poles,
             )),
         }
     }
