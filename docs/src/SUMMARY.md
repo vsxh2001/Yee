@@ -6,6 +6,7 @@
 
 - [Planar Method of Moments](theory/planar-mom.md)
 - [RWG Basis, MPIE, and Phase 1.0 Quadrature](theory/mom-rwg-mpie.md)
+- [Multilayer Green's Function — DCIM and Surface-Wave Poles](theory/multilayer-greens.md)
 - [Finite-Difference Time-Domain](theory/fdtd.md)
 - [FDTD: CPML, NTFF, TF/SF, lumped, dispersive](theory/fdtd-details.md)
 - [FDTD Subgridding](theory/fdtd-subgridding.md)
