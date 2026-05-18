@@ -32,7 +32,7 @@
 //! - Chevalier, M. W., Luebbers, R. J., Cable, V. P., "FDTD local grid with
 //!   material traverse", *IEEE Trans. Antennas Propag.* 45(3), 1997.
 
-use ndarray::Array2;
+use ndarray::{Array2, Array3};
 use yee_core::Error;
 
 use crate::FdtdSolver;
@@ -166,6 +166,30 @@ pub struct SubgridRegion {
     /// Bracketing parent `E_t` snapshots on the six interface faces,
     /// blended linearly in time during each fine sub-step.
     snapshots: InterfaceSnapshots,
+    /// Mid-coarse-step snapshot of the fine `H` field, taken between the
+    /// two fine sub-steps in the Q5 seven-stage `step`. Populated by
+    /// [`SubgridRegion::snapshot_fine_h_mid_step`] at fine wall-clock time
+    /// `t = n + 1/4` (i.e. right after sub-step 1's `update_fine_h`); the
+    /// post-sub-step-2 fine H (at `t = n + 3/4`) is averaged against this
+    /// snapshot in [`SubgridRegion::average_fine_h_to_coarse`] to recover
+    /// the time-centered value `t = n + 1/2` the coarse `H_t` slot
+    /// represents. `None` until the first snapshot of a coarse step;
+    /// callers that invoke `average_fine_h_to_coarse` directly (without
+    /// stepping) get the legacy single-sample behaviour.
+    fine_h_snapshot: Option<FineHSnapshot>,
+}
+
+/// Mid-coarse-step snapshot of the fine `H` field components used by the
+/// Q4.1 time-centered fine → coarse closure. Holds full-fine-grid copies
+/// of `H_x`, `H_y`, `H_z`; the closure only reads cells adjacent to the
+/// six interface faces, so the full-grid clone is a small constant-factor
+/// memory cost (≈ same size as the fine grid's own H arrays) that keeps
+/// the snapshot self-contained and avoids per-face slice plumbing.
+#[derive(Debug, Clone)]
+struct FineHSnapshot {
+    hx: Array3<f64>,
+    hy: Array3<f64>,
+    hz: Array3<f64>,
 }
 
 impl SubgridRegion {
@@ -237,6 +261,7 @@ impl SubgridRegion {
             hi,
             fine,
             snapshots,
+            fine_h_snapshot: None,
         })
     }
 
@@ -327,6 +352,26 @@ impl SubgridRegion {
     /// Dirichlet boundary `E_t` is fixed by the prior interpolation.
     pub fn update_fine_e(&mut self) {
         update::update_e(&mut self.fine);
+    }
+
+    /// Snapshot the current fine `H` field for the Q4.1 time-centered
+    /// fine → coarse closure.
+    ///
+    /// Call once **between** the two fine sub-steps in the Q5 seven-stage
+    /// `step` — specifically, after sub-step 1's
+    /// [`Self::update_fine_h`] (which lands fine H at wall-clock time
+    /// `t = n + 1/4`) and before sub-step 2's `update_fine_h`. The snapshot
+    /// is then averaged against the post-sub-step-2 fine H (at `t = n + 3/4`)
+    /// inside [`Self::average_fine_h_to_coarse`] to recover the
+    /// time-centered value `t = n + 1/2` that the coarse `H_t` slot
+    /// represents, eliminating the quarter-step phase error otherwise
+    /// fed into the coarse H closure each coarse step.
+    pub fn snapshot_fine_h_mid_step(&mut self) {
+        self.fine_h_snapshot = Some(FineHSnapshot {
+            hx: self.fine.hx.clone(),
+            hy: self.fine.hy.clone(),
+            hz: self.fine.hz.clone(),
+        });
     }
 
     /// Base bounds validation: `lo < hi` per axis, `hi` inside the parent.
@@ -833,6 +878,18 @@ impl SubgridRegion {
     /// On 2× refinement each coarse face covers a 2×2 tile of fine faces
     /// (uniform refinement → equal area weighting → arithmetic mean of
     /// four fine samples).
+    ///
+    /// **Time centering (Q4.1).** When a mid-coarse-step snapshot has
+    /// been taken via [`Self::snapshot_fine_h_mid_step`] (the Q5 step
+    /// driver does so between the two fine sub-steps), the values fed
+    /// into the area-average are the **arithmetic mean of the snapshot
+    /// and the current fine H**, i.e. `(H_f^{n+1/4} + H_f^{n+3/4}) / 2`.
+    /// That recovers the time-centered fine-H value `t = n + 1/2` that
+    /// the coarse slot represents. Absent a snapshot the closure falls
+    /// back to a single-sample area-average of the current fine H — the
+    /// pre-Q4.1 behaviour, preserved so the Q4 unit tests
+    /// (which only exercise the spatial average) keep working without
+    /// having to fake a snapshot.
     pub fn average_fine_h_to_coarse(&self, parent: &mut YeeGrid) {
         let lo = self.lo;
         let hi = self.hi;
@@ -840,17 +897,44 @@ impl SubgridRegion {
         let fine_ny = 2 * (hi.1 - lo.1);
         let fine_nz = 2 * (hi.2 - lo.2);
 
+        // Q4.1: time-center fine H against the mid-step snapshot if one
+        // was taken. Compute owned, time-averaged H_x/H_y/H_z arrays once
+        // and read them through the spatial-average helpers. If no
+        // snapshot is present, the helpers read the live fine H instead
+        // (pre-Q4.1 behaviour).
+        let snap = self.fine_h_snapshot.as_ref();
+        let hx_view = match snap {
+            Some(s) => Self::time_avg(&self.fine.hx, &s.hx),
+            None => self.fine.hx.clone(),
+        };
+        let hy_view = match snap {
+            Some(s) => Self::time_avg(&self.fine.hy, &s.hy),
+            None => self.fine.hy.clone(),
+        };
+        let hz_view = match snap {
+            Some(s) => Self::time_avg(&self.fine.hz, &s.hz),
+            None => self.fine.hz.clone(),
+        };
+
         // ±x faces — overwrite coarse H_y, H_z on the layer i_c ∈ {lo.0, hi.0 − 1}.
-        Self::avg_face_x(&self.fine, parent, lo, hi, lo.0, 0);
-        Self::avg_face_x(&self.fine, parent, lo, hi, hi.0 - 1, fine_nx - 2);
+        Self::avg_face_x(&hy_view, &hz_view, parent, lo, hi, lo.0, 0);
+        Self::avg_face_x(&hy_view, &hz_view, parent, lo, hi, hi.0 - 1, fine_nx - 2);
 
         // ±y faces — overwrite coarse H_x, H_z on the layer j_c ∈ {lo.1, hi.1 − 1}.
-        Self::avg_face_y(&self.fine, parent, lo, hi, lo.1, 0);
-        Self::avg_face_y(&self.fine, parent, lo, hi, hi.1 - 1, fine_ny - 2);
+        Self::avg_face_y(&hx_view, &hz_view, parent, lo, hi, lo.1, 0);
+        Self::avg_face_y(&hx_view, &hz_view, parent, lo, hi, hi.1 - 1, fine_ny - 2);
 
         // ±z faces — overwrite coarse H_x, H_y on the layer k_c ∈ {lo.2, hi.2 − 1}.
-        Self::avg_face_z(&self.fine, parent, lo, hi, lo.2, 0);
-        Self::avg_face_z(&self.fine, parent, lo, hi, hi.2 - 1, fine_nz - 2);
+        Self::avg_face_z(&hx_view, &hy_view, parent, lo, hi, lo.2, 0);
+        Self::avg_face_z(&hx_view, &hy_view, parent, lo, hi, hi.2 - 1, fine_nz - 2);
+    }
+
+    /// Elementwise arithmetic mean of two equal-shape arrays. Allocates
+    /// a fresh owning array (Q4.1 fine-H time-centering helper).
+    fn time_avg(a: &Array3<f64>, b: &Array3<f64>) -> Array3<f64> {
+        let mut out = a.clone();
+        out.zip_mut_with(b, |x, y| *x = 0.5 * (*x + *y));
+        out
     }
 
     /// Overwrite the parent grid's tangential `E` on the six interface
@@ -887,9 +971,12 @@ impl SubgridRegion {
     /// `i_c_face` adjacent to a ±x interface face.
     ///
     /// `fine_i_lo` is the first fine x-index covered by the coarse layer
-    /// (`0` for the −x face, `fine_nx − 2` for the +x face).
+    /// (`0` for the −x face, `fine_nx − 2` for the +x face). `fine_hy` /
+    /// `fine_hz` are the (already time-averaged, Q4.1) fine `H_y` / `H_z`
+    /// arrays.
     fn avg_face_x(
-        fine: &YeeGrid,
+        fine_hy: &Array3<f64>,
+        fine_hz: &Array3<f64>,
         parent: &mut YeeGrid,
         lo: (usize, usize, usize),
         hi: (usize, usize, usize),
@@ -904,10 +991,10 @@ impl SubgridRegion {
             let j_f = 2 * (j_c - lo.1);
             for k_c in lo.2..hi.2 {
                 let k_f0 = 2 * (k_c - lo.2);
-                let s = fine.hy[(fine_i_lo, j_f, k_f0)]
-                    + fine.hy[(fine_i_lo + 1, j_f, k_f0)]
-                    + fine.hy[(fine_i_lo, j_f, k_f0 + 1)]
-                    + fine.hy[(fine_i_lo + 1, j_f, k_f0 + 1)];
+                let s = fine_hy[(fine_i_lo, j_f, k_f0)]
+                    + fine_hy[(fine_i_lo + 1, j_f, k_f0)]
+                    + fine_hy[(fine_i_lo, j_f, k_f0 + 1)]
+                    + fine_hy[(fine_i_lo + 1, j_f, k_f0 + 1)];
                 parent.hy[(i_c_face, j_c, k_c)] = 0.25 * s;
             }
         }
@@ -918,10 +1005,10 @@ impl SubgridRegion {
             let j_f0 = 2 * (j_c - lo.1);
             for k_c in lo.2..=hi.2 {
                 let k_f = 2 * (k_c - lo.2);
-                let s = fine.hz[(fine_i_lo, j_f0, k_f)]
-                    + fine.hz[(fine_i_lo + 1, j_f0, k_f)]
-                    + fine.hz[(fine_i_lo, j_f0 + 1, k_f)]
-                    + fine.hz[(fine_i_lo + 1, j_f0 + 1, k_f)];
+                let s = fine_hz[(fine_i_lo, j_f0, k_f)]
+                    + fine_hz[(fine_i_lo + 1, j_f0, k_f)]
+                    + fine_hz[(fine_i_lo, j_f0 + 1, k_f)]
+                    + fine_hz[(fine_i_lo + 1, j_f0 + 1, k_f)];
                 parent.hz[(i_c_face, j_c, k_c)] = 0.25 * s;
             }
         }
@@ -930,7 +1017,8 @@ impl SubgridRegion {
     /// Area-average fine `H_x`, `H_z` onto a coarse layer adjacent to a
     /// ±y interface face.
     fn avg_face_y(
-        fine: &YeeGrid,
+        fine_hx: &Array3<f64>,
+        fine_hz: &Array3<f64>,
         parent: &mut YeeGrid,
         lo: (usize, usize, usize),
         hi: (usize, usize, usize),
@@ -944,10 +1032,10 @@ impl SubgridRegion {
             let i_f = 2 * (i_c - lo.0);
             for k_c in lo.2..hi.2 {
                 let k_f0 = 2 * (k_c - lo.2);
-                let s = fine.hx[(i_f, fine_j_lo, k_f0)]
-                    + fine.hx[(i_f, fine_j_lo + 1, k_f0)]
-                    + fine.hx[(i_f, fine_j_lo, k_f0 + 1)]
-                    + fine.hx[(i_f, fine_j_lo + 1, k_f0 + 1)];
+                let s = fine_hx[(i_f, fine_j_lo, k_f0)]
+                    + fine_hx[(i_f, fine_j_lo + 1, k_f0)]
+                    + fine_hx[(i_f, fine_j_lo, k_f0 + 1)]
+                    + fine_hx[(i_f, fine_j_lo + 1, k_f0 + 1)];
                 parent.hx[(i_c, j_c_face, k_c)] = 0.25 * s;
             }
         }
@@ -958,10 +1046,10 @@ impl SubgridRegion {
             let i_f0 = 2 * (i_c - lo.0);
             for k_c in lo.2..=hi.2 {
                 let k_f = 2 * (k_c - lo.2);
-                let s = fine.hz[(i_f0, fine_j_lo, k_f)]
-                    + fine.hz[(i_f0 + 1, fine_j_lo, k_f)]
-                    + fine.hz[(i_f0, fine_j_lo + 1, k_f)]
-                    + fine.hz[(i_f0 + 1, fine_j_lo + 1, k_f)];
+                let s = fine_hz[(i_f0, fine_j_lo, k_f)]
+                    + fine_hz[(i_f0 + 1, fine_j_lo, k_f)]
+                    + fine_hz[(i_f0, fine_j_lo + 1, k_f)]
+                    + fine_hz[(i_f0 + 1, fine_j_lo + 1, k_f)];
                 parent.hz[(i_c, j_c_face, k_c)] = 0.25 * s;
             }
         }
@@ -970,7 +1058,8 @@ impl SubgridRegion {
     /// Area-average fine `H_x`, `H_y` onto a coarse layer adjacent to a
     /// ±z interface face.
     fn avg_face_z(
-        fine: &YeeGrid,
+        fine_hx: &Array3<f64>,
+        fine_hy: &Array3<f64>,
         parent: &mut YeeGrid,
         lo: (usize, usize, usize),
         hi: (usize, usize, usize),
@@ -984,10 +1073,10 @@ impl SubgridRegion {
             let i_f = 2 * (i_c - lo.0);
             for j_c in lo.1..hi.1 {
                 let j_f0 = 2 * (j_c - lo.1);
-                let s = fine.hx[(i_f, j_f0, fine_k_lo)]
-                    + fine.hx[(i_f, j_f0 + 1, fine_k_lo)]
-                    + fine.hx[(i_f, j_f0, fine_k_lo + 1)]
-                    + fine.hx[(i_f, j_f0 + 1, fine_k_lo + 1)];
+                let s = fine_hx[(i_f, j_f0, fine_k_lo)]
+                    + fine_hx[(i_f, j_f0 + 1, fine_k_lo)]
+                    + fine_hx[(i_f, j_f0, fine_k_lo + 1)]
+                    + fine_hx[(i_f, j_f0 + 1, fine_k_lo + 1)];
                 parent.hx[(i_c, j_c, k_c_face)] = 0.25 * s;
             }
         }
@@ -998,10 +1087,10 @@ impl SubgridRegion {
             let i_f0 = 2 * (i_c - lo.0);
             for j_c in lo.1..=hi.1 {
                 let j_f = 2 * (j_c - lo.1);
-                let s = fine.hy[(i_f0, j_f, fine_k_lo)]
-                    + fine.hy[(i_f0 + 1, j_f, fine_k_lo)]
-                    + fine.hy[(i_f0, j_f, fine_k_lo + 1)]
-                    + fine.hy[(i_f0 + 1, j_f, fine_k_lo + 1)];
+                let s = fine_hy[(i_f0, j_f, fine_k_lo)]
+                    + fine_hy[(i_f0 + 1, j_f, fine_k_lo)]
+                    + fine_hy[(i_f0, j_f, fine_k_lo + 1)]
+                    + fine_hy[(i_f0 + 1, j_f, fine_k_lo + 1)];
                 parent.hy[(i_c, j_c, k_c_face)] = 0.25 * s;
             }
         }
@@ -1219,17 +1308,19 @@ impl SubgriddedSolver {
     /// 2. Coarse `apply_cpml_h` (no-op outside any configured CPML face).
     /// 3. Snapshot the coarse `E_t` on the six interface faces (start).
     /// 4. Fine sub-step `k = 1`: interpolate coarse `E_t` at `frac = 0.25`
-    ///    onto the fine boundary, then bulk `update_h` and `update_e` on
-    ///    the fine grid.
+    ///    onto the fine boundary, `update_fine_h`, **snapshot fine H** at
+    ///    `t = n + 1/4` for the Q4.1 time-centered fine → coarse H
+    ///    closure, then `update_fine_e`.
     /// 5. Coarse `update_e_only`, then `apply_cpml_e`.
     /// 6. Snapshot the coarse `E_t` again (end-of-coarse-step) so the
     ///    second fine sub-step blends against the post-E-update parent.
     /// 7. Fine sub-step `k = 2`: interpolate at `frac = 0.75`, then bulk
     ///    `update_h` and `update_e` on the fine grid.
     /// 8. Average the fine `H_t` onto the coarse interface layer
-    ///    (`average_fine_h_to_coarse`) and overwrite the coarse `E_t` on
-    ///    the interface planes (`overwrite_coarse_e_from_fine`) —
-    ///    Chevalier 1997 §IV closure of the discrete energy balance.
+    ///    (`average_fine_h_to_coarse`, time-centered against the stage-4
+    ///    snapshot) and overwrite the coarse `E_t` on the interface
+    ///    planes (`overwrite_coarse_e_from_fine`) — Chevalier 1997 §IV
+    ///    closure of the discrete energy balance.
     /// 9. Advance the coarse clock by one `dt_coarse`.
     ///
     /// When no [`SubgridRegion`] is attached this collapses to the
@@ -1265,8 +1356,14 @@ impl SubgriddedSolver {
         region.snapshot_coarse_e_t(self.inner.grid());
 
         // 4. Fine sub-step k = 1 (interpolate at t = n + 1/4).
+        //    After update_fine_h here the fine H is at wall-clock time
+        //    t = n + 1/4 (per the spec's labelling convention); snapshot
+        //    it so the Q4.1 closure can average against the
+        //    post-sub-step-2 H (at t = n + 3/4) to recover the
+        //    time-centered t = n + 1/2 value the coarse slot wants.
         region.interpolate_coarse_e_to_fine(0.25);
         region.update_fine_h();
+        region.snapshot_fine_h_mid_step();
         region.update_fine_e();
 
         // 5. Coarse E half-step and outer-boundary closure.
@@ -1281,8 +1378,7 @@ impl SubgriddedSolver {
         region.update_fine_h();
         region.update_fine_e();
 
-        // 8. Close the energy balance: fine → coarse H area-average plus
-        //    coarse E_t overwrite on the interface planes.
+        // 8. Close the energy balance.
         {
             let (parent_grid, _) = self.inner.grid_and_cpml_mut();
             region.average_fine_h_to_coarse(parent_grid);
@@ -1338,9 +1434,11 @@ impl SubgriddedSolver {
         //    region so this ordering is correct for the v7.0 scope.
         region.snapshot_coarse_e_t(self.inner.grid());
 
-        // 4. Fine sub-step k = 1.
+        // 4. Fine sub-step k = 1 with mid-step fine-H snapshot for the
+        //    Q4.1 time-centered closure.
         region.interpolate_coarse_e_to_fine(0.25);
         region.update_fine_h();
+        region.snapshot_fine_h_mid_step();
         region.update_fine_e();
 
         // 5. Coarse source injection and E half-step.

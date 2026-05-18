@@ -61,8 +61,12 @@ const SG_LO: (usize, usize, usize) = (12, 12, 12);
 const SG_HI: (usize, usize, usize) = (20, 20, 20);
 /// Coarse-cell index of the Gaussian source on `E_z`.
 const SRC: (usize, usize, usize) = (8, 16, 16);
-/// Number of coarse steps to integrate.
-const N_COARSE_STEPS: usize = 30;
+/// Number of coarse steps to integrate. Per the Phase 2.fdtd.7 plan Q5
+/// DoD the strict 0.5%-of-peak agreement gate runs for the first 500
+/// coarse steps; the Q4.1 time-centering of the fine → coarse H closure
+/// removes the quarter-step phase error that previously turned the
+/// closure unstable around step 100.
+const N_COARSE_STEPS: usize = 500;
 
 /// Five probe locations downstream of the nest, in coarse-cell indices.
 const PROBES_C: [(usize, usize, usize); 5] = [
@@ -73,25 +77,41 @@ const PROBES_C: [(usize, usize, usize); 5] = [
     (29, 16, 16),
 ];
 
-/// Plane-wave traversal gate — currently `#[ignore]` because the Q4
-/// fine→coarse `H_t` area-average closure exhibits a late-time
-/// instability against any non-trivial wave content in the fine
-/// region. See the Q5 brief's escape hatch and the out-of-lane
-/// finding in the Q5 report: with the current
-/// [`SubgridRegion::average_fine_h_to_coarse`] implementation, the
-/// fine `H` value pushed into the coarse slot is at simulation time
-/// `t = n + 3/4` while the coarse slot represents `t = n + 1/2`,
-/// accumulating a quarter-step phase error per coarse step that
-/// drives an exponential blow-up around step 100. Disabling the H
-/// closure makes the test pass trivially (forward-only coupling
-/// degenerates to pure coarse propagation, since vacuum fine ≡
-/// vacuum coarse on the bare Yee stencil); the test is left
-/// ignored — not relaxed — so the 0.5% bound from the spec is
-/// preserved. Phase 2.fdtd.7.x follow-up will land a temporal
-/// blend `(H_f^{n+1/4} + H_f^{n+3/4}) / 2` to retire the gate.
+/// Plane-wave traversal gate — strict 0.5%-of-peak agreement against
+/// the pure-coarse reference over the first 500 coarse steps.
+///
+/// Still `#[ignore]` after the Phase 2.fdtd.7 Q4.1 attempt. Q4.1 added
+/// the mid-coarse-step fine-H snapshot
+/// ([`SubgridRegion::snapshot_fine_h_mid_step`]) and time-centered the
+/// fine → coarse `H_t` area-average — that fix is correct in itself
+/// and harmless when no instability is present (verified by the
+/// `subgrid_h_average` and `subgrid_e_interp` unit tests, plus the
+/// 20-step smoke gate below). But the late-time instability of the
+/// closure with a Gaussian source on a 96×32×32 coarse grid persists
+/// past step ~50 even with the time-centering applied. Numerical
+/// probing under Q4.1 shows the fine grid itself diverges
+/// exponentially once the Gaussian pulse reaches the subgrid, with
+/// the coarse `H_y` slot adjacent to the +x interface flipping sign
+/// per coarse step at the ½-Nyquist rate. The energy is being
+/// injected through the boundary-`E_t` Dirichlet path that Q3
+/// supplies; surface fix candidates (stage reorder so coarse
+/// update_e bracket the fine sub-steps; spatial-layer choice for the
+/// closure target H slot; dropping the E_t overwrite, which lags by
+/// `0.25 · dt_c` because the fine boundary `E_t` it reads is the
+/// `frac = 0.75` interpolation result rather than a freshly-updated
+/// fine field) each isolate part of the discrepancy but none retire
+/// the gate to ≤ 0.5%. The residual is a discrete-energy-balance
+/// issue rooted in the asymmetric way the spec §3 sequence stages
+/// coarse update_e between the two fine sub-steps; resolution is
+/// deferred to Phase 2.fdtd.7.x (Berenger-style Huygens-surface
+/// fine→coarse coupling per `TECH_STACK.md` open-question §10).
+///
+/// The 0.5% bound is preserved (not relaxed) per brief.
 #[test]
-#[ignore = "fdtd-007 stability gate — Q4 H closure has quarter-step time-stagger bug; \
-            see Q5 report. Re-enable once Q4 is fixed."]
+#[ignore = "fdtd-007 stability gate — Q4.1 time-centered closure (`snapshot_fine_h_mid_step` \
+            + average) is in place and Q3/Q4/Q5 unit tests pass, but the late-time interface \
+            energy balance remains divergent. See doc-comment above; Phase 2.fdtd.7.x \
+            will land a Berenger-Huygens closure to retire this gate."]
 fn subgrid_plane_wave_matches_coarse_reference() {
     // ---- Subgridded run ---------------------------------------------------
     let coarse_grid = YeeGrid::vacuum(NX_C, NY_C, NZ_C, DX_C);
