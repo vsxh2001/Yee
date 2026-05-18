@@ -292,29 +292,31 @@ fn run_oblique_30_45_case(dispersion_match: bool) -> (f64, f64) {
 #[test]
 #[ignore = "slow: ~10s for 60^3 x 400 steps"]
 fn oblique_30deg_45deg_no_match_reproduces_phase_2_fdtd_5_3_baseline() {
-    // Sanity: with `dispersion_match = false`, this constructor takes
-    // the same `ds_aux = dx` code path as the Phase 2.fdtd.5.3 ship.
-    // The expected contrast at θ=30°, φ=45° is ~14.5× (the empirical
-    // value reported in the 5.3 escape-hatch). Allow ±50% wiggle to
-    // accommodate non-reproducibility of secondary effects (CPML wall
-    // contamination, FP order-of-summation drift, etc.); the test
-    // *intent* is "the new code path doesn't break the old result".
+    // Originally asserted ~14.5× (the empirical Phase 2.fdtd.5.3
+    // ship value) with ±50% tolerance. Phase 2.fdtd.5.3.2 upgraded
+    // the 1-D auxiliary incident-field interpolation from linear to
+    // 4-point cubic Lagrange (commit prior). That upgrade improves
+    // *both* match=true and match=false paths, so the no-match
+    // contrast now lands at ~340× rather than ~14.5×. The original
+    // 14.5× baseline is therefore obsolete; widen the window to a
+    // floor-only regression guard that catches a true regression
+    // without re-asserting the pre-cubic figure.
     let (inside_amp, outside_amp) = run_oblique_30_45_case(false);
     let contrast = inside_amp / outside_amp.max(1e-30);
     eprintln!(
         "oblique-30°/45° (no dispersion match) contrast = {contrast:.6e} \
-         ({:.2} dB) — expected ~14.5× from Phase 2.fdtd.5.3",
+         ({:.2} dB) — post-Phase 2.fdtd.5.3.2 cubic interpolation",
         20.0 * contrast.log10().max(-1000.0)
     );
 
-    // Tight window around 14.5×: [7×, 22×] is ±50% of the documented
-    // baseline. The test asserts that turning the new dispersion-match
-    // flag *off* recovers approximately the pre-5.3.1 behaviour.
+    // Floor-only guard: contrast must exceed the pre-cubic 14.5×
+    // figure by a comfortable margin. The old [7×, 22×] window is
+    // gone because cubic interpolation benefits both paths.
     assert!(
-        (7.0..=22.0).contains(&contrast),
-        "oblique 30°/45° (no match) contrast {contrast:.3} far from \
-         the documented Phase 2.fdtd.5.3 baseline of ~14.5× \
-         (expected ±50%, [7×, 22×])"
+        contrast > 50.0,
+        "oblique 30°/45° (no match) contrast {contrast:.3} regressed \
+         below the post-Phase 2.fdtd.5.3.2 floor of 50× — the cubic \
+         interpolation upgrade may have been reverted"
     );
 }
 
@@ -332,17 +334,12 @@ fn oblique_30deg_45deg_ephi_polarization() {
     // TF/SF leakage drops by ~2 orders of magnitude versus the
     // pre-5.3.1 baseline (which sat at ~14.5×).
     //
-    // Phase 2.fdtd.5.3 DoD is >1000×; current measured value with
-    // dispersion match is ~15.6× (vs 14.5× without). The 1.07× gain
-    // confirms dispersion matching works but reveals the dominant SF
-    // leakage source is NOT dispersion mismatch — it is a sign / cross-
-    // section bug in correct_h_oblique / correct_e_oblique at the j/k
-    // faces that were never exercised at normal incidence. Audit the
-    // face stencils against Taflove §5.10.5 in Phase 2.fdtd.5.3.2.
-    //
-    // For now we gate at >10× — verifies the kernel runs without
-    // catastrophic regression — and document the gap. Tighten to >1000×
-    // once 5.3.2 lands the face-stencil audit.
+    // Phase 2.fdtd.5.3 DoD: >1000×. Phase 2.fdtd.5.3.2 face-stencil
+    // audit landed cubic Lagrange interpolation of the 1-D auxiliary
+    // incident-field grid (the dominant SF leakage source turned out
+    // to be the linear-interpolation residual, not the face stencils
+    // themselves). Measured contrast with dispersion match is now
+    // ~1027× (60 dB), clearing the original DoD.
 
     let (inside_amp, outside_amp) = run_oblique_30_45_case(true);
     let contrast = inside_amp / outside_amp.max(1e-30);
@@ -353,10 +350,10 @@ fn oblique_30deg_45deg_ephi_polarization() {
     );
 
     assert!(
-        contrast > 10.0,
-        "oblique 30°/45° contrast {contrast:.3e} below the conservative \
-         >10× regression guard. Phase 2.fdtd.5.3 DoD of >1000× is gated on \
-         Phase 2.fdtd.5.3.2 (face-stencil audit)."
+        contrast > 1000.0,
+        "oblique 30°/45° contrast {contrast:.3e} below the Phase 2.fdtd.5.3 \
+         DoD of >1000× — Phase 2.fdtd.5.3.2 cubic-interpolation upgrade may \
+         have been reverted."
     );
 }
 
