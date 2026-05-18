@@ -17,6 +17,7 @@
 
 use nalgebra::Vector3;
 
+mod cavity;
 pub mod kicad;
 mod session;
 mod tetmesh;
