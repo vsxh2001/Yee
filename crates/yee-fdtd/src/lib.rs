@@ -166,6 +166,84 @@ impl WalkingSkeletonSolver {
         self.step += 1;
     }
 
+    /// Apply the **bulk H-field Yee update** to the underlying grid.
+    ///
+    /// This is the pure spatial-curl update from Taflove & Hagness §3
+    /// with no CPML auxiliary advance, no source injection, and no
+    /// clock advance. It is the H-half-step primitive that
+    /// [`Self::step`], [`Self::step_with_source`], and
+    /// [`Self::step_with_plane_wave`] compose with the other helpers
+    /// to assemble a full Yee step.
+    ///
+    /// Subgridded drivers (Phase 2.fdtd.7) call this helper directly
+    /// so the fine sub-step can be interleaved between the coarse
+    /// H and E updates without re-implementing the CPML wiring.
+    pub fn update_h_only(&mut self) {
+        update::update_h(&mut self.grid);
+    }
+
+    /// Apply the **outer-boundary update for the H half-step**.
+    ///
+    /// If a CPML state is configured (via [`Self::with_cpml`]) this
+    /// advances the CPML auxiliary variables and updates H on the
+    /// six outer faces; otherwise it falls back to the deprecated
+    /// hard-PEC tangential-E clamp used by the cavity-style
+    /// regression in `tests/fdtd_propagation.rs`.
+    ///
+    /// Always call this **after** [`Self::update_h_only`] and
+    /// **before** any source injection on H so the leapfrog timing
+    /// matches the monolithic [`Self::step`] body.
+    pub fn apply_cpml_h(&mut self) {
+        if let Some(cpml) = self.cpml.as_mut() {
+            cpml.update_h(&mut self.grid);
+        } else {
+            #[allow(deprecated)]
+            boundary::apply_pec(&mut self.grid);
+        }
+    }
+
+    /// Apply the **bulk E-field Yee update** to the underlying grid.
+    ///
+    /// Companion to [`Self::update_h_only`]: pure spatial-curl
+    /// update on E with no CPML, no source, no clock advance.
+    pub fn update_e_only(&mut self) {
+        update::update_e(&mut self.grid);
+    }
+
+    /// Apply the **outer-boundary update for the E half-step**.
+    ///
+    /// Companion to [`Self::apply_cpml_h`]: CPML auxiliary update
+    /// on E if a CPML state is configured, otherwise the deprecated
+    /// hard-PEC clamp.
+    pub fn apply_cpml_e(&mut self) {
+        if let Some(cpml) = self.cpml.as_mut() {
+            cpml.update_e(&mut self.grid);
+        } else {
+            #[allow(deprecated)]
+            boundary::apply_pec(&mut self.grid);
+        }
+    }
+
+    /// Add a Gaussian-in-time pulse contribution to `E_z` at cell
+    /// `(i, j, k)`, sampled at simulation time `t`.
+    ///
+    /// This is the per-stage source helper used between the H and E
+    /// half-steps so the injected amplitude is visible to the next E
+    /// update through the standard leapfrog timing. Callers must
+    /// pass the current simulation time (typically `self.current_time()`
+    /// captured *before* the helpers run for the step).
+    pub fn apply_gaussian_source_ez(
+        &mut self,
+        i: usize,
+        j: usize,
+        k: usize,
+        t: f64,
+        t0: f64,
+        sigma: f64,
+    ) {
+        sources::gaussian_pulse_ez(&mut self.grid, i, j, k, t, t0, sigma);
+    }
+
     /// Immutable view of the underlying grid (e.g. for probing field values).
     pub fn grid(&self) -> &YeeGrid {
         &self.grid
@@ -196,22 +274,12 @@ impl WalkingSkeletonSolver {
     /// step advances the clock).
     pub fn step_with_source(&mut self, i: usize, j: usize, k: usize, t0: f64, sigma: f64) {
         let t = self.current_time();
-        update::update_h(&mut self.grid);
-        if let Some(cpml) = self.cpml.as_mut() {
-            cpml.update_h(&mut self.grid);
-        } else {
-            #[allow(deprecated)]
-            boundary::apply_pec(&mut self.grid);
-        }
-        sources::gaussian_pulse_ez(&mut self.grid, i, j, k, t, t0, sigma);
-        update::update_e(&mut self.grid);
-        if let Some(cpml) = self.cpml.as_mut() {
-            cpml.update_e(&mut self.grid);
-        } else {
-            #[allow(deprecated)]
-            boundary::apply_pec(&mut self.grid);
-        }
-        self.step += 1;
+        self.update_h_only();
+        self.apply_cpml_h();
+        self.apply_gaussian_source_ez(i, j, k, t, t0, sigma);
+        self.update_e_only();
+        self.apply_cpml_e();
+        self.advance_clock();
     }
 
     /// Like [`Self::step_with_source`], but additionally feeds the
@@ -269,21 +337,16 @@ impl WalkingSkeletonSolver {
         pw.step_incident_h();
 
         // 2. Standard H update.
-        update::update_h(&mut self.grid);
+        self.update_h_only();
 
         // 3. TF/SF correction on H (uses E_inc at t = n).
         pw.correct_h(&mut self.grid);
 
         // 4. Outer-boundary update.
-        if let Some(cpml) = self.cpml.as_mut() {
-            cpml.update_h(&mut self.grid);
-        } else {
-            #[allow(deprecated)]
-            boundary::apply_pec(&mut self.grid);
-        }
+        self.apply_cpml_h();
 
         // 5. Standard E update.
-        update::update_e(&mut self.grid);
+        self.update_e_only();
 
         // 6. Advance E_inc and inject the source (E_inc now at t = n+1,
         //    H_inc at t = n+1/2).
@@ -293,35 +356,20 @@ impl WalkingSkeletonSolver {
         pw.correct_e(&mut self.grid);
 
         // 8. Outer-boundary update.
-        if let Some(cpml) = self.cpml.as_mut() {
-            cpml.update_e(&mut self.grid);
-        } else {
-            #[allow(deprecated)]
-            boundary::apply_pec(&mut self.grid);
-        }
+        self.apply_cpml_e();
 
         // 9. Advance the wall-clock.
-        self.step += 1;
+        self.advance_clock();
     }
 }
 
 impl FdtdSolver for WalkingSkeletonSolver {
     fn step(&mut self) {
-        update::update_h(&mut self.grid);
-        if let Some(cpml) = self.cpml.as_mut() {
-            cpml.update_h(&mut self.grid);
-        } else {
-            #[allow(deprecated)]
-            boundary::apply_pec(&mut self.grid);
-        }
-        update::update_e(&mut self.grid);
-        if let Some(cpml) = self.cpml.as_mut() {
-            cpml.update_e(&mut self.grid);
-        } else {
-            #[allow(deprecated)]
-            boundary::apply_pec(&mut self.grid);
-        }
-        self.step += 1;
+        self.update_h_only();
+        self.apply_cpml_h();
+        self.update_e_only();
+        self.apply_cpml_e();
+        self.advance_clock();
     }
 
     fn current_time(&self) -> f64 {
