@@ -783,6 +783,304 @@ impl SubgridRegion {
         }
     }
 
+    // ----------------------------------------------------------------
+    // Q4 — fine → coarse H_t area-average and E_t edge-average closure
+    // ----------------------------------------------------------------
+
+    /// Overwrite the parent grid's tangential `H` on the six interface
+    /// faces with the area-weighted average of the four fine-grid
+    /// `H_t` cells covering each coarse face.
+    ///
+    /// This is the closure step from Chevalier 1997 §IV: after both fine
+    /// sub-steps have completed for the current coarse interval, the
+    /// coarse `H_t` cells **just inside the subgrid boundary** (one coarse
+    /// cell layer adjacent to each face) inherit the fine-grid solution.
+    /// The next coarse `E` update outside the subgrid then sees a
+    /// consistent `H_t` on the interface — which is what closes the
+    /// discrete energy balance to second order in `dx_coarse`.
+    ///
+    /// Layer overwritten per face (in coarse-cell indices):
+    /// - `−x` face: `i_c = lo.0`
+    /// - `+x` face: `i_c = hi.0 − 1`
+    /// - `−y` face: `j_c = lo.1`
+    /// - `+y` face: `j_c = hi.1 − 1`
+    /// - `−z` face: `k_c = lo.2`
+    /// - `+z` face: `k_c = hi.2 − 1`
+    ///
+    /// On 2× refinement each coarse face covers a 2×2 tile of fine faces
+    /// (uniform refinement → equal area weighting → arithmetic mean of
+    /// four fine samples).
+    pub fn average_fine_h_to_coarse(&self, parent: &mut YeeGrid) {
+        let lo = self.lo;
+        let hi = self.hi;
+        let fine_nx = 2 * (hi.0 - lo.0);
+        let fine_ny = 2 * (hi.1 - lo.1);
+        let fine_nz = 2 * (hi.2 - lo.2);
+
+        // ±x faces — overwrite coarse H_y, H_z on the layer i_c ∈ {lo.0, hi.0 − 1}.
+        Self::avg_face_x(&self.fine, parent, lo, hi, lo.0, 0);
+        Self::avg_face_x(&self.fine, parent, lo, hi, hi.0 - 1, fine_nx - 2);
+
+        // ±y faces — overwrite coarse H_x, H_z on the layer j_c ∈ {lo.1, hi.1 − 1}.
+        Self::avg_face_y(&self.fine, parent, lo, hi, lo.1, 0);
+        Self::avg_face_y(&self.fine, parent, lo, hi, hi.1 - 1, fine_ny - 2);
+
+        // ±z faces — overwrite coarse H_x, H_y on the layer k_c ∈ {lo.2, hi.2 − 1}.
+        Self::avg_face_z(&self.fine, parent, lo, hi, lo.2, 0);
+        Self::avg_face_z(&self.fine, parent, lo, hi, hi.2 - 1, fine_nz - 2);
+    }
+
+    /// Overwrite the parent grid's tangential `E` on the six interface
+    /// faces with the edge-averaged fine `E_t` (two fine edges per coarse
+    /// edge under 2× refinement).
+    ///
+    /// Symmetric closure to [`Self::average_fine_h_to_coarse`] for stage 7
+    /// of the spec §3 time-step pattern. Coarse `E_t` edges lie *on* the
+    /// interface plane (unlike coarse `H_t` which is cell-centered in the
+    /// normal direction), so the affected coarse indices are the boundary
+    /// nodes `i ∈ {lo.0, hi.0}`, `j ∈ {lo.1, hi.1}`, `k ∈ {lo.2, hi.2}`
+    /// for each respective face.
+    pub fn overwrite_coarse_e_from_fine(&self, parent: &mut YeeGrid) {
+        let lo = self.lo;
+        let hi = self.hi;
+        let fine_nx = 2 * (hi.0 - lo.0);
+        let fine_ny = 2 * (hi.1 - lo.1);
+        let fine_nz = 2 * (hi.2 - lo.2);
+
+        // ±x faces — overwrite coarse E_y, E_z on the planes i_c ∈ {lo.0, hi.0}.
+        Self::overwrite_face_x(&self.fine, parent, lo, hi, lo.0, 0);
+        Self::overwrite_face_x(&self.fine, parent, lo, hi, hi.0, fine_nx);
+
+        // ±y faces — overwrite coarse E_x, E_z on the planes j_c ∈ {lo.1, hi.1}.
+        Self::overwrite_face_y(&self.fine, parent, lo, hi, lo.1, 0);
+        Self::overwrite_face_y(&self.fine, parent, lo, hi, hi.1, fine_ny);
+
+        // ±z faces — overwrite coarse E_x, E_y on the planes k_c ∈ {lo.2, hi.2}.
+        Self::overwrite_face_z(&self.fine, parent, lo, hi, lo.2, 0);
+        Self::overwrite_face_z(&self.fine, parent, lo, hi, hi.2, fine_nz);
+    }
+
+    /// Area-average fine `H_y`, `H_z` onto a single coarse-cell layer
+    /// `i_c_face` adjacent to a ±x interface face.
+    ///
+    /// `fine_i_lo` is the first fine x-index covered by the coarse layer
+    /// (`0` for the −x face, `fine_nx − 2` for the +x face).
+    fn avg_face_x(
+        fine: &YeeGrid,
+        parent: &mut YeeGrid,
+        lo: (usize, usize, usize),
+        hi: (usize, usize, usize),
+        i_c_face: usize,
+        fine_i_lo: usize,
+    ) {
+        // H_y on the layer: coarse hy[(i_c_face, j_c, k_c)], j_c ∈ [lo.1, hi.1],
+        // k_c ∈ [lo.2, hi.2). 4 fine H_y cells per coarse: fine_i ∈ {fine_i_lo,
+        // fine_i_lo+1}, fine_j_node = 2*(j_c − lo.1), fine_k ∈ {2*(k_c − lo.2),
+        // 2*(k_c − lo.2) + 1}.
+        for j_c in lo.1..=hi.1 {
+            let j_f = 2 * (j_c - lo.1);
+            for k_c in lo.2..hi.2 {
+                let k_f0 = 2 * (k_c - lo.2);
+                let s = fine.hy[(fine_i_lo, j_f, k_f0)]
+                    + fine.hy[(fine_i_lo + 1, j_f, k_f0)]
+                    + fine.hy[(fine_i_lo, j_f, k_f0 + 1)]
+                    + fine.hy[(fine_i_lo + 1, j_f, k_f0 + 1)];
+                parent.hy[(i_c_face, j_c, k_c)] = 0.25 * s;
+            }
+        }
+        // H_z on the layer: coarse hz[(i_c_face, j_c, k_c)], j_c ∈ [lo.1, hi.1),
+        // k_c ∈ [lo.2, hi.2]. 4 fine H_z cells: fine_i ∈ {fine_i_lo, fine_i_lo+1},
+        // fine_j ∈ {2*(j_c − lo.1), 2*(j_c − lo.1) + 1}, fine_k_node = 2*(k_c − lo.2).
+        for j_c in lo.1..hi.1 {
+            let j_f0 = 2 * (j_c - lo.1);
+            for k_c in lo.2..=hi.2 {
+                let k_f = 2 * (k_c - lo.2);
+                let s = fine.hz[(fine_i_lo, j_f0, k_f)]
+                    + fine.hz[(fine_i_lo + 1, j_f0, k_f)]
+                    + fine.hz[(fine_i_lo, j_f0 + 1, k_f)]
+                    + fine.hz[(fine_i_lo + 1, j_f0 + 1, k_f)];
+                parent.hz[(i_c_face, j_c, k_c)] = 0.25 * s;
+            }
+        }
+    }
+
+    /// Area-average fine `H_x`, `H_z` onto a coarse layer adjacent to a
+    /// ±y interface face.
+    fn avg_face_y(
+        fine: &YeeGrid,
+        parent: &mut YeeGrid,
+        lo: (usize, usize, usize),
+        hi: (usize, usize, usize),
+        j_c_face: usize,
+        fine_j_lo: usize,
+    ) {
+        // H_x: coarse hx[(i_c, j_c_face, k_c)], i_c ∈ [lo.0, hi.0], k_c ∈ [lo.2, hi.2).
+        // 4 fine H_x cells: fine_i_node = 2*(i_c − lo.0), fine_j ∈ {fine_j_lo,
+        // fine_j_lo+1}, fine_k ∈ {2*(k_c − lo.2), 2*(k_c − lo.2)+1}.
+        for i_c in lo.0..=hi.0 {
+            let i_f = 2 * (i_c - lo.0);
+            for k_c in lo.2..hi.2 {
+                let k_f0 = 2 * (k_c - lo.2);
+                let s = fine.hx[(i_f, fine_j_lo, k_f0)]
+                    + fine.hx[(i_f, fine_j_lo + 1, k_f0)]
+                    + fine.hx[(i_f, fine_j_lo, k_f0 + 1)]
+                    + fine.hx[(i_f, fine_j_lo + 1, k_f0 + 1)];
+                parent.hx[(i_c, j_c_face, k_c)] = 0.25 * s;
+            }
+        }
+        // H_z: coarse hz[(i_c, j_c_face, k_c)], i_c ∈ [lo.0, hi.0), k_c ∈ [lo.2, hi.2].
+        // 4 fine H_z cells: fine_i ∈ {2*(i_c − lo.0), 2*(i_c − lo.0)+1}, fine_j ∈
+        // {fine_j_lo, fine_j_lo+1}, fine_k_node = 2*(k_c − lo.2).
+        for i_c in lo.0..hi.0 {
+            let i_f0 = 2 * (i_c - lo.0);
+            for k_c in lo.2..=hi.2 {
+                let k_f = 2 * (k_c - lo.2);
+                let s = fine.hz[(i_f0, fine_j_lo, k_f)]
+                    + fine.hz[(i_f0 + 1, fine_j_lo, k_f)]
+                    + fine.hz[(i_f0, fine_j_lo + 1, k_f)]
+                    + fine.hz[(i_f0 + 1, fine_j_lo + 1, k_f)];
+                parent.hz[(i_c, j_c_face, k_c)] = 0.25 * s;
+            }
+        }
+    }
+
+    /// Area-average fine `H_x`, `H_y` onto a coarse layer adjacent to a
+    /// ±z interface face.
+    fn avg_face_z(
+        fine: &YeeGrid,
+        parent: &mut YeeGrid,
+        lo: (usize, usize, usize),
+        hi: (usize, usize, usize),
+        k_c_face: usize,
+        fine_k_lo: usize,
+    ) {
+        // H_x: coarse hx[(i_c, j_c, k_c_face)], i_c ∈ [lo.0, hi.0], j_c ∈ [lo.1, hi.1).
+        // 4 fine H_x cells: fine_i_node = 2*(i_c − lo.0), fine_j ∈ {2*(j_c − lo.1),
+        // 2*(j_c − lo.1)+1}, fine_k ∈ {fine_k_lo, fine_k_lo+1}.
+        for i_c in lo.0..=hi.0 {
+            let i_f = 2 * (i_c - lo.0);
+            for j_c in lo.1..hi.1 {
+                let j_f0 = 2 * (j_c - lo.1);
+                let s = fine.hx[(i_f, j_f0, fine_k_lo)]
+                    + fine.hx[(i_f, j_f0 + 1, fine_k_lo)]
+                    + fine.hx[(i_f, j_f0, fine_k_lo + 1)]
+                    + fine.hx[(i_f, j_f0 + 1, fine_k_lo + 1)];
+                parent.hx[(i_c, j_c, k_c_face)] = 0.25 * s;
+            }
+        }
+        // H_y: coarse hy[(i_c, j_c, k_c_face)], i_c ∈ [lo.0, hi.0), j_c ∈ [lo.1, hi.1].
+        // 4 fine H_y cells: fine_i ∈ {2*(i_c − lo.0), 2*(i_c − lo.0)+1}, fine_j_node
+        // = 2*(j_c − lo.1), fine_k ∈ {fine_k_lo, fine_k_lo+1}.
+        for i_c in lo.0..hi.0 {
+            let i_f0 = 2 * (i_c - lo.0);
+            for j_c in lo.1..=hi.1 {
+                let j_f = 2 * (j_c - lo.1);
+                let s = fine.hy[(i_f0, j_f, fine_k_lo)]
+                    + fine.hy[(i_f0 + 1, j_f, fine_k_lo)]
+                    + fine.hy[(i_f0, j_f, fine_k_lo + 1)]
+                    + fine.hy[(i_f0 + 1, j_f, fine_k_lo + 1)];
+                parent.hy[(i_c, j_c, k_c_face)] = 0.25 * s;
+            }
+        }
+    }
+
+    /// Edge-average fine `E_y`, `E_z` onto the coarse `E_t` plane at
+    /// `i_c_face` (a ±x interface face).
+    ///
+    /// `fine_i_face` is the fine x-node index that coincides with the
+    /// coarse boundary plane (`0` for −x, `fine_nx` for +x).
+    fn overwrite_face_x(
+        fine: &YeeGrid,
+        parent: &mut YeeGrid,
+        lo: (usize, usize, usize),
+        hi: (usize, usize, usize),
+        i_c_face: usize,
+        fine_i_face: usize,
+    ) {
+        // E_y on the face: coarse ey[(i_c_face, j_c, k_c)], j_c ∈ [lo.1, hi.1),
+        // k_c ∈ [lo.2, hi.2]. 2 fine E_y edges per coarse: fine_i_node = fine_i_face,
+        // fine_j ∈ {2*(j_c − lo.1), 2*(j_c − lo.1)+1}, fine_k_node = 2*(k_c − lo.2).
+        for j_c in lo.1..hi.1 {
+            let j_f0 = 2 * (j_c - lo.1);
+            for k_c in lo.2..=hi.2 {
+                let k_f = 2 * (k_c - lo.2);
+                let s = fine.ey[(fine_i_face, j_f0, k_f)] + fine.ey[(fine_i_face, j_f0 + 1, k_f)];
+                parent.ey[(i_c_face, j_c, k_c)] = 0.5 * s;
+            }
+        }
+        // E_z on the face: coarse ez[(i_c_face, j_c, k_c)], j_c ∈ [lo.1, hi.1],
+        // k_c ∈ [lo.2, hi.2). 2 fine E_z edges: fine_i_node = fine_i_face,
+        // fine_j_node = 2*(j_c − lo.1), fine_k ∈ {2*(k_c − lo.2), 2*(k_c − lo.2)+1}.
+        for j_c in lo.1..=hi.1 {
+            let j_f = 2 * (j_c - lo.1);
+            for k_c in lo.2..hi.2 {
+                let k_f0 = 2 * (k_c - lo.2);
+                let s = fine.ez[(fine_i_face, j_f, k_f0)] + fine.ez[(fine_i_face, j_f, k_f0 + 1)];
+                parent.ez[(i_c_face, j_c, k_c)] = 0.5 * s;
+            }
+        }
+    }
+
+    /// Edge-average fine `E_x`, `E_z` onto the coarse `E_t` plane at
+    /// `j_c_face` (a ±y interface face).
+    fn overwrite_face_y(
+        fine: &YeeGrid,
+        parent: &mut YeeGrid,
+        lo: (usize, usize, usize),
+        hi: (usize, usize, usize),
+        j_c_face: usize,
+        fine_j_face: usize,
+    ) {
+        // E_x: coarse ex[(i_c, j_c_face, k_c)], i_c ∈ [lo.0, hi.0), k_c ∈ [lo.2, hi.2].
+        for i_c in lo.0..hi.0 {
+            let i_f0 = 2 * (i_c - lo.0);
+            for k_c in lo.2..=hi.2 {
+                let k_f = 2 * (k_c - lo.2);
+                let s = fine.ex[(i_f0, fine_j_face, k_f)] + fine.ex[(i_f0 + 1, fine_j_face, k_f)];
+                parent.ex[(i_c, j_c_face, k_c)] = 0.5 * s;
+            }
+        }
+        // E_z: coarse ez[(i_c, j_c_face, k_c)], i_c ∈ [lo.0, hi.0], k_c ∈ [lo.2, hi.2).
+        for i_c in lo.0..=hi.0 {
+            let i_f = 2 * (i_c - lo.0);
+            for k_c in lo.2..hi.2 {
+                let k_f0 = 2 * (k_c - lo.2);
+                let s = fine.ez[(i_f, fine_j_face, k_f0)] + fine.ez[(i_f, fine_j_face, k_f0 + 1)];
+                parent.ez[(i_c, j_c_face, k_c)] = 0.5 * s;
+            }
+        }
+    }
+
+    /// Edge-average fine `E_x`, `E_y` onto the coarse `E_t` plane at
+    /// `k_c_face` (a ±z interface face).
+    fn overwrite_face_z(
+        fine: &YeeGrid,
+        parent: &mut YeeGrid,
+        lo: (usize, usize, usize),
+        hi: (usize, usize, usize),
+        k_c_face: usize,
+        fine_k_face: usize,
+    ) {
+        // E_x: coarse ex[(i_c, j_c, k_c_face)], i_c ∈ [lo.0, hi.0), j_c ∈ [lo.1, hi.1].
+        for i_c in lo.0..hi.0 {
+            let i_f0 = 2 * (i_c - lo.0);
+            for j_c in lo.1..=hi.1 {
+                let j_f = 2 * (j_c - lo.1);
+                let s = fine.ex[(i_f0, j_f, fine_k_face)] + fine.ex[(i_f0 + 1, j_f, fine_k_face)];
+                parent.ex[(i_c, j_c, k_c_face)] = 0.5 * s;
+            }
+        }
+        // E_y: coarse ey[(i_c, j_c, k_c_face)], i_c ∈ [lo.0, hi.0], j_c ∈ [lo.1, hi.1).
+        for i_c in lo.0..=hi.0 {
+            let i_f = 2 * (i_c - lo.0);
+            for j_c in lo.1..hi.1 {
+                let j_f0 = 2 * (j_c - lo.1);
+                let s = fine.ey[(i_f, j_f0, fine_k_face)] + fine.ey[(i_f, j_f0 + 1, fine_k_face)];
+                parent.ey[(i_c, j_c, k_c_face)] = 0.5 * s;
+            }
+        }
+    }
+
     /// Reject regions that touch a CPML cell on any face. The interior
     /// (non-CPML) coarse cells are `[npml, n - npml)` per axis; the
     /// subgrid `lo..hi` interval must lie inside that half-open range.
