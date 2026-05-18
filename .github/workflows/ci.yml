@@ -4,9 +4,25 @@ on:
   pull_request:
     branches:
       - main
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "ROADMAP.md"
   push:
     branches:
       - main
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "ROADMAP.md"
+  workflow_dispatch: {}
+
+# Cancel superseded runs on the same ref. PR pushes that arrive while a
+# prior run is still in flight will cancel that prior run; pushes to main
+# are grouped per-SHA so a true merge train still gets a clean signal.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   lint-test:
