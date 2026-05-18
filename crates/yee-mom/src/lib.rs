@@ -23,6 +23,8 @@ pub mod ports;
 pub(crate) mod quadrature;
 pub mod roughness;
 pub(crate) mod solve;
+#[doc(hidden)]
+pub mod sommerfeld;
 
 pub use iterative::{GmresParams, GmresResult, gmres_jacobi};
 pub use roughness::{RoughnessModel, SIGMA_COPPER};
@@ -380,6 +382,11 @@ pub mod __internal {
     /// Public re-export of [`MultilayerGreens`] for the Phase 1.1
     /// integration tests. Not part of the stable API.
     pub use crate::multilayer::MultilayerGreens;
+
+    /// Public re-export of the Sommerfeld surface-wave pole-search
+    /// module for the Phase 1.1.1.2 integration tests. Not part of the
+    /// stable API.
+    pub use crate::sommerfeld;
 
     /// Public re-export of the `Greens` trait and `FreeSpaceGreen` struct
     /// so `__internal` callers (the integration tests) can name them in
