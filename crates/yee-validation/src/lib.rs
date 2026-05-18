@@ -13,30 +13,32 @@
 //! 5%/10% tolerance on Re/Im).
 //!
 //! `mom-002` (50 Ω microstrip Z₀ on FR-4) is wired up against the
-//! Phase 1.1.1.0 multi-image DCIM kernel
-//! ([`yee_mom::GreensSpec::MicrostripDcim`] with `n_images = 5`)
-//! plus the Phase 1.1.1.1 refined strip mesh: `30 × 16` cells with
-//! Chebyshev (edge-clustered) width-direction spacing
+//! Phase 1.1.1.2 Sommerfeld pole-subtracted DCIM kernel
+//! ([`yee_mom::__internal::MultilayerGreens::new_microstrip_sommerfeld`]
+//! with `n_images = 5`, `n_surface_wave_poles = 1`) on the Phase
+//! 1.1.1.1 refined strip mesh: `30 × 16` cells with Chebyshev
+//! (edge-clustered) width-direction spacing
 //! ([`StripSpacing::EdgeClustered`]) to resolve the `1/√d` RWG
-//! current singularity at the strip edges. The refinement-convergence
-//! sweep ([`tests::mom_002_strip_width_refinement_sweep`]) shows
-//! `Re(Z)` collapsing from `+2.3 kΩ` (`n_width = 2`) to `≈ −50 Ω`
-//! (`n_width = 32`) — the mesh-resolution leg of the Phase 1.1.1.0
-//! escape hatch is resolved.
+//! current singularity at the strip edges.
 //!
-//! `Im(Z)` stays at `≈ −2.1 kΩ` across `n_width ∈ {16, 24, 32}`;
-//! that residual is **not** mesh-bound. The DCIM kernel approximates
-//! the spectral reflection coefficient with complex images but
-//! misses the discrete surface-wave poles that dominate the field at
-//! 1 GHz on FR-4. Per the brief's escape hatch ("if refining to
-//! `nz = 32` still floors above 100 Ω, surface the `|Z_in|` sweep
-//! table and STOP — the bound is Sommerfeld surface-wave poles
-//! (Phase 1.1.1.2) not mesh"), the validation gate keeps the loose
-//! non-degeneracy band `[1, 100 kΩ]` until Phase 1.1.1.2 ships
-//! Sommerfeld extraction with surface-wave pole subtraction. See
-//! CLAUDE.md §10 and the [`MOM_002_Z_MAX`] docstring.
-//! `mom-003` remains [`CaseStatus::Skipped`] for the same
-//! upstream-physics reason.
+//! **Track CCCCCC retest finding (2026-05-18, Phase 1.1.1.2 shipped):**
+//! the empirical `|Z_in| ≈ 2232 Ω` (see
+//! [`MOM_002_Z_IN_MEASURED_OHM`]) is still ~30× above the analytic
+//! ±50 % band `[35, 75] Ω`. The TM₀ surface-wave pole moves `Z_in`
+//! by only ~10 Ω over the pole-free DCIM result (which was
+//! `Z_in ≈ −67 + j(−2220) Ω`); pole subtraction did **not** close
+//! the ~2.2 kΩ reactance plateau the spec predicted. Per the retest
+//! brief's policy bin ("`|Z_in|` outside `[35, 75] Ω` → leave the
+//! `[1, 100 kΩ]` non-degeneracy band intact"), the validation gate
+//! keeps the loose band; tightening requires a follow-up track that
+//! diagnoses the residual reactance. Candidates: pole-residue sign or
+//! branch-sheet confusion, GPOF noise floor on the pole-subtracted
+//! residual, a strip mesh that still under-resolves the spatial
+//! Hankel-`H_0^{(2)}` decay, or an unmodelled higher-order pole that
+//! the `n_surface_wave_poles == 2` duplicate-detection guard
+//! incorrectly suppresses. See the [`MOM_002_Z_MAX`] docstring.
+//! `mom-003` remains [`CaseStatus::Skipped`] for the same residual
+//! reactance reason.
 //!
 //! The FDTD cases (`cpml-001`, `ntff-001`, `dispersive-001`) continue
 //! to report [`CaseStatus::Skipped`] until their test fixtures are
@@ -525,46 +527,69 @@ const MOM_002_N_WIDTH: usize = 16;
 const MOM_002_F_HZ: f64 = 1.0e9;
 /// Reference port impedance for the `Z_in = Z₀(1+S₁₁)/(1−S₁₁)` map.
 const MOM_002_Z0_REF: f64 = 50.0;
-/// Lower bound on `|Z_in|` (Ω). Phase 1.1.1.0 wires the multi-image
-/// DCIM kernel ([`yee_mom::GreensSpec::MicrostripDcim`]) but the spec
-/// DoD's [35, 75] Ω band is not met on this coarse `30 × 2` mesh —
-/// see [`MOM_002_Z_MAX`] for the per-spec-escape-hatch rationale and
-/// the actual measured value. The lower bound is kept at 1 Ω (a
-/// near-short tripwire) so any genuine pipeline regression still
-/// trips the gate.
+/// Lower bound on `|Z_in|` (Ω). The mom-002 microstrip case has been
+/// retested (Track CCCCCC, Phase 1.1.1.2) against the Sommerfeld
+/// pole-extraction kernel; `|Z_in|` lands far above the analytic
+/// `[35, 75] Ω` band (see [`MOM_002_Z_IN_MEASURED_OHM`]). Per the
+/// retest brief's escape-hatch policy ("If `|Z_in|` is outside [35, 75]
+/// Ω: leave the current non-degeneracy `[1, 100 kΩ]` band intact"),
+/// the lower bound is kept at 1 Ω (a near-short tripwire) so any
+/// genuine pipeline regression still trips the gate.
 const MOM_002_Z_MIN: f64 = 1.0;
 /// Upper bound on `|Z_in|` (Ω). Phase 1.1.1.1 refined the strip mesh
-/// from `30 × 2` (uniform) to `30 × 16` (Chebyshev edge-clustered);
-/// the refinement-convergence sweep
-/// ([`tests::mom_002_strip_width_refinement_sweep`]) confirms `Re(Z)`
-/// converges from `+2.3 kΩ` (`n_width = 2`) to `≈ −67 Ω`
-/// (`n_width = 16`) to `≈ −52 Ω` (`n_width = 32`) — i.e. the
-/// width-direction RWG singularity is now resolved and the
-/// resistive part is bounded near 0 Ω, consistent with a low-loss
-/// line driven well below `λ/4` resonance.
+/// from `30 × 2` (uniform) to `30 × 16` (Chebyshev edge-clustered)
+/// and the resistive part converged to `Re(Z) ≈ −67 Ω` (consistent
+/// with a low-loss line driven well below `λ/4` resonance). The
+/// remaining `Im(Z) ≈ −2.2 kΩ` plateau was the surface-wave-pole
+/// signature; Track CCCCCC (Phase 1.1.1.2 retest) routes mom-002
+/// through [`yee_mom::__internal::MultilayerGreens::new_microstrip_sommerfeld`]
+/// with `n_surface_wave_poles = 1` (TM₀ only — FR-4 at 1 GHz has no
+/// second surface-wave mode below ~27 GHz). The pole correction
+/// moves `Z_in` by only ~10 Ω (78 Ω resistive, 11 Ω reactive), not
+/// the ~2 kΩ that would be required to land in the analytic
+/// `[35, 75] Ω` band. The empirical landing is recorded in
+/// [`MOM_002_Z_IN_MEASURED_OHM`].
 ///
-/// `Im(Z)` stays at `≈ −2.1 kΩ` across `n_width ∈ {16, 24, 32}`;
-/// that floor is **not** mesh-bound. The DCIM kernel
-/// ([`yee_mom::GreensSpec::MicrostripDcim`]) approximates the
-/// spectral reflection coefficient with a finite sum of complex
-/// images, which captures the quasi-static substrate response but
-/// not the discrete surface-wave poles that dominate the field at
-/// 1 GHz on FR-4. Without pole subtraction the spatial Green's
-/// function is missing a `O(1/ρ)` long-range tail, and the strip
-/// self-impedance picks up a large spurious reactance. Per the
-/// brief's escape hatch ("if refining to nz = 32 still floors
-/// above 100 Ω, surface the `|Z_in|` sweep table and STOP — the
-/// bound is Sommerfeld surface-wave poles (Phase 1.1.1.2) not
-/// mesh"), the gate stays at the placeholder upper bound of 100 kΩ
-/// until Phase 1.1.1.2 ships Sommerfeld extraction with
-/// surface-wave pole subtraction. The spec `[35, 75] Ω` band
-/// remains the DoD for the next sub-project; do not tighten until
-/// then.
+/// Per the retest brief's policy bin ("`|Z_in|` outside [35, 75] Ω
+/// → leave the current non-degeneracy `[1, 100 kΩ]` band intact"),
+/// the upper bound stays at 100 kΩ. Tightening this requires a
+/// follow-up track that diagnoses why pole subtraction does not
+/// close the remaining ~kΩ reactance: candidate root causes include
+/// pole-residue sign / branch-sheet confusion, an unmodelled second
+/// pole that the `≤ 27 GHz`-no-TM₁ heuristic incorrectly suppresses,
+/// GPOF noise floor on the pole-subtracted residual, or a strip mesh
+/// that still under-resolves the spatial Hankel-`H_0^{(2)}` decay.
 const MOM_002_Z_MAX: f64 = 100_000.0;
 /// Number of complex images the multi-image DCIM fits at this
 /// frequency. Aksun 1996 recommends `N = 5` for moderate-thickness
 /// substrates; the spec DoD pins the validation to that value.
 const MOM_002_DCIM_N_IMAGES: usize = 5;
+/// Number of surface-wave poles the Phase 1.1.1.2 Sommerfeld kernel
+/// extracts and subtracts before the GPOF fit. FR-4 at 1 GHz supports
+/// only the dominant TM₀ mode (the TM₁ cutoff is around `~27 GHz` for
+/// `h = 1.6 mm, ε_r = 4.4`), so a request for `n = 2` collapses to
+/// `n = 1` via the duplicate-detection guard in
+/// `crates/yee-mom/src/multilayer.rs::find_surface_wave_poles`. Pinned
+/// to 1 here to match the physics; raising it is a no-op until the
+/// frequency or substrate properties unlock TM₁.
+const MOM_002_SOMMERFELD_N_POLES: usize = 1;
+/// Phase 1.1.1.2 measurement (Track CCCCCC) at the 1 GHz probe
+/// frequency on the `30 × 16` edge-clustered strip mesh with the
+/// Sommerfeld kernel (`n_images = 5`, `n_surface_wave_poles = 1`):
+/// `Z_in ≈ −74.781 + j(−2230.915) Ω`, `|Z_in| ≈ 2232.168 Ω`. This
+/// is the empirical landing the loose `[MOM_002_Z_MIN, MOM_002_Z_MAX]`
+/// band brackets — the analytic ±5 % target around 50 Ω is `[47.5,
+/// 52.5] Ω` (40× too small), and the analytic ±50 % band `[35, 75] Ω`
+/// is still 30× too small. See the [`MOM_002_Z_MAX`] docstring for the
+/// follow-up-track diagnostic candidates.
+///
+/// Used as a regression tripwire in
+/// [`tests::mom_002_headline_gate_passes`]; the `#[allow(dead_code)]`
+/// guards the non-test lib build, where the constant is referenced
+/// only from docstrings (i.e. semantically used, but not reachable
+/// from the public-facing case-runner code path).
+#[allow(dead_code)]
+const MOM_002_Z_IN_MEASURED_OHM: f64 = 2232.168;
 
 /// Coarse frequency-sweep extent for the plot artifacts. 0.5 GHz to
 /// 1.5 GHz brackets the 1 GHz probe point on either side without
@@ -575,12 +600,12 @@ const MOM_002_PLOT_N_POINTS: usize = 21;
 
 /// Substrate relative permittivity for the FR-4 microstrip case
 /// (Hammerstad-Jensen reference geometry). Passed into the
-/// `GreensSpec::MicrostripDcim` Phase 1.1.1.0 kernel so mom-002
-/// exercises the multi-image DCIM path with `n_images = 5`. The
-/// finite-image fit converges to the closed-form Z₀ within the
-/// `[35, 75] Ω` ±50 % gate; the tighter ±3 % Hammerstad-Jensen gate
-/// awaits Phase 1.1.1.1 (Sommerfeld extraction with surface-wave
-/// pole subtraction).
+/// Phase 1.1.1.2 Sommerfeld kernel
+/// ([`yee_mom::__internal::MultilayerGreens::new_microstrip_sommerfeld`])
+/// so mom-002 exercises pole-subtracted multi-image DCIM with
+/// `n_images = 5` and the dominant TM₀ surface-wave pole extracted.
+/// The pole subtraction did not close the analytic gap — see the
+/// [`MOM_002_Z_IN_MEASURED_OHM`] constant for the empirical landing.
 const MOM_002_SUBSTRATE_EPS_R: f64 = 4.4;
 /// Substrate thickness `h` (m) for the FR-4 microstrip case.
 const MOM_002_SUBSTRATE_H_M: f64 = 1.6e-3;
@@ -720,22 +745,31 @@ fn mom_002_strip_mesh(
 ///
 /// Builds a rectangular strip mesh (length 30 mm, width 2.94 mm, the
 /// Hammerstad-Jensen 50 Ω geometry on FR-4 `h = 1.6 mm, ε_r = 4.4`),
-/// runs the [`yee_mom::PlanarMoM`] sweep at 1 GHz through the
-/// [`yee_mom::GreensSpec::MicrostripDcim`] kernel with `n_images = 5`,
-/// and extracts `Z_in = Z₀(1 + S₁₁)/(1 − S₁₁)`. Passes iff
+/// solves the MPIE delta-gap problem at 1 GHz with the Phase 1.1.1.2
+/// Sommerfeld kernel
+/// ([`yee_mom::__internal::MultilayerGreens::new_microstrip_sommerfeld`])
+/// — `n_images = 5` complex-image DCIM with `n_surface_wave_poles = 1`
+/// (TM₀, the only mode FR-4 at 1 GHz supports) — and extracts
+/// `Z_in = V_port / I_port` directly. Passes iff
 /// `MOM_002_Z_MIN ≤ |Z_in| ≤ MOM_002_Z_MAX`.
 ///
-/// The spec DoD asked for a `[35, 75] Ω` ±50 % band around 50 Ω, but
-/// the current mesh resolution does not let the multi-image DCIM
-/// land in that band — see the [`MOM_002_Z_MAX`] docstring and the
-/// module-level note for the escape-hatch rationale. The check
-/// retains the loose `[1, 100 kΩ]` non-degeneracy band; the
-/// improvement vs. Phase 1.1.0 is captured in the `notes` string,
-/// which now reports a `|Z_in|` in the kΩ range rather than the
-/// 14 kΩ floor.
+/// Track CCCCCC retest finding (Phase 1.1.1.2): the empirical `|Z_in|`
+/// (`≈ 2232 Ω`, see [`MOM_002_Z_IN_MEASURED_OHM`]) is still ~30× above
+/// the analytic ±50 % band `[35, 75] Ω`. Adding the TM₀ pole moved
+/// `Z_in` by only `~10 Ω` over the pole-free DCIM result, not the
+/// `~2 kΩ` reactance reduction the spec predicted. Per the retest
+/// brief's policy bin ("`|Z_in|` outside `[35, 75] Ω` → leave the
+/// `[1, 100 kΩ]` non-degeneracy band intact"), this case keeps the
+/// loose band and records the measurement as a constant for the
+/// follow-up track. See the [`MOM_002_Z_MAX`] docstring for the
+/// candidate root-cause list.
+///
+/// The plot artifacts share the Sommerfeld kernel via
+/// [`generate_mom_002_plots`] — same numerics, swept across
+/// `[0.5, 1.5] GHz`.
 fn run_mom_002() -> CaseResult {
-    use yee_core::{FreqRange, Solver};
-    use yee_mom::{GreensSpec, PlanarMoM};
+    use num_complex::Complex64;
+    use yee_mom::__internal::{MultilayerGreens, z_in_with_greens};
 
     let t0 = Instant::now();
     let result: Result<Complex64, Error> = (|| -> Result<Complex64, Error> {
@@ -749,26 +783,26 @@ fn run_mom_002() -> CaseResult {
             MOM_002_N_WIDTH,
             StripSpacing::EdgeClustered,
         );
-        // Single-point sweep at 1 GHz. FreqRange requires `stop > start`
-        // for a one-point evaluation (same convention as run_mom_001).
-        let freq = FreqRange::new(MOM_002_F_HZ, MOM_002_F_HZ + 1.0, 1)
-            .map_err(|e| Error::Solver(format!("FreqRange::new: {e}")))?;
-        // Phase 1.1.1.0: route through MultilayerGreens with 5-image
-        // DCIM fit. The GPOF fitter (crates/yee-mom/src/gpof.rs)
-        // recovers complex image coefficients from the slab's TE / TM
-        // spectral reflection coefficients via Aksun 1996; the result
-        // is plumbed through GreensSpec::MicrostripDcim into the same
-        // PlanarMoM sweep loop the Phase 1.1.0 path used.
-        let solver = PlanarMoM::default().with_greens(GreensSpec::microstrip_dcim(
+        // Phase 1.1.1.2: route through MultilayerGreens with the
+        // Sommerfeld pole-subtracted N-image DCIM. The TE/TM split is
+        // resolved (separate image trains per channel) and the dominant
+        // TM₀ surface-wave residue is added analytically via
+        // `(j/4) · R_p · H_0^{(2)}(k_p · ρ)` (per ADR-0033). The
+        // `__internal::MultilayerGreens` re-export is used because
+        // `GreensSpec` does not yet expose a `MicrostripSommerfeld`
+        // variant — see the Track CCCCCC finding in the commit body.
+        let green = MultilayerGreens::new_microstrip_sommerfeld(
             MOM_002_SUBSTRATE_EPS_R,
             MOM_002_SUBSTRATE_H_M,
+            MOM_002_F_HZ,
             MOM_002_DCIM_N_IMAGES,
-        ));
-        let s = solver
-            .run(&mesh, freq)
-            .map_err(|e| Error::Solver(format!("PlanarMoM::run: {e}")))?;
-        let s11 = s.data[0][0];
-        Ok(z_in_from_s11(s11, MOM_002_Z0_REF))
+            MOM_002_SOMMERFELD_N_POLES,
+        );
+        // Delta-gap port_tag 1: matches the column-0 cell-tag in
+        // mom_002_strip_mesh_with_spacing.
+        let z_in: Complex64 = z_in_with_greens(&mesh, 1, &green)
+            .map_err(|e| Error::Solver(format!("z_in_with_greens: {e}")))?;
+        Ok(z_in)
     })();
 
     let elapsed = t0.elapsed().as_secs_f64();
@@ -783,13 +817,14 @@ fn run_mom_002() -> CaseResult {
             };
             let notes = format!(
                 "Z_in = {:.3} + j{:.3} Ohm, |Z_in| = {:.3} Ohm at {:.3} GHz \
-                 (Phase 1.1.1.1 {n_len}x{n_w} edge-clustered strip mesh + \
-                 Phase 1.1.1.0 multi-image DCIM, N={} images, eps_r={:.2}, \
-                 h={:.2} mm; loose non-degeneracy band [{:.1}, {:.0}] Ohm — \
-                 mesh-refinement leg of the escape hatch is resolved \
-                 (Re(Z) converges to ~ -50 Ohm at n_width >= 16), but \
-                 Im(Z) ~ -2.1 kOhm floor is Phase 1.1.1.2 surface-wave \
-                 pole extraction territory; see MOM_002_Z_MAX docstring)",
+                 (Phase 1.1.1.2 Sommerfeld pole-subtracted DCIM, N={} images, \
+                 {n_poles} TM0 surface-wave pole, eps_r={:.2}, h={:.2} mm; \
+                 {n_len}x{n_w} edge-clustered strip mesh; loose non-degeneracy \
+                 band [{:.1}, {:.0}] Ohm — Track CCCCCC retest finding: \
+                 |Z_in| sits ~30x above the analytic [35, 75] Ohm spec target, \
+                 pole correction moves Z by only ~10 Ohm; see MOM_002_Z_MAX \
+                 docstring and MOM_002_Z_IN_MEASURED_OHM constant for the \
+                 follow-up-track diagnostic candidates)",
                 z_in.re,
                 z_in.im,
                 z_mag,
@@ -801,6 +836,7 @@ fn run_mom_002() -> CaseResult {
                 MOM_002_Z_MAX,
                 n_len = MOM_002_N_LENGTH,
                 n_w = MOM_002_N_WIDTH,
+                n_poles = MOM_002_SOMMERFELD_N_POLES,
             );
             (status, notes)
         }
@@ -824,9 +860,10 @@ fn run_mom_002() -> CaseResult {
 
     CaseResult {
         id: "mom-002".into(),
-        description: "50 Ohm microstrip Z0 on FR-4 (h=1.6 mm, eps_r=4.4); Phase 1.1.1.1 30x16 \
-             edge-clustered strip mesh + Phase 1.1.1.0 multi-image DCIM, [35, 75] Ohm \
-             band gated on Phase 1.1.1.2 Sommerfeld pole extraction"
+        description: "50 Ohm microstrip Z0 on FR-4 (h=1.6 mm, eps_r=4.4); 30x16 edge-clustered \
+             strip mesh + Phase 1.1.1.2 Sommerfeld pole-subtracted DCIM (n_images=5, \
+             n_surface_wave_poles=1); loose [1, 100 kOhm] band — analytic [35, 75] Ohm \
+             target gated on a follow-up track per Track CCCCCC retest"
             .into(),
         status,
         notes: format!("{notes}{plot_notes}"),
@@ -837,20 +874,25 @@ fn run_mom_002() -> CaseResult {
 
 /// Generate the S₁₁ dB + Smith chart PNGs for mom-002 under
 /// `validation/results/` (CWD-relative). Mirrors the mom-001 plot
-/// path; differences are (a) the strip mesh instead of the cylinder
-/// and (b) the 0.5..1.5 GHz sweep instead of the 100..200 MHz one.
+/// path; differences are (a) the strip mesh instead of the cylinder,
+/// (b) the 0.5..1.5 GHz sweep instead of the 100..200 MHz one, and
+/// (c) the explicit per-frequency loop through
+/// [`yee_mom::__internal::z_in_with_greens`] with a fresh
+/// `MultilayerGreens::new_microstrip_sommerfeld` kernel at each point
+/// (the [`yee_mom::GreensSpec`] enum does not yet expose the Sommerfeld
+/// variant, so the `PlanarMoM::run` sweep wrapper cannot be used).
 ///
 /// Returns the list of paths written on success, or an [`Error`] if
 /// the solver or the plotter failed. The caller folds either into the
 /// `CaseResult` notes; plot failures do not flip a Passed status to
 /// Failed.
 fn generate_mom_002_plots() -> Result<Vec<PathBuf>, Error> {
-    use yee_core::{FreqRange, Solver};
-    use yee_mom::{GreensSpec, PlanarMoM};
+    use yee_core::FreqRange;
+    use yee_mom::__internal::{MultilayerGreens, z_in_with_greens};
     use yee_plotters::{PlotConfig, PlotFormat, plot_s11_db, plot_smith_chart};
 
-    // Phase 1.1.1.1: same edge-clustered builder the headline gate
-    // uses, so the PNGs reflect the same numerics as the case result.
+    // Same edge-clustered builder the headline gate uses, so the PNGs
+    // reflect the same numerics as the case result.
     let mesh = mom_002_strip_mesh_with_spacing(
         MOM_002_STRIP_LENGTH_M,
         MOM_002_STRIP_WIDTH_M,
@@ -864,20 +906,24 @@ fn generate_mom_002_plots() -> Result<Vec<PathBuf>, Error> {
         MOM_002_PLOT_N_POINTS,
     )
     .map_err(|e| Error::Solver(format!("FreqRange::new (plot sweep): {e}")))?;
-    // Phase 1.1.1.0: route plot sweep through the multi-image DCIM
-    // kernel so the generated PNGs reflect the same kernel as the
-    // headline gate result.
-    let solver = PlanarMoM::default().with_greens(GreensSpec::microstrip_dcim(
-        MOM_002_SUBSTRATE_EPS_R,
-        MOM_002_SUBSTRATE_H_M,
-        MOM_002_DCIM_N_IMAGES,
-    ));
-    let s = solver
-        .run(&mesh, freq)
-        .map_err(|e| Error::Solver(format!("PlanarMoM::run (plot sweep): {e}")))?;
 
-    let freq_hz = s.freq_hz.clone();
-    let s11: Vec<Complex64> = s.data.iter().map(|row| row[0]).collect();
+    let freq_hz: Vec<f64> = freq.iter().collect();
+    let z0 = Complex64::new(MOM_002_Z0_REF, 0.0);
+    let mut s11: Vec<Complex64> = Vec::with_capacity(freq_hz.len());
+    for &f in &freq_hz {
+        // Rebuild the Sommerfeld kernel per frequency (k₀ is baked in).
+        let green = MultilayerGreens::new_microstrip_sommerfeld(
+            MOM_002_SUBSTRATE_EPS_R,
+            MOM_002_SUBSTRATE_H_M,
+            f,
+            MOM_002_DCIM_N_IMAGES,
+            MOM_002_SOMMERFELD_N_POLES,
+        );
+        let z_in = z_in_with_greens(&mesh, 1, &green)
+            .map_err(|e| Error::Solver(format!("z_in_with_greens (plot sweep): {e}")))?;
+        // S11 = (Z_in − Z0) / (Z_in + Z0).
+        s11.push((z_in - z0) / (z_in + z0));
+    }
 
     let dir = validation_results_dir();
     std::fs::create_dir_all(&dir).map_err(|e| Error::Io(format!("create_dir_all: {e}")))?;
@@ -892,7 +938,7 @@ fn generate_mom_002_plots() -> Result<Vec<PathBuf>, Error> {
         &PlotConfig {
             width_px: 800,
             height_px: 600,
-            title: "mom-002 |S11| dB (Phase 1.1.1.0 multi-image DCIM, N=5)".to_string(),
+            title: "mom-002 |S11| dB (Phase 1.1.1.2 Sommerfeld, N=5, n_poles=1)".to_string(),
             format: PlotFormat::Png,
         },
     )
@@ -904,7 +950,7 @@ fn generate_mom_002_plots() -> Result<Vec<PathBuf>, Error> {
         &PlotConfig {
             width_px: 600,
             height_px: 600,
-            title: "mom-002 S11 Smith chart (Phase 1.1.1.0 multi-image DCIM, N=5)".to_string(),
+            title: "mom-002 S11 Smith chart (Phase 1.1.1.2 Sommerfeld, N=5, n_poles=1)".to_string(),
             format: PlotFormat::Png,
         },
     )
@@ -1041,20 +1087,26 @@ mod tests {
     }
 
     /// Fast smoke: build the refined mom-002 mesh, solve at the
-    /// single 1 GHz headline frequency, and assert `|Z_in|` lands in
-    /// the loose `[MOM_002_Z_MIN, MOM_002_Z_MAX]` non-degeneracy
-    /// band. Skips the 21-point plot sweep so this stays in the
-    /// seconds-not-minutes range on the Phase 1.1.1.1 `30 × 16`
-    /// edge-clustered mesh, and runs in the default `cargo test
-    /// --release` path.
+    /// single 1 GHz headline frequency through the Phase 1.1.1.2
+    /// Sommerfeld kernel, and assert `|Z_in|` lands in the loose
+    /// `[MOM_002_Z_MIN, MOM_002_Z_MAX]` non-degeneracy band. Skips the
+    /// 21-point plot sweep so this stays in the seconds-not-minutes
+    /// range on the `30 × 16` edge-clustered mesh, and runs in the
+    /// default `cargo test --release` path.
+    ///
+    /// Also asserts the measurement matches
+    /// [`MOM_002_Z_IN_MEASURED_OHM`] to a coarse `±5 %` band — this
+    /// is a regression tripwire on the Sommerfeld + DCIM numerics:
+    /// if a later kernel change moves the empirical landing without
+    /// updating the constant, the failure surfaces here rather than
+    /// silently passing the loose `[1, 100 kΩ]` gate.
     ///
     /// The full `run_mom_002` path (including plot generation) is
     /// exercised by [`mom_002_standalone_passes`] under `--ignored`.
     #[test]
     fn mom_002_headline_gate_passes() {
         use num_complex::Complex64;
-        use yee_core::{FreqRange, Solver};
-        use yee_mom::{GreensSpec, PlanarMoM};
+        use yee_mom::__internal::{MultilayerGreens, z_in_with_greens};
 
         let mesh = mom_002_strip_mesh_with_spacing(
             MOM_002_STRIP_LENGTH_M,
@@ -1063,15 +1115,14 @@ mod tests {
             MOM_002_N_WIDTH,
             StripSpacing::EdgeClustered,
         );
-        let freq = FreqRange::new(MOM_002_F_HZ, MOM_002_F_HZ + 1.0, 1).expect("freq range");
-        let solver = PlanarMoM::default().with_greens(GreensSpec::microstrip_dcim(
+        let green = MultilayerGreens::new_microstrip_sommerfeld(
             MOM_002_SUBSTRATE_EPS_R,
             MOM_002_SUBSTRATE_H_M,
+            MOM_002_F_HZ,
             MOM_002_DCIM_N_IMAGES,
-        ));
-        let s = solver.run(&mesh, freq).expect("solve");
-        let s11 = s.data[0][0];
-        let z_in: Complex64 = z_in_from_s11(s11, MOM_002_Z0_REF);
+            MOM_002_SOMMERFELD_N_POLES,
+        );
+        let z_in: Complex64 = z_in_with_greens(&mesh, 1, &green).expect("solve");
         let z_mag = z_in.norm();
         assert!(
             (MOM_002_Z_MIN..=MOM_002_Z_MAX).contains(&z_mag),
@@ -1081,6 +1132,19 @@ mod tests {
             MOM_002_Z_MAX,
             z_in.re,
             z_in.im
+        );
+        // Regression tripwire on the recorded Phase 1.1.1.2 measurement
+        // (Track CCCCCC). ±5 % wide because the GPOF + Newton-Raphson
+        // pole-search numerics are not bit-identical across optimisation
+        // levels; tighten only if the kernel becomes more deterministic.
+        let rel_err = (z_mag - MOM_002_Z_IN_MEASURED_OHM).abs() / MOM_002_Z_IN_MEASURED_OHM;
+        assert!(
+            rel_err <= 0.05,
+            "mom-002 |Z_in| = {z_mag:.3} Ohm drifted >5% from recorded \
+             measurement {:.3} Ohm (rel err = {:.4}); update \
+             MOM_002_Z_IN_MEASURED_OHM if the kernel intentionally changed",
+            MOM_002_Z_IN_MEASURED_OHM,
+            rel_err
         );
     }
 
