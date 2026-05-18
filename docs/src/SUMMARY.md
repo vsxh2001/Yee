@@ -22,6 +22,7 @@
 - [Hello, microstrip](tutorials/01-microstrip-line.md)
 - [Half-wave dipole from Python](tutorials/02-dipole-from-python.md)
 - [FDTD cavity resonance](tutorials/03-fdtd-cavity.md)
+- [FEM cavity eigenmode from Python](tutorials/04-fem-cavity-eigenmode.md)
 - [Waveguide eigenmode from Python](tutorials/04-waveguide-eigenmode-from-python.md)
 - [KiCad PCB import to MoM](tutorials/05-kicad-import.md)
 
