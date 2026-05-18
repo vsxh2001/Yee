@@ -305,20 +305,42 @@ impl MultilayerGreens {
     /// Evaluate the surface-wave Hankel-`H_0^{(2)}` contribution for
     /// the supplied pole list at the field / source-point pair.
     ///
-    /// Each pole contributes
+    /// Each pole contributes (Michalski-Mosig 1997 eq. 25 / Felsen-Marcuvitz
+    /// §5.5; Aksun 1996 §III):
     ///
     /// ```text
-    ///   G_{sw,p}(ρ, z, z')  =  Res_p · (-j/4) · H_0^{(2)}(k_{ρ,p} ρ)
-    ///                          · ψ_p(z) ψ_p(z') / (4 π)
+    ///   G_{sw,p}(ρ, z, z')  =  -(j/4) · Res_p · (k_{ρ,p} / k_{z0}(k_{ρ,p}))
+    ///                          · H_0^{(2)}(k_{ρ,p} ρ) · ψ_p(z) ψ_p(z')
     /// ```
     ///
     /// where `ψ_p(z)` is the modal `z`-profile (for TM₀ inside the
     /// slab: `cos(k_{zd} (z + h)) / cos(k_{zd} h)`, normalised to peak
     /// at `z = 0`). For the mom-002 strip geometry both source and
     /// field sit at `z = 0` (slab top), so `ψ_p(0) = 1` and the modal-
-    /// profile factor collapses out. The leading `1/(4π)` matches the
-    /// `1/(4π R)` normalisation of the image-sum and free-space terms
-    /// elsewhere in this module.
+    /// profile factor collapses out.
+    ///
+    /// ## Track EEEEEE — prefactor correction (2026-05-18)
+    ///
+    /// The Phase 1.1.1.2 implementation used a spec-shorthand prefactor
+    /// `(-j/4) · Res / (4π)`, which omitted **two** factors carried by
+    /// the Sommerfeld identity:
+    ///
+    /// 1. The `k_{ρ,p} / k_{z0}(k_{ρ,p})` weight — Aksun 1996 eq. (2):
+    ///    `exp(-jk_0 r) / (4π r) = (1/(4πj)) ∫₀^∞ (k_ρ/k_z0) · J_0(k_ρ ρ)
+    ///    · exp(-j k_z0 |z|) dk_ρ`. The residue at a pole of `R(k_ρ)`
+    ///    therefore picks up `k_{ρ,p}/k_{z0}(k_{ρ,p})` from the integrand.
+    ///    On thin substrates `|k_{z0}(k_p)| ≪ k_p`, so this is a large
+    ///    weight (≈ 38× for FR-4 / 1.6 mm / 1 GHz).
+    /// 2. The leading `1/(4π)` normalisation cancels with the `(2πj)`
+    ///    from the residue theorem and the `J_0 → H_0^{(2)}` factor-of-2,
+    ///    leaving an overall `1/4` (not `1/(16π)`) outside the residue.
+    ///
+    /// Together the corrected prefactor is `(1/4) · |k_p/k_z0(k_p)|` —
+    /// for FR-4 / 1 GHz this is `≈ 9.6`, vs the previous `≈ 0.02`. The
+    /// shift closes the mom-002 `|Z_in|` gap from `~2200 Ω` to the
+    /// analytic `[35, 75] Ω` band. See the diagnostic test
+    /// `tests/sommerfeld_residue_diagnostic.rs` for the full
+    /// hypothesis-vs-data record.
     fn surface_wave_sum(
         &self,
         poles: &[SurfaceWavePole],
@@ -337,7 +359,7 @@ impl MultilayerGreens {
             return Complex64::new(0.0, 0.0);
         }
         let j = Complex64::new(0.0, 1.0);
-        let four_pi = 4.0 * std::f64::consts::PI;
+        let k0_real = self.k0.re;
         let mut acc = Complex64::new(0.0, 0.0);
         for p in poles {
             // Modal z-profile at field and source (TM₀ + grounded
@@ -348,12 +370,22 @@ impl MultilayerGreens {
             let psi_source = modal_z_profile(p, r2.z, self.h);
             let h_arg = p.k_rho * Complex64::new(rho, 0.0);
             let hankel = hankel_h0_2(h_arg);
-            // (-j/4) Hankel is the canonical surface-wave kernel; we
-            // additionally divide by 4π to land in the same
-            // `1/(4π R)`-style normalisation as the image-sum so the
-            // residue scale and the rest of the kernel match.
-            acc += p.residue * (-j * Complex64::new(0.25, 0.0)) * hankel * psi_field * psi_source
-                / Complex64::new(four_pi, 0.0);
+            // Sommerfeld-identity weight `k_ρ / k_{z0}` at the pole.
+            // `k_z0(k_p) = √(k_0² − k_p²)` on the same proper-sheet
+            // branch used inside [`sommerfeld::denom`]; for the bound
+            // mode `k_p > k_0` this is purely imaginary with
+            // `Im k_z0 > 0` (`α_0 = -j k_z0` is the real-positive
+            // air-side decay constant).
+            let kz0_p = sommerfeld::k_z0(p.k_rho, k0_real);
+            let sommerfeld_weight = p.k_rho / kz0_p;
+            // Canonical Michalski-Mosig form:
+            //   G_sw = -(j/4) · Res · (k_ρ/k_z0) · H_0^{(2)}(k_ρ ρ) · ψψ.
+            acc += -j * Complex64::new(0.25, 0.0)
+                * p.residue
+                * sommerfeld_weight
+                * hankel
+                * psi_field
+                * psi_source;
         }
         acc
     }
