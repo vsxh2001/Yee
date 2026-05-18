@@ -60,11 +60,14 @@ fn max_abs_field_in_region(
 /// leak_lo_z, leak_hi_z)`. Each leak* value is the peak |E| in the
 /// corresponding SF half-space.
 fn run_oblique_face_probe(dispersion_match: bool) -> (f64, [f64; 6]) {
+    run_oblique_face_probe_steps(dispersion_match, 400)
+}
+
+fn run_oblique_face_probe_steps(dispersion_match: bool, n_steps: usize) -> (f64, [f64; 6]) {
     use std::f64::consts::PI;
 
     const N: usize = 60;
     const DX: f64 = 5.0e-3;
-    const N_STEPS: usize = 400;
     const FREQ_HZ: f64 = 3.0e9;
     const RAMP: usize = 40;
     const PAD: usize = 8;
@@ -103,7 +106,7 @@ fn run_oblique_face_probe(dispersion_match: bool) -> (f64, [f64; 6]) {
         dispersion_match,
     );
 
-    for _ in 0..N_STEPS {
+    for _ in 0..n_steps {
         solver.step_with_plane_wave(&mut pw);
     }
 
@@ -179,6 +182,21 @@ fn oblique_face_leakage_probe_match() {
     // No hard assertion here — diagnostic only. The 30/45 ephi gate
     // test in `plane_wave_oblique.rs` carries the DoD.
     assert!(inside_amp > 0.1);
+}
+
+#[test]
+#[ignore = "diagnostic: dispersion-match enabled, sweep N_STEPS"]
+fn oblique_face_leakage_probe_match_sweep_steps() {
+    for &n in &[300usize, 400, 500, 600, 800] {
+        let (inside_amp, leaks) = run_oblique_face_probe_steps(true, n);
+        let worst = leaks.iter().cloned().fold(0.0_f64, f64::max);
+        let lo_only = leaks[0].max(leaks[2]).max(leaks[4]);
+        let contrast_worst = inside_amp / worst.max(1e-30);
+        let contrast_lo = inside_amp / lo_only.max(1e-30);
+        eprintln!(
+            "n_steps={n:>4} inside={inside_amp:.6e} worst-face contrast={contrast_worst:.2} lo-only contrast={contrast_lo:.2}"
+        );
+    }
 }
 
 #[test]

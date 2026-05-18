@@ -409,6 +409,55 @@ fn compute_aux_step(theta: f64, phi: f64, dx: f64, c0: f64, omega: f64, dt: f64)
     dx
 }
 
+/// 4-point cubic Lagrange interpolation on a uniformly-spaced 1-D array
+/// (the 1-D auxiliary TF/SF incident-field grid). `f` is the
+/// fractional index (with `arr[i]` at integer `i`). Falls back to
+/// linear interpolation in the boundary cells (where the 4-point
+/// stencil would step out of bounds), and clamps to the array end
+/// values outside `[0, n-1]`.
+///
+/// The cubic-Lagrange basis evaluated at the four samples
+/// `arr[m-1], arr[m], arr[m+1], arr[m+2]` (where `m = floor(f)`,
+/// `t = f - m ∈ [0,1)`) is
+/// ```text
+///   L_{-1}(t) = -t(t-1)(t-2)/6
+///   L_0(t)    =  (t+1)(t-1)(t-2)/2
+///   L_1(t)    = -(t+1)t(t-2)/2
+///   L_2(t)    =  (t+1)t(t-1)/6
+/// ```
+fn sample_aux_cubic(arr: &[f64], f: f64) -> f64 {
+    let n = arr.len();
+    if n == 0 {
+        return 0.0;
+    }
+    if f <= 0.0 {
+        return arr[0];
+    }
+    if f >= (n - 1) as f64 {
+        return arr[n - 1];
+    }
+    let m = f.floor() as usize;
+    let t = f - m as f64;
+
+    // Use cubic Lagrange only when the 4-point stencil [m-1, m, m+1, m+2]
+    // is fully in-bounds. Otherwise fall back to linear (the boundary
+    // pad cells already provide a buffer, so this branch is rarely
+    // hit in practice).
+    if m >= 1 && m + 2 < n {
+        let y0 = arr[m - 1];
+        let y1 = arr[m];
+        let y2 = arr[m + 1];
+        let y3 = arr[m + 2];
+        let l_m1 = -t * (t - 1.0) * (t - 2.0) / 6.0;
+        let l_0 = (t + 1.0) * (t - 1.0) * (t - 2.0) / 2.0;
+        let l_p1 = -(t + 1.0) * t * (t - 2.0) / 2.0;
+        let l_p2 = (t + 1.0) * t * (t - 1.0) / 6.0;
+        l_m1 * y0 + l_0 * y1 + l_p1 * y2 + l_p2 * y3
+    } else {
+        (1.0 - t) * arr[m] + t * arr[m + 1]
+    }
+}
+
 /// Cardinal-axis propagation direction for [`PlaneWaveSource`].
 ///
 /// Phase 2.fdtd.5 only implements [`PlaneWaveDirection::PlusX`] (E_z
@@ -1359,44 +1408,32 @@ impl PlaneWaveSource {
     // Oblique / general-polarization TF/SF kernel (Phase 2.fdtd.5.3)
     // ----------------------------------------------------------------
 
-    /// Linearly interpolate `inc_e` at the projected distance `s` (in
-    /// metres) from the TF reference corner along `k_hat`. `inc_e[pad]`
+    /// Interpolate `inc_e` at the projected distance `s` (in metres)
+    /// from the TF reference corner along `k_hat`. `inc_e[pad]`
     /// corresponds to `s = 0`. The aux-grid step is `ds_aux` (matches
     /// `dx` for the legacy normal-incidence path and is
-    /// dispersion-matched for oblique sources). Clamps to grid bounds.
+    /// dispersion-matched for oblique sources). Uses 4-point cubic
+    /// Lagrange interpolation in the interior (O((Δs/λ)⁴) error), with
+    /// graceful fall-back to linear interpolation near the aux-grid
+    /// boundaries. Clamps to grid bounds.
+    ///
+    /// Phase 2.fdtd.5.3.2: upgraded from linear to cubic interpolation
+    /// because the linear-interpolation residual (~0.1% per sample at
+    /// dx/λ = 0.05) became the dominant SF leakage source once the
+    /// face-stencil k-range off-by-one was fixed (commit prior).
     #[inline]
     fn sample_inc_e(&self, s: f64) -> f64 {
-        // Convert metres → aux-cell index (relative to inc_e[pad]).
-        let f = s / self.ds_aux + self.pad as f64;
-        let n = self.inc_e.len();
-        if f <= 0.0 {
-            return self.inc_e[0];
-        }
-        if f >= (n - 1) as f64 {
-            return self.inc_e[n - 1];
-        }
-        let m = f.floor() as usize;
-        let t = f - m as f64;
-        (1.0 - t) * self.inc_e[m] + t * self.inc_e[m + 1]
+        sample_aux_cubic(&self.inc_e, s / self.ds_aux + self.pad as f64)
     }
 
-    /// Linearly interpolate `inc_h` at the projected distance `s` (in
-    /// metres) from the TF reference corner along `k_hat`. `inc_h[m]`
+    /// Interpolate `inc_h` at the projected distance `s` (in metres)
+    /// from the TF reference corner along `k_hat`. `inc_h[m]`
     /// corresponds to `s = (m - pad + ½)·ds_aux` (the H_inc samples are
     /// staggered half a cell to the right of the E_inc samples).
+    /// Uses cubic Lagrange interpolation (see [`Self::sample_inc_e`]).
     #[inline]
     fn sample_inc_h(&self, s: f64) -> f64 {
-        let f = s / self.ds_aux + self.pad as f64 - 0.5;
-        let n = self.inc_h.len();
-        if f <= 0.0 {
-            return self.inc_h[0];
-        }
-        if f >= (n - 1) as f64 {
-            return self.inc_h[n - 1];
-        }
-        let m = f.floor() as usize;
-        let t = f - m as f64;
-        (1.0 - t) * self.inc_h[m] + t * self.inc_h[m + 1]
+        sample_aux_cubic(&self.inc_h, s / self.ds_aux + self.pad as f64 - 0.5)
     }
 
     /// Projected distance (metres) along `k_hat` from the TF reference
