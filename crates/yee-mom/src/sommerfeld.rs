@@ -355,30 +355,62 @@ pub fn newton_pole(
     })
 }
 
-/// Residue of the spectral Green's function at a converged pole.
+/// Residue of [`crate::multilayer::slab_reflection`] at a converged
+/// surface-wave pole.
 ///
-/// `Res = N(k_{ρ,p}) / D'(k_{ρ,p})` is the L'Hôpital limit for a simple
-/// zero of `D`. For the grounded-slab geometry the numerator is the
-/// spectral reflection coefficient's numerator — see
-/// [`crate::multilayer::slab_reflection`] for the TE / TM forms. The
-/// pole-subtraction inside the GPOF fit only requires the **ratio of
-/// residues to denominator derivatives**, so any consistent numerator
-/// normalisation works as long as the same one is used in the sampled
-/// spectral function passed to GPOF.
+/// ## Convention
 ///
-/// This implementation uses the closed-form Michalski-Mosig 1997
-/// eq. (16)-(19) form: the residue of the reflection coefficient
-/// `R(k_ρ)` (as defined in [`crate::multilayer::slab_reflection`]) at a
-/// zero of its denominator is `2 · D₁(k_{ρ,p}) / D'(k_{ρ,p})` where `D₁`
-/// is the "diagonal" half of the denominator (with the relative sign of
-/// the second term flipped — i.e. for TE it is `k_{z0} - j k_{zd}
-/// cot(k_{zd} h)`, since the full reflection coefficient is `R = D₁ /
-/// D₂` and the pole of `R` is at `D₂ = 0`). For our purposes here we
-/// use the spec's simpler convention: the residue is computed from the
-/// **same** denominator function used in [`denom`], and the numerator
-/// follows the slab reflection coefficient's literal numerator (so the
-/// caller can subtract `Res / (k_ρ − k_{ρ,p})` from the **reflection
-/// coefficient** sampled by [`crate::multilayer::slab_reflection`]).
+/// The reflection coefficient evaluated by
+/// [`crate::multilayer::slab_reflection`] is the meromorphic function
+/// of `k_ρ` whose residue this routine returns. For the TM channel
+/// that function reads
+///
+/// ```text
+///   R_TM(k_ρ) = (j · k_zd · tan(k_zd · h) − ε_r · k_z0)
+///             / (j · k_zd · tan(k_zd · h) + ε_r · k_z0)
+/// ```
+///
+/// (and analogously for TE). The denominator vanishes on the
+/// **improper** Riemann sheet of `k_z0` at the same `k_ρ = k_p` where
+/// the proper-sheet dispersion `D_TM = ε_r · α_0 − k_zd · tan = 0` is
+/// satisfied — this is the well-known sheet-flip relation
+/// `k_z0|_{improper} = −k_z0|_{proper}` that propagates the bound-mode
+/// zero from `d_tm` to `D_slab`. A contour-integral residue of `R_TM`
+/// around `k_p` therefore picks up exactly this surface-wave pole.
+///
+/// ## Formula
+///
+/// We use the Michalski-Mosig 1997 eq. (19) form for the surface-wave
+/// residue of the reflection coefficient. With
+///
+/// ```text
+///   N₁(k_ρ) = ε_r · α_0 + k_zd · tan(k_zd · h)    (TM)
+///   N₁(k_ρ) = α_0      − k_zd · cot(k_zd · h)    (TE)
+/// ```
+///
+/// (these are the same as [`numerator`]) and `D'(k_ρ) = dD/dk_ρ` with
+/// `D` from [`denom`], the residue of `R(k_ρ)` evaluated on the
+/// **proper-to-improper-sheet-crossing contour** that surrounds `k_p`
+/// is
+///
+/// ```text
+///   Res = − N₁(k_p) / (2 · D'(k_p)).
+/// ```
+///
+/// The factor of `1/2` comes from the fact that the residue
+/// extraction is symmetric across the branch cut on the two sheets of
+/// `k_z0` — equivalently, in the Michalski-Mosig spectral-domain
+/// formulation, from the factor relating the modal-amplitude
+/// coefficient to the residue of `R` at the pole. The overall minus
+/// sign tracks the sign of the second term in `D_slab` vs `d_tm`
+/// (i.e. `D_slab = j·(k_zd·tan + ε_r·α_0)` while `d_tm = ε_r·α_0 −
+/// k_zd·tan`), and is verified numerically against the contour
+/// integral of [`crate::multilayer::slab_reflection`] in
+/// `tests/mom_002_reflection_convention.rs`.
+///
+/// Failure mode: returns [`PoleSearchError::DegeneratePole`] if
+/// `|D'(k_p)| < D_PRIME_FLOOR`, in which case L'Hôpital is
+/// numerically unsafe and the caller should drop the pole.
 pub fn residue(
     channel: SwChannel,
     pole: Complex64,
@@ -394,26 +426,30 @@ pub fn residue(
         });
     }
     let num = numerator(channel, pole, eps_r, h, k0);
-    Ok(num / dp)
+    // Michalski-Mosig 1997 eq. (19): Res = -N₁ / (2 · D'). Sign +
+    // factor-of-2 verified by contour-integral diagnostic in
+    // tests/mom_002_reflection_convention.rs (Track SSSSSS / TTTTTT).
+    Ok(-num / (Complex64::new(2.0, 0.0) * dp))
 }
 
-/// Numerator of the spectral reflection coefficient at `k_ρ`, in the
+/// Sign-flipped "diagonal" `N₁(k_ρ)` companion to [`denom`], in the
 /// same `α_0 = -j k_{z0}` convention as [`d_te`] / [`d_tm`].
 ///
-/// The reflection coefficient seen at the air-slab interface for an
-/// incident wave from above is `R = -D' / D` for the appropriate
-/// channel, where `D` is the surface-wave denominator and `D'` is its
-/// "sign-flipped" cousin (the second term carries the opposite sign):
+/// `N₁` is the Michalski-Mosig 1997 numerator that enters the
+/// surface-wave residue formula `Res = -N₁(k_p) / (2 · D'(k_p))`
+/// (see [`residue`]). It is the surface-wave denominator [`denom`]
+/// with the second term sign-flipped:
 ///
-/// * TE channel:  `D = α_0 + k_{zd} cot(k_{zd} h)`,
-///   `D'_TE_num = α_0 − k_{zd} cot(k_{zd} h)`.
-/// * TM channel:  `D = ε_r α_0 − k_{zd} tan(k_{zd} h)`,
-///   `D'_TM_num = ε_r α_0 + k_{zd} tan(k_{zd} h)`.
+/// * TE channel:  `D  = α_0 + k_{zd} cot(k_{zd} h)`,
+///   `N₁ = α_0 − k_{zd} cot(k_{zd} h)`.
+/// * TM channel:  `D  = ε_r α_0 − k_{zd} tan(k_{zd} h)`,
+///   `N₁ = ε_r α_0 + k_{zd} tan(k_{zd} h)`.
 ///
-/// The residue of `R(k_ρ)` at a zero of `D` is therefore
-/// `Res = -D'_num(pole) / D'(pole)` — i.e. the same shape as the
-/// L'Hôpital limit, with the numerator's "other sign" supplying the
-/// modal-amplitude information.
+/// At a zero of `D` (the bound-mode condition), `N₁` evaluates to
+/// `2 · ε_r α_0` (TM) or `2 · α_0` (TE) — twice the "decay-rate
+/// term", which is what the residue formula expects after the
+/// `1/2` factor from the sheet-symmetric branch-cut traversal is
+/// applied.
 pub fn numerator(channel: SwChannel, k_rho: Complex64, eps_r: f64, h: f64, k0: f64) -> Complex64 {
     let kz0 = k_z0(k_rho, k0);
     let kzd = k_zd(k_rho, eps_r, k0);
