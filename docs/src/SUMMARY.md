@@ -59,3 +59,5 @@
 - [ADR-0030: Phase 2.fdtd.7 implementation plan](decisions/0030-phase-2-fdtd-7-implementation-plan.md)
 - [ADR-0031: Phase 3.nl.0 implementation plan](decisions/0031-phase-3-nl-0-implementation-plan.md)
 - [ADR-0032: Phase 4 FEM eigenmode implementation plan](decisions/0032-phase-4-fem-eigenmode-implementation-plan.md)
+- [ADR-0033: Phase 1.1.1.2 Sommerfeld pole extraction shipped](decisions/0033-phase-1-1-1-2-sommerfeld-pole-extraction-shipped.md)
+- [ADR-0034: Phase 2.fdtd.5.3.2 cubic aux-grid interpolation](decisions/0034-phase-2-fdtd-5-3-2-cubic-aux-interp.md)
