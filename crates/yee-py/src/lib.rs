@@ -12,6 +12,7 @@ mod bo;
 mod eigensolver;
 mod errors;
 mod fdtd;
+mod fem;
 mod freq;
 mod helpers;
 mod nsga2;
@@ -65,5 +66,11 @@ fn _yee(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     py.import("sys")?
         .getattr("modules")?
         .set_item("yee.eigensolver", &eig_mod)?;
+    let fem_mod = PyModule::new(py, "yee.fem")?;
+    fem::register(&fem_mod)?;
+    m.add_submodule(&fem_mod)?;
+    py.import("sys")?
+        .getattr("modules")?
+        .set_item("yee.fem", &fem_mod)?;
     Ok(())
 }
