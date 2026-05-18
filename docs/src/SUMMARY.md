@@ -62,3 +62,4 @@
 - [ADR-0032: Phase 4 FEM eigenmode implementation plan](decisions/0032-phase-4-fem-eigenmode-implementation-plan.md)
 - [ADR-0033: Phase 1.1.1.2 Sommerfeld pole extraction shipped](decisions/0033-phase-1-1-1-2-sommerfeld-pole-extraction-shipped.md)
 - [ADR-0034: Phase 2.fdtd.5.3.2 cubic aux-grid interpolation](decisions/0034-phase-2-fdtd-5-3-2-cubic-aux-interp.md)
+- [ADR-0035: Berenger Huygens-surface subgridding (Phase 2.fdtd.7.x)](decisions/0035-berenger-huygens-subgridding.md)
