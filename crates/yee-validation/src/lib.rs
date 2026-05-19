@@ -2699,14 +2699,21 @@ pub const FEM_EIG_003_A_M: f64 = 0.02286;
 pub const FEM_EIG_003_B_M: f64 = 0.01016;
 /// WR-90 stub axial length (m) — spec §8 fixture.
 pub const FEM_EIG_003_D_M: f64 = 0.030;
-/// Mesh subdivisions along the broad-wall axis. Per the E5 brief the
-/// target is `(16, 8, 24)` for ~18 k tets, ~3.4 k interior edges, near
-/// the spec §8 ~25 k target.
-pub const FEM_EIG_003_NX: usize = 16;
-/// Mesh subdivisions along the narrow-wall axis.
-pub const FEM_EIG_003_NY: usize = 8;
-/// Mesh subdivisions along the axial direction.
-pub const FEM_EIG_003_NZ: usize = 24;
+/// Mesh subdivisions along the broad-wall axis. Phase 4.fem.eig.3.0.3
+/// (Track NNNNNNNNN) refinement: bumped from the BBBBBBBBB / JJJJJJJJJ
+/// spec-scale `(16, 8, 24) = 18 432 tets` to `(24, 12, 36) = 62 208
+/// tets` to retire the strict absorption-floor gate per ADR-0042 §risks.
+/// The 1.5× per-axis refinement raises the WR-90 cross-section sampling
+/// to ~24 linear samples — above the ~20-sample threshold derived from
+/// the Jin §10.4 table 10.1 ~30-samples-per-wavelength rule applied to
+/// the WR-90 TE_{10} guided wavelength `λ_g ≈ 30.3 mm` at 10 GHz.
+pub const FEM_EIG_003_NX: usize = 24;
+/// Mesh subdivisions along the narrow-wall axis. See [`FEM_EIG_003_NX`]
+/// for the Phase 4.fem.eig.3.0.3 refinement rationale.
+pub const FEM_EIG_003_NY: usize = 12;
+/// Mesh subdivisions along the axial direction. See [`FEM_EIG_003_NX`]
+/// for the Phase 4.fem.eig.3.0.3 refinement rationale.
+pub const FEM_EIG_003_NZ: usize = 36;
 /// Lower sweep frequency (Hz) — start of the WR-90 dominant TE_{10}
 /// band, well above the cutoff at ~6.56 GHz.
 pub const FEM_EIG_003_F_MIN_HZ: f64 = 8.0e9;
@@ -2785,11 +2792,11 @@ pub const FEM_EIG_003_SMOOTHNESS_DB_BOUND: f64 = 10.0;
 /// Whitney-1 face-centroid quadrature + walking-skeleton modal source
 /// produces measured magnitudes that cluster at exactly `1.0` modulo
 /// round-off (the Phase 4.fem.eig.2 E4 sibling test established the
-/// `<= 1.0 + ε_num` convention with ε_num ≈ 0.5 on a coarse mesh). For
-/// the spec-scale `(16, 8, 24)` mesh the empirical margin is ~1e-3,
-/// well inside this bound. A strict `< 1` gate exists separately as an
-/// `#[ignore]`'d tripwire for the Phase 4.fem.eig.2.0.1 / 4.fem.eig.2.5
-/// follow-up.
+/// `<= 1.0 + ε_num` convention with ε_num ≈ 0.5 on a coarse mesh). On
+/// the Phase 4.fem.eig.3.0.3 refined `(24, 12, 36)` mesh the empirical
+/// margin is `~ 3e-3` (band `[0.9975, 0.99997]`), well inside this
+/// bound. A strict `< 1` gate exists separately as an `#[ignore]`'d
+/// tripwire for the Phase 4.fem.eig.3.5 PML follow-up.
 pub const FEM_EIG_003_PASSIVE_MARGIN: f64 = 0.05;
 
 /// Compute the TE_{10} propagation constant `β(ω) = sqrt((ω/c)² −
@@ -2816,13 +2823,14 @@ fn fem_eig_003_modal_e_t_te10(p: nalgebra::Vector3<f64>) -> nalgebra::Vector3<f6
     nalgebra::Vector3::new(0.0, amp, 0.0)
 }
 
-/// `fem-eig-003`: WR-90 air-filled stub with 1st-order Engquist-Majda
+/// `fem-eig-003`: WR-90 air-filled stub with 2nd-order Engquist-Majda
 /// ABC termination, TE_{10} wave-port drive, swept `|S_{11}(f)|` per
-/// spec §8 / Phase 4.fem.eig.2 plan E5.
+/// spec §8 / Phase 4.fem.eig.2 plan E5 (refined to `(24, 12, 36)` per
+/// Phase 4.fem.eig.3.0.3 / ADR-0042 §risks — Track NNNNNNNNN).
 ///
 /// Constructs an air-filled WR-90 cavity (`a = 22.86 mm`, `b = 10.16
-/// mm`, `d = 30 mm`) meshed with `(16, 8, 24)` Kuhn 6-tet bricks
-/// (~18 k tets), classifies the face at `z = 0` as
+/// mm`, `d = 30 mm`) meshed with `(24, 12, 36)` Kuhn 6-tet bricks
+/// (~62 k tets), classifies the face at `z = 0` as
 /// [`yee_fem::FaceKind::Abc`], the face at `z = 30 mm` as
 /// [`yee_fem::FaceKind::WavePort`]`(0)` carrying the TE_{10} mode,
 /// and the four longitudinal sidewalls as [`yee_fem::FaceKind::Pec`].
