@@ -398,8 +398,25 @@ fn solve_cavity_dispersive<'py>(
 
     // ---- 5. Solve --------------------------------------------------
     //
-    // `sigma_factor = 2.5` mirrors the D4 / D5 fixture convention from
-    // `dispersive_newton.rs` and the v0 `solve_cavity` shift heuristic.
+    // `sigma_factor = 0.9` mirrors the D5 `lossy_lorentz_cavity_*` gate
+    // fixture (`crates/yee-fem/tests/dispersive_newton.rs`): places σ
+    // ~10 % below the trial `(ω/c)²` so the TE_{101} physical mode is
+    // the dominant largest-`|1/(λ − σ)|` mode for inverse iteration,
+    // regardless of bulk `ε_r ≥ 1`. The D4 / pre-fix convention of
+    // `sigma_factor = 2.5` was load-bearing for the buggy
+    // ε-double-divide form of the Newton step (Track QQQQQQQQ D6) and
+    // for the free-space air case (`ε = 1` so σ above the mode is
+    // still in the correct inverse-iter basin), but **fails for
+    // `ε_∞ > 1` filler materials** because TE_{101} sits at `λ ≈
+    // (ω/c)²/ε_∞` and `σ = 2.5·(ω/c)²` ends up above the 10th
+    // returned mode, so the physical TE_{101} is not in the inner
+    // solver's output and Newton picks a misidentified higher mode
+    // (LLLLLLLLL diagnosis of KKKKKKKKK's `test_lossy_drude_returns_
+    // complex_frequency` mode-5 stall — Newton diverges to ~31 GHz
+    // by Newton iter 3, then the inner solver fails at mode 5 of 10
+    // requested in a dense high-mode cluster). `0.9` works for both
+    // `ε = 1` (free-space test ladder n = 8 still converges) and
+    // `ε_∞ > 1` (Drude test now converges).
     //
     // The ladder loop below retries `solve_with_newton` with successive
     // `newton_max_iter` values from `1` to `max_iter` so the precise
@@ -414,7 +431,7 @@ fn solve_cavity_dispersive<'py>(
         let mut s = solver.clone();
         s.newton_max_iter = n;
         s.newton_tol = tol;
-        match s.solve_with_newton(&mesh, omega_warm_start, 2.5) {
+        match s.solve_with_newton(&mesh, omega_warm_start, 0.9) {
             Ok(eig) => {
                 omega_complex = eig.omega;
                 k_complex = eig.k_complex;
