@@ -16,6 +16,12 @@ serde      = { workspace = true }
 serde_json = { workspace = true }
 thiserror  = { workspace = true }
 # `toml` is not in the workspace dep table at base SHA; declare directly.
-# Phase 3.nl.0 plan (Step R3) will promote `toml_edit` for the emitter; the
-# scaffold here only needs read-side parsing for `substrates.toml`.
+# `sha2` produces the spec §8 intent-hash that lands in the second-line
+# metadata comment of every emitted project file. The R3 emitter renders
+# the TOML body by hand-formatting tables in fixed order with keys
+# sorted via `BTreeMap`; `toml_edit`'s `Repr` setter is `pub(crate)` in
+# 0.22.x, so the only way to *guarantee* the canonical `{:.6e}` float
+# literal across the dep's minor releases is to write the literal
+# directly. `toml` is still used as a *parser* in the round-trip tests.
 toml       = "0.8"
+sha2       = "0.10"
