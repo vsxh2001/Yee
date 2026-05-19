@@ -63,7 +63,7 @@
 //! `yee-mesh` when T2's edges()/boundary_edges() are finished —
 //! flagged as an out-of-lane finding in the Track KKKKKK report.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use nalgebra_sparse::{coo::CooMatrix, csr::CsrMatrix};
 use num_complex::Complex64;
@@ -356,6 +356,120 @@ impl<'m> FemEigenAssembly<'m> {
         // `sa * sb ∈ {-1, +1}` is real and applied as a real scalar to
         // the complex block, matching the real path bit-for-bit on the
         // sign convention.
+        let mut k_coo: CooMatrix<Complex64> = CooMatrix::new(n_interior, n_interior);
+        let mut m_coo: CooMatrix<Complex64> = CooMatrix::new(n_interior, n_interior);
+
+        for (tet_idx, conn) in table.tet_edges.iter().enumerate() {
+            let tet = &self.mesh.tetrahedra[tet_idx];
+            let vertices = [
+                self.mesh.vertices[tet[0]],
+                self.mesh.vertices[tet[1]],
+                self.mesh.vertices[tet[2]],
+                self.mesh.vertices[tet[3]],
+            ];
+            let tag = self.mesh.tetrahedron_material[tet_idx];
+            let eps_omega = db.eps_at(tag, omega);
+            let mu_omega = db.mu_at(tag, omega);
+            let elem = assemble_tet_element_complex(vertices, eps_omega, mu_omega);
+
+            for alpha in 0..6 {
+                let gi = conn.global_edge[alpha];
+                let Some(ii) = interior_dof_of_edge[gi] else {
+                    continue;
+                };
+                let sa = conn.sign[alpha];
+                for beta in 0..6 {
+                    let gj = conn.global_edge[beta];
+                    let Some(jj) = interior_dof_of_edge[gj] else {
+                        continue;
+                    };
+                    let sb = conn.sign[beta];
+                    let signed = Complex64::new(sa * sb, 0.0);
+                    k_coo.push(ii, jj, signed * elem.k_local[(alpha, beta)]);
+                    m_coo.push(ii, jj, signed * elem.m_local[(alpha, beta)]);
+                }
+            }
+        }
+
+        let k = CsrMatrix::from(&k_coo);
+        let m = CsrMatrix::from(&m_coo);
+
+        Ok(AssembledMatricesComplex {
+            k,
+            m,
+            interior_edges,
+        })
+    }
+
+    /// Assemble the global **complex** sparse `K(ω)`, `M(ω)` at angular
+    /// frequency `omega` using an **explicit PEC-edge set** for the
+    /// Dirichlet elimination, rather than the geometric boundary-face
+    /// classifier.
+    ///
+    /// This is the entry point consumed by Phase 4.fem.eig.2
+    /// [`crate::OpenBoundarySolver`] when the caller has tagged some
+    /// exterior faces ABC or wave-port: those faces' edges must remain
+    /// in the interior-DoF basis (where the boundary-term scatter then
+    /// adds the corresponding face block / RHS contribution), while
+    /// edges on caller-tagged PEC faces are eliminated by row/column
+    /// drop.
+    ///
+    /// The function returns the **edge table's `is_boundary` array**
+    /// for the open-boundary caller — i.e. the geometric boundary-edge
+    /// set computed from the mesh's face-incidence map — alongside the
+    /// PEC-reduced complex `K(ω)`, `M(ω)`, and the interior-DoF lift
+    /// map. The caller's [`crate::OpenBoundarySolver`] uses the
+    /// (`is_boundary` ∩ ¬`pec_edges`) set to identify ABC + wave-port
+    /// edges and scatter the corresponding face-block / RHS
+    /// contributions on top.
+    ///
+    /// When `pec_edges` is the same as the geometric boundary-edge set
+    /// (i.e. all-PEC), this function is bit-for-bit equivalent to
+    /// [`Self::assemble_complex`].
+    ///
+    /// # Arguments
+    ///
+    /// * `omega` — trial angular frequency (rad/s).
+    /// * `db` — [`MaterialDatabase`] keyed by [`yee_mesh::MaterialTag`].
+    /// * `pec_edges` — set of global edge indices to eliminate by
+    ///   row/column drop. Edges not in this set remain as interior
+    ///   DoFs even if they geometrically lie on the mesh exterior.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`yee_core::Error::Invalid`] on an empty mesh, same as
+    /// [`Self::assemble_complex`].
+    pub fn assemble_complex_with_pec_edges(
+        &self,
+        omega: f64,
+        db: &MaterialDatabase,
+        pec_edges: &HashSet<usize>,
+    ) -> Result<AssembledMatricesComplex, yee_core::Error> {
+        if self.mesh.tetrahedra.is_empty() {
+            return Err(yee_core::Error::Invalid(
+                "cannot assemble FEM matrices on a mesh with zero tetrahedra".to_string(),
+            ));
+        }
+
+        // ---- Step 1+2: build the global edge table identical to
+        // assemble_complex (geometry is material-independent).
+        let table = TetEdgeTable::build(self.mesh);
+        let n_edges = table.edges.len();
+
+        // ---- Step 4 (pre-scatter): classify each global edge as
+        // interior or PEC by the caller-supplied pec_edges set. Edges
+        // not in pec_edges remain as interior DoFs (including
+        // exterior-but-non-PEC faces — ABC and wave-port — whose
+        // boundary-term contributions are scattered by the caller).
+        let interior_edges: Vec<usize> = (0..n_edges).filter(|e| !pec_edges.contains(e)).collect();
+        let n_interior = interior_edges.len();
+        let mut interior_dof_of_edge: Vec<Option<usize>> = vec![None; n_edges];
+        for (dof, &gid) in interior_edges.iter().enumerate() {
+            interior_dof_of_edge[gid] = Some(dof);
+        }
+
+        // ---- Step 3+5: scatter signed 6×6 complex local blocks into
+        // COO, skipping PEC DoFs as we go.
         let mut k_coo: CooMatrix<Complex64> = CooMatrix::new(n_interior, n_interior);
         let mut m_coo: CooMatrix<Complex64> = CooMatrix::new(n_interior, n_interior);
 

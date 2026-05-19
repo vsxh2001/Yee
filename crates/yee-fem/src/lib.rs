@@ -36,6 +36,7 @@ pub mod assembly;
 pub mod dispersive;
 pub mod element;
 pub mod material;
+pub mod open_boundary;
 pub mod solve;
 
 pub use assembly::{AssembledMatrices, AssembledMatricesComplex, FemEigenAssembly};
@@ -46,6 +47,7 @@ pub use element::{
     assemble_tet_element_complex,
 };
 pub use material::{Material, MaterialDatabase, MaterialPole};
+pub use open_boundary::{DrivenSystem, FaceKind, OpenBoundarySolver, PortDefinition, PortId};
 pub use solve::{
     ComplexInverseIterEigen, EigenpairList, EigenpairListComplex, InverseIterEigen, SparseEigen,
     SparseEigenComplex,
