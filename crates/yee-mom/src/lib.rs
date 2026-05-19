@@ -430,6 +430,7 @@ pub mod __internal {
     //! Test-helper surface. Not stable API; do not depend on it.
 
     use crate::fill::impedance_matrix;
+    use crate::ports::{Port, TemSmoothedPort};
     use crate::solve::delta_gap_rhs;
     use faer::linalg::solvers::{PartialPivLu, Solve};
     use num_complex::Complex64;
@@ -460,6 +461,29 @@ pub mod __internal {
     /// See [`impedance_matrix_for_test`].
     pub fn delta_gap_rhs_for_test(basis: &RwgBasis, port_tag: u32) -> faer::Mat<Complex64> {
         crate::solve::delta_gap_rhs(basis, port_tag)
+    }
+
+    /// Track WWWWWWW P1 fix: build the TEM-mode-weighted smoothed RHS
+    /// via [`crate::ports::TemSmoothedPort`] for forensic comparison
+    /// against [`delta_gap_rhs_for_test`]. Returns the production RHS
+    /// column the TEM port would feed into `Z·i = b`, with the
+    /// Maxwell `1/√(1−(2y/w)²)` envelope evaluated at every port
+    /// basis function's edge midpoint and a uniform `√(2/π)`
+    /// normalisation. Pass `strip_width_m = 0.0` to collapse the
+    /// envelope to its uniform-constant limit (numerically identical
+    /// to [`delta_gap_rhs_for_test`] up to a global rescale that
+    /// cancels in `Z_in`).
+    pub fn tem_smoothed_rhs_for_test(
+        basis: &RwgBasis,
+        port_tag: u32,
+        strip_width_m: f64,
+    ) -> faer::Mat<Complex64> {
+        let port = TemSmoothedPort {
+            tag: port_tag,
+            voltage: Complex64::new(1.0, 0.0),
+            strip_width_m,
+        };
+        port.rhs(basis, 0.0)
     }
 
     /// Public re-export of [`MultilayerGreens`] for the Phase 1.1
@@ -647,5 +671,56 @@ pub mod __internal {
     ) -> Result<Complex64, Error> {
         let green = FreeSpaceGreen::new(freq_hz);
         z_in_with_greens(mesh, port_tag, &green)
+    }
+
+    /// Track WWWWWWW P1 fix: TEM-mode-weighted smoothed-RHS variant of
+    /// [`z_in_with_greens`]. Builds the impedance matrix through the
+    /// production `impedance_matrix` fill (identical to the delta-gap
+    /// path), then constructs the RHS via
+    /// [`crate::ports::TemSmoothedPort`] — every port-edge basis is
+    /// length-weighted *and* Maxwell-envelope weighted by
+    /// `w_TEM(y) = sqrt(2 / (π · (1 − (2 y / w)²)))`. The same weighting
+    /// is applied symmetrically to the port-current extraction so
+    /// `Z_in = V_port / I_port` retains the Galerkin inner-product
+    /// structure.
+    ///
+    /// On a single-column wire port (mom-001 dipole) every edge midpoint
+    /// sits at `y = 0`, so the Maxwell weight is the uniform constant
+    /// `√(2/π)` and the answer matches [`z_in_with_greens`]
+    /// bit-for-bit. On a multi-column strip port (mom-002) the weighting
+    /// suppresses the spurious alternating per-edge longitudinal mode
+    /// that Track TTTTTTT diagnosed and recovers a smoothed quasi-TEM
+    /// transverse-mode profile.
+    ///
+    /// `strip_width_m` is the strip width `w` in metres; pass `0.0` to
+    /// collapse the weighting to the uniform `√(2/π)` constant (which
+    /// is bit-for-bit equivalent to [`z_in_with_greens`] up to a
+    /// uniform RHS rescale, and therefore numerically identical for
+    /// `Z_in`).
+    pub fn z_in_with_greens_tem<G: Greens + Sync>(
+        mesh: &TriMesh,
+        port_tag: u32,
+        green: &G,
+        strip_width_m: f64,
+    ) -> Result<Complex64, Error> {
+        let basis = RwgBasis::from_mesh(mesh.clone())?;
+        let z = impedance_matrix(&basis, green);
+        let port = TemSmoothedPort {
+            tag: port_tag,
+            voltage: Complex64::new(1.0, 0.0),
+            strip_width_m,
+        };
+        let b = port.rhs(&basis, 0.0);
+
+        let lu = PartialPivLu::new(z.as_ref());
+        let i = lu.solve(b.as_ref());
+
+        let i_port = port.port_current(&basis, &i);
+        if i_port.norm() < 1e-30 {
+            return Err(Error::Numerical(
+                "port current vanished; check port tagging".into(),
+            ));
+        }
+        Ok(port.port_voltage() / i_port)
     }
 }

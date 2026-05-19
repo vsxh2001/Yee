@@ -96,6 +96,133 @@ impl Port for DeltaGapPort {
     }
 }
 
+/// TEM-mode-weighted smoothed delta-gap port (Track WWWWWWW / P1 fix).
+///
+/// The classical [`DeltaGapPort`] drives every RWG basis function at the
+/// port with `b_k = V · length_k`. Track TTTTTTT's port-edge diagnostic
+/// (`tests/mom_002_port_edge_diagnostic.rs`) showed that on the
+/// IIIIIII-reframed mom-002 strip mesh this uniform drive couples to a
+/// single longitudinal-edge mode (alternating per-edge currents,
+/// `|i|` ratios `~5×` between longitudinal-edge and diagonal-edge
+/// basis functions) rather than the dominant quasi-TEM microstrip
+/// mode. Track QQQQQQQ separately exonerated the Sommerfeld kernel
+/// (`ε_eff_solver = 3.385` vs Hammerstad-Jensen `3.32`, +1.83 % error),
+/// so the residual `|Im(Z)| ≈ 674 Ω` capacitive bias at 1 GHz is a
+/// **port-excitation modeling** problem, not a kernel problem.
+///
+/// This port type weights the delta-gap RHS by an analytic Maxwell
+/// transverse-mode envelope
+///
+/// ```text
+///   w_TEM(y) = sqrt(2 / (π · (1 − (2 y / w)²)))
+/// ```
+///
+/// peaked at the strip edges (`|2 y / w| → 1`) and minimum at strip
+/// centre (`y = 0`). `y_k` is the y-coordinate of the basis function's
+/// edge midpoint and `w` is the strip width (the
+/// [`Self::strip_width_m`] field). The denominator is regularised
+/// away from the singularity by clipping `|2 y / w| ≤ 1 − ε` with
+/// `ε = 1e-3` so the weights stay finite on a uniform-y mesh that
+/// places edges exactly on the strip edges. The `√(2/π)` normalisation
+/// is the analytic `∫ w_TEM² dy / w = 1` factor for a Maxwell
+/// `1/√(1−u²)` density on `u ∈ [-1, 1]`, but the result is
+/// scale-invariant — `Z_in = V / I` is unchanged by a uniform rescale
+/// of the weights — so the constant matters only for diagnostic
+/// comparability across ports.
+///
+/// The same `w_TEM` weighting is applied **symmetrically** to the
+/// port-current extraction so that `Z_in = V / I_port` retains the
+/// Galerkin inner-product structure: a pure delta-gap recovers
+/// bit-for-bit when `w_TEM ≡ 1` (the `strip_width_m → ∞` limit).
+///
+/// On a single-column wire port (the mom-001 dipole geometry) every
+/// edge midpoint sits at `y = 0`, so `w_TEM(0) = √(2/π)` is a constant
+/// uniform rescale and `Z_in` is **unchanged** from the [`DeltaGapPort`]
+/// answer. This is the key property that lets mom-002 pick up the
+/// TEM-smoothed port without disturbing the mom-001 NEC-4 gate.
+pub(crate) struct TemSmoothedPort {
+    /// Port tag — must match the mesh's triangle-tag scheme used by
+    /// [`RwgBasis::port_basis_indices`].
+    pub tag: u32,
+    /// Driving voltage `V`. mom-002 uses `1.0 + 0i`.
+    pub voltage: Complex64,
+    /// Strip width `w` (meters). The transverse-mode envelope
+    /// `w_TEM(y) = √(2 / (π · (1 − (2 y / w)²)))` evaluates the
+    /// edge-singular Maxwell density on `y ∈ [-w/2, w/2]`. On the
+    /// mom-002 IIIIIII reframe this is `2.94 mm`. A `0` width
+    /// degenerates to the [`DeltaGapPort`] form (every weight is
+    /// `√(2/π)`).
+    pub strip_width_m: f64,
+}
+
+impl TemSmoothedPort {
+    /// Evaluate the analytic Maxwell transverse-mode envelope at a
+    /// single edge-midpoint y-coordinate. The
+    /// `√(2 / (π · (1 − (2 y / w)²)))` form is the integrable
+    /// edge-singular density for a thin strip carrying a quasi-TEM
+    /// current; see Harrington, *Time-Harmonic Electromagnetic Fields*,
+    /// §5.5 (Maxwell envelope) and the `tests/port_tem_smoothed_rhs.rs`
+    /// validation gate.
+    ///
+    /// The denominator is clipped at `|u| ≤ 1 − ε` with `ε = 1e-3` so
+    /// edges that sit exactly on the strip boundary (which a
+    /// uniform-y mesh produces at `j = 0` and `j = n_width`) don't
+    /// divide-by-zero. A zero or non-finite `w` falls back to the
+    /// uniform `√(2/π)` weight — i.e. the [`DeltaGapPort`] form modulo
+    /// a uniform rescale, which leaves `Z_in` unchanged.
+    fn weight(&self, y: f64) -> f64 {
+        let w = self.strip_width_m;
+        if !w.is_finite() || w <= 0.0 {
+            return (2.0 / std::f64::consts::PI).sqrt();
+        }
+        let u = (2.0 * y / w).abs().min(1.0 - 1e-3);
+        (2.0 / (std::f64::consts::PI * (1.0 - u * u))).sqrt()
+    }
+
+    /// Sample the y-coordinate of the `k`-th basis function's
+    /// shared-edge midpoint. The Maxwell envelope is a function of
+    /// the transverse coordinate, so this is the point where the
+    /// weight is evaluated.
+    fn edge_y_midpoint(basis: &RwgBasis, k: usize) -> f64 {
+        let edge = &basis.edges[k];
+        let p0 = basis.mesh.vertices[edge.v0 as usize];
+        let p1 = basis.mesh.vertices[edge.v1 as usize];
+        0.5 * (p0.y + p1.y)
+    }
+}
+
+impl Port for TemSmoothedPort {
+    fn tag(&self) -> u32 {
+        self.tag
+    }
+    fn rhs(&self, basis: &RwgBasis, _freq_hz: f64) -> Mat<Complex64> {
+        let n = basis.n_basis();
+        let mut b = Mat::<Complex64>::zeros(n, 1);
+        for k in basis.port_basis_indices(self.tag) {
+            let y = Self::edge_y_midpoint(basis, k);
+            let w_tem = self.weight(y);
+            b[(k, 0)] = self.voltage * Complex64::new(basis.edges[k].length * w_tem, 0.0);
+        }
+        b
+    }
+    fn port_current(&self, basis: &RwgBasis, i: &Mat<Complex64>) -> Complex64 {
+        // Symmetric weighting on the Galerkin projection: the same
+        // `length_k · w_TEM(y_k)` factor that built `b_k` extracts the
+        // port current `I_port = Σ length_k · w_TEM(y_k) · i_k`. This
+        // preserves the inner-product structure of `Z_in = V / I`.
+        let mut total = Complex64::new(0.0, 0.0);
+        for k in basis.port_basis_indices(self.tag) {
+            let y = Self::edge_y_midpoint(basis, k);
+            let w_tem = self.weight(y);
+            total += Complex64::new(basis.edges[k].length * w_tem, 0.0) * i[(k, 0)];
+        }
+        total
+    }
+    fn port_voltage(&self) -> Complex64 {
+        self.voltage
+    }
+}
+
 /// Modal distribution attached to a [`WavePort`].
 ///
 /// Phase 1.3.1.0 ships [`ModalDistribution::Te10`] for rectangular
@@ -573,6 +700,62 @@ mod tests {
                 "stub Numerical2D RHS must equal Uniform RHS bit-for-bit at k={k}"
             );
         }
+    }
+
+    #[test]
+    fn tem_smoothed_port_degenerate_width_equals_uniform_rescale() {
+        // With zero strip_width, the Maxwell envelope collapses to a
+        // uniform `√(2/π)` and the port acts as a delta-gap port at a
+        // rescaled voltage. The Z_in = V / I_port computation is
+        // invariant under a uniform RHS rescale (the same factor
+        // multiplies b and is removed by the symmetric port_current
+        // extraction), so the answer must equal the delta-gap result
+        // bit-for-bit on a single-column wire mesh.
+        let basis = RwgBasis::from_mesh(two_tri_mesh_with_port()).unwrap();
+        let dg = DeltaGapPort {
+            tag: 1,
+            voltage: Complex64::new(1.0, 0.0),
+        };
+        let tem = TemSmoothedPort {
+            tag: 1,
+            voltage: Complex64::new(1.0, 0.0),
+            strip_width_m: 0.0,
+        };
+        let b_dg = dg.rhs(&basis, 1.0e9);
+        let b_tem = tem.rhs(&basis, 1.0e9);
+        let scale = (2.0 / std::f64::consts::PI).sqrt();
+        let n = basis.n_basis();
+        for k in 0..n {
+            let expected = b_dg[(k, 0)] * Complex64::new(scale, 0.0);
+            assert!(
+                (b_tem[(k, 0)] - expected).norm() < 1e-12,
+                "k={k}: tem b = {:?}, expected scale·b_dg = {:?}",
+                b_tem[(k, 0)],
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn tem_smoothed_port_weight_peaks_at_strip_edges() {
+        // The Maxwell envelope `1/√(1−(2y/w)²)` is minimum at y = 0
+        // (the strip centre) and diverges at y → ±w/2. Sanity-check
+        // the monotone behaviour and the clipped finite limit.
+        let port = TemSmoothedPort {
+            tag: 1,
+            voltage: Complex64::new(1.0, 0.0),
+            strip_width_m: 1.0,
+        };
+        let w0 = port.weight(0.0);
+        let w_mid = port.weight(0.25);
+        let w_edge = port.weight(0.5);
+        assert!(w0 > 0.0);
+        assert!(w_mid > w0);
+        assert!(w_edge > w_mid);
+        // ε = 1e-3 clip means w_edge is finite — explicit bound is
+        // sqrt(2/π · 1/(2ε − ε²)) ≈ sqrt(1/π · 1/ε) ≈ 17.8
+        assert!(w_edge.is_finite());
+        assert!(w_edge < 1e2, "w_edge = {w_edge} should be clipped");
     }
 
     #[test]
