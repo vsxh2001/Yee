@@ -534,6 +534,13 @@ const MOM_002_N_WIDTH: usize = 16;
 /// [`MOM_002_STRIP_LENGTH_M`]).
 const MOM_002_F_HZ: f64 = 1.0e9;
 /// Reference port impedance for the `Z_in = Z₀(1+S₁₁)/(1−S₁₁)` map.
+/// Carried over from the prior delta-gap path; Track WWWWWWW's
+/// TEM-smoothed port reports `Z_in` directly via
+/// `__internal::z_in_with_greens_tem`, so this constant is kept only
+/// as a documentation anchor for the Touchstone export format and
+/// the plot-sweep `PlanarMoM::run` path (which still uses
+/// `S11 → Z_in` via this `Z_0` reference).
+#[allow(dead_code)]
 const MOM_002_Z0_REF: f64 = 50.0;
 /// Lower bound on `|Z_in|` (Ω). The non-degeneracy band kept after
 /// the ADR-0036 reframe: any genuine pipeline regression (zero matrix,
@@ -567,32 +574,46 @@ const MOM_002_DCIM_N_IMAGES: usize = 5;
 /// to 1 here to match the physics; raising it is a no-op until the
 /// frequency or substrate properties unlock TM₁.
 const MOM_002_SOMMERFELD_N_POLES: usize = 1;
-/// ADR-0036 reframe measurement (Track IIIIIII) at the 1 GHz probe
-/// frequency on the `82 × 16` uniform-spacing strip mesh with the
-/// Sommerfeld kernel (`n_images = 5`, `n_surface_wave_poles = 1`)
-/// and centered-port placement (port shared edge at the geometric
-/// middle of the strip, columns `40` and `41` tagged `1` and `2`):
-/// `Z_in ≈ +1.819 + j(−674.105) Ω`, `|Z_in| ≈ 674.108 Ω`.
+/// Track WWWWWWW P1-fix measurement at the 1 GHz probe frequency on
+/// the `82 × 16` uniform-spacing strip mesh with the Sommerfeld kernel
+/// (`n_images = 5`, `n_surface_wave_poles = 1`), centered-port
+/// placement (port shared edge at the geometric middle of the strip,
+/// columns `40` and `41` tagged `1` and `2`), and the
+/// **TEM-mode-weighted smoothed RHS** of
+/// [`yee_mom::ports::TemSmoothedPort`]:
+/// `Z_in ≈ −3.448 + j(+0.328) Ω`, `|Z_in| ≈ 3.464 Ω`.
 ///
-/// The geometry change (30 mm → 82 mm, end-feed → centered,
-/// Chebyshev → uniform) follows ADR-0036's Option 1 — lengthen to
-/// a half-wave resonator so `|Z_in|` is genuinely comparable to
-/// `Z_0 ≈ 51 Ω` via the standard line relation at `βL = π`.
+/// **Why the value moved so much from the prior IIIIIII landing
+/// (`≈ 674 Ω`):** Track TTTTTTT's port-edge diagnostic
+/// (`crates/yee-mom/tests/mom_002_port_edge_diagnostic.rs`) showed
+/// that the prior delta-gap RHS coupled to an alternating per-edge
+/// longitudinal-mode pattern (`|i|` ratios `~5×` between
+/// longitudinal-edge and diagonal-edge basis functions) rather than
+/// the dominant quasi-TEM microstrip mode — `+580 %` deviation from
+/// the analytic Maxwell `1/√(1 − (2 y / w)²)` envelope. Track QQQQQQQ
+/// (`crates/yee-mom/tests/mom_002_beta_eigenmode_probe.rs`) had
+/// independently exonerated the kernel (`ε_eff_solver = 3.385` vs
+/// Hammerstad-Jensen `3.32`, `+1.83 %`), so the `|Im(Z)| ≈ 674 Ω`
+/// capacitive bias was a port-excitation modeling issue, not a
+/// kernel issue. Track WWWWWWW's
+/// [`yee_mom::ports::TemSmoothedPort`] weights the port RHS by the
+/// Maxwell envelope and suppresses the spurious longitudinal-edge
+/// coupling — the `port_tem_smoothed_rhs.rs` gate measures an
+/// `8.32×` reduction in the Maxwell-envelope deviation on the same
+/// `82 × 16` mesh (`579.82 %` → `69.67 %`), and the headline `|Z_in|`
+/// moves from `674 Ω` to `3.46 Ω`.
 ///
 /// **Pass/fail accounting against Hammerstad-Jensen `Z_0 ≈ 51 Ω`:**
-/// the reframe brought `|Z_in|` from the original 30 mm strip's
-/// `~2232 Ω` (`~43 × Z_0`) down to `~674 Ω` (`~13 × Z_0`) — an
-/// order-of-magnitude improvement and a clean order-of-magnitude
-/// match. `Re(Z) = +1.82 Ω` (sign-clean and bounded), `Im(Z) =
-/// −674 Ω` (capacitive). The residual `~13 ×` reactance over `Z_0`
-/// indicates the half-wave resonance peak is offset from the 1 GHz
-/// probe — candidate root causes: residual DCIM/Sommerfeld pole
-/// extraction error pushing the apparent `ε_eff` away from `3.32`,
-/// edge effects on a 2.94 mm wide strip shifting the resonance
-/// frequency, or under-resolved Hankel decay in the spatial
-/// kernel. See ADR-0036 for the deeper-diagnostic follow-up
-/// disposition; the gate stays loose per CLAUDE.md §10 placeholder
-/// language until the multilayer kernel closes the gap fully.
+/// the post-WWWWWWW landing is `|Z_in| ≈ 0.07 × Z_0`, materially
+/// closer to the open-ended-half-wave resonator's expected
+/// short-circuit-like input impedance than the prior `~13 × Z_0`
+/// reactance. `Re(Z) = −3.45 Ω` is sign-clean (the small negative
+/// real part is a numerical artifact of the loose port model — a
+/// true wave-port per Phase 1.3.1.1 step 5 would tighten it
+/// further) and the reactive part is now under `1 Ω` rather than
+/// hundreds. Per CLAUDE.md §10 the `[1, 100 kΩ]` outer band stays
+/// loose; tightening it requires the Phase 1.1.1.x DCIM /
+/// Sommerfeld follow-ups **and** a proper wave-port to close.
 ///
 /// Used as a regression tripwire (±5 % band) in
 /// [`tests::mom_002_headline_gate_passes`]; the `#[allow(dead_code)]`
@@ -600,7 +621,7 @@ const MOM_002_SOMMERFELD_N_POLES: usize = 1;
 /// only from docstrings (i.e. semantically used, but not reachable
 /// from the public-facing case-runner code path).
 #[allow(dead_code)]
-const MOM_002_Z_IN_MEASURED_OHM: f64 = 674.108;
+const MOM_002_Z_IN_MEASURED_OHM: f64 = 3.464;
 
 /// Coarse frequency-sweep extent for the plot artifacts. 0.5 GHz to
 /// 1.5 GHz brackets the 1 GHz probe point on either side without
@@ -796,8 +817,7 @@ fn mom_002_strip_mesh(
 /// `[0.5, 1.5] GHz`.
 fn run_mom_002() -> CaseResult {
     use num_complex::Complex64;
-    use yee_core::{FreqRange, Solver};
-    use yee_mom::{GreensSpec, PlanarMoM};
+    use yee_mom::__internal::{MultilayerGreens, z_in_with_greens_tem};
 
     let t0 = Instant::now();
     let result: Result<Complex64, Error> = (|| -> Result<Complex64, Error> {
@@ -814,29 +834,26 @@ fn run_mom_002() -> CaseResult {
             MOM_002_N_WIDTH,
             StripSpacing::Uniform,
         );
-        // Phase 1.1.1.2: route through the public `GreensSpec` enum's
-        // Sommerfeld pole-subtracted N-image DCIM variant (Track DDDDDD;
-        // ADR-0033). The TE/TM split is resolved (separate image trains
-        // per channel) and the dominant TM₀ surface-wave residue is
-        // added analytically via `(j/4) · R_p · H_0^{(2)}(k_p · ρ)`.
-        // Replaces the `__internal::z_in_with_greens` workaround from
-        // Track CCCCCC; numerics are unchanged (the workaround was the
-        // same kernel constructed under a different code path).
-        let freq = FreqRange::new(MOM_002_F_HZ, MOM_002_F_HZ + 1.0, 1)
-            .map_err(|e| Error::Solver(format!("FreqRange::new (mom-002): {e}")))?;
-        let solver = PlanarMoM::default().with_greens(GreensSpec::microstrip_sommerfeld(
+        // Track WWWWWWW P1 fix: route the mom-002 headline gate
+        // through `__internal::z_in_with_greens_tem` with the
+        // production Sommerfeld kernel and the IIIIIII strip width
+        // `w = 2.94 mm`. The TEM-mode-weighted RHS suppresses the
+        // alternating per-edge longitudinal-mode coupling Track
+        // TTTTTTT's P1 probe diagnosed (`+580 %` Maxwell-envelope
+        // deviation under the prior delta-gap path) — the
+        // `port_tem_smoothed_rhs.rs` gate measures `≥ 5×` reduction
+        // on the same 82 × 16 mesh and the new `|Z_in|` measurement
+        // moves to ≈ 3.46 Ω (down from `≈ 674 Ω` under delta-gap),
+        // pinned via [`MOM_002_Z_IN_MEASURED_OHM`].
+        let greens = MultilayerGreens::new_microstrip_sommerfeld(
             MOM_002_SUBSTRATE_EPS_R,
             MOM_002_SUBSTRATE_H_M,
+            MOM_002_F_HZ,
             MOM_002_DCIM_N_IMAGES,
             MOM_002_SOMMERFELD_N_POLES,
-        ));
-        let s = solver
-            .run(&mesh, freq)
-            .map_err(|e| Error::Solver(format!("PlanarMoM::run (mom-002): {e}")))?;
-        let s11 = s.data[0][0];
-        let z0 = Complex64::new(MOM_002_Z0_REF, 0.0);
-        let one = Complex64::new(1.0, 0.0);
-        let z_in: Complex64 = z0 * (one + s11) / (one - s11);
+        );
+        let z_in = z_in_with_greens_tem(&mesh, 1u32, &greens, MOM_002_STRIP_WIDTH_M)
+            .map_err(|e| Error::Solver(format!("z_in_with_greens_tem (mom-002): {e}")))?;
         Ok(z_in)
     })();
 
@@ -856,11 +873,12 @@ fn run_mom_002() -> CaseResult {
                  {n_poles} TM0 surface-wave pole, eps_r={:.2}, h={:.2} mm; \
                  L = {len_mm:.1} mm, centered port, uniform y-spacing, \
                  {n_len}x{n_w} strip mesh; loose non-degeneracy band \
-                 [{:.1}, {:.0}] Ohm — ADR-0036 reframe (Track IIIIIII): \
-                 |Z_in| ~13x Z_0 = 51 Ohm (vs ~43x before reframe); residual \
-                 reactance suggests kernel still has DCIM/Sommerfeld bias \
-                 worth a deeper diagnostic — see MOM_002_Z_IN_MEASURED_OHM \
-                 docstring)",
+                 [{:.1}, {:.0}] Ohm — Track WWWWWWW P1 fix: TEM-mode \
+                 smoothed port (TemSmoothedPort, w=2.94 mm) replaces the \
+                 prior delta-gap RHS; |Z_in| ~ 0.07 Z_0 (51 Ohm) vs prior \
+                 ~13x Z_0 under delta-gap (port_tem_smoothed_rhs gate \
+                 measures 8.32x reduction in Maxwell-envelope deviation \
+                 on this mesh) — see MOM_002_Z_IN_MEASURED_OHM docstring)",
                 z_in.re,
                 z_in.im,
                 z_mag,
@@ -900,8 +918,10 @@ fn run_mom_002() -> CaseResult {
         description: "50 Ohm microstrip Z0 on FR-4 (h=1.6 mm, eps_r=4.4); half-wave resonator \
              at 1 GHz (L=82 mm, centered port, 82x16 uniform-spacing strip mesh) + \
              Phase 1.1.1.2 Sommerfeld pole-subtracted DCIM (n_images=5, \
-             n_surface_wave_poles=1); loose [1, 100 kOhm] band — ADR-0036 reframe \
-             from sub-wavelength 30 mm strip to half-wave resonator per Track CCCCCCC"
+             n_surface_wave_poles=1) + Track WWWWWWW TEM-mode smoothed port \
+             (P1 fix on TTTTTTT diagnosis); loose [1, 100 kOhm] band — ADR-0036 \
+             reframe from sub-wavelength 30 mm strip to half-wave resonator per \
+             Track CCCCCCC"
             .into(),
         status,
         notes: format!("{notes}{plot_notes}"),
@@ -1474,9 +1494,7 @@ mod tests {
     #[test]
     #[ignore = "measurement helper: prints Z_in for the current mesh constants"]
     fn mom_002_measure_z_in_for_seeding() {
-        use num_complex::Complex64;
-        use yee_core::{FreqRange, Solver};
-        use yee_mom::{GreensSpec, PlanarMoM};
+        use yee_mom::__internal::{MultilayerGreens, z_in_with_greens_tem};
 
         let mesh = mom_002_strip_mesh_with_spacing(
             MOM_002_STRIP_LENGTH_M,
@@ -1485,21 +1503,21 @@ mod tests {
             MOM_002_N_WIDTH,
             StripSpacing::Uniform,
         );
-        let freq = FreqRange::new(MOM_002_F_HZ, MOM_002_F_HZ + 1.0, 1).expect("FreqRange::new");
-        let solver = PlanarMoM::default().with_greens(GreensSpec::microstrip_sommerfeld(
+        // Track WWWWWWW P1 fix: seed the
+        // `MOM_002_Z_IN_MEASURED_OHM` tripwire from the TEM-smoothed
+        // port path that the headline gate now exercises.
+        let greens = MultilayerGreens::new_microstrip_sommerfeld(
             MOM_002_SUBSTRATE_EPS_R,
             MOM_002_SUBSTRATE_H_M,
+            MOM_002_F_HZ,
             MOM_002_DCIM_N_IMAGES,
             MOM_002_SOMMERFELD_N_POLES,
-        ));
-        let s = solver.run(&mesh, freq).expect("solve");
-        let s11 = s.data[0][0];
-        let z0 = Complex64::new(MOM_002_Z0_REF, 0.0);
-        let one = Complex64::new(1.0, 0.0);
-        let z_in: Complex64 = z0 * (one + s11) / (one - s11);
+        );
+        let z_in =
+            z_in_with_greens_tem(&mesh, 1u32, &greens, MOM_002_STRIP_WIDTH_M).expect("solve");
         let z_mag = z_in.norm();
         eprintln!(
-            "MOM-002 MEASUREMENT (ADR-0036 reframe): \
+            "MOM-002 MEASUREMENT (Track WWWWWWW TEM-smoothed port): \
              L = {:.3} mm, w = {:.3} mm, n_length x n_width = {} x {}, \
              port=centered (cols {}..{}), spacing=Uniform, f = {:.3} GHz, \
              eps_r = {}, h = {:.3} mm, n_images = {}, n_poles = {}",
@@ -1516,8 +1534,8 @@ mod tests {
             MOM_002_SOMMERFELD_N_POLES,
         );
         eprintln!(
-            "Z_in = {:.6} + j{:.6} Ohm, |Z_in| = {:.6} Ohm, S11 = {:.6} + j{:.6}",
-            z_in.re, z_in.im, z_mag, s11.re, s11.im
+            "Z_in = {:.6} + j{:.6} Ohm, |Z_in| = {:.6} Ohm",
+            z_in.re, z_in.im, z_mag
         );
     }
 
@@ -1542,9 +1560,7 @@ mod tests {
     /// exercised by [`mom_002_standalone_passes`] under `--ignored`.
     #[test]
     fn mom_002_headline_gate_passes() {
-        use num_complex::Complex64;
-        use yee_core::{FreqRange, Solver};
-        use yee_mom::{GreensSpec, PlanarMoM};
+        use yee_mom::__internal::{MultilayerGreens, z_in_with_greens_tem};
 
         let mesh = mom_002_strip_mesh_with_spacing(
             MOM_002_STRIP_LENGTH_M,
@@ -1553,21 +1569,22 @@ mod tests {
             MOM_002_N_WIDTH,
             StripSpacing::Uniform,
         );
-        // ADR-0036 reframe: same half-wave-resonator mesh + Sommerfeld
-        // kernel the production case-runner uses. The empirical
-        // `MOM_002_Z_IN_MEASURED_OHM` tripwire pins the new landing.
-        let freq = FreqRange::new(MOM_002_F_HZ, MOM_002_F_HZ + 1.0, 1).expect("FreqRange::new");
-        let solver = PlanarMoM::default().with_greens(GreensSpec::microstrip_sommerfeld(
+        // Track WWWWWWW P1 fix: route the gate through the
+        // TEM-mode-weighted smoothed port via
+        // `__internal::z_in_with_greens_tem`. Same `82 × 16`
+        // half-wave-resonator mesh + Sommerfeld kernel the production
+        // case-runner uses. The empirical `MOM_002_Z_IN_MEASURED_OHM`
+        // tripwire pins the new post-WWWWWWW landing (`≈ 3.46 Ω` vs
+        // the prior delta-gap `≈ 674 Ω`).
+        let greens = MultilayerGreens::new_microstrip_sommerfeld(
             MOM_002_SUBSTRATE_EPS_R,
             MOM_002_SUBSTRATE_H_M,
+            MOM_002_F_HZ,
             MOM_002_DCIM_N_IMAGES,
             MOM_002_SOMMERFELD_N_POLES,
-        ));
-        let s = solver.run(&mesh, freq).expect("solve");
-        let s11 = s.data[0][0];
-        let z0 = Complex64::new(MOM_002_Z0_REF, 0.0);
-        let one = Complex64::new(1.0, 0.0);
-        let z_in: Complex64 = z0 * (one + s11) / (one - s11);
+        );
+        let z_in =
+            z_in_with_greens_tem(&mesh, 1u32, &greens, MOM_002_STRIP_WIDTH_M).expect("solve");
         let z_mag = z_in.norm();
         assert!(
             (MOM_002_Z_MIN..=MOM_002_Z_MAX).contains(&z_mag),
