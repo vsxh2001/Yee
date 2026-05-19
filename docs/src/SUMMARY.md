@@ -64,3 +64,4 @@
 - [ADR-0034: Phase 2.fdtd.5.3.2 cubic aux-grid interpolation](decisions/0034-phase-2-fdtd-5-3-2-cubic-aux-interp.md)
 - [ADR-0035: Berenger Huygens-surface subgridding (Phase 2.fdtd.7.x)](decisions/0035-berenger-huygens-subgridding.md)
 - [ADR-0036: mom-002 validation strategy — sub-wavelength strip needs reframe](decisions/0036-mom-002-validation-strategy.md)
+- [ADR-0037: mom-002 R1 ε_eff-biasing metric retracted](decisions/0037-mom-002-r1-metric-retracted.md)
