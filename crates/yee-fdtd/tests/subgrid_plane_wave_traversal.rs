@@ -108,10 +108,15 @@ const PROBES_C: [(usize, usize, usize); 5] = [
 ///
 /// The 0.5% bound is preserved (not relaxed) per brief.
 #[test]
-#[ignore = "fdtd-007 stability gate — Q4.1 time-centered closure (`snapshot_fine_h_mid_step` \
-            + average) is in place and Q3/Q4/Q5 unit tests pass, but the late-time interface \
-            energy balance remains divergent. See doc-comment above; Phase 2.fdtd.7.x \
-            will land a Berenger-Huygens closure to retire this gate."]
+#[ignore = "Phase 2.fdtd.7.x B2.1 (Track LLLLLLL): split J/M injection refactor (M deferred to \
+            next step's update_h_only, J injected after both fine sub-steps and after coarse \
+            update_e_only) is in place; per HHHHHHH's diagnosis and JJJJJJJ's Q6 canary, \
+            the divergence persists (peak |E_z| ≈ 1.27e30 at step 499 — the J source is \
+            still folded into already-updated coarse E because addition order does not change \
+            the resulting field values). Resolution requires a deeper fix to the \
+            equivalence-principle accounting (likely a coarse 'ghost' field subtraction in \
+            J/M corrections, beyond the scope of Option A/B as recommended by HHHHHHH). \
+            Deferred to Phase 2.fdtd.7.y per the AAAAAAA plan B4 escape hatch."]
 fn subgrid_plane_wave_matches_coarse_reference() {
     // ---- Subgridded run ---------------------------------------------------
     let coarse_grid = YeeGrid::vacuum(NX_C, NY_C, NZ_C, DX_C);

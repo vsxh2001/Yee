@@ -274,6 +274,21 @@ pub struct SubgridRegion {
     /// callers that invoke `average_fine_h_to_coarse` directly (without
     /// stepping) get the legacy single-sample behaviour.
     fine_h_snapshot: Option<FineHSnapshot>,
+    /// End-of-coarse-step snapshot of the fine `E` field, captured at
+    /// `t = n + 1` (after sub-step 2's `update_fine_e`) and consumed at
+    /// the **start of the next coarse step** to inject the
+    /// `M = -n̂ × E_tot` magnetic-current source onto the coarse `H`
+    /// arrays just before that step's `update_h_only`.
+    ///
+    /// `None` until the first call to
+    /// [`SubgridRegion::snapshot_fine_e_end_of_step`]; the first coarse
+    /// step's `inject_m_to_coarse_h` call therefore treats the source
+    /// as identically zero (correct: no fine fields existed at `t = 0`
+    /// before sub-step 2 ran).
+    ///
+    /// Spec: `docs/superpowers/specs/2026-05-19-phase-2-fdtd-7-x-berenger-huygens-design.md` §3.
+    /// ADR:  `docs/src/decisions/0035-berenger-huygens-subgridding.md`.
+    fine_e_snapshot: Option<FineESnapshot>,
 }
 
 /// Mid-coarse-step snapshot of the fine `H` field components used by the
@@ -287,6 +302,29 @@ struct FineHSnapshot {
     hx: Array3<f64>,
     hy: Array3<f64>,
     hz: Array3<f64>,
+}
+
+/// End-of-coarse-step snapshot of the fine `E` field components used by
+/// the Phase 2.fdtd.7.x B2.1 split Berenger closure to defer the
+/// `M = -n̂ × E_tot` magnetic-current injection to the **start of the
+/// next coarse step**, just before the next coarse `update_h_only`.
+///
+/// Captured at `t = n + 1` (immediately after sub-step 2's
+/// `update_fine_e`) by [`SubgridRegion::snapshot_fine_e_end_of_step`].
+/// Consumed at the top of the next coarse step by
+/// [`SubgridRegion::inject_m_to_coarse_h`]. Decouples the `M` injection
+/// from the J injection so each source enters its respective leapfrog
+/// update before that update runs, per the Phase 2.fdtd.7.x B2.1 fix
+/// for the spec §6 risk 3 time-centering bug diagnosed by Track
+/// HHHHHHH (commit `997e706` divergence; the J/M source values were
+/// being stacked on top of already-updated coarse `E`/`H` slots,
+/// closing a unit-magnitude feedback loop through the Q3 coarse → fine
+/// Dirichlet boundary).
+#[derive(Debug, Clone)]
+struct FineESnapshot {
+    ex: Array3<f64>,
+    ey: Array3<f64>,
+    ez: Array3<f64>,
 }
 
 impl SubgridRegion {
@@ -359,6 +397,7 @@ impl SubgridRegion {
             fine,
             snapshots,
             fine_h_snapshot: None,
+            fine_e_snapshot: None,
         })
     }
 
@@ -468,6 +507,28 @@ impl SubgridRegion {
             hx: self.fine.hx.clone(),
             hy: self.fine.hy.clone(),
             hz: self.fine.hz.clone(),
+        });
+    }
+
+    /// Snapshot the post-sub-step-2 fine `E` field for the Phase
+    /// 2.fdtd.7.x B2.1 split-injection closure.
+    ///
+    /// Call once at the **end** of each coarse step — after sub-step 2's
+    /// [`Self::update_fine_e`] has advanced fine `E` to wall-clock time
+    /// `t = n + 1`, and before the next coarse step begins. The snapshot
+    /// is then consumed at the **top** of the next coarse step by
+    /// [`Self::inject_m_to_coarse_h`] to apply the
+    /// `M = -n̂ × E_tot^{n+1}` magnetic-current source onto the coarse
+    /// `H_t` arrays *before* the next coarse `update_h_only` consumes
+    /// them. This defers the M injection by one coarse step so the
+    /// source enters its respective leapfrog update before the update
+    /// runs — the spec §6 risk 3 time-centering fix per Phase 2.fdtd.7.x
+    /// B2.1.
+    pub fn snapshot_fine_e_end_of_step(&mut self) {
+        self.fine_e_snapshot = Some(FineESnapshot {
+            ex: self.fine.ex.clone(),
+            ey: self.fine.ey.clone(),
+            ez: self.fine.ez.clone(),
         });
     }
 
@@ -1444,6 +1505,82 @@ impl SubgridRegion {
     /// Spec: `docs/superpowers/specs/2026-05-19-phase-2-fdtd-7-x-berenger-huygens-design.md`.
     /// ADR: `docs/src/decisions/0035-berenger-huygens-subgridding.md`.
     pub fn inject_equivalent_currents_to_coarse(&self, parent: &mut YeeGrid) {
+        self.inject_currents_inner(parent, true, true);
+    }
+
+    /// Inject **only** the electric equivalent current `J = +n̂ × H_tot`
+    /// onto the coarse `E_t` arrays at the Huygens surface.
+    ///
+    /// Phase 2.fdtd.7.x B2.1 split-injection closure (companion to
+    /// [`Self::inject_m_to_coarse_h`]). HHHHHHH's diagnosis of the B2
+    /// divergence (commit `997e706`, Q5 strict gate `|E_z|` doubling
+    /// every ~7 coarse steps) traced the instability to the J source
+    /// being **stacked on top of an already-updated coarse `E`** rather
+    /// than consumed inside the `update_e_only` stencil. The split-
+    /// injection pipeline (see [`SubgriddedSolver::step`]) calls this
+    /// helper *before* the coarse `update_e_only` so the J source enters
+    /// its leapfrog update before the update runs — closing the spec
+    /// §6 risk 3 time-centering bug.
+    ///
+    /// `H_tot` is sampled at `t = n + 1/2` via the Q4.1 mid-step snapshot
+    /// plus post-sub-step-2 average (same time-centering as the legacy
+    /// monolithic [`Self::inject_equivalent_currents_to_coarse`]).
+    pub fn inject_j_to_coarse_e(&self, parent: &mut YeeGrid) {
+        self.inject_currents_inner(parent, true, false);
+    }
+
+    /// Inject **only** the magnetic equivalent current `M = -n̂ × E_tot`
+    /// onto the coarse `H_t` arrays at the Huygens surface, sampling the
+    /// fine `E` field from the **previous coarse step's end-of-sub-step-2
+    /// snapshot** ([`Self::snapshot_fine_e_end_of_step`]).
+    ///
+    /// Phase 2.fdtd.7.x B2.1 split-injection closure (companion to
+    /// [`Self::inject_j_to_coarse_e`]). Called at the top of each coarse
+    /// step, *before* `update_h_only`, so the M source enters its
+    /// leapfrog update before the update runs — closing the spec §6
+    /// risk 3 time-centering bug per HHHHHHH's diagnosis.
+    ///
+    /// On the **first** coarse step after construction (or after a
+    /// region is freshly attached), no snapshot exists yet and this
+    /// helper is a no-op. The fine grid has zero fields at `t = 0` so
+    /// the correct M is identically zero anyway; no special handling is
+    /// required.
+    pub fn inject_m_to_coarse_h(&self, parent: &mut YeeGrid) {
+        let Some(snap) = self.fine_e_snapshot.as_ref() else {
+            return;
+        };
+        self.inject_currents_inner_with_e(parent, false, true, &snap.ex, &snap.ey, &snap.ez);
+    }
+
+    /// Shared body for the monolithic and split-injection closures.
+    /// Computes the time-centered fine `H` average (Q4.1) and dispatches
+    /// to the per-face helpers with the requested `do_j` / `do_m` flags.
+    /// When `do_m` is `true`, M is sourced from the current fine `E`
+    /// (legacy monolithic behaviour preserved for the B1 no-op test).
+    fn inject_currents_inner(&self, parent: &mut YeeGrid, do_j: bool, do_m: bool) {
+        self.inject_currents_inner_with_e(
+            parent,
+            do_j,
+            do_m,
+            &self.fine.ex,
+            &self.fine.ey,
+            &self.fine.ez,
+        );
+    }
+
+    /// Like [`Self::inject_currents_inner`] but takes explicit fine `E`
+    /// arrays for the M term. Used by [`Self::inject_m_to_coarse_h`] to
+    /// source M from a stored end-of-previous-step snapshot rather than
+    /// the live fine grid.
+    fn inject_currents_inner_with_e(
+        &self,
+        parent: &mut YeeGrid,
+        do_j: bool,
+        do_m: bool,
+        fine_ex: &Array3<f64>,
+        fine_ey: &Array3<f64>,
+        fine_ez: &Array3<f64>,
+    ) {
         let lo = self.lo;
         let hi = self.hi;
         let fine_nx = 2 * (hi.0 - lo.0);
@@ -1495,7 +1632,8 @@ impl SubgridRegion {
             parent,
             lo,
             hi,
-            &self.fine,
+            fine_ey,
+            fine_ez,
             &hy_t,
             &hz_t,
             1.0,
@@ -1505,9 +1643,12 @@ impl SubgridRegion {
             fine_nx,
             coeff_e,
             coeff_h,
+            do_j,
+            do_m,
         );
         Self::inject_x_face(
-            parent, lo, hi, &self.fine, &hy_t, &hz_t, -1.0, lo.0, lo.0, 0, 0, coeff_e, coeff_h,
+            parent, lo, hi, fine_ey, fine_ez, &hy_t, &hz_t, -1.0, lo.0, lo.0, 0, 0, coeff_e,
+            coeff_h, do_j, do_m,
         );
 
         // ±y faces.
@@ -1515,7 +1656,8 @@ impl SubgridRegion {
             parent,
             lo,
             hi,
-            &self.fine,
+            fine_ex,
+            fine_ez,
             &hx_t,
             &hz_t,
             1.0,
@@ -1525,9 +1667,12 @@ impl SubgridRegion {
             fine_ny,
             coeff_e,
             coeff_h,
+            do_j,
+            do_m,
         );
         Self::inject_y_face(
-            parent, lo, hi, &self.fine, &hx_t, &hz_t, -1.0, lo.1, lo.1, 0, 0, coeff_e, coeff_h,
+            parent, lo, hi, fine_ex, fine_ez, &hx_t, &hz_t, -1.0, lo.1, lo.1, 0, 0, coeff_e,
+            coeff_h, do_j, do_m,
         );
 
         // ±z faces.
@@ -1535,7 +1680,8 @@ impl SubgridRegion {
             parent,
             lo,
             hi,
-            &self.fine,
+            fine_ex,
+            fine_ey,
             &hx_t,
             &hy_t,
             1.0,
@@ -1545,9 +1691,12 @@ impl SubgridRegion {
             fine_nz,
             coeff_e,
             coeff_h,
+            do_j,
+            do_m,
         );
         Self::inject_z_face(
-            parent, lo, hi, &self.fine, &hx_t, &hy_t, -1.0, lo.2, lo.2, 0, 0, coeff_e, coeff_h,
+            parent, lo, hi, fine_ex, fine_ey, &hx_t, &hy_t, -1.0, lo.2, lo.2, 0, 0, coeff_e,
+            coeff_h, do_j, do_m,
         );
     }
 
@@ -1560,6 +1709,21 @@ impl SubgridRegion {
     /// cell-centered index of the fine `H_y`, `H_z` layer adjacent to
     /// the surface (SF side); `fine_i_e` is the fine-x node index of
     /// the surface plane (where fine `E_y`, `E_z` live).
+    ///
+    /// `do_j` and `do_m` independently enable the J → coarse E and
+    /// M → coarse H paths. The Phase 2.fdtd.7.x B2.1 split-injection
+    /// closure ([`Self::inject_j_to_coarse_e`] /
+    /// [`Self::inject_m_to_coarse_h`]) calls this helper twice per
+    /// face per coarse step — once with `do_j=true, do_m=false` before
+    /// `update_e_only`, and once with `do_j=false, do_m=true` at the
+    /// top of the next coarse step before `update_h_only` — so each
+    /// source enters its leapfrog update before the update runs.
+    ///
+    /// `fine_e_for_m` supplies the fine `E_x`, `E_y`, `E_z` arrays the
+    /// `M = -n̂ × E` source samples. When `do_m=true` this is the
+    /// previous step's end-of-fine-sub-step-2 snapshot
+    /// ([`SubgridRegion::snapshot_fine_e_end_of_step`]); when
+    /// `do_m=false` the slot is unused.
     ///
     /// The four signs per face come from `J = sign · x̂ × H` and
     /// `M = -sign · x̂ × E`:
@@ -1587,7 +1751,8 @@ impl SubgridRegion {
         parent: &mut YeeGrid,
         lo: (usize, usize, usize),
         hi: (usize, usize, usize),
-        fine: &YeeGrid,
+        fine_ey_for_m: &Array3<f64>,
+        fine_ez_for_m: &Array3<f64>,
         fine_hy_t: &Array3<f64>,
         fine_hz_t: &Array3<f64>,
         sign: f64,
@@ -1597,83 +1762,70 @@ impl SubgridRegion {
         fine_i_e: usize,
         coeff_e: f64,
         coeff_h: f64,
+        do_j: bool,
+        do_m: bool,
     ) {
         let dx = parent.dx;
         let ce = coeff_e / dx;
         let ch = coeff_h / dx;
 
-        // -------- J term: write to E_y, E_z on the surface plane. --------
+        if do_j {
+            // -------- J term: write to E_y, E_z on the surface plane. --------
 
-        // E_y on the surface: coarse ey[(i_c_surface, j_c, k_c)],
-        // j_c ∈ [lo.1, hi.1), k_c ∈ [lo.2, hi.2].
-        // Source: H_z at fine cell-centered x = fine_i_h, averaged in
-        // the tangential half-cell direction. Fine H_z lives on faces
-        // normal to z → shape [fine_nx, fine_ny, fine_nz+1], staggered
-        // half-cell in (x, y), integer in z (cell-centered in x, in y).
-        // Wait — H_z has shape [nx, ny, nz+1]: cell-centered (i, j),
-        // node (k). For a coarse cell (j_c, k_c) at the surface:
-        //   coarse E_y edge: j_c (cell-centered y), k_c (node z).
-        //   fine H_z to map: fine_i = fine_i_h, fine_j ∈ {2·(j_c-lo.1),
-        //     2·(j_c-lo.1)+1}, fine_k_node = 2·(k_c-lo.2).
-        // Average 2 fine H_z values per coarse E_y position.
-        for j_c in lo.1..hi.1 {
-            let j_f0 = 2 * (j_c - lo.1);
-            for k_c in lo.2..=hi.2 {
-                let k_f = 2 * (k_c - lo.2);
-                let hz_avg =
-                    0.5 * (fine_hz_t[(fine_i_h, j_f0, k_f)] + fine_hz_t[(fine_i_h, j_f0 + 1, k_f)]);
-                parent.ey[(i_c_surface, j_c, k_c)] += sign * ce * hz_avg;
+            // E_y on the surface: coarse ey[(i_c_surface, j_c, k_c)],
+            // j_c ∈ [lo.1, hi.1), k_c ∈ [lo.2, hi.2].
+            for j_c in lo.1..hi.1 {
+                let j_f0 = 2 * (j_c - lo.1);
+                for k_c in lo.2..=hi.2 {
+                    let k_f = 2 * (k_c - lo.2);
+                    let hz_avg = 0.5
+                        * (fine_hz_t[(fine_i_h, j_f0, k_f)] + fine_hz_t[(fine_i_h, j_f0 + 1, k_f)]);
+                    parent.ey[(i_c_surface, j_c, k_c)] += sign * ce * hz_avg;
+                }
+            }
+
+            // E_z on the surface: coarse ez[(i_c_surface, j_c, k_c)],
+            // j_c ∈ [lo.1, hi.1], k_c ∈ [lo.2, hi.2).
+            for j_c in lo.1..=hi.1 {
+                let j_f = 2 * (j_c - lo.1);
+                for k_c in lo.2..hi.2 {
+                    let k_f0 = 2 * (k_c - lo.2);
+                    let hy_avg = 0.5
+                        * (fine_hy_t[(fine_i_h, j_f, k_f0)] + fine_hy_t[(fine_i_h, j_f, k_f0 + 1)]);
+                    parent.ez[(i_c_surface, j_c, k_c)] -= sign * ce * hy_avg;
+                }
             }
         }
 
-        // E_z on the surface: coarse ez[(i_c_surface, j_c, k_c)],
-        // j_c ∈ [lo.1, hi.1], k_c ∈ [lo.2, hi.2).
-        // Source: H_y at fine cell-centered x = fine_i_h, shape
-        // [nx, ny+1, nz]. Fine H_y: cell-centered (i, k), node (j).
-        // For a coarse E_z edge at (j_c, k_c):
-        //   fine_j_node = 2·(j_c - lo.1), fine_k ∈ {2·(k_c-lo.2),
-        //     2·(k_c-lo.2)+1}.
-        for j_c in lo.1..=hi.1 {
-            let j_f = 2 * (j_c - lo.1);
-            for k_c in lo.2..hi.2 {
-                let k_f0 = 2 * (k_c - lo.2);
-                let hy_avg =
-                    0.5 * (fine_hy_t[(fine_i_h, j_f, k_f0)] + fine_hy_t[(fine_i_h, j_f, k_f0 + 1)]);
-                parent.ez[(i_c_surface, j_c, k_c)] -= sign * ce * hy_avg;
+        if do_m {
+            // -------- M term: write to H_y, H_z on the layer just inside. --------
+
+            // H_y on the layer: coarse hy[(i_c_inside_h, j_c, k_c)],
+            // j_c ∈ [lo.1, hi.1], k_c ∈ [lo.2, hi.2).
+            // Source: fine E_z on the surface (fine_i = fine_i_e).
+            for j_c in lo.1..=hi.1 {
+                let j_f = 2 * (j_c - lo.1);
+                for k_c in lo.2..hi.2 {
+                    let k_f0 = 2 * (k_c - lo.2);
+                    let ez_avg = 0.5
+                        * (fine_ez_for_m[(fine_i_e, j_f, k_f0)]
+                            + fine_ez_for_m[(fine_i_e, j_f, k_f0 + 1)]);
+                    parent.hy[(i_c_inside_h, j_c, k_c)] -= sign * ch * ez_avg;
+                }
             }
-        }
 
-        // -------- M term: write to H_y, H_z on the layer just inside. --------
-
-        // H_y on the layer: coarse hy[(i_c_inside_h, j_c, k_c)],
-        // j_c ∈ [lo.1, hi.1], k_c ∈ [lo.2, hi.2).
-        // Source: E_z on the surface (fine_i = fine_i_e), shape of fine
-        // ez is [nx+1, ny+1, nz]. For a coarse H_y at (j_c, k_c):
-        //   fine_j_node = 2·(j_c-lo.1), fine_k ∈ {2·(k_c-lo.2),
-        //     2·(k_c-lo.2)+1}.
-        for j_c in lo.1..=hi.1 {
-            let j_f = 2 * (j_c - lo.1);
-            for k_c in lo.2..hi.2 {
-                let k_f0 = 2 * (k_c - lo.2);
-                let ez_avg =
-                    0.5 * (fine.ez[(fine_i_e, j_f, k_f0)] + fine.ez[(fine_i_e, j_f, k_f0 + 1)]);
-                parent.hy[(i_c_inside_h, j_c, k_c)] -= sign * ch * ez_avg;
-            }
-        }
-
-        // H_z on the layer: coarse hz[(i_c_inside_h, j_c, k_c)],
-        // j_c ∈ [lo.1, hi.1), k_c ∈ [lo.2, hi.2].
-        // Source: E_y on the surface (fine_i = fine_i_e), shape of fine
-        // ey is [nx+1, ny, nz+1]. For a coarse H_z at (j_c, k_c):
-        //   fine_j ∈ {2·(j_c-lo.1), 2·(j_c-lo.1)+1}, fine_k_node =
-        //   2·(k_c-lo.2).
-        for j_c in lo.1..hi.1 {
-            let j_f0 = 2 * (j_c - lo.1);
-            for k_c in lo.2..=hi.2 {
-                let k_f = 2 * (k_c - lo.2);
-                let ey_avg =
-                    0.5 * (fine.ey[(fine_i_e, j_f0, k_f)] + fine.ey[(fine_i_e, j_f0 + 1, k_f)]);
-                parent.hz[(i_c_inside_h, j_c, k_c)] += sign * ch * ey_avg;
+            // H_z on the layer: coarse hz[(i_c_inside_h, j_c, k_c)],
+            // j_c ∈ [lo.1, hi.1), k_c ∈ [lo.2, hi.2].
+            // Source: fine E_y on the surface (fine_i = fine_i_e).
+            for j_c in lo.1..hi.1 {
+                let j_f0 = 2 * (j_c - lo.1);
+                for k_c in lo.2..=hi.2 {
+                    let k_f = 2 * (k_c - lo.2);
+                    let ey_avg = 0.5
+                        * (fine_ey_for_m[(fine_i_e, j_f0, k_f)]
+                            + fine_ey_for_m[(fine_i_e, j_f0 + 1, k_f)]);
+                    parent.hz[(i_c_inside_h, j_c, k_c)] += sign * ch * ey_avg;
+                }
             }
         }
     }
@@ -1696,7 +1848,8 @@ impl SubgridRegion {
         parent: &mut YeeGrid,
         lo: (usize, usize, usize),
         hi: (usize, usize, usize),
-        fine: &YeeGrid,
+        fine_ex_for_m: &Array3<f64>,
+        fine_ez_for_m: &Array3<f64>,
         fine_hx_t: &Array3<f64>,
         fine_hz_t: &Array3<f64>,
         sign: f64,
@@ -1706,67 +1859,74 @@ impl SubgridRegion {
         fine_j_e: usize,
         coeff_e: f64,
         coeff_h: f64,
+        do_j: bool,
+        do_m: bool,
     ) {
         let dy = parent.dy;
         let ce = coeff_e / dy;
         let ch = coeff_h / dy;
 
-        // -------- J term: write to E_x, E_z on the surface plane. --------
+        if do_j {
+            // -------- J term: write to E_x, E_z on the surface plane. --------
 
-        // E_z on the surface: coarse ez[(i_c, j_c_surface, k_c)],
-        // i_c ∈ [lo.0, hi.0], k_c ∈ [lo.2, hi.2). (Cuboid edges at
-        // i = lo.0 and i = hi.0 are owned by ±x faces — but the
-        // surface E_z[(lo.0, j_c_surface, k_c)] / E_z[(hi.0, ...)] is
-        // a different array cell than the ±x face's targets, so no
-        // double-count. We use the full range here.)
-        for i_c in lo.0..=hi.0 {
-            let i_f = 2 * (i_c - lo.0);
-            for k_c in lo.2..hi.2 {
-                let k_f0 = 2 * (k_c - lo.2);
-                let hx_avg =
-                    0.5 * (fine_hx_t[(i_f, fine_j_h, k_f0)] + fine_hx_t[(i_f, fine_j_h, k_f0 + 1)]);
-                parent.ez[(i_c, j_c_surface, k_c)] += sign * ce * hx_avg;
+            // E_z on the surface: coarse ez[(i_c, j_c_surface, k_c)],
+            // i_c ∈ [lo.0, hi.0], k_c ∈ [lo.2, hi.2). (Cuboid edges at
+            // i = lo.0 and i = hi.0 are owned by ±x faces — but the
+            // surface E_z[(lo.0, j_c_surface, k_c)] / E_z[(hi.0, ...)] is
+            // a different array cell than the ±x face's targets, so no
+            // double-count. We use the full range here.)
+            for i_c in lo.0..=hi.0 {
+                let i_f = 2 * (i_c - lo.0);
+                for k_c in lo.2..hi.2 {
+                    let k_f0 = 2 * (k_c - lo.2);
+                    let hx_avg = 0.5
+                        * (fine_hx_t[(i_f, fine_j_h, k_f0)] + fine_hx_t[(i_f, fine_j_h, k_f0 + 1)]);
+                    parent.ez[(i_c, j_c_surface, k_c)] += sign * ce * hx_avg;
+                }
+            }
+
+            // E_x on the surface: coarse ex[(i_c, j_c_surface, k_c)],
+            // i_c ∈ [lo.0, hi.0), k_c ∈ [lo.2, hi.2].
+            for i_c in lo.0..hi.0 {
+                let i_f0 = 2 * (i_c - lo.0);
+                for k_c in lo.2..=hi.2 {
+                    let k_f = 2 * (k_c - lo.2);
+                    let hz_avg = 0.5
+                        * (fine_hz_t[(i_f0, fine_j_h, k_f)] + fine_hz_t[(i_f0 + 1, fine_j_h, k_f)]);
+                    parent.ex[(i_c, j_c_surface, k_c)] -= sign * ce * hz_avg;
+                }
             }
         }
 
-        // E_x on the surface: coarse ex[(i_c, j_c_surface, k_c)],
-        // i_c ∈ [lo.0, hi.0), k_c ∈ [lo.2, hi.2].
-        for i_c in lo.0..hi.0 {
-            let i_f0 = 2 * (i_c - lo.0);
-            for k_c in lo.2..=hi.2 {
-                let k_f = 2 * (k_c - lo.2);
-                let hz_avg =
-                    0.5 * (fine_hz_t[(i_f0, fine_j_h, k_f)] + fine_hz_t[(i_f0 + 1, fine_j_h, k_f)]);
-                parent.ex[(i_c, j_c_surface, k_c)] -= sign * ce * hz_avg;
+        if do_m {
+            // -------- M term: write to H_z, H_x on the layer just inside. --------
+
+            // H_z on the layer: coarse hz[(i_c, j_c_inside_h, k_c)],
+            // i_c ∈ [lo.0, hi.0), k_c ∈ [lo.2, hi.2].
+            // Source: fine E_x on the surface (fine_j = fine_j_e).
+            for i_c in lo.0..hi.0 {
+                let i_f0 = 2 * (i_c - lo.0);
+                for k_c in lo.2..=hi.2 {
+                    let k_f = 2 * (k_c - lo.2);
+                    let ex_avg = 0.5
+                        * (fine_ex_for_m[(i_f0, fine_j_e, k_f)]
+                            + fine_ex_for_m[(i_f0 + 1, fine_j_e, k_f)]);
+                    parent.hz[(i_c, j_c_inside_h, k_c)] -= sign * ch * ex_avg;
+                }
             }
-        }
 
-        // -------- M term: write to H_z, H_x on the layer just inside. --------
-
-        // H_z on the layer: coarse hz[(i_c, j_c_inside_h, k_c)],
-        // i_c ∈ [lo.0, hi.0), k_c ∈ [lo.2, hi.2].
-        // Source: E_x on the surface (fine_j = fine_j_e).
-        // fine ex shape: [nx, ny+1, nz+1].
-        for i_c in lo.0..hi.0 {
-            let i_f0 = 2 * (i_c - lo.0);
-            for k_c in lo.2..=hi.2 {
-                let k_f = 2 * (k_c - lo.2);
-                let ex_avg =
-                    0.5 * (fine.ex[(i_f0, fine_j_e, k_f)] + fine.ex[(i_f0 + 1, fine_j_e, k_f)]);
-                parent.hz[(i_c, j_c_inside_h, k_c)] -= sign * ch * ex_avg;
-            }
-        }
-
-        // H_x on the layer: coarse hx[(i_c, j_c_inside_h, k_c)],
-        // i_c ∈ [lo.0, hi.0], k_c ∈ [lo.2, hi.2).
-        // Source: E_z on the surface (fine_j = fine_j_e).
-        for i_c in lo.0..=hi.0 {
-            let i_f = 2 * (i_c - lo.0);
-            for k_c in lo.2..hi.2 {
-                let k_f0 = 2 * (k_c - lo.2);
-                let ez_avg =
-                    0.5 * (fine.ez[(i_f, fine_j_e, k_f0)] + fine.ez[(i_f, fine_j_e, k_f0 + 1)]);
-                parent.hx[(i_c, j_c_inside_h, k_c)] += sign * ch * ez_avg;
+            // H_x on the layer: coarse hx[(i_c, j_c_inside_h, k_c)],
+            // i_c ∈ [lo.0, hi.0], k_c ∈ [lo.2, hi.2).
+            // Source: fine E_z on the surface (fine_j = fine_j_e).
+            for i_c in lo.0..=hi.0 {
+                let i_f = 2 * (i_c - lo.0);
+                for k_c in lo.2..hi.2 {
+                    let k_f0 = 2 * (k_c - lo.2);
+                    let ez_avg = 0.5
+                        * (fine_ez_for_m[(i_f, fine_j_e, k_f0)]
+                            + fine_ez_for_m[(i_f, fine_j_e, k_f0 + 1)]);
+                    parent.hx[(i_c, j_c_inside_h, k_c)] += sign * ch * ez_avg;
+                }
             }
         }
     }
@@ -1789,7 +1949,8 @@ impl SubgridRegion {
         parent: &mut YeeGrid,
         lo: (usize, usize, usize),
         hi: (usize, usize, usize),
-        fine: &YeeGrid,
+        fine_ex_for_m: &Array3<f64>,
+        fine_ey_for_m: &Array3<f64>,
         fine_hx_t: &Array3<f64>,
         fine_hy_t: &Array3<f64>,
         sign: f64,
@@ -1799,62 +1960,70 @@ impl SubgridRegion {
         fine_k_e: usize,
         coeff_e: f64,
         coeff_h: f64,
+        do_j: bool,
+        do_m: bool,
     ) {
         let dz = parent.dz;
         let ce = coeff_e / dz;
         let ch = coeff_h / dz;
 
-        // -------- J term: write to E_x, E_y on the surface plane. --------
+        if do_j {
+            // -------- J term: write to E_x, E_y on the surface plane. --------
 
-        // E_x on the surface: coarse ex[(i_c, j_c, k_c_surface)],
-        // i_c ∈ [lo.0, hi.0), j_c ∈ [lo.1, hi.1].
-        for i_c in lo.0..hi.0 {
-            let i_f0 = 2 * (i_c - lo.0);
-            for j_c in lo.1..=hi.1 {
-                let j_f = 2 * (j_c - lo.1);
-                let hy_avg =
-                    0.5 * (fine_hy_t[(i_f0, j_f, fine_k_h)] + fine_hy_t[(i_f0 + 1, j_f, fine_k_h)]);
-                parent.ex[(i_c, j_c, k_c_surface)] += sign * ce * hy_avg;
+            // E_x on the surface: coarse ex[(i_c, j_c, k_c_surface)],
+            // i_c ∈ [lo.0, hi.0), j_c ∈ [lo.1, hi.1].
+            for i_c in lo.0..hi.0 {
+                let i_f0 = 2 * (i_c - lo.0);
+                for j_c in lo.1..=hi.1 {
+                    let j_f = 2 * (j_c - lo.1);
+                    let hy_avg = 0.5
+                        * (fine_hy_t[(i_f0, j_f, fine_k_h)] + fine_hy_t[(i_f0 + 1, j_f, fine_k_h)]);
+                    parent.ex[(i_c, j_c, k_c_surface)] += sign * ce * hy_avg;
+                }
+            }
+
+            // E_y on the surface: coarse ey[(i_c, j_c, k_c_surface)],
+            // i_c ∈ [lo.0, hi.0], j_c ∈ [lo.1, hi.1).
+            for i_c in lo.0..=hi.0 {
+                let i_f = 2 * (i_c - lo.0);
+                for j_c in lo.1..hi.1 {
+                    let j_f0 = 2 * (j_c - lo.1);
+                    let hx_avg = 0.5
+                        * (fine_hx_t[(i_f, j_f0, fine_k_h)] + fine_hx_t[(i_f, j_f0 + 1, fine_k_h)]);
+                    parent.ey[(i_c, j_c, k_c_surface)] -= sign * ce * hx_avg;
+                }
             }
         }
 
-        // E_y on the surface: coarse ey[(i_c, j_c, k_c_surface)],
-        // i_c ∈ [lo.0, hi.0], j_c ∈ [lo.1, hi.1).
-        for i_c in lo.0..=hi.0 {
-            let i_f = 2 * (i_c - lo.0);
-            for j_c in lo.1..hi.1 {
-                let j_f0 = 2 * (j_c - lo.1);
-                let hx_avg =
-                    0.5 * (fine_hx_t[(i_f, j_f0, fine_k_h)] + fine_hx_t[(i_f, j_f0 + 1, fine_k_h)]);
-                parent.ey[(i_c, j_c, k_c_surface)] -= sign * ce * hx_avg;
+        if do_m {
+            // -------- M term: write to H_x, H_y on the layer just inside. --------
+
+            // H_x on the layer: coarse hx[(i_c, j_c, k_c_inside_h)],
+            // i_c ∈ [lo.0, hi.0], j_c ∈ [lo.1, hi.1).
+            // Source: fine E_y on the surface (fine_k = fine_k_e).
+            for i_c in lo.0..=hi.0 {
+                let i_f = 2 * (i_c - lo.0);
+                for j_c in lo.1..hi.1 {
+                    let j_f0 = 2 * (j_c - lo.1);
+                    let ey_avg = 0.5
+                        * (fine_ey_for_m[(i_f, j_f0, fine_k_e)]
+                            + fine_ey_for_m[(i_f, j_f0 + 1, fine_k_e)]);
+                    parent.hx[(i_c, j_c, k_c_inside_h)] -= sign * ch * ey_avg;
+                }
             }
-        }
 
-        // -------- M term: write to H_x, H_y on the layer just inside. --------
-
-        // H_x on the layer: coarse hx[(i_c, j_c, k_c_inside_h)],
-        // i_c ∈ [lo.0, hi.0], j_c ∈ [lo.1, hi.1).
-        // Source: E_y on the surface (fine_k = fine_k_e).
-        for i_c in lo.0..=hi.0 {
-            let i_f = 2 * (i_c - lo.0);
-            for j_c in lo.1..hi.1 {
-                let j_f0 = 2 * (j_c - lo.1);
-                let ey_avg =
-                    0.5 * (fine.ey[(i_f, j_f0, fine_k_e)] + fine.ey[(i_f, j_f0 + 1, fine_k_e)]);
-                parent.hx[(i_c, j_c, k_c_inside_h)] -= sign * ch * ey_avg;
-            }
-        }
-
-        // H_y on the layer: coarse hy[(i_c, j_c, k_c_inside_h)],
-        // i_c ∈ [lo.0, hi.0), j_c ∈ [lo.1, hi.1].
-        // Source: E_x on the surface (fine_k = fine_k_e).
-        for i_c in lo.0..hi.0 {
-            let i_f0 = 2 * (i_c - lo.0);
-            for j_c in lo.1..=hi.1 {
-                let j_f = 2 * (j_c - lo.1);
-                let ex_avg =
-                    0.5 * (fine.ex[(i_f0, j_f, fine_k_e)] + fine.ex[(i_f0 + 1, j_f, fine_k_e)]);
-                parent.hy[(i_c, j_c, k_c_inside_h)] += sign * ch * ex_avg;
+            // H_y on the layer: coarse hy[(i_c, j_c, k_c_inside_h)],
+            // i_c ∈ [lo.0, hi.0), j_c ∈ [lo.1, hi.1].
+            // Source: fine E_x on the surface (fine_k = fine_k_e).
+            for i_c in lo.0..hi.0 {
+                let i_f0 = 2 * (i_c - lo.0);
+                for j_c in lo.1..=hi.1 {
+                    let j_f = 2 * (j_c - lo.1);
+                    let ex_avg = 0.5
+                        * (fine_ex_for_m[(i_f0, j_f, fine_k_e)]
+                            + fine_ex_for_m[(i_f0 + 1, j_f, fine_k_e)]);
+                    parent.hy[(i_c, j_c, k_c_inside_h)] += sign * ch * ex_avg;
+                }
             }
         }
     }
@@ -1986,37 +2155,62 @@ impl SubgriddedSolver {
 
     /// Advance the simulation by one coarse step.
     ///
-    /// Phase 2.fdtd.7.x B2 — Berenger 2006 Huygens-surface closure
+    /// Phase 2.fdtd.7.x B2.1 — Berenger 2006 Huygens-surface closure
+    /// with **split J / M injection** to retire the half-step
+    /// time-centering bug diagnosed by Track HHHHHHH on the B2 landing
+    /// (commit `997e706`) and confirmed by Track JJJJJJJ
     /// (`docs/src/decisions/0035-berenger-huygens-subgridding.md`).
     ///
-    /// The step is composed of the Q1 per-stage helpers in the
-    /// following order:
+    /// The split-injection pipeline interleaves the J and M injections
+    /// with the coarse leapfrog so each source enters its respective
+    /// `update_*_only` stencil *before* the update runs, rather than
+    /// being stacked on top of an already-updated field:
     ///
-    /// 1. Coarse `update_h_only`.
-    /// 2. Coarse `apply_cpml_h` (no-op outside any configured CPML face).
-    /// 3. Snapshot the coarse `E_t` on the six interface faces (start).
-    /// 4. Fine sub-step `k = 1`: interpolate coarse `E_t` at `frac = 0.25`
-    ///    onto the fine boundary, `update_fine_h`, **snapshot fine H**
-    ///    (Q4.1; supplies the time-centered `H_tot` for the
-    ///    `J = +n̂ × H` source), then `update_fine_e`.
-    /// 5. Coarse `update_e_only`, then `apply_cpml_e`.
-    /// 6. Snapshot the coarse `E_t` again (end-of-coarse-step) so the
-    ///    second fine sub-step blends against the post-E-update parent.
-    /// 7. Fine sub-step `k = 2`: interpolate at `frac = 0.75`, bulk
-    ///    `update_fine_h`, `update_fine_e`.
-    /// 8. **Berenger fine → coarse closure** —
-    ///    [`SubgridRegion::inject_equivalent_currents_to_coarse`] injects
-    ///    equivalent surface currents `J = +n̂ × H_tot`,
-    ///    `M = -n̂ × E_tot` from the fine subdomain onto the coarse
-    ///    grid's `E_t`, `H_t` arrays at the six Huygens faces. The
-    ///    fine grid's storage is read only; the coarse grid's storage
-    ///    is mutated only on the interface plane (TF/SF accumulation).
-    /// 9. Advance the coarse clock by one `dt_coarse`.
+    /// 1. **M-source injection (deferred from previous step).**
+    ///    [`SubgridRegion::inject_m_to_coarse_h`] applies
+    ///    `M^n = -n̂ × E_fine^n` (sampled from the previous step's
+    ///    [`SubgridRegion::snapshot_fine_e_end_of_step`]) onto coarse
+    ///    `H_t`. No-op on the first coarse step (no snapshot yet).
+    /// 2. Coarse `update_h_only` consumes the M source as it advances
+    ///    coarse `H^{n−1/2}` → `H^{n+1/2}`.
+    /// 3. Coarse `apply_cpml_h`.
+    /// 4. Snapshot the coarse `E_t` (start of step).
+    /// 5. Fine sub-step `k = 1`: `interpolate_coarse_e_to_fine(0.25)`,
+    ///    `update_fine_h`, **`snapshot_fine_h_mid_step`** (Q4.1; captures
+    ///    fine `H^{n+1/4}` for the J time-centering average),
+    ///    `update_fine_e`.
+    /// 6. Coarse `update_e_only` is **not yet called** — the J source
+    ///    must enter `update_e_only` so we run fine sub-step 2 to a
+    ///    state where `H_fine^{n+1/2}` is well-defined first.
+    /// 7. Snapshot the coarse `E_t` (end-of-step proxy: equals start
+    ///    because coarse `update_e_only` has not run yet). The fine
+    ///    sub-step 2 reads the same value at `frac = 0.75` that
+    ///    sub-step 1 read at `frac = 0.25`; the Berenger closure does
+    ///    not depend on temporal blending here (it depends on the
+    ///    equivalent-current injection instead).
+    /// 8. Fine sub-step `k = 2`: `interpolate_coarse_e_to_fine(0.75)`,
+    ///    `update_fine_h`, `update_fine_e`. Fine `H` now at `t = n + 3/4`,
+    ///    fine `E` at `t = n + 1`.
+    /// 9. **J-source injection** —
+    ///    [`SubgridRegion::inject_j_to_coarse_e`] applies
+    ///    `J^{n+1/2} = +n̂ × ((H_fine^{n+1/4} + H_fine^{n+3/4}) / 2)`
+    ///    onto coarse `E_t` *before* coarse `update_e_only`.
+    /// 10. Coarse `update_e_only` consumes the J source as it advances
+    ///     coarse `E^n` → `E^{n+1}`.
+    /// 11. Coarse `apply_cpml_e`.
+    /// 12. [`SubgridRegion::snapshot_fine_e_end_of_step`] captures fine
+    ///     `E^{n+1}` for the next coarse step's M injection.
+    /// 13. Advance the coarse clock by one `dt_coarse`.
     ///
-    /// Replaces the prior spec `2026-05-18` §3 stage-6 / 7
-    /// `average_fine_h_to_coarse` + `overwrite_coarse_e_from_fine`
-    /// bidirectional direct-copy closure (diagnosed energy-balance
-    /// unstable late-time by Track VVVVVV in commit `72c825c`).
+    /// Replaces the prior B2 monolithic
+    /// `inject_equivalent_currents_to_coarse` call site that injected
+    /// both J and M **after** both `update_*_only` stages had completed.
+    /// Per HHHHHHH's diagnosis, that ordering closed a unit-magnitude
+    /// feedback loop: fine E → coarse E (via J injected post-`update_e`)
+    /// → coarse H (via next step's `update_h`) → fine E_t Dirichlet
+    /// (via Q3 interpolation) → larger fine E updated by larger fine H
+    /// → larger J. Decoupling J/M into the pre-update stencil breaks
+    /// the loop.
     ///
     /// When no [`SubgridRegion`] is attached this collapses to the
     /// bare `WalkingSkeletonSolver` helper sequence, matching
@@ -2031,41 +2225,82 @@ impl SubgriddedSolver {
             return;
         };
 
-        // 1–2. Coarse H half-step and outer-boundary closure.
+        // Phase 2.fdtd.7.x B2.1 split-injection pipeline. The stage
+        // ordering breaks HHHHHHH's feedback loop diagnosis (commit
+        // `997e706`) — the J source is decoupled from the Q3
+        // coarse → fine Dirichlet propagation by deferring its
+        // application until **after** both fine sub-steps have read
+        // coarse `E` and after coarse `update_e_only` has advanced its
+        // natural-curl-only step. The M source is similarly deferred
+        // by one coarse step so it lands on coarse `H` before the
+        // next `update_h_only` consumes it.
+
+        // 1. Deferred M injection from previous step's end-of-fine-E
+        //    snapshot (no-op on the first coarse step). The M source
+        //    enters coarse `H` *before* `update_h_only` runs so the
+        //    next H half-step consumes it inside the leapfrog stencil
+        //    rather than stacking on top of an already-updated H.
+        {
+            let (parent_grid, _) = self.inner.grid_and_cpml_mut();
+            region.inject_m_to_coarse_h(parent_grid);
+        }
+
+        // 2–3. Coarse H half-step (consumes M^n) and outer-boundary
+        //      closure.
         self.inner.update_h_only();
         self.inner.apply_cpml_h();
 
-        // 3. Snapshot the parent E_t at the start of the coarse step.
+        // 4. Snapshot the parent E_t at the start of the coarse step.
+        //    Taken before the coarse-E update so fine sub-step 1
+        //    Dirichlet reads coarse E^n.
         region.snapshot_coarse_e_t(self.inner.grid());
 
-        // 4. Fine sub-step k = 1 (interpolate at t = n + 1/4).
-        //    Mid-step snapshot of fine H captures the t = n + 1/4 value;
-        //    the Berenger J source averages this with the post-sub-step-2
-        //    fine H (t = n + 3/4) to get the time-centered t = n + 1/2.
+        // 5. Fine sub-step k = 1 (interpolate at t = n + 1/4).
         region.interpolate_coarse_e_to_fine(0.25);
         region.update_fine_h();
         region.snapshot_fine_h_mid_step();
         region.update_fine_e();
 
-        // 5. Coarse E half-step and outer-boundary closure.
+        // 6–7. Coarse E half-step *without* the J source. update_e_only
+        //      advances coarse E using only the natural curl(H^{n+1/2});
+        //      the resulting E^{n+1}_natural is what the fine sub-step 2
+        //      Dirichlet boundary will read via the end snapshot.
         self.inner.update_e_only();
         self.inner.apply_cpml_e();
 
-        // 6. Snapshot the parent E_t at the end of the coarse step.
+        // 8. Snapshot the parent E_t at the end of the coarse E update.
+        //    Captured *before* the J injection (stage 10) so the Q3
+        //    coarse → fine boundary feed in sub-step 2 (and in the
+        //    next coarse step's sub-step 1, which reads the post-step
+        //    coarse E via `snapshot_coarse_e_t`) does not loop the J
+        //    contribution straight back into the fine grid. Breaking
+        //    this direct Q3 propagation path is the Phase 2.fdtd.7.x
+        //    B2.1 fix for HHHHHHH's J-source feedback-loop diagnosis.
         region.snapshot_coarse_e_t_end(self.inner.grid());
 
-        // 7. Fine sub-step k = 2 (interpolate at t = n + 3/4).
+        // 9. Fine sub-step k = 2 (interpolate at t = n + 3/4 between
+        //    pre-J E^n and pre-J E^{n+1}).
         region.interpolate_coarse_e_to_fine(0.75);
         region.update_fine_h();
         region.update_fine_e();
 
-        // 8. Berenger fine → coarse equivalent-current injection.
+        // 10. J-source injection — applies J^{n+1/2} to coarse E^{n+1}
+        //     *after* the Q3 snapshots and both fine sub-steps have
+        //     read coarse E. The J modifies coarse E^{n+1} for the
+        //     coarse leapfrog (so the next coarse `update_h_only` sees
+        //     a J-augmented coarse `E`, as Maxwell's equations require),
+        //     but the fine grid's next-step Dirichlet feed will
+        //     re-snapshot post-`update_e` E *before* re-applying J at
+        //     the same point in the next step's pipeline.
         {
             let (parent_grid, _) = self.inner.grid_and_cpml_mut();
-            region.inject_equivalent_currents_to_coarse(parent_grid);
+            region.inject_j_to_coarse_e(parent_grid);
         }
 
-        // 9. Advance the coarse clock.
+        // 11. Snapshot fine E for next step's M injection.
+        region.snapshot_fine_e_end_of_step();
+
+        // 12. Advance the coarse clock.
         self.inner.advance_clock();
     }
 
@@ -2102,45 +2337,64 @@ impl SubgriddedSolver {
             return;
         };
 
-        // 1–2. Coarse H half-step.
+        // Phase 2.fdtd.7.x B2.1 split-injection pipeline — see
+        // [`Self::step`] for the stage-by-stage rationale.
+
+        // 1. Deferred M injection from previous step.
+        {
+            let (parent_grid, _) = self.inner.grid_and_cpml_mut();
+            region.inject_m_to_coarse_h(parent_grid);
+        }
+
+        // 2–3. Coarse H half-step (consumes M) and outer-boundary
+        //      closure.
         self.inner.update_h_only();
         self.inner.apply_cpml_h();
 
-        // 3. Start-of-step snapshot. Done before the source contribution
-        //    so the snapshot reflects the parent's pre-source E_t. The
-        //    source landing on a cell strictly interior to the subgrid
-        //    region would in principle want to advance the snapshot, but
-        //    the integration gate places the source upstream of the
-        //    region so this ordering is correct for the v7.0 scope.
+        // 4. Start-of-step snapshot (taken before the coarse-E update).
         region.snapshot_coarse_e_t(self.inner.grid());
 
-        // 4. Fine sub-step k = 1 with mid-step fine-H snapshot for the
+        // 5. Fine sub-step k = 1 with mid-step fine-H snapshot for the
         //    Berenger time-centered J = +n̂ × H source.
         region.interpolate_coarse_e_to_fine(0.25);
         region.update_fine_h();
         region.snapshot_fine_h_mid_step();
         region.update_fine_e();
 
-        // 5. Coarse source injection and E half-step.
+        // 6. Coarse Gaussian source injection (between fine sub-step 1
+        //    and the coarse E half-step — standard leapfrog timing).
         self.inner.apply_gaussian_source_ez(i, j, k, t, t0, sigma);
+
+        // 7–8. Coarse E half-step *without* the Berenger J source, and
+        //      CPML-E closure. update_e_only consumes the Gaussian
+        //      source plus the natural curl(H^{n+1/2}); J^{n+1/2} is
+        //      injected later (stage 11) so the Q3 snapshot at stage 9
+        //      does not feed J back into the fine grid.
         self.inner.update_e_only();
         self.inner.apply_cpml_e();
 
-        // 6. End-of-step snapshot (after the source-modulated coarse E).
+        // 9. End-of-coarse-E snapshot, taken *before* the J injection
+        //    so the fine sub-step 2 Dirichlet boundary reads the
+        //    natural (J-free) coarse E^{n+1}.
         region.snapshot_coarse_e_t_end(self.inner.grid());
 
-        // 7. Fine sub-step k = 2.
+        // 10. Fine sub-step k = 2.
         region.interpolate_coarse_e_to_fine(0.75);
         region.update_fine_h();
         region.update_fine_e();
 
-        // 8. Berenger fine → coarse equivalent-current injection.
+        // 11. J-source injection — applies J^{n+1/2} to coarse E^{n+1}
+        //     after both fine sub-steps have read coarse E (so the
+        //     Q3 propagation path is not contaminated).
         {
             let (parent_grid, _) = self.inner.grid_and_cpml_mut();
-            region.inject_equivalent_currents_to_coarse(parent_grid);
+            region.inject_j_to_coarse_e(parent_grid);
         }
 
-        // 9. Advance the coarse clock.
+        // 12. Snapshot fine E for next step's M injection.
+        region.snapshot_fine_e_end_of_step();
+
+        // 13. Advance the coarse clock.
         self.inner.advance_clock();
     }
 

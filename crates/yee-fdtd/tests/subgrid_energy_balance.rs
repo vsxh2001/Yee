@@ -322,10 +322,12 @@ fn q6_energy_accounting_initial_state() {
 /// subgrid_energy_balance -- --include-ignored` to reproduce the
 /// regression-tracked drift values.
 #[test]
-#[ignore = "Phase 2.fdtd.7.x B4: Berenger closure surfaces > 0.5% energy drift on fine-seeded \
-            cavity per spec §6 risk 3 (time-centering mismatch); strict bound preserved, \
-            deferred to Phase 2.fdtd.7.y per AAAAAAA plan escape hatch. See doc-comment for \
-            measured drift."]
+#[ignore = "Phase 2.fdtd.7.x B2.1 (Track LLLLLLL): split J/M injection refactor in place; \
+            divergence persists (|dW|/W(0) ≈ 1e150 at N=1000) because the addition-order \
+            change recommended by HHHHHHH is mathematically equivalent to the original B2 \
+            monolithic injection. Resolution requires deeper physics fix; deferred to Phase \
+            2.fdtd.7.y per the AAAAAAA plan B4 escape hatch. See doc-comment for measured \
+            drift."]
 fn q6_round_trip_smoke_1000_steps() {
     let (w0, wn) = run_and_measure(N_SHORT);
     assert!(w0.is_finite() && w0 > 0.0, "W(0) must be finite, got {w0}");
@@ -359,9 +361,11 @@ fn q6_round_trip_smoke_1000_steps() {
 /// Run with `cargo test -p yee-fdtd --release --test
 /// subgrid_energy_balance -- --include-ignored` to exercise.
 #[test]
-#[ignore = "Phase 2.fdtd.7.x B4: Berenger closure surfaces > 0.5% energy drift on fine-seeded \
-            cavity per spec §6 risk 3 (time-centering mismatch); strict bound preserved, \
-            deferred to Phase 2.fdtd.7.y per AAAAAAA plan escape hatch."]
+#[ignore = "Phase 2.fdtd.7.x B2.1 (Track LLLLLLL): split J/M injection refactor in place; \
+            divergence persists (catastrophic, NaN well before N=10000) because the \
+            addition-order change recommended by HHHHHHH is mathematically equivalent to \
+            the original B2 monolithic injection. Resolution requires deeper physics fix; \
+            deferred to Phase 2.fdtd.7.y per the AAAAAAA plan B4 escape hatch."]
 fn q6_round_trip_10000_steps() {
     const N: usize = 10_000;
     let (w0, wn) = run_and_measure(N);
