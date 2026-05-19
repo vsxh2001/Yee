@@ -28,6 +28,7 @@
 - [KiCad PCB import to MoM](tutorials/05-kicad-import.md)
 - [Dispersive FEM cavity eigenmode from Python](tutorials/06-fem-cavity-dispersive.md)
 - [Open-boundary FEM driven sweep from Python](tutorials/07-fem-open-cavity.md)
+- [Multi-port FEM S-matrix from Python](tutorials/08-fem-multi-port.md)
 
 # Decisions
 
