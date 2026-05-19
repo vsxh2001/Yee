@@ -17,9 +17,24 @@ dynamic         = ["version"]
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
+# `llm` extras are only required by `yee.design.from_prompt_llm`; default
+# `pip install yee` and default CI installs do NOT pull these. Plan R4 keeps
+# the Anthropic SDK off the required-deps list so `maturin develop` works
+# without network access.
+llm  = ["anthropic>=0.40", "jsonschema>=4"]
 
 [tool.maturin]
 manifest-path  = "Cargo.toml"
 features       = ["pyo3/extension-module"]
 python-source  = "python"
 module-name    = "yee._yee"
+
+[tool.pytest.ini_options]
+# `anthropic`-marked tests hit the live Anthropic Messages API and are
+# skipped in default CI (plan R4 DoD). Run them locally with:
+#   pytest -m anthropic crates/yee-py/tests/test_design_llm.py
+# after `pip install 'yee[llm]'` and `export ANTHROPIC_API_KEY=...`.
+addopts = "-m 'not anthropic'"
+markers = [
+    "anthropic: tests that call the live Anthropic Messages API (require ANTHROPIC_API_KEY and the `[llm]` extras)",
+]

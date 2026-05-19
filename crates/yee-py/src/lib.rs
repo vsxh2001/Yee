@@ -9,6 +9,7 @@ use pyo3::prelude::*;
 
 mod al;
 mod bo;
+mod design;
 mod eigensolver;
 mod errors;
 mod fdtd;
@@ -72,5 +73,20 @@ fn _yee(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     py.import("sys")?
         .getattr("modules")?
         .set_item("yee.fem", &fem_mod)?;
+    // `yee.design` is a hybrid: the Rust submodule below carries the
+    // `SchemaRejectedError` class and the `intent_schema_str` accessor, but
+    // the pure-Python `from_prompt_llm` sidecar lives in
+    // `crates/yee-py/python/yee/design.py`. To let the Python module own the
+    // `yee.design` import path (so `from yee.design import from_prompt_llm`
+    // resolves to the sidecar), we register the Rust child as
+    // `yee._yee.design` ONLY and let the Python file re-export from
+    // `yee._yee.design`. We deliberately do NOT insert `yee.design` into
+    // `sys.modules` from Rust — that would shadow the Python sidecar.
+    let design_mod = PyModule::new(py, "yee._yee.design")?;
+    design::register(py, &design_mod)?;
+    m.add_submodule(&design_mod)?;
+    py.import("sys")?
+        .getattr("modules")?
+        .set_item("yee._yee.design", &design_mod)?;
     Ok(())
 }
