@@ -37,6 +37,7 @@ pub mod dispersive;
 pub mod element;
 pub mod material;
 pub mod open_boundary;
+pub mod pml_mesh;
 pub mod solve;
 
 pub use assembly::{AssembledMatrices, AssembledMatricesComplex, FemEigenAssembly};
@@ -52,6 +53,7 @@ pub use open_boundary::{
     AbcOrder, DrivenSystem, FaceKind, OpenBoundarySolver, PmlConfig, PmlRegion, PortDefinition,
     PortId, SParameters, SParametersMatrix,
 };
+pub use pml_mesh::{FaceIndexMap, PmlAxis, PmlClass, extend_mesh_with_pml};
 pub use solve::{
     ComplexInverseIterEigen, EigenpairList, EigenpairListComplex, InverseIterEigen, SparseEigen,
     SparseEigenComplex,
