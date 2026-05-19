@@ -56,7 +56,8 @@ const SG_LO: (usize, usize, usize) = (16, 12, 12);
 const SG_HI: (usize, usize, usize) = (24, 20, 20);
 /// Gaussian source location (coarse-cell index on `E_z`).
 const SRC: (usize, usize, usize) = (8, 16, 16);
-/// Number of coarse steps to integrate.
+/// Number of coarse steps to integrate for the 100-step canary; the
+/// 500-step gate runs in [`berenger_step_propagates_without_divergence_500_steps`].
 const N_COARSE_STEPS: usize = 100;
 /// Stability bound on peak `|E_z|` (V/m). For a `~1 V/m` Gaussian
 /// excitation in vacuum the steady-state wave amplitude is `≪ 1`; an
@@ -65,6 +66,105 @@ const N_COARSE_STEPS: usize = 100;
 /// closure switch from spec `2026-05-18` Q4 to spec `2026-05-19`
 /// Berenger). Bounded propagation up to 100 steps is the B2 gate.
 const STABILITY_BOUND: f64 = 1.0e3;
+
+/// Phase 2.fdtd.7.x B2.1 — 500-step variant of the
+/// [`berenger_step_propagates_without_divergence`] stability gate.
+///
+/// HHHHHHH's diagnosis on the B2 landing (`commit 997e706`,
+/// `subgrid_plane_wave_traversal::*_strict_*`) found the coarse `|E_z|`
+/// doubles every ~7 coarse steps from step ~60 onwards on the Q5
+/// 96 × 32 × 32 plane-wave-traversal geometry. The smaller
+/// 64 × 32 × 32 geometry used here has a longer onset (the source is
+/// further from the fine box and the CPML faces absorb more of the
+/// scattered field), but the divergence is qualitatively the same
+/// failure mode. Tracked as the 500-step canary so the
+/// stability bound stays grep-able even if the 100-step test
+/// remains green.
+///
+/// **Currently `#[ignore]`'d** per AAAAAAA plan B4 escape hatch —
+/// the B2.1 split-injection refactor (this track LLLLLLL) is a
+/// mathematically-equivalent reordering of the B2 closure (M
+/// deferred by one coarse step to the next step's `update_h_only`,
+/// J injected after both fine sub-steps but before the next step
+/// reads coarse E through Q3) and does not retire the divergence
+/// surfaced by HHHHHHH. Resolution requires a deeper fix to the
+/// equivalence-principle accounting — likely the coarse "ghost"
+/// field subtraction in the J/M correction (see B2.1 commit body
+/// for the analysis) — and is deferred to Phase 2.fdtd.7.y.
+#[test]
+#[ignore = "Phase 2.fdtd.7.x B2.1: Berenger closure surfaces > 1e3 V/m peak |E_z| at 500 coarse \
+            steps. The B2.1 split-injection refactor does not retire the divergence; resolution \
+            is a future spec amendment (Phase 2.fdtd.7.y)."]
+fn berenger_step_propagates_without_divergence_500_steps() {
+    let coarse_grid = YeeGrid::vacuum(NX_C, NY_C, NZ_C, DX_C);
+    let coarse_dt = coarse_grid.dt;
+    let cpml_c = CpmlParams::for_grid(&coarse_grid, NPML_C);
+    let inner = WalkingSkeletonSolver::with_cpml(coarse_grid, cpml_c);
+
+    let region = SubgridRegion::new(inner.grid(), SG_LO, SG_HI)
+        .expect("SubgridRegion::new must accept this in-interior nest");
+
+    let mut sub = SubgriddedSolver::new(inner).with_region(region);
+
+    let sigma = 4.0 * coarse_dt;
+    let t0 = 3.0 * sigma;
+
+    let mut peak_fine_ez = 0.0_f64;
+    let mut peak_coarse_ez = 0.0_f64;
+
+    const N_LONG_STEPS: usize = 500;
+
+    for step in 0..N_LONG_STEPS {
+        sub.step_with_gaussian_source_ez(SRC.0, SRC.1, SRC.2, t0, sigma);
+
+        let g = sub.inner().grid();
+        let f = sub.region().expect("region attached").fine_grid();
+
+        // Track running peaks.
+        for &v in f.ez.iter() {
+            let av = v.abs();
+            if av > peak_fine_ez {
+                peak_fine_ez = av;
+            }
+        }
+        for &v in g.ez.iter() {
+            let av = v.abs();
+            if av > peak_coarse_ez {
+                peak_coarse_ez = av;
+            }
+        }
+
+        // Finite check (catches the catastrophic divergence inside
+        // the 500-step window — currently triggered around step 60
+        // per HHHHHHH's diagnosis).
+        for arr in [&g.ex, &g.ey, &g.ez, &g.hx, &g.hy, &g.hz] {
+            for &v in arr.iter() {
+                assert!(
+                    v.is_finite(),
+                    "coarse field non-finite at step {step}: v = {v}"
+                );
+            }
+        }
+        for arr in [&f.ex, &f.ey, &f.ez, &f.hx, &f.hy, &f.hz] {
+            for &v in arr.iter() {
+                assert!(
+                    v.is_finite(),
+                    "fine field non-finite at step {step}: v = {v}"
+                );
+            }
+        }
+
+        assert!(
+            peak_fine_ez < STABILITY_BOUND,
+            "fine grid |E_z| diverged at step {step}: peak = {peak_fine_ez:.3e} >= {STABILITY_BOUND:.3e}"
+        );
+    }
+
+    eprintln!(
+        "Berenger 500-step traversal: peak |E_z|_coarse = {peak_coarse_ez:.3e}, \
+         peak |E_z|_fine = {peak_fine_ez:.3e} (bound {STABILITY_BOUND:.0e})"
+    );
+}
 
 /// Run the Berenger-closure step driver for 100 coarse steps with a
 /// Gaussian `E_z` excitation on the coarse grid and assert bounded
