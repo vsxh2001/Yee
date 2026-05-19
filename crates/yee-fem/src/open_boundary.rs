@@ -93,13 +93,57 @@
 //! side. The spec's `NumericalCrossSection` integration lands in a
 //! follow-up cross-lane PR (Phase 4.fem.eig.2.0.2 per spec §13).
 //!
+//! ## S-parameter extraction (Phase 4.fem.eig.2 step E4)
+//!
+//! [`OpenBoundarySolver::sweep`] runs the per-frequency driven solve at
+//! every `ω` in the supplied list and extracts the diagonal scattering
+//! matrix entries `S_{p,p}(ω)` via modal projection on each port face.
+//! Per spec §4.3 / Pozar §3.3, with normalised incident amplitude
+//! `a_inc_p = 1`:
+//!
+//! ```text
+//!     b_p(ω)   =   2  ⟨ E_FEM,t , e_mode_p ⟩_port  −  a_inc_p,
+//!     S_{p,p}(ω)   =   b_p(ω) / a_inc_p.
+//! ```
+//!
+//! The modal projection is computed by face-centroid quadrature: for
+//! every port face `f` carrying the port `p` tag,
+//!
+//! ```text
+//!     ⟨ E_FEM,t , e_mode_p ⟩_port
+//!         ≈  Σ_face  A_face · ( E_FEM,t(centroid_f) · e_mode_p(centroid_f) ),
+//! ```
+//!
+//! and `E_FEM,t(centroid_f)` is reconstructed from the per-edge complex
+//! DoFs of the three face edges by evaluating the Whitney-1 face basis
+//! at the centroid:
+//!
+//! ```text
+//!     E_FEM,t(centroid)  =  Σ_{i ∈ face_edges}  s_i · e_i · (t_i / 3),
+//! ```
+//!
+//! where `t_i = v_{(i+1) mod 3} − v_i` is the canonical face-edge
+//! tangent, `s_i ∈ {-1, +1}` is the local-to-global orientation sign,
+//! `e_i` is the interior-DoF complex amplitude (or `0` if edge `i` is
+//! PEC-eliminated), and the `1/3` is the Whitney-1 edge basis value at
+//! the centroid (each edge basis integrates to `A/3` against a constant
+//! test function — see [`crate::element::assemble_port_modal_rhs`] for
+//! the dual formulation). Cross-port `S_{p,q}` for `p ≠ q` is deferred
+//! to Phase 4.fem.eig.2.0.2 per spec §13.
+//!
 //! ## References
 //!
 //! * `docs/superpowers/specs/2026-05-19-phase-4-fem-eig-2-open-boundary-design.md`
 //!   §4 (theory), §6 (API surface).
 //! * `docs/superpowers/plans/2026-05-19-phase-4-fem-eig-2-open-boundary.md`
-//!   step E3.
+//!   step E3, step E4 (S-parameter extraction).
 //! * `docs/src/decisions/0040-phase-4-fem-eig-2-open-boundary-scope.md`.
+//! * Pozar, D. M., *Microwave Engineering*, 4th ed., Wiley 2012, §3.3
+//!   — wave-port modal characterisation and `S_{11}` extraction
+//!   convention.
+//! * Jin, J.-M., *The Finite Element Method in Electromagnetics*, 3rd
+//!   ed., Wiley 2014, §10.5 — modal decomposition for FEM wave-port
+//!   driven analysis.
 
 use std::collections::{HashMap, HashSet};
 
@@ -221,6 +265,34 @@ pub struct DrivenSystem {
     /// PEC-eliminated. Sized to cover every global edge index in the
     /// mesh's edge table.
     pub interior_dof_of_edge: Vec<Option<usize>>,
+}
+
+/// Frequency-swept diagonal S-parameter matrix
+/// (Phase 4.fem.eig.2 step E4 output of [`OpenBoundarySolver::sweep`]).
+///
+/// Carries only the **diagonal** entries `S_{p,p}(ω)` per port, one
+/// sweep vector per port. Cross-port `S_{p,q}` for `p ≠ q` is deferred
+/// to Phase 4.fem.eig.2.0.2 per spec §13 (single-incident-mode-per-port
+/// driven analysis ships single-port S-parameters only; multi-port
+/// scattering requires per-port driven sweeps with cross-projection,
+/// which is out of scope for v0).
+///
+/// # Layout
+///
+/// `s_pp.len() == n_ports` and `s_pp[p].len() == omegas.len()` for every
+/// `p ∈ [0, n_ports)`. `s_pp[p][k]` is the per-port `S_{p,p}` at
+/// `omegas[k]`.
+#[derive(Debug, Clone)]
+pub struct SParameters {
+    /// Real-valued angular frequencies (rad/s) at which the sweep was
+    /// evaluated; matches the order of the slice passed to
+    /// [`OpenBoundarySolver::sweep`].
+    pub omegas: Vec<f64>,
+    /// Per-port diagonal S-parameter sweep vectors.
+    /// `s_pp[p][k] = S_{p,p}(omegas[k])`. Length of the outer vector
+    /// equals the number of [`PortDefinition`]s registered with the
+    /// solver; length of each inner vector equals `omegas.len()`.
+    pub s_pp: Vec<Vec<Complex64>>,
 }
 
 /// Phase 4.fem.eig.2 open-boundary FEM driven solver.
@@ -376,6 +448,31 @@ impl<'m> OpenBoundarySolver<'m> {
     /// Read-only borrow of the wave-port descriptors.
     pub fn ports(&self) -> &[PortDefinition] {
         &self.ports
+    }
+
+    /// Geometric centroids of the exterior faces, in the same canonical
+    /// order as [`Self::face_kinds`].
+    ///
+    /// Callers building face-kind tagging from geometric criteria (e.g.
+    /// "tag the face at `z = 0` ABC, the face at `z = d` WavePort") can
+    /// use this accessor to identify faces by centroid position **after
+    /// constructing the solver** with a placeholder tagging — note that
+    /// in practice the convention is to build the centroid list first
+    /// (via a temporary all-PEC solver), classify by centroid position,
+    /// then rebuild the solver with the proper tagging.
+    pub fn exterior_face_centroids(&self) -> Vec<Vector3<f64>> {
+        self.exterior_faces
+            .faces
+            .iter()
+            .map(|f| f.centroid(self.mesh))
+            .collect()
+    }
+
+    /// Outward unit normals of the exterior faces, in the same canonical
+    /// order as [`Self::face_kinds`]. Peer of
+    /// [`Self::exterior_face_centroids`].
+    pub fn exterior_face_normals(&self) -> Vec<Vector3<f64>> {
+        self.exterior_faces.faces.iter().map(|f| f.normal).collect()
     }
 
     /// Assemble the driven open-boundary system at angular frequency
@@ -551,6 +648,216 @@ impl<'m> OpenBoundarySolver<'m> {
             *slot = rhs_mat[(i, 0)];
         }
         Ok(out)
+    }
+
+    /// Frequency-sweep driven solve with diagonal S-parameter extraction
+    /// (Phase 4.fem.eig.2 step E4).
+    ///
+    /// For each `ω` in `omegas`:
+    ///
+    /// 1. Call [`Self::solve_at_frequency`] to obtain the interior-DoF
+    ///    complex solution vector `e_interior(ω)`.
+    /// 2. For each wave-port `p`: project `e_interior` onto port `p`'s
+    ///    modal profile via face-centroid quadrature (see module-level
+    ///    docs for the formula), giving the modal reflection amplitude
+    ///    `b_p(ω) = 2 ⟨E_FEM,t, e_mode_p⟩_port − a_inc_p`.
+    /// 3. With normalised incident amplitude `a_inc_p = 1`,
+    ///    `S_{p,p}(ω) = b_p(ω)`.
+    ///
+    /// The returned [`SParameters`] carries one diagonal sweep vector
+    /// per port: `s_pp[p]` is a `Vec<Complex64>` of length `omegas.len()`
+    /// indexing the per-frequency `S_{p,p}` value. Cross-port `S_{p,q}`
+    /// for `p ≠ q` lands in Phase 4.fem.eig.2.0.2 per spec §13.
+    ///
+    /// # Arguments
+    ///
+    /// * `omegas` — non-empty slice of real-valued angular frequencies
+    ///   (rad/s). Every entry must be positive; below-cutoff frequencies
+    ///   are passed through to [`Self::solve_at_frequency`] verbatim, and
+    ///   the wave-port modal contribution is whatever
+    ///   [`PortDefinition::beta_mode`] returns (the caller is
+    ///   responsible for the below-cutoff branch).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Invalid`] if `omegas` is empty. Propagates any
+    /// error from [`Self::solve_at_frequency`] (mesh / material shape
+    /// mismatch, sparse LU failure) verbatim.
+    pub fn sweep(&self, omegas: &[f64]) -> Result<SParameters, Error> {
+        if omegas.is_empty() {
+            return Err(Error::Invalid(
+                "OpenBoundarySolver::sweep: omegas slice is empty".to_string(),
+            ));
+        }
+
+        let n_ports = self.ports.len();
+        let mut s_pp: Vec<Vec<Complex64>> = vec![Vec::with_capacity(omegas.len()); n_ports];
+
+        for &omega in omegas {
+            // Re-assemble the driven system so we have access to the
+            // interior-edge lift map needed for modal projection.
+            let system = self.assemble_driven_system(omega)?;
+            let n_interior = system.rhs.len();
+
+            // Sparse LU factor + back-substitute, mirroring
+            // solve_at_frequency.
+            let lu: Lu<usize, Complex64> = system.matrix.sp_lu().map_err(|e| {
+                Error::Numerical(format!(
+                    "OpenBoundarySolver::sweep: sparse LU of driven matrix at \
+                     omega = {omega} failed: {e:?}"
+                ))
+            })?;
+
+            let mut rhs_mat = faer::Mat::<Complex64>::zeros(n_interior, 1);
+            for (i, &b_i) in system.rhs.iter().enumerate() {
+                rhs_mat[(i, 0)] = b_i;
+            }
+            lu.solve_in_place_with_conj(faer::Conj::No, rhs_mat.as_mut());
+
+            let e_interior: Vec<Complex64> = (0..n_interior).map(|i| rhs_mat[(i, 0)]).collect();
+
+            // Extract S_{p,p}(ω) for every port.
+            for (p, s_vec) in s_pp.iter_mut().enumerate().take(n_ports) {
+                let s_pp_omega = self.extract_s11(p, omega, &e_interior, &system)?;
+                s_vec.push(s_pp_omega);
+            }
+        }
+
+        Ok(SParameters {
+            omegas: omegas.to_vec(),
+            s_pp,
+        })
+    }
+
+    /// Extract `S_{p,p}(ω)` for a single port from an interior-DoF
+    /// complex solution vector (Phase 4.fem.eig.2 step E4).
+    ///
+    /// Implements the modal projection
+    ///
+    /// ```text
+    ///     ⟨ E_FEM,t , e_mode_p ⟩_port
+    ///         =  Σ_face  A_face · ( E_FEM,t(centroid) · e_mode_p(centroid) ),
+    /// ```
+    ///
+    /// summed over every exterior face tagged
+    /// [`FaceKind::WavePort`]`(p)`. `E_FEM,t(centroid)` is reconstructed
+    /// from the per-edge interior DoFs via the Whitney-1 face basis
+    /// evaluated at the centroid (see the private
+    /// `e_t_at_face_centroid` helper for the closed-form basis-at-
+    /// centroid weighting).
+    /// With normalised incident amplitude `a_inc = 1`,
+    ///
+    /// ```text
+    ///     b_p   =   2 ⟨ E_FEM,t , e_mode_p ⟩_port  −  a_inc,
+    ///     S_{p,p}   =   b_p / a_inc   =   b_p.
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Invalid`] if `port_id` is out of range.
+    pub fn extract_s11(
+        &self,
+        port_id: PortId,
+        _omega: f64,
+        e_interior: &[Complex64],
+        system: &DrivenSystem,
+    ) -> Result<Complex64, Error> {
+        if port_id >= self.ports.len() {
+            return Err(Error::Invalid(format!(
+                "OpenBoundarySolver::extract_s11: port_id = {port_id} \
+                 out of range (n_ports = {})",
+                self.ports.len()
+            )));
+        }
+
+        let port = &self.ports[port_id];
+        let mut inner_product = Complex64::new(0.0, 0.0);
+
+        for (i, kind) in self.face_kinds.iter().enumerate() {
+            if let FaceKind::WavePort(p) = *kind
+                && p == port_id
+            {
+                let face = &self.exterior_faces.faces[i];
+                let face_vertices = face.world_vertices(self.mesh);
+
+                // Face area A_face = 0.5 · ||t_0 × t_1||.
+                let t0 = face_vertices[1] - face_vertices[0];
+                let t1 = face_vertices[2] - face_vertices[1];
+                let face_area = 0.5 * t0.cross(&t1).norm();
+
+                // Modal profile at the face centroid (already includes
+                // a_inc normalisation per PortDefinition contract).
+                let centroid = face.centroid(self.mesh);
+                let e_mode = (port.modal_e_t)(centroid);
+
+                // FEM-solution tangential E at the face centroid.
+                let e_fem =
+                    self.e_t_at_face_centroid(face, e_interior, &system.interior_dof_of_edge);
+
+                // E_FEM(centroid) · e_mode(centroid) — complex × real
+                // dot product (e_mode is a real 3-vector, e_fem is
+                // complex). The face-centroid quadrature weights each
+                // sample by the face area.
+                let face_dot = e_fem.x * Complex64::new(e_mode.x, 0.0)
+                    + e_fem.y * Complex64::new(e_mode.y, 0.0)
+                    + e_fem.z * Complex64::new(e_mode.z, 0.0);
+                inner_product += Complex64::new(face_area, 0.0) * face_dot;
+            }
+        }
+
+        // S_{p,p} = b_p / a_inc with a_inc = 1 and
+        // b_p = 2 · <E_FEM, e_mode>_port − a_inc.
+        let a_inc = Complex64::new(1.0, 0.0);
+        let b_p = Complex64::new(2.0, 0.0) * inner_product - a_inc;
+        Ok(b_p / a_inc)
+    }
+
+    /// Reconstruct the tangential `E`-field at a port face's centroid
+    /// from the global interior-DoF complex solution vector
+    /// (Phase 4.fem.eig.2 step E4 helper).
+    ///
+    /// For the Whitney-1 face basis the per-edge basis function `N_i`
+    /// evaluated at the centroid simplifies to `t_i / 3`, where
+    /// `t_i = v_{(i+1) mod 3} − v_i` is the canonical face-edge tangent
+    /// (each edge basis integrates to `A/3` against a constant test
+    /// function — see [`crate::element::assemble_port_modal_rhs`] for
+    /// the dual formulation that motivates the `1/3` weight). The
+    /// face-centroid FEM E-field is therefore
+    ///
+    /// ```text
+    ///     E_FEM,t(centroid)  =  Σ_{i ∈ face_edges}  s_i · e_i · (t_i / 3),
+    /// ```
+    ///
+    /// where `s_i ∈ {-1, +1}` is the local-to-global orientation sign
+    /// and `e_i` is the interior-DoF amplitude (or `0` if edge `i` is
+    /// PEC-eliminated).
+    fn e_t_at_face_centroid(
+        &self,
+        face: &ExteriorFace,
+        e_interior: &[Complex64],
+        interior_dof_of_edge: &[Option<usize>],
+    ) -> nalgebra::Vector3<Complex64> {
+        let face_vertices = face.world_vertices(self.mesh);
+        let t = [
+            face_vertices[1] - face_vertices[0],
+            face_vertices[2] - face_vertices[1],
+            face_vertices[0] - face_vertices[2],
+        ];
+
+        let mut e_t = nalgebra::Vector3::<Complex64>::zeros();
+        for (i, t_i) in t.iter().enumerate() {
+            let gi = face.global_edges[i];
+            let Some(dof) = interior_dof_of_edge[gi] else {
+                continue;
+            };
+            let coeff = e_interior[dof];
+            let sign = Complex64::new(face.signs[i], 0.0);
+            let weight = sign * coeff * Complex64::new(1.0 / 3.0, 0.0);
+            e_t.x += weight * Complex64::new(t_i.x, 0.0);
+            e_t.y += weight * Complex64::new(t_i.y, 0.0);
+            e_t.z += weight * Complex64::new(t_i.z, 0.0);
+        }
+        e_t
     }
 
     /// Scatter the per-face ABC `+ j k₀ B_ABC` block into the driven
