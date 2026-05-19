@@ -20,6 +20,7 @@ yee-fdtd      = { workspace = true }
 yee-io        = { workspace = true }
 yee-surrogate = { workspace = true }
 yee-validation = { workspace = true }
+yee-design    = { workspace = true }
 pyo3        = { workspace = true }
 numpy       = { workspace = true }
 num-complex = { workspace = true }

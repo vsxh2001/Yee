@@ -182,6 +182,22 @@ impl SubstrateLibrary {
 /// Raw `substrates.toml` contents, baked in at build time.
 const SUBSTRATES_TOML: &str = include_str!("../substrates.toml");
 
+/// JSON Schema (Draft-07) for the structured-output contract enforced on the
+/// LLM tool-use response in Phase 3.nl.0 (spec §7).
+///
+/// Baked in via `include_str!` so the Rust crate and the Python sidecar in
+/// `yee-py` read the same artefact (plan R4 makes this an intentional shared
+/// asset across the `yee-design` / `yee-py` lane boundary). The schema is
+/// exposed to Python via `yee.design.intent_schema_str()` so `jsonschema`
+/// validates the LLM's `tool_use.input` against precisely this document.
+///
+/// Schema shape mirrors the serde-derived layout of [`DesignIntent`]'s
+/// **LLM-supplied subset**: `family`, `target_frequency_hz`, `substrate`,
+/// and the optional `gain_target_dbi` / `bandwidth_target_mhz`. The caller
+/// fills in `source_prompt` and [`Provenance`] after validation; those fields
+/// are intentionally NOT part of the LLM's contract.
+pub const INTENT_SCHEMA: &str = include_str!("intent_schema.json");
+
 /// Access the canonical substrate library (lazy-initialised, process-wide).
 ///
 /// Panics at startup only if the baked-in `substrates.toml` fails to parse —
@@ -238,6 +254,33 @@ mod tests {
         let json = serde_json::to_string(&intent).expect("serialize");
         let back: DesignIntent = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(intent, back);
+    }
+
+    #[test]
+    fn intent_schema_is_valid_json() {
+        // The schema is `include_str!`-baked into the binary; if it failed to
+        // parse here the Python sidecar's `jsonschema.validate` call would
+        // raise at first use. Fail loudly at the Rust unit-test layer so the
+        // breakage is caught in default CI without needing Python.
+        let v: serde_json::Value = serde_json::from_str(INTENT_SCHEMA)
+            .expect("yee-design: intent_schema.json must be valid JSON");
+        // Spot-check schema-level invariants that R4 + spec §7 require so a
+        // typo (missing $schema, missing `family` enum) trips the gate.
+        assert_eq!(
+            v.get("$schema").and_then(|s| s.as_str()),
+            Some("http://json-schema.org/draft-07/schema#"),
+            "schema must declare Draft-07"
+        );
+        let family_enum = v
+            .pointer("/properties/family/enum")
+            .and_then(|e| e.as_array())
+            .expect("schema /properties/family/enum must be an array");
+        assert!(
+            family_enum
+                .iter()
+                .any(|x| x.as_str() == Some("rectangular_patch")),
+            "family enum must include rectangular_patch (Phase 3.nl.0)"
+        );
     }
 
     #[test]

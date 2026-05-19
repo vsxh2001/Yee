@@ -1,0 +1,85 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://yee.dev/schemas/design-intent-v1.json",
+  "title": "DesignIntent",
+  "description": "Phase 3.nl.0 structured-output schema for the natural-language design surface. Mirrors the serde shape of `yee_design::DesignIntent` so a tool-use response can be ingested by Rust without translation. Phase 3.nl.0 ships `family = rectangular_patch` only; other variants land in 3.nl.2 per spec §12.",
+  "type": "object",
+  "required": ["family", "target_frequency_hz", "substrate"],
+  "additionalProperties": false,
+  "properties": {
+    "family": {
+      "description": "Closed-enum geometry family. Phase 3.nl.0 supports rectangular_patch only.",
+      "type": "string",
+      "enum": ["rectangular_patch"]
+    },
+    "target_frequency_hz": {
+      "description": "Target operating / resonant frequency in hertz.",
+      "type": "number",
+      "minimum": 1.0e6,
+      "maximum": 1.0e12
+    },
+    "substrate": {
+      "description": "Substrate stack-up; either a named-library lookup (with optional override) or an explicit {eps_r, h_mm, loss_tangent} record.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["name"],
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "description": "Library key; must match a row in substrates.toml.",
+              "type": "string",
+              "enum": ["FR4", "RO4003C", "RO5880", "AluminaTC"]
+            },
+            "override_with": {
+              "description": "Partial override of the named substrate's parameters.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "eps_r": { "type": "number", "minimum": 1.0, "maximum": 100.0 },
+                "h_mm": { "type": "number", "minimum": 0.05, "maximum": 10.0 },
+                "loss_tangent": { "type": "number", "minimum": 0.0, "maximum": 0.5 }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["eps_r", "h_mm", "loss_tangent"],
+          "additionalProperties": false,
+          "properties": {
+            "eps_r": {
+              "description": "Relative permittivity (unitless).",
+              "type": "number",
+              "minimum": 1.0,
+              "maximum": 100.0
+            },
+            "h_mm": {
+              "description": "Substrate height in millimetres.",
+              "type": "number",
+              "minimum": 0.05,
+              "maximum": 10.0
+            },
+            "loss_tangent": {
+              "description": "Loss tangent (tan delta, unitless).",
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 0.5
+            }
+          }
+        }
+      ]
+    },
+    "gain_target_dbi": {
+      "description": "Optional gain target in dBi. Recorded only; not used by Phase 3.nl.0's initial estimator.",
+      "type": "number",
+      "minimum": -10.0,
+      "maximum": 40.0
+    },
+    "bandwidth_target_mhz": {
+      "description": "Optional fractional / absolute bandwidth target in megahertz. Recorded only in Phase 3.nl.0.",
+      "type": "number",
+      "minimum": 0.0
+    }
+  }
+}

@@ -6645,6 +6645,7 @@ dependencies = [
  "pyo3",
  "thiserror 1.0.69",
  "yee-core",
+ "yee-design",
  "yee-fdtd",
  "yee-fem",
  "yee-io",

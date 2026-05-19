@@ -30,6 +30,13 @@ from yee._yee import (
 )
 from yee._yee import minimize as bo_minimize
 
+# `yee.design` is a hybrid module: the Rust-side `_yee.design` submodule
+# carries the schema accessor and the `SchemaRejectedError` class, but the
+# `from_prompt_llm` sidecar lives in pure Python at `yee/design.py` to keep
+# the Anthropic SDK out of the Rust build path (spec §11). Import it last so
+# the Rust submodule is fully registered in `sys.modules` first.
+from yee import design  # noqa: E402
+
 __all__ = [
     "AlConfig",
     "AlResult",
@@ -50,6 +57,7 @@ __all__ = [
     "__version__",
     "active_learn",
     "bo_minimize",
+    "design",
     "eigensolver",
     "fem",
     "nsga2_minimize",
