@@ -38,16 +38,26 @@ use crate::grid::YeeGrid;
 /// Reads the current `E` field and writes the new `H` field in place.
 /// All six staggered field arrays are walked over their full extent for
 /// the curl-of-E that produces them.
+///
+/// When `grid.mu_r_cells` is `Some`, the coefficient is recomputed per
+/// cell from the array entry indexed by the primary `(i, j, k)` (the
+/// staggered H component is taken to share its primary cell's μ_r).
+/// Otherwise the scalar `grid.mu_r` is used and the loop body matches
+/// the pre-Phase-2.fdtd.7.z behaviour bit-for-bit.
 pub fn update_h(grid: &mut YeeGrid) {
     let dt = grid.dt;
     let dx = grid.dx;
     let dy = grid.dy;
     let dz = grid.dz;
-    let coeff = dt / (MU0 * grid.mu_r);
+    let coeff_scalar = dt / (MU0 * grid.mu_r);
 
     let nx = grid.nx;
     let ny = grid.ny;
     let nz = grid.nz;
+
+    // Take ownership-free borrow of the per-cell map (if present) so the
+    // hot loop can do an O(1) lookup. None ⇒ scalar fallback.
+    let mu_r_cells = grid.mu_r_cells.as_ref();
 
     // ---- H_x: shape [nx+1, ny, nz] ----
     for i in 0..=nx {
@@ -55,6 +65,10 @@ pub fn update_h(grid: &mut YeeGrid) {
             for k in 0..nz {
                 let dey_dz = (grid.ey[(i, j, k + 1)] - grid.ey[(i, j, k)]) / dz;
                 let dez_dy = (grid.ez[(i, j + 1, k)] - grid.ez[(i, j, k)]) / dy;
+                let coeff = match mu_r_cells {
+                    None => coeff_scalar,
+                    Some(m) => dt / (MU0 * m[(i, j, k)]),
+                };
                 grid.hx[(i, j, k)] += coeff * (dey_dz - dez_dy);
             }
         }
@@ -66,6 +80,10 @@ pub fn update_h(grid: &mut YeeGrid) {
             for k in 0..nz {
                 let dez_dx = (grid.ez[(i + 1, j, k)] - grid.ez[(i, j, k)]) / dx;
                 let dex_dz = (grid.ex[(i, j, k + 1)] - grid.ex[(i, j, k)]) / dz;
+                let coeff = match mu_r_cells {
+                    None => coeff_scalar,
+                    Some(m) => dt / (MU0 * m[(i, j, k)]),
+                };
                 grid.hy[(i, j, k)] += coeff * (dez_dx - dex_dz);
             }
         }
@@ -77,6 +95,10 @@ pub fn update_h(grid: &mut YeeGrid) {
             for k in 0..=nz {
                 let dex_dy = (grid.ex[(i, j + 1, k)] - grid.ex[(i, j, k)]) / dy;
                 let dey_dx = (grid.ey[(i + 1, j, k)] - grid.ey[(i, j, k)]) / dx;
+                let coeff = match mu_r_cells {
+                    None => coeff_scalar,
+                    Some(m) => dt / (MU0 * m[(i, j, k)]),
+                };
                 grid.hz[(i, j, k)] += coeff * (dex_dy - dey_dx);
             }
         }
@@ -89,16 +111,24 @@ pub fn update_h(grid: &mut YeeGrid) {
 /// Tangential E components on the outer faces are deliberately skipped
 /// — those cells are managed by the PEC boundary in
 /// [`crate::boundary::apply_pec`].
+///
+/// When `grid.eps_r_cells` is `Some`, the coefficient is recomputed per
+/// cell from the array entry indexed by the primary `(i, j, k)` (all
+/// three E components in cell `(i, j, k)` see the same ε_r, matching the
+/// dispersive-material convention in [`crate::dispersive`]). Otherwise
+/// the scalar `grid.eps_r` is used.
 pub fn update_e(grid: &mut YeeGrid) {
     let dt = grid.dt;
     let dx = grid.dx;
     let dy = grid.dy;
     let dz = grid.dz;
-    let coeff = dt / (EPS0 * grid.eps_r);
+    let coeff_scalar = dt / (EPS0 * grid.eps_r);
 
     let nx = grid.nx;
     let ny = grid.ny;
     let nz = grid.nz;
+
+    let eps_r_cells = grid.eps_r_cells.as_ref();
 
     // ---- E_x: shape [nx, ny+1, nz+1] ----
     // Interior j ∈ [1, ny), k ∈ [1, nz); j == 0, ny and k == 0, nz are PEC faces.
@@ -107,6 +137,10 @@ pub fn update_e(grid: &mut YeeGrid) {
             for k in 1..nz {
                 let dhz_dy = (grid.hz[(i, j, k)] - grid.hz[(i, j - 1, k)]) / dy;
                 let dhy_dz = (grid.hy[(i, j, k)] - grid.hy[(i, j, k - 1)]) / dz;
+                let coeff = match eps_r_cells {
+                    None => coeff_scalar,
+                    Some(e) => dt / (EPS0 * e[(i, j, k)]),
+                };
                 grid.ex[(i, j, k)] += coeff * (dhz_dy - dhy_dz);
             }
         }
@@ -119,6 +153,10 @@ pub fn update_e(grid: &mut YeeGrid) {
             for k in 1..nz {
                 let dhx_dz = (grid.hx[(i, j, k)] - grid.hx[(i, j, k - 1)]) / dz;
                 let dhz_dx = (grid.hz[(i, j, k)] - grid.hz[(i - 1, j, k)]) / dx;
+                let coeff = match eps_r_cells {
+                    None => coeff_scalar,
+                    Some(e) => dt / (EPS0 * e[(i, j, k)]),
+                };
                 grid.ey[(i, j, k)] += coeff * (dhx_dz - dhz_dx);
             }
         }
@@ -131,6 +169,10 @@ pub fn update_e(grid: &mut YeeGrid) {
             for k in 0..nz {
                 let dhy_dx = (grid.hy[(i, j, k)] - grid.hy[(i - 1, j, k)]) / dx;
                 let dhx_dy = (grid.hx[(i, j, k)] - grid.hx[(i, j - 1, k)]) / dy;
+                let coeff = match eps_r_cells {
+                    None => coeff_scalar,
+                    Some(e) => dt / (EPS0 * e[(i, j, k)]),
+                };
                 grid.ez[(i, j, k)] += coeff * (dhy_dx - dhx_dy);
             }
         }

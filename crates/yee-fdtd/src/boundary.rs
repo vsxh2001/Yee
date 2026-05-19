@@ -2,14 +2,17 @@
 //!
 //! # Status
 //!
-//! **Deprecated** in favor of [`crate::cpml::CpmlState`].
+//! Two boundary primitives live here:
 //!
-//! This module ships a *reflecting* hard PEC boundary: tangential
-//! electric-field components on the six outer faces are clamped to zero each
-//! step, so any energy that reaches the walls bounces back into the
-//! computational domain. It is kept around for the regression test in
-//! `tests/fdtd_propagation.rs` (which exercises propagation in a closed
-//! cavity) and for diagnostic comparisons against CPML.
+//! - [`apply_pec`] (**deprecated**) — reflecting outer-face PEC clamp.
+//!   Replaced by [`crate::cpml::CpmlState`] for production work; kept for
+//!   `tests/fdtd_propagation.rs` (closed-cavity regression) and for
+//!   diagnostic comparisons against CPML.
+//! - [`apply_pec_mask`] — per-component **interior** PEC clamp driven by
+//!   the optional `pec_mask_e{x,y,z}` arrays on [`YeeGrid`]. This is the
+//!   Phase 2.fdtd.7.z infrastructure that lets fdtd-007 (Maloney-Smith
+//!   dielectric-loaded slot) model the ground-plane-with-slot geometry as
+//!   an interior PEC sheet rather than an outer-face clamp.
 //!
 //! For an absorbing boundary (correct long-term behavior for open-domain
 //! antenna or radar-cross-section runs) use the Roden–Gedney 2000 CPML
@@ -79,4 +82,19 @@ pub fn apply_pec(grid: &mut YeeGrid) {
             grid.ey[(i, j, nz)] = 0.0;
         }
     }
+}
+
+/// Apply the per-component interior PEC mask (if any) to the grid's E
+/// arrays.
+///
+/// Thin wrapper around [`YeeGrid::apply_pec_mask`] kept in `boundary` so
+/// drivers that call `boundary::apply_pec` can mirror the call shape with
+/// the per-cell variant. If no masks are attached this is a no-op.
+///
+/// Intended call site: **after** the E half-step (after `update_e` and
+/// after the CPML auxiliary E update) so the clamp is the final word for
+/// the step. Calling it before `update_e` would let the next E update
+/// reintroduce non-zero values from the curl-of-H stencil.
+pub fn apply_pec_mask(grid: &mut YeeGrid) {
+    grid.apply_pec_mask();
 }
