@@ -291,6 +291,115 @@ pub fn assemble_tet_element_complex(
     NedelecTetElementComplex { k_local, m_local }
 }
 
+/// Assemble the per-face 1st-order Engquist–Majda ABC contribution
+/// (Phase 4.fem.eig.2 step E1).
+///
+/// On an ABC-tagged exterior triangular face with outward normal `n̂`,
+/// the Engquist–Majda 1977 radiation condition
+///
+/// ```text
+///     n̂ × ∇×E   =   −j k₀  n̂ × (n̂ × E)
+/// ```
+///
+/// substituted into the curl-curl variational form's surface integral
+/// yields the per-face stiffness contribution (Jin, *FEM in
+/// Electromagnetics* 3rd ed. §10.4, eq. 10.28)
+///
+/// ```text
+///     K_ABC^{e,face}_{ij}  =  + j k₀ · (1/μ_r,face) · ∫_face
+///                                (n̂ × N_i) · (n̂ × N_j)  dS.
+/// ```
+///
+/// For the first-order Nedelec / Whitney-1 face basis the basis
+/// vector `N_i` restricted to the triangular face reduces to a constant
+/// edge tangent `t_i = v_{(i+1) mod 3} − v_i` (the dual of the edge in
+/// the Whitney complex), so `n̂ × N_i` is constant over the face and the
+/// surface integral evaluates exactly to
+///
+/// ```text
+///     ∫_face (n̂ × N_i) · (n̂ × N_j) dS = A · (n̂ × t_i) · (n̂ × t_j)
+/// ```
+///
+/// where `A = 0.5 · ||t_0 × t_1||` is the triangle area. The returned
+/// `3 × 3` block is therefore
+///
+/// ```text
+///     B[i][j] = j · k₀ · (A / μ_r,face) · (n̂ × t_i) · (n̂ × t_j),
+/// ```
+///
+/// indexed by the three face edges `(0→1, 1→2, 2→0)` in the canonical
+/// CCW traversal of the face vertices. The block is **complex-symmetric**
+/// (`B == B^T`, NOT Hermitian) because the imaginary prefactor `j k₀` is
+/// scalar and the real `(n̂ × t_i) · (n̂ × t_j)` Gram form is symmetric.
+/// Adding ABC face contributions promotes the otherwise-real
+/// closed-cavity stiffness matrix to complex-symmetric — the same
+/// mathematical fact that lets the ABC absorb outgoing waves (the
+/// imaginary part carries the radiation resistance).
+///
+/// ## Sign / orientation convention
+///
+/// The block is emitted in **canonical local-edge orientation** —
+/// each edge `i` runs from `face_vertices[i]` to
+/// `face_vertices[(i + 1) % 3]`. The element layer makes no attempt to
+/// reconcile that with any global edge orientation; that is the
+/// assembly layer's job (Phase 4.fem.eig.2 step E3): when a face-local
+/// edge runs against the global orientation, the corresponding row
+/// *and* column of this block are negated during scatter. Keeping the
+/// negation out of the element layer means
+/// [`assemble_abc_face_block`] is a pure function of
+/// `(face_vertices, outward_normal, k0, mu_r_face)`.
+///
+/// ## References
+///
+/// * Engquist, B. and Majda, A., "Absorbing boundary conditions for the
+///   numerical simulation of waves", *Math. Comp.* 31 (1977),
+///   pp. 629–651 — canonical 1st-order ABC derivation.
+/// * Jin, J.-M., *The Finite Element Method in Electromagnetics*,
+///   3rd ed., Wiley 2014, §10.4 (ABC face contributions).
+/// * Phase 4.fem.eig.2 spec
+///   `docs/superpowers/specs/2026-05-19-phase-4-fem-eig-2-open-boundary-design.md`
+///   §4.2 — the bilinear form this helper implements.
+pub fn assemble_abc_face_block(
+    face_vertices: [Vector3<f64>; 3],
+    outward_normal: Vector3<f64>,
+    k0: f64,
+    mu_r_face: f64,
+) -> SMatrix<Complex64, 3, 3> {
+    // Three edge tangents of the triangular face, in CCW order:
+    //     t_i = v_{(i+1) mod 3} − v_i.
+    let t = [
+        face_vertices[1] - face_vertices[0],
+        face_vertices[2] - face_vertices[1],
+        face_vertices[0] - face_vertices[2],
+    ];
+
+    // Face area A = 0.5 · ||t_0 × t_1||. The cross product of any two
+    // edge tangents of a planar triangle yields a vector of magnitude
+    // 2 · A (twice the triangle area), so dividing by 2 recovers A.
+    let face_area = 0.5 * t[0].cross(&t[1]).norm();
+
+    // (n̂ × N_i) is constant per face for the Whitney-1 face basis;
+    // for the edge-tangent dual basis this is exactly (n̂ × t_i).
+    let n_cross_t = [
+        outward_normal.cross(&t[0]),
+        outward_normal.cross(&t[1]),
+        outward_normal.cross(&t[2]),
+    ];
+
+    // Outer prefactor: j · k₀ · (A / μ_r,face). Purely imaginary.
+    let prefactor = Complex64::new(0.0, 1.0) * Complex64::new(k0 * face_area / mu_r_face, 0.0);
+
+    let mut block = SMatrix::<Complex64, 3, 3>::zeros();
+    for i in 0..3 {
+        for j in 0..3 {
+            let gram_entry = n_cross_t[i].dot(&n_cross_t[j]);
+            block[(i, j)] = prefactor * Complex64::new(gram_entry, 0.0);
+        }
+    }
+
+    block
+}
+
 /// Assemble the `6 × 6` Nedelec local stiffness + mass block for a
 /// single tetrahedron with scalar real `ε_r`, `μ_r`.
 ///
