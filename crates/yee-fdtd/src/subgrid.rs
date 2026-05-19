@@ -1689,40 +1689,77 @@ impl SubgridRegion {
         self.inject_currents_inner(parent, true, false, true);
     }
 
-    /// Inject the magnetic equivalent current `M = -n̂ × E_tot` onto
-    /// the coarse `H_t` arrays at the Huygens surface, sampling the
-    /// fine `E` field from the **previous coarse step's end-of-sub-
-    /// step-2 snapshot** ([`Self::snapshot_fine_e_end_of_step`]).
+    /// Inject the magnetic equivalent current
+    /// `M = -n̂ × (E_post − E_pre)` (Phase 2.fdtd.7.y Option β
+    /// compensating-source form) onto the coarse `H_t` arrays at the
+    /// Huygens surface. The fine-`E` pair is sourced from the
+    /// [`Self::snapshot_fine_e_pre_update`] and
+    /// [`Self::snapshot_fine_e_post_update`] snapshots captured by
+    /// [`SubgriddedSolver::step`] either side of sub-step 2's
+    /// [`Self::update_fine_e`].
     ///
-    /// Phase 2.fdtd.7.x B2.2: M is **not** coarse-ghost-subtracted
-    /// (asymmetric to the J side). The "symmetric" ghost candidate for
-    /// M would be the coarse `E` at the surface plane (same spatial
-    /// location as the fine `E_t` sample), but that coarse `E` is
-    /// **Dirichlet-tied to the fine grid** by Q3
-    /// [`Self::interpolate_coarse_e_to_fine`] — so `fine_E_surface −
-    /// coarse_E_surface ≈ 0` by construction, and ghost-subtracting M
-    /// would nullify the magnetic equivalent current entirely. The
-    /// empirical 100-step canary regression confirms this: with M
-    /// ghost subtraction enabled, peak `|E_z|_fine` jumps from 2.75
-    /// V/m (J-only ghost) to ≈ 1.0e3 V/m (J + M ghost). Only the J
-    /// side is ghost-subtracted; the M source remains the full
-    /// `-n̂ × E_fine` form per the original B2 closure.
+    /// **Why the compensating form, not the canonical `-n̂ × E_fine`
+    /// or `-n̂ × (E_fine − E_coarse_ghost)`.** Berenger 2006 §III gives
+    /// the canonical equivalent magnetic current
+    /// `M = -n̂ × (E_TF_fine − E_SF_coarse_ghost)`. On this pipeline
+    /// the "coarse-E ghost" is `parent.ey[(i_c_surface, …)]` /
+    /// `parent.ez[(…)]` at the surface plane, i.e. the same coarse-E
+    /// slot Q3 [`Self::interpolate_coarse_e_to_fine`] used to write
+    /// the fine outer-layer `E_t` Dirichlet value just before
+    /// `update_fine_e`. By Q3 construction `fine_E_surface ≈
+    /// coarse_E_surface` to interpolation order, so the canonical
+    /// `M_canonical ≈ 0` and is dominated by round-off noise; Track
+    /// OOOOOOO confirmed this empirically (100-step canary peak
+    /// `|E_z|_fine` regressing from 2.75 V/m with J-only ghost to
+    /// ≈ 1.0e3 V/m once M ghost subtraction was enabled).
+    ///
+    /// The compensating form `M = -n̂ × (E_post − E_pre)` captures
+    /// the **per-fine-sub-step Maxwell-evolved increment** to the
+    /// outer-layer fine `E_t` — the part of `E_fine` that escapes the
+    /// Q3 Dirichlet tie precisely because `update_fine_e` runs after
+    /// Q3 writes. The Dirichlet-tied part nullifies inside the
+    /// difference. The B2.1 J-side coarse-ghost subtraction
+    /// ([`Self::inject_j_to_coarse_e`]) is **kept unchanged** — it
+    /// remains the load-bearing improvement of Phase 2.fdtd.7.x and
+    /// the differencing happens on a genuinely non-Q3-coupled `H`
+    /// pair there.
+    ///
+    /// **Do not also enable coarse-ghost subtraction on M.** The
+    /// `E_post − E_pre` sample already performs the differencing;
+    /// re-subtracting a coarse `E` ghost would double-count and
+    /// reintroduce OOOOOOO's failure mode. The per-face helpers carry
+    /// a `debug_assert!(!(do_ghost && use_compensating_source))`
+    /// guard.
     ///
     /// On the **first** coarse step after construction (or after a
-    /// region is freshly attached), no snapshot exists yet and this
-    /// helper is a no-op. The fine grid has zero fields at `t = 0` so
-    /// the correct M is identically zero anyway; no special handling is
-    /// required.
+    /// region is freshly attached), one or both snapshots are `None`
+    /// and this helper is a no-op. The fine grid has zero fields at
+    /// `t = 0`, so the correct compensating `M` is identically zero
+    /// anyway; no special handling is required.
+    ///
+    /// Spec: `docs/superpowers/specs/2026-05-19-phase-2-fdtd-7-y-m-coupling-design.md` §3 (Option β).
+    /// ADR:  `docs/src/decisions/0038-berenger-m-coupling-spec-amendment.md`.
     pub fn inject_m_to_coarse_h(&self, parent: &mut YeeGrid) {
-        let Some(snap) = self.fine_e_snapshot.as_ref() else {
+        let (Some(pre), Some(post)) = (
+            self.fine_e_pre_snapshot.as_ref(),
+            self.fine_e_post_snapshot.as_ref(),
+        ) else {
+            // First coarse step (or test path that never wired the
+            // Step C1 snapshots): the compensating source is
+            // identically zero. Return without touching the parent
+            // grid to preserve the B1 no-op pin behaviour.
             return;
         };
-        // The M side is **not** ghost-subtracted (see the docstring on
-        // this fn for the empirical rationale on the Q3-coupled
-        // boundary). The `do_ghost = false` here is unused on the M
-        // path inside the face helpers, but is wired uniformly to
-        // keep the call-site signature stable.
-        self.inject_currents_inner_with_e(parent, false, true, &snap.ex, &snap.ey, &snap.ez, false);
+        // Compensating-source path: pass both pre and post arrays
+        // through; the per-face helpers read `E_post − E_pre`. The
+        // `do_ghost = false` on the M path is enforced by the
+        // `use_compensating_source = true` flag's debug-assert guard
+        // inside `inject_*_face`; we wire it explicitly here for
+        // grep-ability.
+        self.inject_currents_inner_with_e_pair(
+            parent, false, true, &pre.ex, &pre.ey, &pre.ez, &post.ex, &post.ey, &post.ez, false,
+            true,
+        );
     }
 
     /// Shared body for the monolithic and split-injection closures.
@@ -1748,10 +1785,15 @@ impl SubgridRegion {
         );
     }
 
-    /// Like [`Self::inject_currents_inner`] but takes explicit fine `E`
-    /// arrays for the M term. Used by [`Self::inject_m_to_coarse_h`] to
-    /// source M from a stored end-of-previous-step snapshot rather than
-    /// the live fine grid.
+    /// Phase 2.fdtd.7.y Option β compensating-source dispatcher.
+    /// Wraps [`Self::inject_currents_inner_with_e_pair`] for the
+    /// no-pre-array case (legacy `M = -n̂ × E_fine`) by routing the
+    /// post array as the sole M source — kept as a thin alias so the
+    /// J-only / monolithic call paths above do not have to plumb the
+    /// extra pre arrays. The compensating path (`E_post − E_pre`) is
+    /// reached only through [`Self::inject_m_to_coarse_h`] →
+    /// `inject_currents_inner_with_e_pair` with
+    /// `use_compensating_source = true`.
     #[allow(clippy::too_many_arguments)]
     fn inject_currents_inner_with_e(
         &self,
@@ -1762,6 +1804,46 @@ impl SubgridRegion {
         fine_ey: &Array3<f64>,
         fine_ez: &Array3<f64>,
         do_ghost: bool,
+    ) {
+        // Route through the pair helper with the same array for both
+        // pre and post and `use_compensating_source = false`; the
+        // per-face helpers then read the single array directly and
+        // ignore the pre slot.
+        self.inject_currents_inner_with_e_pair(
+            parent, do_j, do_m, fine_ex, fine_ey, fine_ez, fine_ex, fine_ey, fine_ez, do_ghost,
+            false,
+        );
+    }
+
+    /// Phase 2.fdtd.7.y Option β-aware injection helper. Like
+    /// [`Self::inject_currents_inner_with_e`] but takes both a `_pre`
+    /// and a `_post` fine-E array triple plus a
+    /// `use_compensating_source` flag that selects between two M-source
+    /// sampling regimes:
+    ///
+    /// - `use_compensating_source = false` (legacy paths) — the M
+    ///   source reads `fine_e*_post` directly as `M = -n̂ × E_fine`.
+    ///   The `_pre` arrays are passed through but unread on the M side.
+    /// - `use_compensating_source = true` (Phase 2.fdtd.7.y Option β) —
+    ///   the M source reads `M = -n̂ × (E_post − E_pre)` per ADR-0038.
+    ///   `do_ghost` MUST be `false` on the M side in this regime
+    ///   (otherwise the per-face debug-assert fires); see
+    ///   [`Self::inject_m_to_coarse_h`]'s docstring for the
+    ///   double-counting rationale.
+    #[allow(clippy::too_many_arguments)]
+    fn inject_currents_inner_with_e_pair(
+        &self,
+        parent: &mut YeeGrid,
+        do_j: bool,
+        do_m: bool,
+        fine_ex_pre: &Array3<f64>,
+        fine_ey_pre: &Array3<f64>,
+        fine_ez_pre: &Array3<f64>,
+        fine_ex: &Array3<f64>,
+        fine_ey: &Array3<f64>,
+        fine_ez: &Array3<f64>,
+        do_ghost: bool,
+        use_compensating_source: bool,
     ) {
         let lo = self.lo;
         let hi = self.hi;
@@ -1814,6 +1896,8 @@ impl SubgridRegion {
             parent,
             lo,
             hi,
+            fine_ey_pre,
+            fine_ez_pre,
             fine_ey,
             fine_ez,
             &hy_t,
@@ -1828,10 +1912,29 @@ impl SubgridRegion {
             do_j,
             do_m,
             do_ghost,
+            use_compensating_source,
         );
         Self::inject_x_face(
-            parent, lo, hi, fine_ey, fine_ez, &hy_t, &hz_t, -1.0, lo.0, lo.0, 0, 0, coeff_e,
-            coeff_h, do_j, do_m, do_ghost,
+            parent,
+            lo,
+            hi,
+            fine_ey_pre,
+            fine_ez_pre,
+            fine_ey,
+            fine_ez,
+            &hy_t,
+            &hz_t,
+            -1.0,
+            lo.0,
+            lo.0,
+            0,
+            0,
+            coeff_e,
+            coeff_h,
+            do_j,
+            do_m,
+            do_ghost,
+            use_compensating_source,
         );
 
         // ±y faces.
@@ -1839,6 +1942,8 @@ impl SubgridRegion {
             parent,
             lo,
             hi,
+            fine_ex_pre,
+            fine_ez_pre,
             fine_ex,
             fine_ez,
             &hx_t,
@@ -1853,10 +1958,29 @@ impl SubgridRegion {
             do_j,
             do_m,
             do_ghost,
+            use_compensating_source,
         );
         Self::inject_y_face(
-            parent, lo, hi, fine_ex, fine_ez, &hx_t, &hz_t, -1.0, lo.1, lo.1, 0, 0, coeff_e,
-            coeff_h, do_j, do_m, do_ghost,
+            parent,
+            lo,
+            hi,
+            fine_ex_pre,
+            fine_ez_pre,
+            fine_ex,
+            fine_ez,
+            &hx_t,
+            &hz_t,
+            -1.0,
+            lo.1,
+            lo.1,
+            0,
+            0,
+            coeff_e,
+            coeff_h,
+            do_j,
+            do_m,
+            do_ghost,
+            use_compensating_source,
         );
 
         // ±z faces.
@@ -1864,6 +1988,8 @@ impl SubgridRegion {
             parent,
             lo,
             hi,
+            fine_ex_pre,
+            fine_ey_pre,
             fine_ex,
             fine_ey,
             &hx_t,
@@ -1878,10 +2004,29 @@ impl SubgridRegion {
             do_j,
             do_m,
             do_ghost,
+            use_compensating_source,
         );
         Self::inject_z_face(
-            parent, lo, hi, fine_ex, fine_ey, &hx_t, &hy_t, -1.0, lo.2, lo.2, 0, 0, coeff_e,
-            coeff_h, do_j, do_m, do_ghost,
+            parent,
+            lo,
+            hi,
+            fine_ex_pre,
+            fine_ey_pre,
+            fine_ex,
+            fine_ey,
+            &hx_t,
+            &hy_t,
+            -1.0,
+            lo.2,
+            lo.2,
+            0,
+            0,
+            coeff_e,
+            coeff_h,
+            do_j,
+            do_m,
+            do_ghost,
+            use_compensating_source,
         );
     }
 
@@ -1904,11 +2049,26 @@ impl SubgridRegion {
     /// top of the next coarse step before `update_h_only` — so each
     /// source enters its leapfrog update before the update runs.
     ///
-    /// `fine_e_for_m` supplies the fine `E_x`, `E_y`, `E_z` arrays the
-    /// `M = -n̂ × E` source samples. When `do_m=true` this is the
-    /// previous step's end-of-fine-sub-step-2 snapshot
-    /// ([`SubgridRegion::snapshot_fine_e_end_of_step`]); when
-    /// `do_m=false` the slot is unused.
+    /// `fine_e*_for_m` supplies the fine `E_x`, `E_y`, `E_z` arrays
+    /// the `M = -n̂ × E` source samples. Behaviour depends on
+    /// `use_compensating_source`:
+    ///
+    /// - `use_compensating_source = false` — legacy paths. `fine_e*_post`
+    ///   is read directly (`M = -n̂ × E_fine`); the `_pre` slot is
+    ///   ignored on the M side. Used by the monolithic
+    ///   [`Self::inject_equivalent_currents_to_coarse`] entry point.
+    /// - `use_compensating_source = true` — Phase 2.fdtd.7.y Option β
+    ///   compensating-source form. The per-cell M source reads
+    ///   `(E_post − E_pre)` cell-by-cell from the two snapshot arrays
+    ///   captured by [`SubgridRegion::snapshot_fine_e_pre_update`] and
+    ///   [`SubgridRegion::snapshot_fine_e_post_update`]; this isolates
+    ///   the Maxwell-evolved fine-E increment per sub-step and
+    ///   nullifies the Q3-Dirichlet-tied part that would otherwise
+    ///   cancel against the coarse-E ghost. **`do_ghost = false` is
+    ///   required in this regime** (see
+    ///   [`SubgridRegion::inject_m_to_coarse_h`]'s docstring for the
+    ///   double-counting rationale); a `debug_assert!` below catches
+    ///   the misuse.
     ///
     /// The four signs per face come from `J = sign · x̂ × H` and
     /// `M = -sign · x̂ × E`:
@@ -1936,6 +2096,8 @@ impl SubgridRegion {
         parent: &mut YeeGrid,
         lo: (usize, usize, usize),
         hi: (usize, usize, usize),
+        fine_ey_pre_for_m: &Array3<f64>,
+        fine_ez_pre_for_m: &Array3<f64>,
         fine_ey_for_m: &Array3<f64>,
         fine_ez_for_m: &Array3<f64>,
         fine_hy_t: &Array3<f64>,
@@ -1950,7 +2112,16 @@ impl SubgridRegion {
         do_j: bool,
         do_m: bool,
         do_ghost: bool,
+        use_compensating_source: bool,
     ) {
+        // ADR-0038: M-side coarse-ghost subtraction is incompatible
+        // with the compensating-source sampling, because the
+        // `E_post − E_pre` difference already does the differencing
+        // that ghost subtraction would do again.
+        debug_assert!(
+            !(do_ghost && use_compensating_source),
+            "inject_x_face: do_ghost and use_compensating_source are mutually exclusive on M"
+        );
         let dx = parent.dx;
         let ce = coeff_e / dx;
         let ch = coeff_h / dx;
@@ -2015,24 +2186,25 @@ impl SubgridRegion {
         if do_m {
             // -------- M term: write to H_y, H_z on the layer just inside. --------
             //
-            // Phase 2.fdtd.7.x B2.2: the M source is **not** ghost-
-            // subtracted. The "symmetric" coarse-E ghost for M would be
-            // `parent.ez[(i_c_surface, j_c, k_c)]` / `parent.ey[(...)]`
-            // at the surface plane — the same spatial slot the fine
-            // `E_t` sample sits on. But these coarse-E slots are
-            // **Dirichlet-tied to the fine grid** by Q3
-            // `interpolate_coarse_e_to_fine`, so `fine_E_surface −
-            // coarse_E_surface ≈ 0` by construction, and ghost-
-            // subtracting M would nullify the magnetic equivalent
-            // current. The J side is the load-bearing one: its ghost
-            // (`parent.hz[i_c_inside_h]` / `parent.hy[i_c_inside_h]`)
-            // is coarse SF storage that evolves only via coarse
-            // `update_h_only` reading the J-augmented coarse `E` at
-            // the surface — a genuinely independent SF field. The 100-
-            // step canary regression observed when M ghost subtraction
-            // is enabled (peak |E_z|_fine 1.0e3 vs 2.75 V/m with J-only)
-            // confirmed empirically that M ghost subtraction is the
-            // wrong move on this Q3-coupled boundary.
+            // Phase 2.fdtd.7.y Option β (`use_compensating_source =
+            // true`): `M = -n̂ × (E_post − E_pre)`. The per-cell fine-E
+            // sample is `E_post − E_pre` cell-by-cell. The
+            // Dirichlet-tied part of `E_post` cancels against `E_pre`;
+            // the residual is the per-fine-sub-step Maxwell-evolved
+            // increment to fine `E_t` on the surface plane, which is
+            // the part Berenger's canonical M source needs.
+            //
+            // Legacy un-ghosted path (`use_compensating_source =
+            // false`): reads only `E_post` (`M = -n̂ × E_fine`). Kept
+            // for the monolithic
+            // [`SubgridRegion::inject_equivalent_currents_to_coarse`]
+            // entry point so the B1 skeleton no-op test continues to
+            // pass.
+            //
+            // Coarse-E ghost subtraction on M is **not** supported in
+            // either regime; see ADR-0038 and the docstring on
+            // [`SubgridRegion::inject_m_to_coarse_h`] for the
+            // empirical rationale.
 
             // H_y on the layer: coarse hy[(i_c_inside_h, j_c, k_c)],
             // j_c ∈ [lo.1, hi.1], k_c ∈ [lo.2, hi.2).
@@ -2041,9 +2213,19 @@ impl SubgridRegion {
                 let j_f = 2 * (j_c - lo.1);
                 for k_c in lo.2..hi.2 {
                     let k_f0 = 2 * (k_c - lo.2);
-                    let ez_avg = 0.5
-                        * (fine_ez_for_m[(fine_i_e, j_f, k_f0)]
-                            + fine_ez_for_m[(fine_i_e, j_f, k_f0 + 1)]);
+                    let ez0 = fine_ez_for_m[(fine_i_e, j_f, k_f0)];
+                    let ez1 = fine_ez_for_m[(fine_i_e, j_f, k_f0 + 1)];
+                    let ez_eff0 = if use_compensating_source {
+                        ez0 - fine_ez_pre_for_m[(fine_i_e, j_f, k_f0)]
+                    } else {
+                        ez0
+                    };
+                    let ez_eff1 = if use_compensating_source {
+                        ez1 - fine_ez_pre_for_m[(fine_i_e, j_f, k_f0 + 1)]
+                    } else {
+                        ez1
+                    };
+                    let ez_avg = 0.5 * (ez_eff0 + ez_eff1);
                     parent.hy[(i_c_inside_h, j_c, k_c)] -= sign * ch * ez_avg;
                 }
             }
@@ -2055,9 +2237,19 @@ impl SubgridRegion {
                 let j_f0 = 2 * (j_c - lo.1);
                 for k_c in lo.2..=hi.2 {
                     let k_f = 2 * (k_c - lo.2);
-                    let ey_avg = 0.5
-                        * (fine_ey_for_m[(fine_i_e, j_f0, k_f)]
-                            + fine_ey_for_m[(fine_i_e, j_f0 + 1, k_f)]);
+                    let ey0 = fine_ey_for_m[(fine_i_e, j_f0, k_f)];
+                    let ey1 = fine_ey_for_m[(fine_i_e, j_f0 + 1, k_f)];
+                    let ey_eff0 = if use_compensating_source {
+                        ey0 - fine_ey_pre_for_m[(fine_i_e, j_f0, k_f)]
+                    } else {
+                        ey0
+                    };
+                    let ey_eff1 = if use_compensating_source {
+                        ey1 - fine_ey_pre_for_m[(fine_i_e, j_f0 + 1, k_f)]
+                    } else {
+                        ey1
+                    };
+                    let ey_avg = 0.5 * (ey_eff0 + ey_eff1);
                     parent.hz[(i_c_inside_h, j_c, k_c)] += sign * ch * ey_avg;
                 }
             }
@@ -2082,6 +2274,8 @@ impl SubgridRegion {
         parent: &mut YeeGrid,
         lo: (usize, usize, usize),
         hi: (usize, usize, usize),
+        fine_ex_pre_for_m: &Array3<f64>,
+        fine_ez_pre_for_m: &Array3<f64>,
         fine_ex_for_m: &Array3<f64>,
         fine_ez_for_m: &Array3<f64>,
         fine_hx_t: &Array3<f64>,
@@ -2096,7 +2290,15 @@ impl SubgridRegion {
         do_j: bool,
         do_m: bool,
         do_ghost: bool,
+        use_compensating_source: bool,
     ) {
+        // ADR-0038: M-side coarse-ghost subtraction is incompatible
+        // with compensating-source sampling. See `inject_x_face` for
+        // the rationale.
+        debug_assert!(
+            !(do_ghost && use_compensating_source),
+            "inject_y_face: do_ghost and use_compensating_source are mutually exclusive on M"
+        );
         let dy = parent.dy;
         let ce = coeff_e / dy;
         let ch = coeff_h / dy;
@@ -2154,11 +2356,10 @@ impl SubgridRegion {
         if do_m {
             // -------- M term: write to H_z, H_x on the layer just inside. --------
             //
-            // Phase 2.fdtd.7.x B2.2: M is **not** ghost-subtracted on
-            // this Q3-coupled boundary. See [`Self::inject_x_face`] for
-            // the empirical rationale (M ghost would nullify the
-            // current because coarse `E` on the surface is Dirichlet-
-            // tied to fine).
+            // Phase 2.fdtd.7.y Option β: see [`Self::inject_x_face`]
+            // for the compensating-source rationale. When
+            // `use_compensating_source = true`, each fine-E sample is
+            // `E_post − E_pre` cell-by-cell.
 
             // H_z on the layer: coarse hz[(i_c, j_c_inside_h, k_c)],
             // i_c ∈ [lo.0, hi.0), k_c ∈ [lo.2, hi.2].
@@ -2167,9 +2368,19 @@ impl SubgridRegion {
                 let i_f0 = 2 * (i_c - lo.0);
                 for k_c in lo.2..=hi.2 {
                     let k_f = 2 * (k_c - lo.2);
-                    let ex_avg = 0.5
-                        * (fine_ex_for_m[(i_f0, fine_j_e, k_f)]
-                            + fine_ex_for_m[(i_f0 + 1, fine_j_e, k_f)]);
+                    let ex0 = fine_ex_for_m[(i_f0, fine_j_e, k_f)];
+                    let ex1 = fine_ex_for_m[(i_f0 + 1, fine_j_e, k_f)];
+                    let ex_eff0 = if use_compensating_source {
+                        ex0 - fine_ex_pre_for_m[(i_f0, fine_j_e, k_f)]
+                    } else {
+                        ex0
+                    };
+                    let ex_eff1 = if use_compensating_source {
+                        ex1 - fine_ex_pre_for_m[(i_f0 + 1, fine_j_e, k_f)]
+                    } else {
+                        ex1
+                    };
+                    let ex_avg = 0.5 * (ex_eff0 + ex_eff1);
                     parent.hz[(i_c, j_c_inside_h, k_c)] -= sign * ch * ex_avg;
                 }
             }
@@ -2181,9 +2392,19 @@ impl SubgridRegion {
                 let i_f = 2 * (i_c - lo.0);
                 for k_c in lo.2..hi.2 {
                     let k_f0 = 2 * (k_c - lo.2);
-                    let ez_avg = 0.5
-                        * (fine_ez_for_m[(i_f, fine_j_e, k_f0)]
-                            + fine_ez_for_m[(i_f, fine_j_e, k_f0 + 1)]);
+                    let ez0 = fine_ez_for_m[(i_f, fine_j_e, k_f0)];
+                    let ez1 = fine_ez_for_m[(i_f, fine_j_e, k_f0 + 1)];
+                    let ez_eff0 = if use_compensating_source {
+                        ez0 - fine_ez_pre_for_m[(i_f, fine_j_e, k_f0)]
+                    } else {
+                        ez0
+                    };
+                    let ez_eff1 = if use_compensating_source {
+                        ez1 - fine_ez_pre_for_m[(i_f, fine_j_e, k_f0 + 1)]
+                    } else {
+                        ez1
+                    };
+                    let ez_avg = 0.5 * (ez_eff0 + ez_eff1);
                     parent.hx[(i_c, j_c_inside_h, k_c)] += sign * ch * ez_avg;
                 }
             }
@@ -2208,6 +2429,8 @@ impl SubgridRegion {
         parent: &mut YeeGrid,
         lo: (usize, usize, usize),
         hi: (usize, usize, usize),
+        fine_ex_pre_for_m: &Array3<f64>,
+        fine_ey_pre_for_m: &Array3<f64>,
         fine_ex_for_m: &Array3<f64>,
         fine_ey_for_m: &Array3<f64>,
         fine_hx_t: &Array3<f64>,
@@ -2222,7 +2445,15 @@ impl SubgridRegion {
         do_j: bool,
         do_m: bool,
         do_ghost: bool,
+        use_compensating_source: bool,
     ) {
+        // ADR-0038: M-side coarse-ghost subtraction is incompatible
+        // with compensating-source sampling. See `inject_x_face` for
+        // the rationale.
+        debug_assert!(
+            !(do_ghost && use_compensating_source),
+            "inject_z_face: do_ghost and use_compensating_source are mutually exclusive on M"
+        );
         let dz = parent.dz;
         let ce = coeff_e / dz;
         let ch = coeff_h / dz;
@@ -2276,9 +2507,10 @@ impl SubgridRegion {
         if do_m {
             // -------- M term: write to H_x, H_y on the layer just inside. --------
             //
-            // Phase 2.fdtd.7.x B2.2: M is **not** ghost-subtracted on
-            // this Q3-coupled boundary. See [`Self::inject_x_face`] for
-            // the empirical rationale.
+            // Phase 2.fdtd.7.y Option β: see [`Self::inject_x_face`]
+            // for the compensating-source rationale. When
+            // `use_compensating_source = true`, each fine-E sample is
+            // `E_post − E_pre` cell-by-cell.
 
             // H_x on the layer: coarse hx[(i_c, j_c, k_c_inside_h)],
             // i_c ∈ [lo.0, hi.0], j_c ∈ [lo.1, hi.1).
@@ -2287,9 +2519,19 @@ impl SubgridRegion {
                 let i_f = 2 * (i_c - lo.0);
                 for j_c in lo.1..hi.1 {
                     let j_f0 = 2 * (j_c - lo.1);
-                    let ey_avg = 0.5
-                        * (fine_ey_for_m[(i_f, j_f0, fine_k_e)]
-                            + fine_ey_for_m[(i_f, j_f0 + 1, fine_k_e)]);
+                    let ey0 = fine_ey_for_m[(i_f, j_f0, fine_k_e)];
+                    let ey1 = fine_ey_for_m[(i_f, j_f0 + 1, fine_k_e)];
+                    let ey_eff0 = if use_compensating_source {
+                        ey0 - fine_ey_pre_for_m[(i_f, j_f0, fine_k_e)]
+                    } else {
+                        ey0
+                    };
+                    let ey_eff1 = if use_compensating_source {
+                        ey1 - fine_ey_pre_for_m[(i_f, j_f0 + 1, fine_k_e)]
+                    } else {
+                        ey1
+                    };
+                    let ey_avg = 0.5 * (ey_eff0 + ey_eff1);
                     parent.hx[(i_c, j_c, k_c_inside_h)] -= sign * ch * ey_avg;
                 }
             }
@@ -2301,9 +2543,19 @@ impl SubgridRegion {
                 let i_f0 = 2 * (i_c - lo.0);
                 for j_c in lo.1..=hi.1 {
                     let j_f = 2 * (j_c - lo.1);
-                    let ex_avg = 0.5
-                        * (fine_ex_for_m[(i_f0, j_f, fine_k_e)]
-                            + fine_ex_for_m[(i_f0 + 1, j_f, fine_k_e)]);
+                    let ex0 = fine_ex_for_m[(i_f0, j_f, fine_k_e)];
+                    let ex1 = fine_ex_for_m[(i_f0 + 1, j_f, fine_k_e)];
+                    let ex_eff0 = if use_compensating_source {
+                        ex0 - fine_ex_pre_for_m[(i_f0, j_f, fine_k_e)]
+                    } else {
+                        ex0
+                    };
+                    let ex_eff1 = if use_compensating_source {
+                        ex1 - fine_ex_pre_for_m[(i_f0 + 1, j_f, fine_k_e)]
+                    } else {
+                        ex1
+                    };
+                    let ex_avg = 0.5 * (ex_eff0 + ex_eff1);
                     parent.hy[(i_c, j_c, k_c_inside_h)] += sign * ch * ex_avg;
                 }
             }

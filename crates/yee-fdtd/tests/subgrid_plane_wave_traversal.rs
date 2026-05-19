@@ -107,13 +107,25 @@ const PROBES_C: [(usize, usize, usize); 5] = [
 /// fine→coarse coupling per `TECH_STACK.md` open-question §10).
 ///
 /// The 0.5% bound is preserved (not relaxed) per brief.
+///
+/// **Phase 2.fdtd.7.y C2 (compensating-source M) status:** the M
+/// source switched to `M = -n̂ × (E_post − E_pre)` per ADR-0038
+/// Option β. Empirically `E_post − E_pre ≡ 0` on the fine outer
+/// surface plane (the only cells the M sampler touches) because
+/// `update_fine_e` skips boundary cells — so C2 effectively
+/// disables M. The strict 500-step traversal still fails
+/// catastrophically (rel_err = 100.0% with peak |E_z| ≈ 6e27 at
+/// step 499) — same failure mode as B2.2 with M off. Resolution is
+/// Step C5 (Option α — drop the Q3 Dirichlet for a Mur absorbing
+/// BC). See the matching note on
+/// `berenger_traversal::berenger_step_propagates_without_divergence_500_steps`.
 #[test]
-#[ignore = "Phase 2.fdtd.7.x B2.2 (Track OOOOOOO): J-side coarse-ghost subtraction landed; \
-            500-step divergence is delayed (peak |E_z| ≈ 2.7e26 at step 497 vs ≈ 1.27e30 at \
-            the same step pre-B2.2) but not retired. M-side ghost subtraction destabilises \
-            (Q3-tied coarse E surface), so only J is ghost-subtracted. Residual is an M-side \
-            equivalence accounting issue — deferred to Phase 2.fdtd.7.y per the AAAAAAA plan \
-            B4 escape hatch."]
+#[ignore = "Phase 2.fdtd.7.y C2 (compensating-source M): the M sample sites are on the fine \
+            outer surface plane which update_fine_e skips, so E_post − E_pre ≡ 0 (spec §6 \
+            risk 2 degeneration). 500-step strict gate still diverges (rel_err = 100%, peak \
+            |E_z| ≈ 6e27 at step 499). Resolution deferred to Step C5 (Option α — replace Q3 \
+            Dirichlet with a Mur absorbing BC so canonical M differencing recovers \
+            non-zero magnitude)."]
 fn subgrid_plane_wave_matches_coarse_reference() {
     // ---- Subgridded run ---------------------------------------------------
     let coarse_grid = YeeGrid::vacuum(NX_C, NY_C, NZ_C, DX_C);
