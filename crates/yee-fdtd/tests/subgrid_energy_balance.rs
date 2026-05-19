@@ -322,11 +322,14 @@ fn q6_energy_accounting_initial_state() {
 /// subgrid_energy_balance -- --include-ignored` to reproduce the
 /// regression-tracked drift values.
 #[test]
-#[ignore = "Phase 2.fdtd.7.y C2 (compensating-source M): the M sample sites are on the fine \
-            outer surface plane which update_fine_e skips, so E_post − E_pre ≡ 0 (spec §6 \
-            risk 2 degeneration). |dW|/W(0) at N = 1000 is ≈ 2.7e114 — catastrophic \
-            divergence essentially unchanged from B2.2. Resolution deferred to Step C5 \
-            (Option α — replace Q3 Dirichlet with a Mur absorbing BC)."]
+#[ignore = "Phase 2.fdtd.7.y C5 (Option α — Mur ABC): catastrophic ≈ 2.7e114 divergence \
+            retired (energy now grows monotonically to ≈ 1.55× W(0) by N = 1000, finite \
+            throughout), but the 0.5% bound is not met — drift sits at ≈ 57% at N = 1000. \
+            The growth mode under Option α reflects the same J-side asymmetry described on \
+            the Q5 strict gate: the Mur ABC dissipates fine-grid energy non-conservatively \
+            while the B2.2 J injection (kept per ADR-0038) pumps coarse-side energy back \
+            in. Resolution deferred to a Phase 2.fdtd.7.y.α spec amendment re-balancing \
+            the J side under Option α."]
 fn q6_round_trip_smoke_1000_steps() {
     let (w0, wn) = run_and_measure(N_SHORT);
     assert!(w0.is_finite() && w0 > 0.0, "W(0) must be finite, got {w0}");
@@ -360,11 +363,12 @@ fn q6_round_trip_smoke_1000_steps() {
 /// Run with `cargo test -p yee-fdtd --release --test
 /// subgrid_energy_balance -- --include-ignored` to exercise.
 #[test]
-#[ignore = "Phase 2.fdtd.7.y C2 (compensating-source M): the M sample sites are on the fine \
-            outer surface plane which update_fine_e skips, so E_post − E_pre ≡ 0 (spec §6 \
-            risk 2 degeneration). W(10000) is non-finite — energy ledger diverges well \
-            before N = 10000, unchanged from B2.2. Resolution deferred to Step C5 (Option \
-            α — replace Q3 Dirichlet with a Mur absorbing BC)."]
+#[ignore = "Phase 2.fdtd.7.y C5 (Option α — Mur ABC): non-finite divergence retired (W(N) \
+            is finite throughout the 10000-step run), but the 0.5% bound is not met — drift \
+            sits at ≈ 82% at N = 10000 with energy plateauing as Mur asymptotically \
+            equilibrates with the J-side pumping. See the matching note on \
+            q6_round_trip_smoke_1000_steps for the J-side asymmetry rationale. \
+            Resolution deferred to a Phase 2.fdtd.7.y.α spec amendment."]
 fn q6_round_trip_10000_steps() {
     const N: usize = 10_000;
     let (w0, wn) = run_and_measure(N);
