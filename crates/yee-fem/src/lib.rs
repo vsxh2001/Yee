@@ -33,11 +33,13 @@
 #![warn(missing_docs)]
 
 pub mod assembly;
+pub mod dispersive;
 pub mod element;
 pub mod material;
 pub mod solve;
 
-pub use assembly::{AssembledMatrices, FemEigenAssembly};
+pub use assembly::{AssembledMatrices, AssembledMatricesComplex, FemEigenAssembly};
+pub use dispersive::DispersiveSolver;
 pub use element::{
     LOCAL_EDGES, NedelecTetElement, NedelecTetElementComplex, assemble_tet_element,
     assemble_tet_element_complex,
