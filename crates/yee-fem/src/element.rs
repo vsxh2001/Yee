@@ -57,6 +57,21 @@
 //! the same tet regardless of how its neighbours' global edges happen
 //! to be oriented.
 //!
+//! ## Phase 4.fem.eig.1 — dispersive `ε(ω)` lift
+//!
+//! Phase 4.fem.eig.1 (ADR-0039) extends this layer to complex scalar
+//! `ε(ω)`, `μ(ω)` coefficients. The barycentric gradients, Nedelec basis
+//! curls, and 4-point Gauss-tet quadrature weights are all real and
+//! unchanged; only the scalar pre-multiplier on `K_local` (`1/μ`) and
+//! on `M_local` (`ε`) becomes complex. This is implemented by
+//! [`assemble_tet_element_complex`] which returns a
+//! [`NedelecTetElementComplex`] with `SMatrix<Complex64, 6, 6>` blocks.
+//! The real entry point [`assemble_tet_element`] is preserved as a thin
+//! wrapper that calls the complex path with `Complex64::from` and
+//! projects the result to real via `.re`. Real-valued inputs produce
+//! real-valued blocks bit-for-bit identical to the Phase 4.fem.eig.0
+//! shipped behaviour — see the `element_complex` integration tests.
+//!
 //! ## References
 //!
 //! * Jin, J.-M., *The Finite Element Method in Electromagnetics*,
@@ -66,6 +81,7 @@
 //!   four-point symmetric rule).
 
 use nalgebra::{Matrix3, SMatrix, Vector3};
+use num_complex::Complex64;
 
 /// The six canonical local edges of a tetrahedron in
 /// lower-endpoint-first order.
@@ -75,16 +91,38 @@ use nalgebra::{Matrix3, SMatrix, Vector3};
 /// matrices.
 pub const LOCAL_EDGES: [(usize, usize); 6] = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
 
-/// Per-tet element matrices for the first-order Nedelec edge basis.
+/// Per-tet element matrices for the first-order Nedelec edge basis
+/// (real-coefficient path — Phase 4.fem.eig.0).
 ///
 /// Both fields are `6 × 6` real symmetric blocks indexed by
 /// [`LOCAL_EDGES`]. See module docs for the exact bilinear forms.
+///
+/// For the Phase 4.fem.eig.1 complex-coefficient path see
+/// [`NedelecTetElementComplex`].
 #[derive(Debug, Clone, Copy)]
 pub struct NedelecTetElement {
     /// Local curl-curl stiffness `K^e_{αβ} = (1/μ_r) V (∇×N_α)·(∇×N_β)`.
     pub k_local: SMatrix<f64, 6, 6>,
     /// Local vector mass `M^e_{αβ} = ε_r ∫_T N_α · N_β dV`.
     pub m_local: SMatrix<f64, 6, 6>,
+}
+
+/// Per-tet element matrices for the first-order Nedelec edge basis with
+/// complex scalar `ε(ω)`, `μ(ω)` coefficients (Phase 4.fem.eig.1).
+///
+/// Both fields are `6 × 6` complex symmetric (not Hermitian — see
+/// ADR-0039 / spec §11) blocks indexed by [`LOCAL_EDGES`]. The blocks
+/// reduce bit-for-bit to the real [`NedelecTetElement`] blocks when
+/// `eps` and `mu` are pure-real (`Im(eps) = Im(mu) = 0`). See
+/// [`assemble_tet_element_complex`] for the construction.
+#[derive(Debug, Clone, Copy)]
+pub struct NedelecTetElementComplex {
+    /// Local curl-curl stiffness
+    /// `K^e_{αβ} = (1/μ(ω)) V (∇×N_α)·(∇×N_β)`. Complex symmetric.
+    pub k_local: SMatrix<Complex64, 6, 6>,
+    /// Local vector mass
+    /// `M^e_{αβ} = ε(ω) ∫_T N_α · N_β dV`. Complex symmetric.
+    pub m_local: SMatrix<Complex64, 6, 6>,
 }
 
 /// 4-point Gauss-tet quadrature, exact for polynomials of degree 2.
@@ -164,6 +202,96 @@ fn barycentric_gradients_and_volume(vertices: &[Vector3<f64>; 4]) -> ([Vector3<f
 }
 
 /// Assemble the `6 × 6` Nedelec local stiffness + mass block for a
+/// single tetrahedron with **complex scalar** `ε(ω)`, `μ(ω)`
+/// (Phase 4.fem.eig.1).
+///
+/// `vertices` must be ordered so that the signed volume is positive
+/// (`yee-mesh::TetMesh3D::new` enforces this; callers passing
+/// hand-rolled vertices should ensure the same). The returned matrices
+/// are emitted in canonical local-edge orientation per [`LOCAL_EDGES`]
+/// — sign flips against global-edge orientation are the assembly
+/// layer's job.
+///
+/// The local matrices are
+///
+/// ```text
+///     K^e_{αβ} = (1/μ(ω)) · V · (∇×N_α) · (∇×N_β)
+///     M^e_{αβ} = ε(ω) · ∫_T N_α · N_β dV
+/// ```
+///
+/// with the same barycentric / Nedelec / 4-point Gauss-tet machinery as
+/// the real-coefficient path; only the scalar pre-multiplier becomes
+/// complex. For real `eps` and `mu` (imaginary part exactly zero) the
+/// returned blocks reduce bit-for-bit to the real
+/// [`assemble_tet_element`] output — this is the load-bearing
+/// backward-compatibility invariant per ADR-0039 §6.
+///
+/// # Panics
+///
+/// Panics if the tet is degenerate (all four vertices coplanar; the
+/// barycentric gradient system is singular). Real meshes go through
+/// [`yee_mesh::TetMesh3D::new`] which rejects such tets at
+/// construction; this entry point trusts its caller.
+pub fn assemble_tet_element_complex(
+    vertices: [Vector3<f64>; 4],
+    eps: Complex64,
+    mu: Complex64,
+) -> NedelecTetElementComplex {
+    let (grads, signed_volume) = barycentric_gradients_and_volume(&vertices);
+    let volume = signed_volume.abs();
+
+    // ---- Local stiffness: K^e_{αβ} = (1/μ(ω)) V (∇×N_α)·(∇×N_β) ----
+    //
+    // ∇×N_{ij} = 2 ∇λ_i × ∇λ_j is constant on the tet and **real**, so
+    // the integral is exactly `volume × (curl_α · curl_β)`. Only the
+    // outer `(1/μ)` scalar carries the complex frequency dependence.
+    let mut curls = [Vector3::<f64>::zeros(); 6];
+    for (alpha, &(i, j)) in LOCAL_EDGES.iter().enumerate() {
+        curls[alpha] = 2.0 * grads[i].cross(&grads[j]);
+    }
+
+    let mut k_local = SMatrix::<Complex64, 6, 6>::zeros();
+    let inv_mu = Complex64::new(1.0, 0.0) / mu;
+    for alpha in 0..6 {
+        for beta in 0..6 {
+            let real_entry = volume * curls[alpha].dot(&curls[beta]);
+            k_local[(alpha, beta)] = inv_mu * Complex64::new(real_entry, 0.0);
+        }
+    }
+
+    // ---- Local mass: M^e_{αβ} = ε(ω) ∫_T N_α · N_β dV --------------
+    //
+    // 4-point Gauss-tet quadrature, exact for polynomials of degree 2.
+    // The basis vectors `N_α(λ)` and their dot products are real; only
+    // the outer `ε(ω)` scalar carries the complex frequency
+    // dependence. Accumulate the real integral first, then multiply.
+    let weight = volume / 4.0;
+    let mut m_real = SMatrix::<f64, 6, 6>::zeros();
+
+    for qp in &QUAD_POINTS {
+        // Evaluate all six basis vectors at this quadrature point.
+        let mut basis = [Vector3::<f64>::zeros(); 6];
+        for (alpha, &(i, j)) in LOCAL_EDGES.iter().enumerate() {
+            basis[alpha] = qp[i] * grads[j] - qp[j] * grads[i];
+        }
+        for alpha in 0..6 {
+            for beta in 0..6 {
+                m_real[(alpha, beta)] += weight * basis[alpha].dot(&basis[beta]);
+            }
+        }
+    }
+
+    let mut m_local = SMatrix::<Complex64, 6, 6>::zeros();
+    for alpha in 0..6 {
+        for beta in 0..6 {
+            m_local[(alpha, beta)] = eps * Complex64::new(m_real[(alpha, beta)], 0.0);
+        }
+    }
+
+    NedelecTetElementComplex { k_local, m_local }
+}
+
+/// Assemble the `6 × 6` Nedelec local stiffness + mass block for a
 /// single tetrahedron with scalar real `ε_r`, `μ_r`.
 ///
 /// `vertices` must be ordered so that the signed volume is positive
@@ -172,6 +300,13 @@ fn barycentric_gradients_and_volume(vertices: &[Vector3<f64>; 4]) -> ([Vector3<f
 /// are emitted in canonical local-edge orientation per [`LOCAL_EDGES`]
 /// — sign flips against global-edge orientation are the assembly
 /// layer's job.
+///
+/// This is a thin wrapper over [`assemble_tet_element_complex`]:
+/// the real `ε_r`, `μ_r` are lifted to `Complex64`, the complex local
+/// matrices are computed, and the result is projected to real via
+/// `.re`. For real inputs `Im(K_local) ≡ 0` and `Im(M_local) ≡ 0`, so
+/// the projection is lossless and the returned matrices are bit-for-bit
+/// identical to the Phase 4.fem.eig.0 shipped implementation.
 ///
 /// # Panics
 ///
@@ -184,51 +319,24 @@ pub fn assemble_tet_element(
     eps_r: f64,
     mu_r: f64,
 ) -> NedelecTetElement {
-    let (grads, signed_volume) = barycentric_gradients_and_volume(&vertices);
-    let volume = signed_volume.abs();
+    let elem_complex = assemble_tet_element_complex(
+        vertices,
+        Complex64::new(eps_r, 0.0),
+        Complex64::new(mu_r, 0.0),
+    );
 
-    // ---- Local stiffness: K^e_{αβ} = (1/μ_r) V (∇×N_α)·(∇×N_β) ------
-    //
-    // ∇×N_{ij} = 2 ∇λ_i × ∇λ_j is constant on the tet, so the integral
-    // is exactly volume × (curl_α · curl_β).
-    let mut curls = [Vector3::<f64>::zeros(); 6];
-    for (alpha, &(i, j)) in LOCAL_EDGES.iter().enumerate() {
-        curls[alpha] = 2.0 * grads[i].cross(&grads[j]);
-    }
-
+    // Project to real. For real `eps_r`, `mu_r` the imaginary parts are
+    // identically zero (within FP round-off of the `1/mu_r` reciprocal
+    // step, but since `Im(mu_r) = 0` exactly the imaginary component
+    // does not appear) so the `.re` projection is bit-for-bit lossless.
     let mut k_local = SMatrix::<f64, 6, 6>::zeros();
-    let inv_mu = 1.0 / mu_r;
+    let mut m_local = SMatrix::<f64, 6, 6>::zeros();
     for alpha in 0..6 {
         for beta in 0..6 {
-            k_local[(alpha, beta)] = inv_mu * volume * curls[alpha].dot(&curls[beta]);
+            k_local[(alpha, beta)] = elem_complex.k_local[(alpha, beta)].re;
+            m_local[(alpha, beta)] = elem_complex.m_local[(alpha, beta)].re;
         }
     }
-
-    // ---- Local mass: M^e_{αβ} = ε_r ∫_T N_α · N_β dV --------------
-    //
-    // 4-point Gauss-tet quadrature, exact for polynomials of degree 2.
-    // At each barycentric quadrature point λ = (λ_0, λ_1, λ_2, λ_3):
-    //
-    //     N_{ij}(λ) = λ_i ∇λ_j − λ_j ∇λ_i      (Vector3<f64>)
-    //
-    // and the integrand `N_α · N_β` is degree 2 in the λ_k. The weight
-    // is V/4 per point.
-    let weight = volume / 4.0;
-    let mut m_local = SMatrix::<f64, 6, 6>::zeros();
-
-    for qp in &QUAD_POINTS {
-        // Evaluate all six basis vectors at this quadrature point.
-        let mut basis = [Vector3::<f64>::zeros(); 6];
-        for (alpha, &(i, j)) in LOCAL_EDGES.iter().enumerate() {
-            basis[alpha] = qp[i] * grads[j] - qp[j] * grads[i];
-        }
-        for alpha in 0..6 {
-            for beta in 0..6 {
-                m_local[(alpha, beta)] += weight * basis[alpha].dot(&basis[beta]);
-            }
-        }
-    }
-    m_local *= eps_r;
 
     NedelecTetElement { k_local, m_local }
 }

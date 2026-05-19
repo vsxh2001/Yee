@@ -83,6 +83,7 @@ use faer::linalg::solvers::SolveCore;
 use faer::sparse::{SparseColMat, Triplet, linalg::solvers::Lu};
 use nalgebra::DMatrix;
 use nalgebra_sparse::csr::CsrMatrix;
+use num_complex::Complex64;
 
 /// Solved eigenpairs returned by [`SparseEigen::solve`].
 ///
@@ -473,6 +474,411 @@ fn seed_vector(n: usize, mode_idx: usize) -> Vec<f64> {
         // identical-up-to-sign for trivial mode_idx ≠ 0 cases.
         let t = (i as f64 + 1.0) / (n as f64 + 1.0);
         *xi = (1.0 + phase) * t + (1.0 + phase * 0.37).sin() * (t * 7.0).cos();
+    }
+    x
+}
+
+// =====================================================================
+// Phase 4.fem.eig.1 — complex-coefficient peer
+// =====================================================================
+//
+// Per ADR-0039 / spec §8, Phase 4.fem.eig.1 introduces a complex peer
+// `ComplexInverseIterEigen` of the v0 `InverseIterEigen` behind a new
+// `SparseEigenComplex` trait sibling to `SparseEigen<f64>`. Two traits
+// is cleaner than one parametric trait given the complex symmetric (not
+// Hermitian) inner-product conventions for lossy materials and the
+// pivoting differences in complex LU.
+//
+// Algorithm mirrors the v0 path: shift-invert
+// `T = (K − σM)^{-1} M`, deflated inverse-power iteration mode-by-mode,
+// Gram-Schmidt M-orthogonalisation against converged eigenvectors. The
+// substitutions are:
+//
+// * Scalar field: `f64 → Complex64`.
+// * Inner product: **transposed** `e^T M e` (not Hermitian `e^H M e`).
+//   The complex symmetric pencil arising from FEM dispersive materials
+//   is symmetric under transposition only — the Hellmann–Feynman
+//   identity in plan step D5 lands in the natural transposed form
+//   exactly because of this convention.
+// * Normalisation: `x ← x / sqrt(x^T M x)` where the square root is
+//   the principal complex square root.
+// * Convergence: `|θ_new − θ_prev| / |θ_new|` with `Complex64::norm`.
+// * Sort order: ascending by `Re(k²)` (the natural one-mode-at-a-time
+//   ordering from inverse-power iteration on a complex-symmetric
+//   pencil with mostly-real eigenvalues; see spec §11 risk register
+//   for the mode-crossing caveat).
+//
+// `faer 0.23` exposes `Lu<usize, T>` for `T: ComplexField` and
+// `num_complex::Complex<T: RealField>` is a `ComplexField`, so the
+// sparse LU path is the same `try_new_from_triplets → sp_lu →
+// solve_in_place_with_conj` chain as the v0 real path. No dense
+// fallback is necessary at the base SHA `a08f0db`.
+
+/// Complex-coefficient eigenpairs returned by [`SparseEigenComplex::solve`].
+///
+/// Eigenvalues are stored as **complex** `k²` (the physical
+/// eigenvalues of the generalised problem `K e = k² M e` for the
+/// dispersive case; `Im(k²) ≤ 0` for lossy media in the engineering
+/// `exp(+jωt)` convention used throughout Yee). Sorted ascending by
+/// `Re(k²)`. Eigenvectors are column-stacked on the interior-DoF basis
+/// the caller supplied.
+///
+/// ## Invariants
+///
+/// * `k.len() == e.ncols()`.
+/// * `e.nrows()` equals the dimension of the interior-DoF basis.
+/// * Eigenvectors are `M`-orthonormalised in the *transposed* inner
+///   product to within the solver's working tolerance:
+///   `e[:, i]^T M e[:, j] ≈ δ_{ij}` (≤ `tol`). Note: **transposed**,
+///   not Hermitian — see module-level comment for why.
+/// * `k.iter().map(|z| z.re)` is monotonically non-decreasing.
+#[derive(Debug, Clone)]
+pub struct EigenpairListComplex {
+    /// Complex eigenvalues `k²`, sorted ascending by `Re(k²)`.
+    pub k: Vec<Complex64>,
+    /// Mode-coefficient vectors stacked column-wise on the
+    /// interior-DoF basis: `e[:, n]` is the eigenvector for `k[n]`.
+    pub e: DMatrix<Complex64>,
+}
+
+/// Trait abstracting the **complex-coefficient** sparse generalised
+/// eigensolve `K e = k² M e` for `K`, `M` ∈ `CsrMatrix<Complex64>`.
+///
+/// Sibling of [`SparseEigen`] (the real-coefficient trait); per
+/// ADR-0039 §8 the two traits live alongside each other rather than
+/// being unified parametrically because the complex symmetric (not
+/// Hermitian) inner-product conventions and the pivoting differences
+/// in complex LU make a single trait clumsy.
+pub trait SparseEigenComplex {
+    /// Solve `K e = k² M e` for the `num_eigs` eigenvalues *near* the
+    /// complex shift `σ`. Shift-invert converts the problem to
+    /// `(K − σM)^{-1} M e = θ e` and recovers `k² = σ + 1 / θ`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`yee_core::Error::Invalid`] for shape mismatches or
+    /// `num_eigs == 0` / `num_eigs > k.nrows()`. Returns
+    /// [`yee_core::Error::Numerical`] when the sparse LU of `(K − σM)`
+    /// fails or a mode does not converge within the implementation's
+    /// configured iteration budget.
+    fn solve(
+        &self,
+        k: &CsrMatrix<Complex64>,
+        m: &CsrMatrix<Complex64>,
+        num_eigs: usize,
+        sigma: Complex64,
+    ) -> Result<EigenpairListComplex, yee_core::Error>;
+}
+
+/// Complex peer of [`InverseIterEigen`] — deflated shift-invert
+/// inverse-power iteration over `faer::sparse` `Lu<usize, Complex64>`.
+///
+/// Mirrors the v0 algorithm with `Complex64` arithmetic throughout
+/// and a **transposed** (not Hermitian) M-inner product per ADR-0039.
+/// For real-valued `K`, `M` and real `σ` the results are bit-for-bit
+/// equal to the v0 [`InverseIterEigen`] on the same input — the
+/// `complex_lobpcg_smoke` integration test pins this invariant.
+///
+/// ## Tuning
+///
+/// * `max_iter` — per-mode iteration budget. Same defaults as the
+///   real path (`1000` is safe headroom for fem-eig-002 scale).
+/// * `tol` — relative Rayleigh-quotient convergence target in the
+///   complex norm. `1e-8` is the v0 default.
+#[derive(Debug, Clone, Copy)]
+pub struct ComplexInverseIterEigen {
+    /// Per-mode iteration cap.
+    pub max_iter: usize,
+    /// Relative complex Rayleigh-quotient convergence tolerance.
+    pub tol: f64,
+}
+
+impl ComplexInverseIterEigen {
+    /// Construct a configured solver. See type docs for tuning notes.
+    pub fn new(max_iter: usize, tol: f64) -> Self {
+        Self { max_iter, tol }
+    }
+}
+
+impl Default for ComplexInverseIterEigen {
+    /// `max_iter = 1000`, `tol = 1e-8` — matches the v0
+    /// [`InverseIterEigen`] defaults.
+    fn default() -> Self {
+        Self::new(1000, 1e-8)
+    }
+}
+
+impl SparseEigenComplex for ComplexInverseIterEigen {
+    fn solve(
+        &self,
+        k: &CsrMatrix<Complex64>,
+        m: &CsrMatrix<Complex64>,
+        num_eigs: usize,
+        sigma: Complex64,
+    ) -> Result<EigenpairListComplex, yee_core::Error> {
+        // ---- Validate shapes --------------------------------------
+        if k.nrows() != k.ncols() {
+            return Err(yee_core::Error::Invalid(format!(
+                "ComplexInverseIterEigen: K must be square, got {}×{}",
+                k.nrows(),
+                k.ncols()
+            )));
+        }
+        if m.nrows() != m.ncols() {
+            return Err(yee_core::Error::Invalid(format!(
+                "ComplexInverseIterEigen: M must be square, got {}×{}",
+                m.nrows(),
+                m.ncols()
+            )));
+        }
+        if k.nrows() != m.nrows() {
+            return Err(yee_core::Error::Invalid(format!(
+                "ComplexInverseIterEigen: K and M must have matching dimensions, \
+                 got K = {}×{} M = {}×{}",
+                k.nrows(),
+                k.ncols(),
+                m.nrows(),
+                m.ncols()
+            )));
+        }
+        let n = k.nrows();
+        if num_eigs == 0 {
+            return Err(yee_core::Error::Invalid(
+                "ComplexInverseIterEigen: num_eigs must be >= 1".to_string(),
+            ));
+        }
+        if num_eigs > n {
+            return Err(yee_core::Error::Invalid(format!(
+                "ComplexInverseIterEigen: num_eigs = {num_eigs} exceeds dimension {n}"
+            )));
+        }
+
+        // ---- Build (K − σM) as a faer SparseColMat<usize, Complex64>
+        let shifted = build_shifted_complex(k, m, sigma)?;
+
+        // ---- Factor once via faer sparse LU -----------------------
+        let lu: Lu<usize, Complex64> = shifted.sp_lu().map_err(|e| {
+            yee_core::Error::Numerical(format!(
+                "ComplexInverseIterEigen: sparse LU of (K − σM) failed: {e:?}"
+            ))
+        })?;
+
+        // ---- Inverse-power iteration with deflation ---------------
+        let mut eig_vals: Vec<Complex64> = Vec::with_capacity(num_eigs);
+        let mut eig_vecs: Vec<Vec<Complex64>> = Vec::with_capacity(num_eigs);
+
+        for mode_idx in 0..num_eigs {
+            let mut x = seed_vector_complex(n, mode_idx);
+            m_orthogonalize_complex(&mut x, &eig_vecs, m);
+            m_normalize_complex(&mut x, m)?;
+
+            let mut theta_prev = Complex64::new(f64::NAN, f64::NAN);
+            let mut converged = false;
+            let mut last_residual = f64::INFINITY;
+
+            for _iter in 0..self.max_iter {
+                let mx = csr_matvec_complex(m, &x);
+                let mut x_new = lu_solve_complex(&lu, &mx);
+                m_orthogonalize_complex(&mut x_new, &eig_vecs, m);
+                m_normalize_complex(&mut x_new, m)?;
+
+                // Reconstruct one extra T step so the Rayleigh quotient
+                // is a fresh estimate at the normalised x_new (matches
+                // the v0 algorithm bit-for-bit).
+                let mx_new = csr_matvec_complex(m, &x_new);
+                let t_x_new = lu_solve_complex(&lu, &mx_new);
+                let mut t_x_def = t_x_new.clone();
+                m_orthogonalize_complex(&mut t_x_def, &eig_vecs, m);
+                // θ = x_new^T M (T x_new) — transposed, not Hermitian.
+                let theta = dot_complex(&x_new, &csr_matvec_complex(m, &t_x_def));
+
+                last_residual = if theta_prev.is_finite() && theta.norm() > 0.0 {
+                    (theta - theta_prev).norm() / theta.norm()
+                } else {
+                    f64::INFINITY
+                };
+
+                x = x_new;
+                if last_residual < self.tol && theta.is_finite() {
+                    converged = true;
+                    theta_prev = theta;
+                    break;
+                }
+                theta_prev = theta;
+            }
+
+            if !converged {
+                return Err(yee_core::Error::Numerical(format!(
+                    "ComplexInverseIterEigen: mode {mode_idx} failed to converge in {} \
+                     iterations (last relative residual = {last_residual:e}, tol = {:e})",
+                    self.max_iter, self.tol
+                )));
+            }
+
+            if theta_prev.norm() < f64::EPSILON {
+                return Err(yee_core::Error::Numerical(format!(
+                    "ComplexInverseIterEigen: mode {mode_idx} converged to θ ≈ 0 \
+                     (k² = ∞ — shift σ = {sigma} is far from the spectrum)"
+                )));
+            }
+            let k_sq = sigma + Complex64::new(1.0, 0.0) / theta_prev;
+            eig_vals.push(k_sq);
+            eig_vecs.push(x);
+        }
+
+        // ---- Sort ascending by Re(k²) -----------------------------
+        let mut order: Vec<usize> = (0..num_eigs).collect();
+        order.sort_by(|&a, &b| eig_vals[a].re.total_cmp(&eig_vals[b].re));
+
+        let sorted_k: Vec<Complex64> = order.iter().map(|&i| eig_vals[i]).collect();
+        let mut e = DMatrix::<Complex64>::zeros(n, num_eigs);
+        for (col, &i) in order.iter().enumerate() {
+            for row in 0..n {
+                e[(row, col)] = eig_vecs[i][row];
+            }
+        }
+
+        Ok(EigenpairListComplex { k: sorted_k, e })
+    }
+}
+
+// ---------------------------------------------------------------------
+// Complex helpers — peers of the real helpers above
+// ---------------------------------------------------------------------
+
+/// Build `(K − σM)` as a `faer::SparseColMat<usize, Complex64>` ready
+/// for sparse LU factorisation. Peer of [`build_shifted`].
+fn build_shifted_complex(
+    k: &CsrMatrix<Complex64>,
+    m: &CsrMatrix<Complex64>,
+    sigma: Complex64,
+) -> Result<SparseColMat<usize, Complex64>, yee_core::Error> {
+    let n = k.nrows();
+    let mut triplets: Vec<Triplet<usize, usize, Complex64>> = Vec::with_capacity(k.nnz() + m.nnz());
+    for (row, col, &val) in k.triplet_iter() {
+        triplets.push(Triplet::new(row, col, val));
+    }
+    for (row, col, &val) in m.triplet_iter() {
+        triplets.push(Triplet::new(row, col, -sigma * val));
+    }
+    SparseColMat::try_new_from_triplets(n, n, &triplets).map_err(|e| {
+        yee_core::Error::Numerical(format!(
+            "ComplexInverseIterEigen: failed to build sparse (K − σM): {e:?}"
+        ))
+    })
+}
+
+/// Sparse `y = A x` for a complex CSR matrix. Peer of [`csr_matvec`].
+fn csr_matvec_complex(a: &CsrMatrix<Complex64>, x: &[Complex64]) -> Vec<Complex64> {
+    let n = a.nrows();
+    let mut y = vec![Complex64::new(0.0, 0.0); n];
+    let row_offsets = a.row_offsets();
+    let col_indices = a.col_indices();
+    let values = a.values();
+    for row in 0..n {
+        let start = row_offsets[row];
+        let end = row_offsets[row + 1];
+        let mut sum = Complex64::new(0.0, 0.0);
+        for k in start..end {
+            sum += values[k] * x[col_indices[k]];
+        }
+        y[row] = sum;
+    }
+    y
+}
+
+/// Solve `(K − σM) y = b` in place via the pre-computed complex sparse
+/// LU. Peer of [`lu_solve`]. `Conj::No` selects the unconjugated solve
+/// (matching the natural transposed `e^T M e` convention used by the
+/// outer inverse-power iteration).
+fn lu_solve_complex(lu: &Lu<usize, Complex64>, b: &[Complex64]) -> Vec<Complex64> {
+    let n = b.len();
+    let mut rhs = faer::Mat::<Complex64>::zeros(n, 1);
+    for (i, &bi) in b.iter().enumerate() {
+        rhs[(i, 0)] = bi;
+    }
+    lu.solve_in_place_with_conj(faer::Conj::No, rhs.as_mut());
+    let mut out = vec![Complex64::new(0.0, 0.0); n];
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = rhs[(i, 0)];
+    }
+    out
+}
+
+/// Transposed (not Hermitian) bilinear product `x^T y` on complex
+/// dense vectors. Peer of [`dot`].
+///
+/// **Not conjugated** — this is the load-bearing choice for the
+/// complex symmetric pencil of dispersive FEM eigenproblems (ADR-0039
+/// / spec §11). For real-valued inputs it agrees with the real
+/// Euclidean dot bit-for-bit (imaginary parts are identically zero).
+fn dot_complex(x: &[Complex64], y: &[Complex64]) -> Complex64 {
+    debug_assert_eq!(x.len(), y.len());
+    let mut acc = Complex64::new(0.0, 0.0);
+    for (a, b) in x.iter().zip(y.iter()) {
+        acc += a * b;
+    }
+    acc
+}
+
+/// In-place complex M-orthogonalisation in the *transposed* inner
+/// product: `x ← x − Σ_j (e_j^T M x) e_j`. Peer of [`m_orthogonalize`].
+fn m_orthogonalize_complex(
+    x: &mut [Complex64],
+    eig_vecs: &[Vec<Complex64>],
+    m: &CsrMatrix<Complex64>,
+) {
+    for ej in eig_vecs {
+        let mx = csr_matvec_complex(m, x);
+        let coeff = dot_complex(ej, &mx);
+        for (xi, eji) in x.iter_mut().zip(ej.iter()) {
+            *xi -= coeff * eji;
+        }
+    }
+}
+
+/// In-place complex M-normalisation in the *transposed* inner product:
+/// `x ← x / sqrt(x^T M x)`. The square root is the principal complex
+/// square root (`num_complex::Complex::sqrt`). Peer of [`m_normalize`].
+///
+/// Returns an error if `x^T M x` is zero or non-finite (would indicate
+/// deflation killed the seed; bump the seed or relax `tol`).
+fn m_normalize_complex(
+    x: &mut [Complex64],
+    m: &CsrMatrix<Complex64>,
+) -> Result<(), yee_core::Error> {
+    let mx = csr_matvec_complex(m, x);
+    let norm_sq = dot_complex(x, &mx);
+    if norm_sq.norm() == 0.0 || !norm_sq.is_finite() {
+        return Err(yee_core::Error::Numerical(format!(
+            "ComplexInverseIterEigen: M-norm (transposed) collapsed to {norm_sq} during \
+             deflation"
+        )));
+    }
+    let inv_norm = Complex64::new(1.0, 0.0) / norm_sq.sqrt();
+    for xi in x.iter_mut() {
+        *xi *= inv_norm;
+    }
+    Ok(())
+}
+
+/// Seed vector for the `mode_idx`-th complex inverse-power iteration.
+///
+/// Matches the v0 real `seed_vector` exactly in the real-component
+/// generation (so the real-and-complex paths agree bit-for-bit on
+/// real input) and adds a small linearly-varying imaginary tail so
+/// the seeds for different `mode_idx` are visibly different in every
+/// coordinate even when the K, M pencil is purely real (in which
+/// case the imaginary tail is killed by the first M-orthogonalise
+/// step against the prior converged real eigenvectors). Peer of
+/// [`seed_vector`].
+fn seed_vector_complex(n: usize, mode_idx: usize) -> Vec<Complex64> {
+    let mut x = vec![Complex64::new(0.0, 0.0); n];
+    let phase = mode_idx as f64;
+    for (i, xi) in x.iter_mut().enumerate() {
+        let t = (i as f64 + 1.0) / (n as f64 + 1.0);
+        let re = (1.0 + phase) * t + (1.0 + phase * 0.37).sin() * (t * 7.0).cos();
+        *xi = Complex64::new(re, 0.0);
     }
     x
 }

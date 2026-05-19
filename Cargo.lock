@@ -6564,6 +6564,7 @@ dependencies = [
  "faer",
  "nalgebra 0.34.2",
  "nalgebra-sparse",
+ "num-complex",
  "thiserror 1.0.69",
  "tracing",
  "yee-core",
