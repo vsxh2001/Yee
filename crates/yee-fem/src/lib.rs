@@ -42,7 +42,8 @@ pub use assembly::{AssembledMatrices, AssembledMatricesComplex, FemEigenAssembly
 pub use dispersive::{BULK_TAG, DispersiveEigenpair, DispersiveError, DispersiveSolver};
 pub use element::{
     LOCAL_EDGES, NedelecTetElement, NedelecTetElementComplex, assemble_abc_face_block,
-    assemble_tet_element, assemble_tet_element_complex,
+    assemble_port_face_block, assemble_port_modal_rhs, assemble_tet_element,
+    assemble_tet_element_complex,
 };
 pub use material::{Material, MaterialDatabase, MaterialPole};
 pub use solve::{

@@ -80,7 +80,7 @@
 //!   *Comp. Methods Appl. Mech. Eng.* 55, 1986, pp. 339–348 (degree-2
 //!   four-point symmetric rule).
 
-use nalgebra::{Matrix3, SMatrix, Vector3};
+use nalgebra::{Matrix3, SMatrix, SVector, Vector3};
 use num_complex::Complex64;
 
 /// The six canonical local edges of a tetrahedron in
@@ -398,6 +398,209 @@ pub fn assemble_abc_face_block(
     }
 
     block
+}
+
+/// Assemble the per-face modal wave-port stiffness contribution
+/// (Phase 4.fem.eig.2 step E2).
+///
+/// On a wave-port-tagged exterior triangular face with outward normal
+/// `n̂`, the modal wave-port boundary condition (Jin, *FEM in
+/// Electromagnetics* 3rd ed. §10.5; Pozar, *Microwave Engineering* 4th
+/// ed. §3.3) contributes a per-face stiffness term
+///
+/// ```text
+///     K_port^{e,face}_{ij}  =  + j β_mode · (1/μ_r,face) · ∫_face
+///                                  (n̂ × N_i) · (n̂ × N_j)  dS
+/// ```
+///
+/// to the global complex stiffness matrix. The structure is identical
+/// to [`assemble_abc_face_block`] with the wave-port modal propagation
+/// constant `β_mode` replacing the free-space wavenumber `k₀`. For the
+/// dominant TE_{10} mode of a rectangular waveguide,
+/// `β_mode = sqrt(k₀² ε_r μ_r − (π/a)²)`; below cutoff `β_mode` is
+/// purely imaginary and the caller may decide to skip the assembly.
+/// `β_mode` is computed externally by the caller (typically from a
+/// `NumericalCrossSection` eigensolver dispatched per swept frequency).
+///
+/// As in the ABC case, the Whitney-1 face basis `N_i` restricted to the
+/// triangular face reduces to the constant edge tangent
+/// `t_i = v_{(i+1) mod 3} − v_i`, so `n̂ × N_i = n̂ × t_i` is constant
+/// per face and the surface integral evaluates exactly to
+///
+/// ```text
+///     B[i][j] = j · β_mode · (A / μ_r,face) · (n̂ × t_i) · (n̂ × t_j),
+/// ```
+///
+/// where `A = 0.5 · ||t_0 × t_1||` is the triangle area. The returned
+/// block is **complex-symmetric** (`B == B^T`, NOT Hermitian) — the
+/// imaginary prefactor `j β_mode` is scalar and the real
+/// `(n̂ × t_i) · (n̂ × t_j)` Gram form is symmetric. When
+/// `β_mode = 0` (cutoff) every entry is identically zero.
+///
+/// ## Sign / orientation convention
+///
+/// As in [`assemble_abc_face_block`], the block is emitted in
+/// **canonical local-edge orientation** — each edge `i` runs from
+/// `face_vertices[i]` to `face_vertices[(i + 1) % 3]`. Local-to-global
+/// orientation flips are the assembly layer's job (Phase 4.fem.eig.2
+/// step E3); this element helper is a pure function of
+/// `(face_vertices, outward_normal, beta_mode, mu_r_face)`.
+///
+/// ## References
+///
+/// * Jin, J.-M., *The Finite Element Method in Electromagnetics*,
+///   3rd ed., Wiley 2014, §10.5 (wave-port modal decomposition).
+/// * Pozar, D. M., *Microwave Engineering*, 4th ed., Wiley 2012,
+///   §3.3 (waveguide TE/TM modes, propagation constants).
+/// * Phase 4.fem.eig.2 spec
+///   `docs/superpowers/specs/2026-05-19-phase-4-fem-eig-2-open-boundary-design.md`
+///   §4.3 — the bilinear form this helper implements.
+pub fn assemble_port_face_block(
+    face_vertices: [Vector3<f64>; 3],
+    outward_normal: Vector3<f64>,
+    beta_mode: f64,
+    mu_r_face: f64,
+) -> SMatrix<Complex64, 3, 3> {
+    // Three edge tangents of the triangular face, in CCW order:
+    //     t_i = v_{(i+1) mod 3} − v_i.
+    let t = [
+        face_vertices[1] - face_vertices[0],
+        face_vertices[2] - face_vertices[1],
+        face_vertices[0] - face_vertices[2],
+    ];
+
+    // Face area A = 0.5 · ||t_0 × t_1||.
+    let face_area = 0.5 * t[0].cross(&t[1]).norm();
+
+    // (n̂ × N_i) is constant per face for the Whitney-1 face basis;
+    // for the edge-tangent dual basis this is exactly (n̂ × t_i).
+    let n_cross_t = [
+        outward_normal.cross(&t[0]),
+        outward_normal.cross(&t[1]),
+        outward_normal.cross(&t[2]),
+    ];
+
+    // Outer prefactor: j · β_mode · (A / μ_r,face). Purely imaginary.
+    // When β_mode = 0 (cutoff), the prefactor is zero and the block
+    // vanishes identically — no special-case branch needed.
+    let prefactor =
+        Complex64::new(0.0, 1.0) * Complex64::new(beta_mode * face_area / mu_r_face, 0.0);
+
+    let mut block = SMatrix::<Complex64, 3, 3>::zeros();
+    for i in 0..3 {
+        for j in 0..3 {
+            let gram_entry = n_cross_t[i].dot(&n_cross_t[j]);
+            block[(i, j)] = prefactor * Complex64::new(gram_entry, 0.0);
+        }
+    }
+
+    block
+}
+
+/// Assemble the per-face modal wave-port right-hand-side contribution
+/// (Phase 4.fem.eig.2 step E2).
+///
+/// On a wave-port-tagged exterior triangular face, the driven FEM
+/// system carries a per-face right-hand-side contribution encoding the
+/// incident modal current (Jin, *FEM in Electromagnetics* 3rd ed.
+/// §10.5, eq. 10.74; Pozar, *Microwave Engineering* 4th ed. §3.3):
+///
+/// ```text
+///     b_port,i  =  + 2 j β_mode  ·  ∫_face  N_i · E_t_mode  dS.
+/// ```
+///
+/// The leading factor of `2` is the matched-port double-amplitude
+/// convention from Pozar §3.3: for a matched port driving the incident
+/// mode at amplitude `a_inc = 1`, the total tangential E-field at the
+/// port boundary is `E_inc + E_refl = 2 · E_inc` because a perfectly
+/// matched modal termination absorbs the outgoing wave but the boundary
+/// itself sees twice the incident amplitude. Any modulation by the
+/// caller's incident amplitude is folded into the supplied
+/// `mode_e_t_at_centroid` (i.e. the caller passes
+/// `a_inc · e_mode(x_c, y_c)`).
+///
+/// For the first-order Whitney-1 face basis the basis vector
+/// `N_i` restricted to the triangular face reduces to the constant
+/// edge tangent `t_i = v_{(i+1) mod 3} − v_i` (see
+/// [`assemble_abc_face_block`] for the derivation), so the integrand
+/// `N_i · E_t_mode` is constant per face when the modal profile is
+/// approximated by its centroid value. The face-centroid quadrature
+/// therefore evaluates to
+///
+/// ```text
+///     ∫_face N_i · E_t_mode dS  ≈  (A / 3) · t_i · E_t_mode,
+/// ```
+///
+/// where the `1/3` factor is the Whitney-1 edge basis weight at the
+/// face centroid (each edge basis integrates to `A/3` against a
+/// constant test field over a triangular face). Substituting:
+///
+/// ```text
+///     b_i  =  2 j β_mode · (A / 3) · (t_i · E_t_mode).
+/// ```
+///
+/// The returned `SVector<Complex64, 3>` is indexed by the three face
+/// edges `(0→1, 1→2, 2→0)` in the canonical CCW traversal of the face
+/// vertices; the assembly layer (Phase 4.fem.eig.2 step E3) is
+/// responsible for the local-to-global orientation flips per shared
+/// edge. Higher-order quadrature (3-point Gauss) is a Phase
+/// 4.fem.eig.2.0.1 refinement if the face-centroid sampling proves
+/// insufficient on the fem-eig-003 sweep.
+///
+/// `mode_e_t_at_centroid` is the tangential E-field of the incident
+/// mode at the face centroid (typically `a_inc · e_mode(x_c, y_c)`
+/// where `e_mode` is sourced from
+/// `yee_mom::eigensolver::NumericalCrossSection::e_tangential_at`).
+/// Its component along the face normal is dropped — only the
+/// tangential projection contributes via the dot product with `t_i`,
+/// which lies in the face plane.
+///
+/// ## Sign / orientation convention
+///
+/// As with the face-block helpers above, the RHS is emitted in
+/// **canonical local-edge orientation** — each edge `i` runs from
+/// `face_vertices[i]` to `face_vertices[(i + 1) % 3]`. The assembly
+/// layer applies the local-to-global sign flip during scatter.
+///
+/// ## References
+///
+/// * Jin, J.-M., *The Finite Element Method in Electromagnetics*,
+///   3rd ed., Wiley 2014, §10.5 (wave-port modal decomposition),
+///   eq. 10.74 (incident-wave RHS).
+/// * Pozar, D. M., *Microwave Engineering*, 4th ed., Wiley 2012,
+///   §3.3 — the matched-port `E_inc + E_refl = 2 · E_inc` convention
+///   that motivates the factor-of-`2` prefactor.
+/// * Phase 4.fem.eig.2 spec
+///   `docs/superpowers/specs/2026-05-19-phase-4-fem-eig-2-open-boundary-design.md`
+///   §4.3 — the wave-port forcing bilinear form this helper implements.
+pub fn assemble_port_modal_rhs(
+    face_vertices: [Vector3<f64>; 3],
+    _outward_normal: Vector3<f64>,
+    beta_mode: f64,
+    mode_e_t_at_centroid: Vector3<f64>,
+) -> SVector<Complex64, 3> {
+    // Three edge tangents of the triangular face, in CCW order:
+    //     t_i = v_{(i+1) mod 3} − v_i.
+    let t = [
+        face_vertices[1] - face_vertices[0],
+        face_vertices[2] - face_vertices[1],
+        face_vertices[0] - face_vertices[2],
+    ];
+
+    // Face area A = 0.5 · ||t_0 × t_1||.
+    let face_area = 0.5 * t[0].cross(&t[1]).norm();
+
+    // Outer prefactor: 2 j β_mode · (A / 3). Purely imaginary.
+    let prefactor =
+        Complex64::new(0.0, 1.0) * Complex64::new(2.0 * beta_mode * face_area / 3.0, 0.0);
+
+    let mut rhs = SVector::<Complex64, 3>::zeros();
+    for i in 0..3 {
+        let dot = t[i].dot(&mode_e_t_at_centroid);
+        rhs[i] = prefactor * Complex64::new(dot, 0.0);
+    }
+
+    rhs
 }
 
 /// Assemble the `6 × 6` Nedelec local stiffness + mass block for a
