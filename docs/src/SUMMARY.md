@@ -74,3 +74,4 @@
 - [ADR-0040: Phase 4.fem.eig.2 open-boundary scope (ABC + wave ports)](decisions/0040-phase-4-fem-eig-2-open-boundary-scope.md)
 - [ADR-0041: fdtd-007 Maloney-Smith reference correction (open question)](decisions/0041-fdtd-007-reference-correction.md)
 - [ADR-0042: Phase 4.fem.eig.3 scope — coupled-Whitney + 2nd-order ABC + multi-port](decisions/0042-phase-4-fem-eig-3-scope.md)
+- [ADR-0043: Phase 4.fem.eig.3.5 scope — CFS-PML retires fem-eig-003 strict gate](decisions/0043-phase-4-fem-eig-3-5-cfs-pml-scope.md)
