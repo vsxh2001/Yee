@@ -99,6 +99,18 @@ Conventions used below:
   - PPPPPPPP CPML reads per-cell ε_r/μ_r (reflection floor 69.33 dB preserved; merge `c57592f`)
   - UUUUUUUU fdtd-007 rewire smoke gate retires (uniform-fine path; physics gates remain ignored pending citation verification; merge `462c37d`)
   - XXXXXXXX ADR-0041 fdtd-007 reference correction (Wu-King cylindrical-monopole mismatch documented; citation TBD; merge `3d0327b`)
+- Phase 4.fem.eig.2 corrections + tutorial:
+  - CCCCCCCCC modal-RHS M_pp normalization (partial; coupled-Whitney deferred to fem.eig.3; merge `e45692d`)
+  - EEEEEEEEE 07-fem-open-cavity tutorial (merge `3cf884e`)
+- Phase 4.fem.eig.3 design + F1-F8 walking skeleton end-to-end:
+  - FFFFFFFFF design spec + plan + ADR-0042 (coupled-Whitney + 2nd-order ABC + multi-port; merge `ba565f1`)
+  - GGGGGGGGG F1+F2 coupled Whitney-1 3-pt Gauss port face block (|S_11| 1.0→0.9977; 7 tests; merge `41737b2`)
+  - HHHHHHHHH F3+F4 2nd-order Engquist-Majda ABC + abc_order knob (7 tests; merge `7c93319`)
+  - IIIIIIIII F5 multi-port S_{p,q} sweep_matrix (4 tests; merge `9dc1278`)
+  - JJJJJJJJJ F6 fem-eig-003+004+005 production gates — 004 thru-line PASSES (|S_21| -0.045 dB, reciprocity 2e-15), 005 T-junction passivity+reciprocity, 003 strict ignored pending mesh refinement (merge `259023c`)
+  - KKKKKKKKK F7 yee.fem.solve_open_cavity multi-port + coupled_whitney/abc_order kwargs + callable modal_e_t (4 pytest; merge `f0f6d7d`)
+  - MMMMMMMMM F8 08-fem-multi-port tutorial (merge `6430ed9`)
+  - LLLLLLLLL sigma_factor 2.5→0.9 fix for lossy Drude (test_lossy_drude passes; pre-existing failure retired; merge `7818133`)
 - mom-002 root-cause chain end-to-end (10 forensic tracks + 3 kernel fixes + 3 ADRs):
   - EEEEEE prefactor / JJJJJJ extent / PPPPPP GPOF / SSSSSS contour / TTTTTT residue sign / XXXXXX ψ_p / YYYYYY MPIE / CCCCCCC port-mesh / MMMMMMM ε_eff / NNNNNNN R1 retract / DDDDDDD DCIM-TM / TTTTTTT port spatial / QQQQQQQ β eigen (kernel exonerated at 1.83% from HJ)
   - ADR-0036 mom-002 validation reframe (sub-wavelength strip)
