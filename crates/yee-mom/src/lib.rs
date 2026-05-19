@@ -430,7 +430,7 @@ pub mod __internal {
     //! Test-helper surface. Not stable API; do not depend on it.
 
     use crate::fill::impedance_matrix;
-    use crate::ports::{Port, TemSmoothedPort};
+    use crate::ports::{ModalDistribution, Port, TemSmoothedPort, WavePort};
     use crate::solve::delta_gap_rhs;
     use faer::linalg::solvers::{PartialPivLu, Solve};
     use num_complex::Complex64;
@@ -484,6 +484,34 @@ pub mod __internal {
             strip_width_m,
         };
         port.rhs(basis, 0.0)
+    }
+
+    /// Build the wave-port RHS column for [`WavePort::rhs`] from an
+    /// integration test, without forcing the `pub(crate)` [`Port`]
+    /// trait or the inherent `WavePort::rhs` method to become public.
+    /// Phase 1.3.1.1 step 7 (`tests/wave_port_numerical_te10.rs`) uses
+    /// this to compare the numerical-cross-section wave-port RHS
+    /// against the closed-form TE10 RHS on the same RWG mesh.
+    /// `voltage` is in volts; `mode_phase_velocity_factor` is the
+    /// `WavePort` field of the same name (only consumed by the
+    /// [`ModalDistribution::Uniform`] arm). Returns the
+    /// `basis.n_basis() × 1` RHS column with port-tag-selected entries
+    /// populated and the rest zero. Not part of the stable API.
+    pub fn wave_port_rhs_for_test(
+        basis: &RwgBasis,
+        tag: u32,
+        voltage: Complex64,
+        mode_phase_velocity_factor: f64,
+        modal_distribution: ModalDistribution,
+        freq_hz: f64,
+    ) -> faer::Mat<Complex64> {
+        let port = WavePort {
+            tag,
+            voltage,
+            mode_phase_velocity_factor,
+            modal_distribution,
+        };
+        port.rhs(basis, freq_hz)
     }
 
     /// Public re-export of [`MultilayerGreens`] for the Phase 1.1
