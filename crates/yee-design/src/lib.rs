@@ -26,8 +26,10 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod estimate;
 pub mod intent;
 
+pub use estimate::{Error, InitialEstimate, ResolvedSubstrate};
 pub use intent::{
     DesignIntent, GeometryFamily, NamedSubstrate, Provenance, Substrate, SubstrateLibrary,
     SubstrateOverride, SubstrateRecord, substrate_library,
