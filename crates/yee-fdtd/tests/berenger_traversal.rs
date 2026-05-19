@@ -100,11 +100,35 @@ const STABILITY_BOUND: f64 = 1.0e3;
 /// (J-only ghost) back to ≈ 1e3 V/m (J + M ghost). Resolution
 /// requires a separate, M-side equivalence accounting fix —
 /// deferred to Phase 2.fdtd.7.y.
+///
+/// Phase 2.fdtd.7.y Step C2 (Option β compensating source
+/// `M = -n̂ × (E_post − E_pre)`) is now landed but **degenerates to
+/// the spec §6 risk 2 failure mode**: the M source samples fine
+/// `E_y` / `E_z` on the outer surface plane, where `update_fine_e`
+/// is a no-op (boundary cells `i = 0, nx`; `j = 0, ny`;
+/// `k = 0, nz` are skipped by the Yee update — see
+/// `yee_fdtd::update::update_e` index ranges). Both `E_pre` and
+/// `E_post` are therefore bit-equal to the Q3 Dirichlet write at
+/// those cells, so the compensating source is identically zero. The
+/// effective behaviour is equivalent to "M disabled entirely". The
+/// 500-step canary diverges at step 139 (peak |E_z| ≈ 1.139e3),
+/// essentially identical to B2.2 (step 137 / 1.035e3). The 100-step
+/// canary improves from 2.75 V/m (B2.2) to 1.564 V/m (C2) because
+/// removing the noise-dominated M term reduces the closure-loop
+/// gain, but the strict 500-step bound stays unretired.
+///
+/// Resolution is the Step C5 escape hatch (Option α — drop the Q3
+/// Dirichlet on the fine outer `E_t` layer and replace with a
+/// second-order Mur absorbing BC, restoring the canonical
+/// `M = -n̂ × (E_TF − E_SF)` differencing on a non-Q3-tied
+/// boundary).
 #[test]
-#[ignore = "Phase 2.fdtd.7.x B2.2 (Track OOOOOOO): coarse-ghost J subtraction lands; 500-step \
-            divergence delayed from step ~98 to step ~137 (peak |E_z| = 1.035e3) but not \
-            retired. Residual is an M-side accounting issue (Q3-tied coarse E surface) — \
-            deferred to Phase 2.fdtd.7.y."]
+#[ignore = "Phase 2.fdtd.7.y C2 (compensating-source M): the M sample sites are on the fine \
+            outer surface plane which update_fine_e skips, so E_post − E_pre ≡ 0 (spec §6 risk \
+            2 degeneration). 500-step canary diverges at step 139 (peak |E_z| ≈ 1.139e3), \
+            ≈ B2.2 baseline. 100-step canary improves to 1.564 V/m (M effectively disabled). \
+            Resolution deferred to Step C5 (Option α — replace Q3 Dirichlet with a Mur \
+            absorbing BC so canonical M = -n̂ × (E_TF − E_SF) has non-zero differencing)."]
 fn berenger_step_propagates_without_divergence_500_steps() {
     let coarse_grid = YeeGrid::vacuum(NX_C, NY_C, NZ_C, DX_C);
     let coarse_dt = coarse_grid.dt;

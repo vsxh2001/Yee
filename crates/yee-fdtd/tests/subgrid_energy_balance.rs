@@ -322,13 +322,11 @@ fn q6_energy_accounting_initial_state() {
 /// subgrid_energy_balance -- --include-ignored` to reproduce the
 /// regression-tracked drift values.
 #[test]
-#[ignore = "Phase 2.fdtd.7.x B2.2 (Track OOOOOOO): J-side coarse-ghost subtraction landed but \
-            does not retire the long-time energy drift for a fine-seeded cavity (|dW|/W(0) ≈ \
-            3.3e140 at N = 1000). M-side ghost subtraction destabilises the source-driven \
-            canary (Q3-tied coarse E surface), so only J is ghost-subtracted. The cavity \
-            seeds energy into the fine grid at t = 0 with the coarse grid at rest, so the \
-            asymmetric M handling shows up as residual drift here. Deferred to Phase \
-            2.fdtd.7.y per the AAAAAAA plan B4 escape hatch."]
+#[ignore = "Phase 2.fdtd.7.y C2 (compensating-source M): the M sample sites are on the fine \
+            outer surface plane which update_fine_e skips, so E_post − E_pre ≡ 0 (spec §6 \
+            risk 2 degeneration). |dW|/W(0) at N = 1000 is ≈ 2.7e114 — catastrophic \
+            divergence essentially unchanged from B2.2. Resolution deferred to Step C5 \
+            (Option α — replace Q3 Dirichlet with a Mur absorbing BC)."]
 fn q6_round_trip_smoke_1000_steps() {
     let (w0, wn) = run_and_measure(N_SHORT);
     assert!(w0.is_finite() && w0 > 0.0, "W(0) must be finite, got {w0}");
@@ -362,11 +360,11 @@ fn q6_round_trip_smoke_1000_steps() {
 /// Run with `cargo test -p yee-fdtd --release --test
 /// subgrid_energy_balance -- --include-ignored` to exercise.
 #[test]
-#[ignore = "Phase 2.fdtd.7.x B2.2 (Track OOOOOOO): J-side coarse-ghost subtraction landed but \
-            does not retire long-time energy drift for a fine-seeded cavity (NaN before N \
-            = 10000). M-side ghost subtraction destabilises the source-driven canary, so \
-            only J is ghost-subtracted. Deferred to Phase 2.fdtd.7.y per the AAAAAAA plan \
-            B4 escape hatch."]
+#[ignore = "Phase 2.fdtd.7.y C2 (compensating-source M): the M sample sites are on the fine \
+            outer surface plane which update_fine_e skips, so E_post − E_pre ≡ 0 (spec §6 \
+            risk 2 degeneration). W(10000) is non-finite — energy ledger diverges well \
+            before N = 10000, unchanged from B2.2. Resolution deferred to Step C5 (Option \
+            α — replace Q3 Dirichlet with a Mur absorbing BC)."]
 fn q6_round_trip_10000_steps() {
     const N: usize = 10_000;
     let (w0, wn) = run_and_measure(N);
