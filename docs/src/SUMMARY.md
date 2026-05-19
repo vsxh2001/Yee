@@ -24,6 +24,7 @@
 - [FDTD cavity resonance](tutorials/03-fdtd-cavity.md)
 - [FEM cavity eigenmode from Python](tutorials/04-fem-cavity-eigenmode.md)
 - [Waveguide eigenmode from Python](tutorials/04-waveguide-eigenmode-from-python.md)
+- [Natural-language design surface](tutorials/04-nl-design-surface.md)
 - [KiCad PCB import to MoM](tutorials/05-kicad-import.md)
 
 # Decisions
