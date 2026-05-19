@@ -1505,40 +1505,61 @@ impl SubgridRegion {
     /// Spec: `docs/superpowers/specs/2026-05-19-phase-2-fdtd-7-x-berenger-huygens-design.md`.
     /// ADR: `docs/src/decisions/0035-berenger-huygens-subgridding.md`.
     pub fn inject_equivalent_currents_to_coarse(&self, parent: &mut YeeGrid) {
-        self.inject_currents_inner(parent, true, true);
+        // Legacy monolithic entry point — preserved without B2.2 coarse-
+        // ghost subtraction so the B1 skeleton no-op test
+        // (`berenger_skeleton::inject_equivalent_currents_to_coarse_is_currently_noop`)
+        // continues to pass bit-exactly: when the fine grid is zero,
+        // the un-ghosted `J = sign·coef·H_fine_avg = 0` and `M =
+        // sign·coef·E_fine_avg = 0`, leaving the parent grid untouched
+        // even if the parent carries seeded non-zero fields. The ghost-
+        // subtracted (B2.2) form is reserved for the split-injection
+        // pipeline used by [`SubgriddedSolver::step`].
+        self.inject_currents_inner(parent, true, true, false);
     }
 
-    /// Inject **only** the electric equivalent current `J = +n̂ × H_tot`
-    /// onto the coarse `E_t` arrays at the Huygens surface.
+    /// Inject the electric equivalent current
+    /// `J = +n̂ × (H_TF_fine − H_SF_coarse_ghost)` onto the coarse `E_t`
+    /// arrays at the Huygens surface.
     ///
-    /// Phase 2.fdtd.7.x B2.1 split-injection closure (companion to
-    /// [`Self::inject_m_to_coarse_h`]). HHHHHHH's diagnosis of the B2
-    /// divergence (commit `997e706`, Q5 strict gate `|E_z|` doubling
-    /// every ~7 coarse steps) traced the instability to the J source
-    /// being **stacked on top of an already-updated coarse `E`** rather
-    /// than consumed inside the `update_e_only` stencil. The split-
-    /// injection pipeline (see [`SubgriddedSolver::step`]) calls this
-    /// helper *before* the coarse `update_e_only` so the J source enters
-    /// its leapfrog update before the update runs — closing the spec
-    /// §6 risk 3 time-centering bug.
+    /// Phase 2.fdtd.7.x B2.2 coarse-ghost-subtraction form (Berenger
+    /// 2006 §III canonical equivalent-source convention). LLLLLLL's
+    /// B2.1 diagnosis traced the residual B2 divergence (peak coarse
+    /// `|E_z|` ≈ 1e30 at 500 steps even with the split-injection
+    /// reorder) to the J source representing `+n̂ × H_fine_inside`
+    /// **without** subtracting the coarse `H` slot the coarse natural
+    /// curl already reads for its leapfrog update. Without that
+    /// subtraction the J term carries gain > 1 around the loop
+    /// `fine E → coarse E → coarse H → fine boundary E → fine H →
+    /// larger J`. Subtracting the same-spatial-location coarse-H ghost
+    /// converts the injection from full TF to the canonical
+    /// scattered-correction form (Berenger 2006 §III), which closes
+    /// the equivalence principle at the discrete level.
     ///
     /// `H_tot` is sampled at `t = n + 1/2` via the Q4.1 mid-step snapshot
     /// plus post-sub-step-2 average (same time-centering as the legacy
     /// monolithic [`Self::inject_equivalent_currents_to_coarse`]).
     pub fn inject_j_to_coarse_e(&self, parent: &mut YeeGrid) {
-        self.inject_currents_inner(parent, true, false);
+        self.inject_currents_inner(parent, true, false, true);
     }
 
-    /// Inject **only** the magnetic equivalent current `M = -n̂ × E_tot`
-    /// onto the coarse `H_t` arrays at the Huygens surface, sampling the
-    /// fine `E` field from the **previous coarse step's end-of-sub-step-2
-    /// snapshot** ([`Self::snapshot_fine_e_end_of_step`]).
+    /// Inject the magnetic equivalent current `M = -n̂ × E_tot` onto
+    /// the coarse `H_t` arrays at the Huygens surface, sampling the
+    /// fine `E` field from the **previous coarse step's end-of-sub-
+    /// step-2 snapshot** ([`Self::snapshot_fine_e_end_of_step`]).
     ///
-    /// Phase 2.fdtd.7.x B2.1 split-injection closure (companion to
-    /// [`Self::inject_j_to_coarse_e`]). Called at the top of each coarse
-    /// step, *before* `update_h_only`, so the M source enters its
-    /// leapfrog update before the update runs — closing the spec §6
-    /// risk 3 time-centering bug per HHHHHHH's diagnosis.
+    /// Phase 2.fdtd.7.x B2.2: M is **not** coarse-ghost-subtracted
+    /// (asymmetric to the J side). The "symmetric" ghost candidate for
+    /// M would be the coarse `E` at the surface plane (same spatial
+    /// location as the fine `E_t` sample), but that coarse `E` is
+    /// **Dirichlet-tied to the fine grid** by Q3
+    /// [`Self::interpolate_coarse_e_to_fine`] — so `fine_E_surface −
+    /// coarse_E_surface ≈ 0` by construction, and ghost-subtracting M
+    /// would nullify the magnetic equivalent current entirely. The
+    /// empirical 100-step canary regression confirms this: with M
+    /// ghost subtraction enabled, peak `|E_z|_fine` jumps from 2.75
+    /// V/m (J-only ghost) to ≈ 1.0e3 V/m (J + M ghost). Only the J
+    /// side is ghost-subtracted; the M source remains the full
+    /// `-n̂ × E_fine` form per the original B2 closure.
     ///
     /// On the **first** coarse step after construction (or after a
     /// region is freshly attached), no snapshot exists yet and this
@@ -1549,7 +1570,12 @@ impl SubgridRegion {
         let Some(snap) = self.fine_e_snapshot.as_ref() else {
             return;
         };
-        self.inject_currents_inner_with_e(parent, false, true, &snap.ex, &snap.ey, &snap.ez);
+        // The M side is **not** ghost-subtracted (see the docstring on
+        // this fn for the empirical rationale on the Q3-coupled
+        // boundary). The `do_ghost = false` here is unused on the M
+        // path inside the face helpers, but is wired uniformly to
+        // keep the call-site signature stable.
+        self.inject_currents_inner_with_e(parent, false, true, &snap.ex, &snap.ey, &snap.ez, false);
     }
 
     /// Shared body for the monolithic and split-injection closures.
@@ -1557,7 +1583,13 @@ impl SubgridRegion {
     /// to the per-face helpers with the requested `do_j` / `do_m` flags.
     /// When `do_m` is `true`, M is sourced from the current fine `E`
     /// (legacy monolithic behaviour preserved for the B1 no-op test).
-    fn inject_currents_inner(&self, parent: &mut YeeGrid, do_j: bool, do_m: bool) {
+    ///
+    /// `do_ghost` enables the Phase 2.fdtd.7.x B2.2 coarse-ghost-
+    /// subtraction form on the J term: when `true`, `J = +n̂ × (H_fine
+    /// − H_coarse_ghost)` per Berenger 2006 §III; when `false`, `J =
+    /// +n̂ × H_fine` (legacy un-ghosted form, kept for the monolithic
+    /// entry point so the B1 skeleton no-op test continues to pass).
+    fn inject_currents_inner(&self, parent: &mut YeeGrid, do_j: bool, do_m: bool, do_ghost: bool) {
         self.inject_currents_inner_with_e(
             parent,
             do_j,
@@ -1565,6 +1597,7 @@ impl SubgridRegion {
             &self.fine.ex,
             &self.fine.ey,
             &self.fine.ez,
+            do_ghost,
         );
     }
 
@@ -1572,6 +1605,7 @@ impl SubgridRegion {
     /// arrays for the M term. Used by [`Self::inject_m_to_coarse_h`] to
     /// source M from a stored end-of-previous-step snapshot rather than
     /// the live fine grid.
+    #[allow(clippy::too_many_arguments)]
     fn inject_currents_inner_with_e(
         &self,
         parent: &mut YeeGrid,
@@ -1580,6 +1614,7 @@ impl SubgridRegion {
         fine_ex: &Array3<f64>,
         fine_ey: &Array3<f64>,
         fine_ez: &Array3<f64>,
+        do_ghost: bool,
     ) {
         let lo = self.lo;
         let hi = self.hi;
@@ -1645,10 +1680,11 @@ impl SubgridRegion {
             coeff_h,
             do_j,
             do_m,
+            do_ghost,
         );
         Self::inject_x_face(
             parent, lo, hi, fine_ey, fine_ez, &hy_t, &hz_t, -1.0, lo.0, lo.0, 0, 0, coeff_e,
-            coeff_h, do_j, do_m,
+            coeff_h, do_j, do_m, do_ghost,
         );
 
         // ±y faces.
@@ -1669,10 +1705,11 @@ impl SubgridRegion {
             coeff_h,
             do_j,
             do_m,
+            do_ghost,
         );
         Self::inject_y_face(
             parent, lo, hi, fine_ex, fine_ez, &hx_t, &hz_t, -1.0, lo.1, lo.1, 0, 0, coeff_e,
-            coeff_h, do_j, do_m,
+            coeff_h, do_j, do_m, do_ghost,
         );
 
         // ±z faces.
@@ -1693,10 +1730,11 @@ impl SubgridRegion {
             coeff_h,
             do_j,
             do_m,
+            do_ghost,
         );
         Self::inject_z_face(
             parent, lo, hi, fine_ex, fine_ey, &hx_t, &hy_t, -1.0, lo.2, lo.2, 0, 0, coeff_e,
-            coeff_h, do_j, do_m,
+            coeff_h, do_j, do_m, do_ghost,
         );
     }
 
@@ -1764,6 +1802,7 @@ impl SubgridRegion {
         coeff_h: f64,
         do_j: bool,
         do_m: bool,
+        do_ghost: bool,
     ) {
         let dx = parent.dx;
         let ce = coeff_e / dx;
@@ -1771,6 +1810,25 @@ impl SubgridRegion {
 
         if do_j {
             // -------- J term: write to E_y, E_z on the surface plane. --------
+            //
+            // Berenger 2006 §III equivalent-source form (B2.2,
+            // `do_ghost = true`):
+            //   J = +n̂ × (H_TF_fine − H_SF_coarse_ghost)
+            // The "coarse ghost" is the coarse `H` slot at the same
+            // spatial location that the coarse natural-curl stencil for
+            // the target `E` cell already reads from inside the fine box
+            // footprint (SF side). For `ey[(i_c_surface, j, k)]` the
+            // natural curl reads `hz[(i_c_inside_h, j, k)]` — that IS the
+            // ghost. Subtracting it converts the injection from full TF
+            // ("J = n̂ × H_fine") to the canonical SF-subtracted form,
+            // closing Berenger's discrete equivalence principle.
+            //
+            // `do_ghost = false` reverts to the legacy un-ghosted form
+            // `J = +n̂ × H_TF_fine` so the monolithic
+            // [`Self::inject_equivalent_currents_to_coarse`] entry point
+            // continues to pass the B1 skeleton no-op test (which seeds
+            // non-zero coarse fields and expects fine = 0 to yield a
+            // bit-exact identity injection).
 
             // E_y on the surface: coarse ey[(i_c_surface, j_c, k_c)],
             // j_c ∈ [lo.1, hi.1), k_c ∈ [lo.2, hi.2].
@@ -1780,7 +1838,12 @@ impl SubgridRegion {
                     let k_f = 2 * (k_c - lo.2);
                     let hz_avg = 0.5
                         * (fine_hz_t[(fine_i_h, j_f0, k_f)] + fine_hz_t[(fine_i_h, j_f0 + 1, k_f)]);
-                    parent.ey[(i_c_surface, j_c, k_c)] += sign * ce * hz_avg;
+                    let hz_eff = if do_ghost {
+                        hz_avg - parent.hz[(i_c_inside_h, j_c, k_c)]
+                    } else {
+                        hz_avg
+                    };
+                    parent.ey[(i_c_surface, j_c, k_c)] += sign * ce * hz_eff;
                 }
             }
 
@@ -1792,13 +1855,37 @@ impl SubgridRegion {
                     let k_f0 = 2 * (k_c - lo.2);
                     let hy_avg = 0.5
                         * (fine_hy_t[(fine_i_h, j_f, k_f0)] + fine_hy_t[(fine_i_h, j_f, k_f0 + 1)]);
-                    parent.ez[(i_c_surface, j_c, k_c)] -= sign * ce * hy_avg;
+                    let hy_eff = if do_ghost {
+                        hy_avg - parent.hy[(i_c_inside_h, j_c, k_c)]
+                    } else {
+                        hy_avg
+                    };
+                    parent.ez[(i_c_surface, j_c, k_c)] -= sign * ce * hy_eff;
                 }
             }
         }
 
         if do_m {
             // -------- M term: write to H_y, H_z on the layer just inside. --------
+            //
+            // Phase 2.fdtd.7.x B2.2: the M source is **not** ghost-
+            // subtracted. The "symmetric" coarse-E ghost for M would be
+            // `parent.ez[(i_c_surface, j_c, k_c)]` / `parent.ey[(...)]`
+            // at the surface plane — the same spatial slot the fine
+            // `E_t` sample sits on. But these coarse-E slots are
+            // **Dirichlet-tied to the fine grid** by Q3
+            // `interpolate_coarse_e_to_fine`, so `fine_E_surface −
+            // coarse_E_surface ≈ 0` by construction, and ghost-
+            // subtracting M would nullify the magnetic equivalent
+            // current. The J side is the load-bearing one: its ghost
+            // (`parent.hz[i_c_inside_h]` / `parent.hy[i_c_inside_h]`)
+            // is coarse SF storage that evolves only via coarse
+            // `update_h_only` reading the J-augmented coarse `E` at
+            // the surface — a genuinely independent SF field. The 100-
+            // step canary regression observed when M ghost subtraction
+            // is enabled (peak |E_z|_fine 1.0e3 vs 2.75 V/m with J-only)
+            // confirmed empirically that M ghost subtraction is the
+            // wrong move on this Q3-coupled boundary.
 
             // H_y on the layer: coarse hy[(i_c_inside_h, j_c, k_c)],
             // j_c ∈ [lo.1, hi.1], k_c ∈ [lo.2, hi.2).
@@ -1861,6 +1948,7 @@ impl SubgridRegion {
         coeff_h: f64,
         do_j: bool,
         do_m: bool,
+        do_ghost: bool,
     ) {
         let dy = parent.dy;
         let ce = coeff_e / dy;
@@ -1868,6 +1956,14 @@ impl SubgridRegion {
 
         if do_j {
             // -------- J term: write to E_x, E_z on the surface plane. --------
+            //
+            // Berenger 2006 §III equivalent-source form (B2.2,
+            // `do_ghost = true`):
+            //   J = +n̂ × (H_TF_fine − H_SF_coarse_ghost)
+            // For target `ez[(i, j_c_surface, k)]` the coarse natural
+            // curl reads `hx[(i, j_c_inside_h, k)]` from inside the
+            // footprint — that's the ghost. See [`Self::inject_x_face`]
+            // for the rationale on `do_ghost`.
 
             // E_z on the surface: coarse ez[(i_c, j_c_surface, k_c)],
             // i_c ∈ [lo.0, hi.0], k_c ∈ [lo.2, hi.2). (Cuboid edges at
@@ -1881,7 +1977,12 @@ impl SubgridRegion {
                     let k_f0 = 2 * (k_c - lo.2);
                     let hx_avg = 0.5
                         * (fine_hx_t[(i_f, fine_j_h, k_f0)] + fine_hx_t[(i_f, fine_j_h, k_f0 + 1)]);
-                    parent.ez[(i_c, j_c_surface, k_c)] += sign * ce * hx_avg;
+                    let hx_eff = if do_ghost {
+                        hx_avg - parent.hx[(i_c, j_c_inside_h, k_c)]
+                    } else {
+                        hx_avg
+                    };
+                    parent.ez[(i_c, j_c_surface, k_c)] += sign * ce * hx_eff;
                 }
             }
 
@@ -1893,13 +1994,24 @@ impl SubgridRegion {
                     let k_f = 2 * (k_c - lo.2);
                     let hz_avg = 0.5
                         * (fine_hz_t[(i_f0, fine_j_h, k_f)] + fine_hz_t[(i_f0 + 1, fine_j_h, k_f)]);
-                    parent.ex[(i_c, j_c_surface, k_c)] -= sign * ce * hz_avg;
+                    let hz_eff = if do_ghost {
+                        hz_avg - parent.hz[(i_c, j_c_inside_h, k_c)]
+                    } else {
+                        hz_avg
+                    };
+                    parent.ex[(i_c, j_c_surface, k_c)] -= sign * ce * hz_eff;
                 }
             }
         }
 
         if do_m {
             // -------- M term: write to H_z, H_x on the layer just inside. --------
+            //
+            // Phase 2.fdtd.7.x B2.2: M is **not** ghost-subtracted on
+            // this Q3-coupled boundary. See [`Self::inject_x_face`] for
+            // the empirical rationale (M ghost would nullify the
+            // current because coarse `E` on the surface is Dirichlet-
+            // tied to fine).
 
             // H_z on the layer: coarse hz[(i_c, j_c_inside_h, k_c)],
             // i_c ∈ [lo.0, hi.0), k_c ∈ [lo.2, hi.2].
@@ -1962,6 +2074,7 @@ impl SubgridRegion {
         coeff_h: f64,
         do_j: bool,
         do_m: bool,
+        do_ghost: bool,
     ) {
         let dz = parent.dz;
         let ce = coeff_e / dz;
@@ -1969,6 +2082,14 @@ impl SubgridRegion {
 
         if do_j {
             // -------- J term: write to E_x, E_y on the surface plane. --------
+            //
+            // Berenger 2006 §III equivalent-source form (B2.2,
+            // `do_ghost = true`):
+            //   J = +n̂ × (H_TF_fine − H_SF_coarse_ghost)
+            // For target `ex[(i, j, k_c_surface)]` the coarse natural
+            // curl reads `hy[(i, j, k_c_inside_h)]` from inside the
+            // footprint — that's the ghost. See [`Self::inject_x_face`]
+            // for the rationale on `do_ghost`.
 
             // E_x on the surface: coarse ex[(i_c, j_c, k_c_surface)],
             // i_c ∈ [lo.0, hi.0), j_c ∈ [lo.1, hi.1].
@@ -1978,7 +2099,12 @@ impl SubgridRegion {
                     let j_f = 2 * (j_c - lo.1);
                     let hy_avg = 0.5
                         * (fine_hy_t[(i_f0, j_f, fine_k_h)] + fine_hy_t[(i_f0 + 1, j_f, fine_k_h)]);
-                    parent.ex[(i_c, j_c, k_c_surface)] += sign * ce * hy_avg;
+                    let hy_eff = if do_ghost {
+                        hy_avg - parent.hy[(i_c, j_c, k_c_inside_h)]
+                    } else {
+                        hy_avg
+                    };
+                    parent.ex[(i_c, j_c, k_c_surface)] += sign * ce * hy_eff;
                 }
             }
 
@@ -1990,13 +2116,22 @@ impl SubgridRegion {
                     let j_f0 = 2 * (j_c - lo.1);
                     let hx_avg = 0.5
                         * (fine_hx_t[(i_f, j_f0, fine_k_h)] + fine_hx_t[(i_f, j_f0 + 1, fine_k_h)]);
-                    parent.ey[(i_c, j_c, k_c_surface)] -= sign * ce * hx_avg;
+                    let hx_eff = if do_ghost {
+                        hx_avg - parent.hx[(i_c, j_c, k_c_inside_h)]
+                    } else {
+                        hx_avg
+                    };
+                    parent.ey[(i_c, j_c, k_c_surface)] -= sign * ce * hx_eff;
                 }
             }
         }
 
         if do_m {
             // -------- M term: write to H_x, H_y on the layer just inside. --------
+            //
+            // Phase 2.fdtd.7.x B2.2: M is **not** ghost-subtracted on
+            // this Q3-coupled boundary. See [`Self::inject_x_face`] for
+            // the empirical rationale.
 
             // H_x on the layer: coarse hx[(i_c, j_c, k_c_inside_h)],
             // i_c ∈ [lo.0, hi.0], j_c ∈ [lo.1, hi.1).
@@ -2155,11 +2290,21 @@ impl SubgriddedSolver {
 
     /// Advance the simulation by one coarse step.
     ///
-    /// Phase 2.fdtd.7.x B2.1 — Berenger 2006 Huygens-surface closure
-    /// with **split J / M injection** to retire the half-step
-    /// time-centering bug diagnosed by Track HHHHHHH on the B2 landing
-    /// (commit `997e706`) and confirmed by Track JJJJJJJ
-    /// (`docs/src/decisions/0035-berenger-huygens-subgridding.md`).
+    /// Phase 2.fdtd.7.x B2.2 — Berenger 2006 Huygens-surface closure
+    /// with **split J / M injection** and **coarse-ghost-subtracted J
+    /// source** (canonical Berenger §III equivalent-current form). The
+    /// J injection now reads `J = +n̂ × (H_fine − H_coarse_ghost)`
+    /// where `H_coarse_ghost` is the coarse `H` slot inside the fine-
+    /// box footprint that the coarse natural-curl stencil already reads
+    /// for its leapfrog update — converting the source from full TF
+    /// to the canonical scattered-correction form (LLLLLLL's B2.1
+    /// diagnosis identified the missing-ghost-subtraction as the root
+    /// cause of the residual divergence after the split-injection
+    /// reorder). The M side remains un-ghosted because its candidate
+    /// ghost slot (coarse `E` at the surface plane) is Dirichlet-tied
+    /// to the fine grid via Q3, so subtracting it would nullify M; see
+    /// [`SubgridRegion::inject_m_to_coarse_h`] for the empirical
+    /// rationale.
     ///
     /// The split-injection pipeline interleaves the J and M injections
     /// with the coarse leapfrog so each source enters its respective

@@ -81,20 +81,30 @@ const STABILITY_BOUND: f64 = 1.0e3;
 /// stability bound stays grep-able even if the 100-step test
 /// remains green.
 ///
-/// **Currently `#[ignore]`'d** per AAAAAAA plan B4 escape hatch —
-/// the B2.1 split-injection refactor (this track LLLLLLL) is a
-/// mathematically-equivalent reordering of the B2 closure (M
-/// deferred by one coarse step to the next step's `update_h_only`,
-/// J injected after both fine sub-steps but before the next step
-/// reads coarse E through Q3) and does not retire the divergence
-/// surfaced by HHHHHHH. Resolution requires a deeper fix to the
-/// equivalence-principle accounting — likely the coarse "ghost"
-/// field subtraction in the J/M correction (see B2.1 commit body
-/// for the analysis) — and is deferred to Phase 2.fdtd.7.y.
+/// **Currently `#[ignore]`'d** per AAAAAAA plan B4 escape hatch.
+///
+/// Phase 2.fdtd.7.x B2.2 (track OOOOOOO) added coarse-ghost
+/// subtraction to the J source (Berenger 2006 §III canonical
+/// equivalent-source form `J = +n̂ × (H_fine − H_coarse_ghost)`).
+/// This DELAYS the divergence onset from step ~98 (B2.1 baseline) to
+/// step ~137 (B2.2), and reduces the always-on 100-step canary peak
+/// |E_z| from 31 V/m to 2.75 V/m — a strict improvement. But it does
+/// NOT retire the 500-step bound: peak |E_z| still crosses 1e3 V/m
+/// around step 137 and grows by ~10× per 20 steps thereafter.
+/// Empirically, applying coarse-ghost subtraction **symmetrically**
+/// to the M source (Berenger §III in pure form) actively destabilises
+/// the canary: the coarse `E_t` at the surface is Dirichlet-tied to
+/// the fine grid by Q3, so the "symmetric" M ghost subtraction
+/// nullifies the magnetic equivalent current rather than correcting
+/// it, and the 100-step canary peak |E_z| jumps from 2.75 V/m
+/// (J-only ghost) back to ≈ 1e3 V/m (J + M ghost). Resolution
+/// requires a separate, M-side equivalence accounting fix —
+/// deferred to Phase 2.fdtd.7.y.
 #[test]
-#[ignore = "Phase 2.fdtd.7.x B2.1: Berenger closure surfaces > 1e3 V/m peak |E_z| at 500 coarse \
-            steps. The B2.1 split-injection refactor does not retire the divergence; resolution \
-            is a future spec amendment (Phase 2.fdtd.7.y)."]
+#[ignore = "Phase 2.fdtd.7.x B2.2 (Track OOOOOOO): coarse-ghost J subtraction lands; 500-step \
+            divergence delayed from step ~98 to step ~137 (peak |E_z| = 1.035e3) but not \
+            retired. Residual is an M-side accounting issue (Q3-tied coarse E surface) — \
+            deferred to Phase 2.fdtd.7.y."]
 fn berenger_step_propagates_without_divergence_500_steps() {
     let coarse_grid = YeeGrid::vacuum(NX_C, NY_C, NZ_C, DX_C);
     let coarse_dt = coarse_grid.dt;
