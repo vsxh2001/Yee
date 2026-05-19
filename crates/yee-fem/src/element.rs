@@ -291,6 +291,146 @@ pub fn assemble_tet_element_complex(
     NedelecTetElementComplex { k_local, m_local }
 }
 
+/// Assemble the `6 × 6` Nedelec local stiffness + mass block for a
+/// single tetrahedron with **complex anisotropic** `ε(ω)` and
+/// `μ⁻¹(ω)` tensors (Phase 4.fem.eig.3.5 step P3).
+///
+/// Per spec §4.3, the bilinear forms become
+///
+/// ```text
+///     K_{αβ} = V · (∇×N_α)^T · μ⁻¹ · (∇×N_β),
+///     M_{αβ} = ∫_T N_α^T · ε · N_β dV.
+/// ```
+///
+/// For **diagonal** tensors `ε = diag(ε_x, ε_y, ε_z)` and `μ⁻¹ =
+/// diag(μ⁻¹_x, μ⁻¹_y, μ⁻¹_z)` (the only case v3.5 supports — see
+/// ADR-0043 §4 + the validation below), the integrand factorises into
+/// per-component sums and the cost is bounded at ~3× the scalar-`ε`
+/// [`assemble_tet_element_complex`] cell-assembly cost.
+///
+/// Returns
+/// `Err(Error::Unimplemented)` if either input tensor has a non-zero
+/// off-diagonal entry — rotated / non-axis-aligned PML is queued for
+/// Phase 4.fem.eig.3.5.1.
+///
+/// # Backward-compatibility invariant
+///
+/// For `eps_tensor = eps · I` and `mu_inv_tensor = (1/mu) · I` (scalar
+/// tensors), the returned blocks match
+/// [`assemble_tet_element_complex`] bit-for-bit (Frobenius difference
+/// `< 1e-12`) — the
+/// `scalar_equivalence_when_tensor_is_scalar_times_identity` test in
+/// `crates/yee-fem/tests/anisotropic_tet_assembly.rs` exercises this
+/// invariant.
+///
+/// # Arguments
+///
+/// * `vertices` — same convention as [`assemble_tet_element_complex`]
+///   (positive signed volume; degenerate tets panic in
+///   `barycentric_gradients_and_volume`).
+/// * `eps_tensor` — `3 × 3` complex anisotropic permittivity. Must be
+///   diagonal for v3.5.
+/// * `mu_inv_tensor` — `3 × 3` complex anisotropic inverse-permeability.
+///   Must be diagonal for v3.5.
+///
+/// # Errors
+///
+/// `Error::Unimplemented` if any off-diagonal entry of either tensor is
+/// non-zero (absolute value > `1e-12` relative to the Frobenius norm).
+/// The runtime check is necessary because dropping off-diagonal terms
+/// silently would corrupt the result for rotated-PML callers.
+pub fn assemble_tet_element_complex_anisotropic(
+    vertices: [Vector3<f64>; 4],
+    eps_tensor: SMatrix<Complex64, 3, 3>,
+    mu_inv_tensor: SMatrix<Complex64, 3, 3>,
+) -> Result<NedelecTetElementComplex, yee_core::Error> {
+    // ---- 0. Validate diagonality (v3.5 restriction). ----------------
+    fn assert_diagonal(
+        tensor: &SMatrix<Complex64, 3, 3>,
+        name: &'static str,
+    ) -> Result<[Complex64; 3], yee_core::Error> {
+        let mut frob_off = 0.0_f64;
+        for i in 0..3 {
+            for j in 0..3 {
+                if i != j {
+                    frob_off += tensor[(i, j)].norm_sqr();
+                }
+            }
+        }
+        if frob_off > 1.0e-24 {
+            return Err(yee_core::Error::Unimplemented(
+                "assemble_tet_element_complex_anisotropic: off-diagonal \
+                 entry detected (rotated-PML deferred to Phase 4.fem.eig.3.5.1)",
+            ));
+        }
+        // Quiet a clippy lint about unused name in non-debug builds.
+        let _ = name;
+        Ok([tensor[(0, 0)], tensor[(1, 1)], tensor[(2, 2)]])
+    }
+    let eps_diag = assert_diagonal(&eps_tensor, "eps_tensor")?;
+    let mu_inv_diag = assert_diagonal(&mu_inv_tensor, "mu_inv_tensor")?;
+
+    let (grads, signed_volume) = barycentric_gradients_and_volume(&vertices);
+    let volume = signed_volume.abs();
+
+    // ---- Local stiffness with anisotropic μ⁻¹ -----------------------
+    // K_{αβ} = V · Σ_d (μ⁻¹)_d · curl_α[d] · curl_β[d].
+    let mut curls = [Vector3::<f64>::zeros(); 6];
+    for (alpha, &(i, j)) in LOCAL_EDGES.iter().enumerate() {
+        curls[alpha] = 2.0 * grads[i].cross(&grads[j]);
+    }
+
+    let mut k_local = SMatrix::<Complex64, 6, 6>::zeros();
+    for alpha in 0..6 {
+        for beta in 0..6 {
+            // Σ over Cartesian components, weighted by the diagonal μ⁻¹
+            // entries.
+            let cx = curls[alpha].x * curls[beta].x;
+            let cy = curls[alpha].y * curls[beta].y;
+            let cz = curls[alpha].z * curls[beta].z;
+            k_local[(alpha, beta)] = Complex64::new(volume, 0.0)
+                * (mu_inv_diag[0] * Complex64::new(cx, 0.0)
+                    + mu_inv_diag[1] * Complex64::new(cy, 0.0)
+                    + mu_inv_diag[2] * Complex64::new(cz, 0.0));
+        }
+    }
+
+    // ---- Local mass with anisotropic ε ------------------------------
+    // M_{αβ} = ∫_T Σ_d ε_d · N_α[d] · N_β[d] dV.
+    // Use the same 4-point Gauss-tet quadrature as
+    // `assemble_tet_element_complex`; accumulate three real per-
+    // component sub-blocks first, then multiply by the ε diagonal.
+    let weight = volume / 4.0;
+    let mut m_xx = SMatrix::<f64, 6, 6>::zeros();
+    let mut m_yy = SMatrix::<f64, 6, 6>::zeros();
+    let mut m_zz = SMatrix::<f64, 6, 6>::zeros();
+
+    for qp in &QUAD_POINTS {
+        let mut basis = [Vector3::<f64>::zeros(); 6];
+        for (alpha, &(i, j)) in LOCAL_EDGES.iter().enumerate() {
+            basis[alpha] = qp[i] * grads[j] - qp[j] * grads[i];
+        }
+        for alpha in 0..6 {
+            for beta in 0..6 {
+                m_xx[(alpha, beta)] += weight * basis[alpha].x * basis[beta].x;
+                m_yy[(alpha, beta)] += weight * basis[alpha].y * basis[beta].y;
+                m_zz[(alpha, beta)] += weight * basis[alpha].z * basis[beta].z;
+            }
+        }
+    }
+
+    let mut m_local = SMatrix::<Complex64, 6, 6>::zeros();
+    for alpha in 0..6 {
+        for beta in 0..6 {
+            m_local[(alpha, beta)] = eps_diag[0] * Complex64::new(m_xx[(alpha, beta)], 0.0)
+                + eps_diag[1] * Complex64::new(m_yy[(alpha, beta)], 0.0)
+                + eps_diag[2] * Complex64::new(m_zz[(alpha, beta)], 0.0);
+        }
+    }
+
+    Ok(NedelecTetElementComplex { k_local, m_local })
+}
+
 /// Assemble the per-face 1st-order Engquist–Majda ABC contribution
 /// (Phase 4.fem.eig.2 step E1).
 ///

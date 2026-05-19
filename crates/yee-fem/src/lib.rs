@@ -46,7 +46,7 @@ pub use element::{
     LOCAL_EDGES, NedelecTetElement, NedelecTetElementComplex, assemble_abc_face_block,
     assemble_abc2_face_block, assemble_port_face_block, assemble_port_face_block_gauss_pts,
     assemble_port_face_rhs_gauss_pts, assemble_port_modal_rhs, assemble_tet_element,
-    assemble_tet_element_complex,
+    assemble_tet_element_complex, assemble_tet_element_complex_anisotropic,
 };
 pub use material::{Material, MaterialDatabase, MaterialPole};
 pub use open_boundary::{
