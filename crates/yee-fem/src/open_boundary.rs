@@ -170,7 +170,7 @@ use yee_mesh::TetMesh3D;
 
 use crate::assembly::FemEigenAssembly;
 use crate::element::{
-    LOCAL_EDGES, assemble_abc_face_block, assemble_port_face_block,
+    LOCAL_EDGES, assemble_abc_face_block, assemble_abc2_face_block, assemble_port_face_block,
     assemble_port_face_block_gauss_pts, assemble_port_face_rhs_gauss_pts, assemble_port_modal_rhs,
 };
 use crate::material::MaterialDatabase;
@@ -219,6 +219,37 @@ pub enum FaceKind {
     /// `+ j β B_port` block to the stiffness matrix and a per-face
     /// modal-current contribution to the RHS vector.
     WavePort(PortId),
+}
+
+/// Selects the Engquist–Majda ABC bilinear form on
+/// [`FaceKind::Abc`]-tagged exterior faces (Phase 4.fem.eig.3 step F4).
+///
+/// The default is [`AbcOrder::First`], which reproduces the
+/// Phase 4.fem.eig.2 v2 + CCCCCCCCC behaviour bit-for-bit: every ABC
+/// face contributes the 1st-order Mur block `+ j k₀ · (A / μ_r) · R_1`
+/// via [`crate::element::assemble_abc_face_block`]. The reflection
+/// floor for a TE plane wave at normal incidence is `~ −40 dB`
+/// (Jin §10.4, Table 10.1).
+///
+/// Selecting [`AbcOrder::Second`] augments the bilinear form with the
+/// tangential-curl correction `−(1 / (2 k₀)) · (A / μ_r) · R_2` from
+/// Engquist–Majda 1979 eq. 9, lowering the normal-incidence reflection
+/// floor to `~ −60 dB`. The 2nd-order block is computed by
+/// [`crate::element::assemble_abc2_face_block`]; the curl correction
+/// has a **real** scalar prefactor while the 1st-order part stays
+/// purely imaginary, so the composite block is complex-symmetric with
+/// non-trivial real *and* imaginary content.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum AbcOrder {
+    /// 1st-order Engquist–Majda absorbing boundary. The v0 / v2 default
+    /// — reproduces the shipped behaviour bit-for-bit. Reflection floor
+    /// `~ −40 dB` at normal incidence (Jin §10.4).
+    #[default]
+    First,
+    /// 2nd-order Engquist–Majda absorbing boundary. Adds the
+    /// tangential-curl correction term per Engquist–Majda 1979 eq. 9.
+    /// Reflection floor `~ −60 dB` at normal incidence (Jin §10.4).
+    Second,
 }
 
 /// Caller-supplied wave-port descriptor.
@@ -366,6 +397,11 @@ pub struct OpenBoundarySolver<'m> {
     /// CCCCCCCCC lumped-centroid behaviour bit-for-bit. Toggled by
     /// [`Self::with_coupled_whitney`].
     coupled_whitney: bool,
+    /// Selects the Engquist–Majda ABC bilinear form on
+    /// [`FaceKind::Abc`]-tagged faces (Phase 4.fem.eig.3 F4). Default
+    /// [`AbcOrder::First`] reproduces the v2 1st-order Mur behaviour
+    /// bit-for-bit. Toggled by [`Self::with_abc_order`].
+    abc_order: AbcOrder,
 }
 
 impl<'m> OpenBoundarySolver<'m> {
@@ -452,6 +488,7 @@ impl<'m> OpenBoundarySolver<'m> {
             exterior_faces,
             pec_global_edges,
             coupled_whitney: false,
+            abc_order: AbcOrder::First,
         })
     }
 
@@ -496,6 +533,34 @@ impl<'m> OpenBoundarySolver<'m> {
     /// Read-only borrow of the `coupled_whitney` flag.
     pub fn coupled_whitney(&self) -> bool {
         self.coupled_whitney
+    }
+
+    /// Set the Engquist–Majda ABC bilinear-form order on
+    /// [`FaceKind::Abc`]-tagged faces (Phase 4.fem.eig.3 F4).
+    ///
+    /// Default [`AbcOrder::First`] reproduces the v2 1st-order Mur
+    /// behaviour bit-for-bit — every ABC face contributes
+    /// [`crate::element::assemble_abc_face_block`] unchanged. Selecting
+    /// [`AbcOrder::Second`] augments each ABC face's stiffness block
+    /// with the tangential-curl correction term from Engquist–Majda
+    /// 1979 eq. 9 via [`crate::element::assemble_abc2_face_block`]; the
+    /// reflection floor for a TE plane wave at normal incidence drops
+    /// from `~ −40 dB` to `~ −60 dB` (Jin §10.4, Table 10.1).
+    ///
+    /// The 2nd-order correction has a real scalar prefactor while the
+    /// 1st-order part stays purely imaginary, so an `AbcOrder::Second`
+    /// face contributes both Re and Im entries to the driven matrix on
+    /// the face-edge rows/columns. The composite block is still
+    /// complex-symmetric (`B == B^T`); `faer::sparse::Lu<usize,
+    /// Complex64>` handles it unchanged from v2.
+    pub fn with_abc_order(mut self, order: AbcOrder) -> Self {
+        self.abc_order = order;
+        self
+    }
+
+    /// Read-only borrow of the `abc_order` configuration.
+    pub fn abc_order(&self) -> AbcOrder {
+        self.abc_order
     }
 
     /// Number of exterior faces classified by this solver. Equal to
@@ -1046,6 +1111,12 @@ impl<'m> OpenBoundarySolver<'m> {
     /// triplet list. PEC edges on the face are silently skipped — they
     /// are eliminated by the global row/column drop applied to `K(ω)`
     /// and `M(ω)` by [`FemEigenAssembly::assemble_complex`].
+    ///
+    /// Branches on [`Self::abc_order`]: [`AbcOrder::First`] (default)
+    /// calls [`crate::element::assemble_abc_face_block`] for v2
+    /// bit-for-bit behaviour; [`AbcOrder::Second`] calls
+    /// [`crate::element::assemble_abc2_face_block`] which adds the
+    /// Engquist–Majda 1979 eq. 9 tangential-curl correction term.
     fn scatter_abc_face(
         &self,
         face: &ExteriorFace,
@@ -1053,7 +1124,14 @@ impl<'m> OpenBoundarySolver<'m> {
         interior_dof_of_edge: &[Option<usize>],
         triplets: &mut Vec<Triplet<usize, usize, Complex64>>,
     ) {
-        let block = assemble_abc_face_block(face.world_vertices(self.mesh), face.normal, k0, 1.0);
+        let block = match self.abc_order {
+            AbcOrder::First => {
+                assemble_abc_face_block(face.world_vertices(self.mesh), face.normal, k0, 1.0)
+            }
+            AbcOrder::Second => {
+                assemble_abc2_face_block(face.world_vertices(self.mesh), face.normal, k0, 1.0)
+            }
+        };
         for i in 0..3 {
             let gi = face.global_edges[i];
             let Some(ii) = interior_dof_of_edge[gi] else {

@@ -877,6 +877,162 @@ pub fn assemble_port_face_rhs_gauss_pts(
     rhs
 }
 
+/// Assemble the per-face 2nd-order Engquist–Majda ABC contribution
+/// (Phase 4.fem.eig.3 step F3).
+///
+/// The 2nd-order Engquist–Majda radiation condition on a planar surface
+/// with outward normal `n̂` is (Engquist & Majda 1979, *IEEE Trans.
+/// Antennas Propag.* 27(5) p. 661, eq. 9; equivalent forms in Jin §10.4)
+///
+/// ```text
+///     n̂ × ∇×E   =   −j k₀ · n̂×(n̂×E)   +   (1/(2 j k₀)) · ∇_t × (∇_t × E_t).
+/// ```
+///
+/// Substituting into the curl-curl variational form, the bilinear form
+/// picks up **two** boundary terms per face — the 1st-order Mur term
+/// inherited from [`assemble_abc_face_block`] and a new tangential-curl
+/// correction (Jin §10.4 / Engquist–Majda 1979 eq. 9):
+///
+/// ```text
+///     a_ABC2(E, v)  =  + j k₀ · ∫_face (n̂×N_i)·(n̂×N_j) dS    ← 1st-order Mur
+///                      − (1/(2 k₀)) · ∫_face (∇_t×N_i)(∇_t×N_j) dS  ← 2nd-order correction
+/// ```
+///
+/// where `∇_t × N_i = n̂ · (∇ × N_i)` is the **scalar** tangential curl
+/// (the out-of-plane component of the 3D curl of the in-plane Whitney
+/// basis). For first-order Whitney-1 elements on a triangular face,
+/// `∇ × N_i = 2 ∇λ_a × ∇λ_b` is parallel to `n̂` (because the in-plane
+/// barycentric gradients `∇λ_a, ∇λ_b` both lie in the face plane and
+/// their cross product is normal to the plane), so the scalar
+/// tangential curl `∇_t × N_i = 2 n̂ · (∇λ_a × ∇λ_b)` is **constant per
+/// face**. The curl-correction surface integral is therefore exact and
+/// reduces to a rank-1 real-symmetric outer product. The returned
+/// `3 × 3` block is
+///
+/// ```text
+///     B[i][j]  =  + j · k₀ · (A / μ_r,face) · R_1[i][j]
+///                 − (1 / (2 k₀)) · (A / μ_r,face) · R_2[i][j],
+/// ```
+///
+/// where
+///
+/// ```text
+///     R_1[i][j]  =  (n̂ × t_i) · (n̂ × t_j),       t_i = v_{(i+1) mod 3} − v_i,
+///     R_2[i][j]  =  c_i · c_j,                    c_i = 2 · n̂ · (∇λ_a × ∇λ_b),
+///                                                 (a, b) = (i, (i+1) mod 3).
+/// ```
+///
+/// The 1st-order term `R_1` here is identical to the Gram form used by
+/// [`assemble_abc_face_block`] — the lumped Whitney-1 edge-tangent dual
+/// identity `N_i|_face = t_i` (Bossavit) is preserved on the 1st-order
+/// part so that `AbcOrder::First` and the imaginary part of
+/// `AbcOrder::Second` agree bit-for-bit when the 2nd-order term is
+/// dropped.
+///
+/// ## Note on the surface-curl reduction
+///
+/// The spec design document writes the 2nd-order Gram form as
+/// `(n̂ × ∇×N_i) · (n̂ × ∇×N_j)`; on a planar face `∇ × N_i` is parallel
+/// to `n̂`, so the literal `n̂ × ∇×N_i` term is zero. The correct
+/// physical reduction — the scalar surface curl `∇_t × N_i = n̂·(∇×N_i)`
+/// — yields the rank-1 outer product `R_2[i][j] = c_i · c_j` documented
+/// above. This is the form Engquist–Majda 1979 eq. 9 and Jin §10.4
+/// derive for first-order Whitney-1 face elements.
+///
+/// ## Sign / orientation convention
+///
+/// As with [`assemble_abc_face_block`] and the wave-port face helpers,
+/// the block is emitted in **canonical local-edge orientation** — each
+/// edge `i` runs from `face_vertices[i]` to
+/// `face_vertices[(i + 1) % 3]`. Local-to-global orientation flips are
+/// the assembly layer's job; this element-layer helper is a pure
+/// function of `(face_vertices, outward_normal, k0, mu_r_face)`.
+///
+/// ## Block symmetry
+///
+/// The block is **complex-symmetric** (`B == B^T`, NOT Hermitian): both
+/// `R_1` and `R_2` are real-symmetric Gram matrices, and the
+/// prefactors `j k₀ · A / μ_r` (imaginary) and `−A / (2 k₀ μ_r)` (real)
+/// are scalars. The composite has Im ≠ 0 (from `R_1`) and Re ≠ 0 (from
+/// `R_2`).
+///
+/// ## Frequency scaling
+///
+/// At high `k₀` the curl correction `−(1/(2 k₀)) R_2` is suppressed by a
+/// factor `1/k₀` relative to `+ j k₀ R_1`; at low `k₀` it diverges as
+/// `1/k₀`. The Engquist–Majda derivation is asymptotic for
+/// `k₀ ≫ k_grazing`; below cutoff the 1st-order ABC is the numerically
+/// stable choice (see spec §10 mitigation for the WR-90 band-edge
+/// behaviour).
+///
+/// ## References
+///
+/// * Engquist, B. and Majda, A., "Radiation boundary conditions for the
+///   numerical simulation of waves", *Math. Comp.* 31 (1977),
+///   pp. 629–651; and *IEEE Trans. Antennas Propag.* 27(5) (1979)
+///   p. 661, eq. 9 — the 2nd-order ABC derivation this helper
+///   implements.
+/// * Jin, J.-M., *The Finite Element Method in Electromagnetics*,
+///   3rd ed., Wiley 2014, §10.4 (1st- and 2nd-order ABC face
+///   contributions and reflection-floor tables).
+/// * Phase 4.fem.eig.3 spec
+///   `docs/superpowers/specs/2026-05-19-phase-4-fem-eig-3-design.md`
+///   §4.2 — the bilinear form this helper implements.
+pub fn assemble_abc2_face_block(
+    face_vertices: [Vector3<f64>; 3],
+    outward_normal: Vector3<f64>,
+    k0: f64,
+    mu_r_face: f64,
+) -> SMatrix<Complex64, 3, 3> {
+    // ---- 1st-order R_1 contribution. Re-use the 1st-order helper so
+    // the `AbcOrder::First` path and the imaginary part of `R_1` in the
+    // composite agree bit-for-bit. -----------------------------------
+    let abc1 = assemble_abc_face_block(face_vertices, outward_normal, k0, mu_r_face);
+
+    // ---- 2nd-order R_2 curl-correction contribution. --------------------
+    //
+    // Whitney-1 in-plane barycentric gradients ∇λ_a per face vertex —
+    // constant across the face. (a, b, c) cyclic in {0, 1, 2}.
+    let (grads, face_area) = face_barycentric_gradients_and_area(&face_vertices, outward_normal);
+
+    // Normalise the outward normal once for the (n̂ · ·) reduction below.
+    let n_norm = outward_normal.norm();
+    let n_hat = if n_norm > 0.0 {
+        outward_normal / n_norm
+    } else {
+        outward_normal
+    };
+
+    // Per-edge scalar surface-curl c_i = ∇_t × N_i = n̂ · (∇ × N_i)
+    //                                  = 2 · n̂ · (∇λ_a × ∇λ_b)
+    // with (a, b) = (i, (i + 1) mod 3). Constant per face because
+    // ∇λ_a, ∇λ_b are constant; the 3D curl `∇ × N_i = 2 ∇λ_a × ∇λ_b`
+    // is parallel to `n̂` on a planar face, so its scalar projection
+    // onto `n̂` carries the full information.
+    let mut c = [0.0_f64; 3];
+    for (i, slot) in c.iter_mut().enumerate() {
+        let a = i;
+        let b = (i + 1) % 3;
+        *slot = 2.0 * n_hat.dot(&grads[a].cross(&grads[b]));
+    }
+
+    // 2nd-order scalar prefactor: −(1 / (2 k₀)) · (A / μ_r,face). REAL.
+    // (Engquist–Majda 1979 eq. 9 — the curl term has a real prefactor;
+    // the composite block is complex-symmetric with Re from R_2 and Im
+    // from R_1.)
+    let curl_prefactor = -face_area / (2.0 * k0 * mu_r_face);
+
+    let mut block = abc1;
+    for i in 0..3 {
+        for j in 0..3 {
+            let r2_entry = c[i] * c[j];
+            block[(i, j)] += Complex64::new(curl_prefactor * r2_entry, 0.0);
+        }
+    }
+
+    block
+}
+
 /// Assemble the `6 × 6` Nedelec local stiffness + mass block for a
 /// single tetrahedron with scalar real `ε_r`, `μ_r`.
 ///
