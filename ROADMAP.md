@@ -69,6 +69,20 @@ Conventions used below:
   - R5: yee design CLI subcommand + 10 canonical prompts (Track AAAAAAAA merge `08cec1b`)
   - R6: nl-001 production gate — schema+round-trip+offline sub-gates A+B+C all 10 prompts (Track CCCCCCCC merge `417978e`)
   - R7: mdBook tutorial `docs/src/tutorials/04-nl-design-surface.md` (Track EEEEEEEE merge `5016fda`)
+- Phase 4.fem.eig.1 dispersive ε_r(ω) FEM eigensolver, D1-D7 shipped:
+  - design spec + plan + ADR-0039 (Track FFFFFFFF merge `10d91d7`)
+  - D1+D2: complex tet element + Complex64 inverse-iter (Track HHHHHHHH merge `cfd3e49`)
+  - D3: MaterialDatabase (Drude/Lorentz/Debye ε(ω)) (Track JJJJJJJJ merge `7e15ed2`)
+  - D4: DispersiveSolver::solve_at_frequency (Track NNNNNNNN merge `90bc337`)
+  - D5: Newton-Raphson ω-tracker (Track OOOOOOOO merge `1480a51`)
+  - D7: yee.fem.solve_cavity_dispersive Python binding (Track RRRRRRRR merge `214075b`)
+  - D6 production gate fem-eig-002 lossy SiO₂ cavity — Track QQQQQQQQ in flight
+- Track WWWWWWW TEM-mode smoothed RHS port: mom-002 |Z_in| 674 Ω → 3.46 Ω, Maxwell-envelope deviation 580% → 70% (merge `a08f0db`)
+- Track GGGGGGGG WavePort::rhs Numerical2D arm wired (Phase 1.3.1.1 step 7, 1% L2 vs analytic TE10; merge `3b115fa`)
+- Track IIIIIIII mom-003 re-run through Sommerfeld + TEM port: CaseStatus::Passed within loose-tolerance band, |Z_in| = 13.4 Ω (merge `3b115fa`)
+- Track MMMMMMMM yee-fdtd per-cell ε_r/μ_r + PEC mask infrastructure (merge `cb6f8ed`)
+- Track PPPPPPPP CPML reads per-cell ε_r/μ_r (lifts MMMMMMMM workaround; reflection floor 69.33 dB preserved; merge `c57592f`)
+- Track LLLLLLLL fdtd-007 Maloney-Smith driver+gates committed `#[ignore]`'d pending fdtd infra (3 blockers documented; merge `30b2d2c`)
 - mom-002 root-cause chain end-to-end (10 forensic tracks + 3 kernel fixes + 3 ADRs):
   - EEEEEE prefactor / JJJJJJ extent / PPPPPP GPOF / SSSSSS contour / TTTTTT residue sign / XXXXXX ψ_p / YYYYYY MPIE / CCCCCCC port-mesh / MMMMMMM ε_eff / NNNNNNN R1 retract / DDDDDDD DCIM-TM / TTTTTTT port spatial / QQQQQQQ β eigen (kernel exonerated at 1.83% from HJ)
   - ADR-0036 mom-002 validation reframe (sub-wavelength strip)
