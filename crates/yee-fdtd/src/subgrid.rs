@@ -34,6 +34,7 @@
 
 use ndarray::{Array2, Array3};
 use yee_core::Error;
+use yee_core::units::{EPS0, MU0};
 
 use crate::FdtdSolver;
 use crate::WalkingSkeletonSolver;
@@ -986,6 +987,17 @@ impl SubgridRegion {
     /// pre-Q4.1 behaviour, preserved so the Q4 unit tests
     /// (which only exercise the spatial average) keep working without
     /// having to fake a snapshot.
+    ///
+    /// **Phase 2.fdtd.7.x B2 status — retired from the step pipeline.**
+    /// [`SubgriddedSolver::step`] no longer calls this method; the
+    /// fine → coarse coupling is now done by
+    /// [`Self::inject_equivalent_currents_to_coarse`] (Berenger 2006
+    /// equivalent-current re-radiation). This method is retained
+    /// `#[doc(hidden)]` for posterity per ADR-0035 — see
+    /// `docs/src/decisions/0035-berenger-huygens-subgridding.md`. The
+    /// existing Q4 unit tests pin its bit-for-bit behaviour; do not
+    /// modify them without a spec amendment.
+    #[doc(hidden)]
     pub fn average_fine_h_to_coarse(&self, parent: &mut YeeGrid) {
         let lo = self.lo;
         let hi = self.hi;
@@ -1043,6 +1055,15 @@ impl SubgridRegion {
     /// normal direction), so the affected coarse indices are the boundary
     /// nodes `i ∈ {lo.0, hi.0}`, `j ∈ {lo.1, hi.1}`, `k ∈ {lo.2, hi.2}`
     /// for each respective face.
+    ///
+    /// **Phase 2.fdtd.7.x B2 status — retired from the step pipeline.**
+    /// [`SubgriddedSolver::step`] no longer calls this method; the
+    /// fine → coarse coupling is now done by
+    /// [`Self::inject_equivalent_currents_to_coarse`] (Berenger 2006
+    /// equivalent-current re-radiation). Retained `#[doc(hidden)]` for
+    /// posterity per ADR-0035 — see
+    /// `docs/src/decisions/0035-berenger-huygens-subgridding.md`.
+    #[doc(hidden)]
     pub fn overwrite_coarse_e_from_fine(&self, parent: &mut YeeGrid) {
         let lo = self.lo;
         let hi = self.hi;
@@ -1363,24 +1384,479 @@ impl SubgridRegion {
     ///
     /// One-directional, post-coarse-update closure: the fine grid's
     /// storage is read only; the coarse grid's `E` and `H` arrays are
-    /// mutated in-place at the Huygens surface only. Concretely the
-    /// final pipeline (Step B2) will add
-    /// `E_coarse += (dt / ε₀) · J_S` and `H_coarse += (dt / μ₀) · M_S`
-    /// on the coarse cells enumerated by [`Self::face_index_table`].
+    /// mutated in-place at the Huygens surface only.
     ///
-    /// **Phase 2.fdtd.7.x B1 status — stub.** This call is currently a
-    /// no-op; the per-face surface-current accumulation lands in B2
-    /// (see `docs/superpowers/plans/2026-05-19-phase-2-fdtd-7-x-berenger-huygens.md`).
-    /// B1 ships only the API surface, the face enumeration
-    /// ([`Self::face_index_table`]), and the lower-axis-wins
-    /// edge-ownership rule ([`assign_edge_to_face`]) so downstream
-    /// integration tests can be written against a stable signature.
+    /// ## Time centering
+    ///
+    /// - The `J = +n̂ × H_tot` source is sampled at fine wall-clock time
+    ///   `t = n + 1/2` by averaging the Q4.1 mid-step snapshot
+    ///   ([`Self::snapshot_fine_h_mid_step`], taken at `t = n + 1/4`)
+    ///   with the current fine `H` (at `t = n + 3/4` after sub-step 2);
+    ///   absent a snapshot the closure falls back to the single-sample
+    ///   current fine `H` (the bit-exact-fresh-construction behaviour
+    ///   that keeps the B1 no-op pin valid on a zero-field fine grid).
+    /// - The `M = -n̂ × E_tot` source is sampled at `t = n + 1` from the
+    ///   post-`update_fine_e` outer-layer fine `E_t` (sub-step 2's
+    ///   final `update_fine_e`).
+    ///
+    /// ## TF/SF convention (sign discipline)
+    ///
+    /// Following spec §3.1: the fine box's coarse-cell footprint is
+    /// the **scattered-field** (SF) side; everything strictly outside
+    /// is **total-field** (TF). The six Huygens faces sit at the SF/TF
+    /// boundary. The per-face corrections are the equivalent-current
+    /// counterpart of the existing TF/SF plane-wave injection
+    /// (`crates/yee-fdtd/src/sources.rs`) with the SF and TF roles
+    /// inverted — see the per-face derivation in
+    /// `docs/superpowers/specs/2026-05-19-phase-2-fdtd-7-x-berenger-huygens-design.md`
+    /// §3 and ADR-0035.
+    ///
+    /// Concretely the additions per face are
+    ///
+    /// ```text
+    /// E_t_coarse += s · (-dt / (ε₀·ε_r·dx_n)) · H_t_fine_just_inside    (J term)
+    /// H_t_coarse += s · (-dt / (μ₀·μ_r·dx_n)) · E_t_fine_on_surface     (M term)
+    /// ```
+    ///
+    /// where `dx_n` is the coarse cell size normal to the face and the
+    /// per-component sign `s` comes from the `n̂ × ·` cross product
+    /// (see implementation per-face sign table in the source body).
+    /// The global `-1` factor on `coeff_e` / `coeff_h` encodes the
+    /// inverted-TF/SF convention: standard TF/SF (TF inside) subtracts
+    /// an `H_inc` / `E_inc` excess from an SF stencil reading a TF
+    /// neighbour; Berenger inverts the role of the SF and TF sides,
+    /// which flips the correction sign relative to the natural "add
+    /// J·dt/ε" form.
+    ///
+    /// The cuboid-edge cells (where two adjacent faces meet) are
+    /// assigned to a single owning face under the lower-numbered-axis
+    /// wins rule ([`assign_edge_to_face`]). Concretely the tangential
+    /// index range on each face is half-open on the higher-axis edges:
+    /// `±x` faces use the full `[lo.1, hi.1)` × `[lo.2, hi.2)` extent
+    /// (X axis is lowest, wins every shared edge); `±y` faces use
+    /// `[lo.0, hi.0)` for the X tangent (no contribution at the X-edge
+    /// because X already owns it) but the full `[lo.2, hi.2)` for the Z
+    /// tangent; `±z` faces use `[lo.0, hi.0)` × `[lo.1, hi.1)`
+    /// (everything is owned by X or Y). This convention is what the B1
+    /// `cuboid_edge_owned_by_one_face_only` unit test (sibling to
+    /// `assign_edge_to_face`) verifies independently.
     ///
     /// Spec: `docs/superpowers/specs/2026-05-19-phase-2-fdtd-7-x-berenger-huygens-design.md`.
     /// ADR: `docs/src/decisions/0035-berenger-huygens-subgridding.md`.
-    pub fn inject_equivalent_currents_to_coarse(&self, _parent: &mut YeeGrid) {
-        // Phase 2.fdtd.7.x B1: no-op stub. The per-face accumulation
-        // of (J, M) onto the coarse (E, H) arrays is wired in B2.
+    pub fn inject_equivalent_currents_to_coarse(&self, parent: &mut YeeGrid) {
+        let lo = self.lo;
+        let hi = self.hi;
+        let fine_nx = 2 * (hi.0 - lo.0);
+        let fine_ny = 2 * (hi.1 - lo.1);
+        let fine_nz = 2 * (hi.2 - lo.2);
+
+        // Time-center fine H against the mid-step snapshot if one was
+        // taken: `(H_f^{n+1/4} + H_f^{n+3/4}) / 2 = H_f^{n+1/2}`. Absent
+        // a snapshot, fall through to the current fine H. The B1 no-op
+        // pin relies on the fresh-construction path: a freshly allocated
+        // SubgridRegion has zero fields everywhere and no snapshot, so
+        // J = +n̂ × 0 = 0 and M = -n̂ × 0 = 0 — the injection is the
+        // identity on the parent grid as the B1 test requires.
+        let snap = self.fine_h_snapshot.as_ref();
+        let hx_t = match snap {
+            Some(s) => Self::time_avg(&self.fine.hx, &s.hx),
+            None => self.fine.hx.clone(),
+        };
+        let hy_t = match snap {
+            Some(s) => Self::time_avg(&self.fine.hy, &s.hy),
+            None => self.fine.hy.clone(),
+        };
+        let hz_t = match snap {
+            Some(s) => Self::time_avg(&self.fine.hz, &s.hz),
+            None => self.fine.hz.clone(),
+        };
+
+        // Coefficient signs: the inverted TF/SF convention (SF inside the
+        // fine box footprint, TF outside) flips both the J → E and the
+        // M → H contributions relative to the natural "add J·dt/ε" /
+        // "add M·dt/μ" forms — the standard TF/SF accumulation in
+        // `sources.rs` subtracts an excess `H_inc` / `E_inc` baked into
+        // the SF stencil reading a TF neighbour, and the Berenger
+        // counterpart flips the role of SF and TF, which net-flips the
+        // sign once more. Both effects compose to the global `-1`
+        // pre-factor below; the per-face sign tables in
+        // [`Self::inject_x_face`] / `inject_y_face` / `inject_z_face`
+        // multiply by the outward-normal sign on top.
+        let coeff_e = -parent.dt / (EPS0 * parent.eps_r);
+        let coeff_h = -parent.dt / (MU0 * parent.mu_r);
+
+        // ±x faces (normal = ±x̂). `fine_i_h` is the fine cell-centered
+        // x-index of the fine H_y / H_z layer adjacent to the Huygens
+        // surface from the SF (fine-interior) side. For the +x face
+        // that's `fine_i = fine_nx - 1`; for the −x face `fine_i = 0`.
+        // `fine_i_e` is the fine x-node index of the surface plane
+        // (where fine E_y / E_z live).
+        Self::inject_x_face(
+            parent,
+            lo,
+            hi,
+            &self.fine,
+            &hy_t,
+            &hz_t,
+            1.0,
+            hi.0,
+            hi.0 - 1,
+            fine_nx - 1,
+            fine_nx,
+            coeff_e,
+            coeff_h,
+        );
+        Self::inject_x_face(
+            parent, lo, hi, &self.fine, &hy_t, &hz_t, -1.0, lo.0, lo.0, 0, 0, coeff_e, coeff_h,
+        );
+
+        // ±y faces.
+        Self::inject_y_face(
+            parent,
+            lo,
+            hi,
+            &self.fine,
+            &hx_t,
+            &hz_t,
+            1.0,
+            hi.1,
+            hi.1 - 1,
+            fine_ny - 1,
+            fine_ny,
+            coeff_e,
+            coeff_h,
+        );
+        Self::inject_y_face(
+            parent, lo, hi, &self.fine, &hx_t, &hz_t, -1.0, lo.1, lo.1, 0, 0, coeff_e, coeff_h,
+        );
+
+        // ±z faces.
+        Self::inject_z_face(
+            parent,
+            lo,
+            hi,
+            &self.fine,
+            &hx_t,
+            &hy_t,
+            1.0,
+            hi.2,
+            hi.2 - 1,
+            fine_nz - 1,
+            fine_nz,
+            coeff_e,
+            coeff_h,
+        );
+        Self::inject_z_face(
+            parent, lo, hi, &self.fine, &hx_t, &hy_t, -1.0, lo.2, lo.2, 0, 0, coeff_e, coeff_h,
+        );
+    }
+
+    /// Inject the equivalent-current corrections on one `±x` Huygens
+    /// face. `sign = +1.0` for the `+x` face (outward `+x̂`), `-1.0`
+    /// for the `-x` face. `i_c_surface` is the coarse `i` index of
+    /// the surface plane (where coarse `E_y`, `E_z` live); `i_c_inside_h`
+    /// is the coarse `i` index of the coarse `H_y`, `H_z` layer just
+    /// **inside** the fine box (SF storage). `fine_i_h` is the fine-x
+    /// cell-centered index of the fine `H_y`, `H_z` layer adjacent to
+    /// the surface (SF side); `fine_i_e` is the fine-x node index of
+    /// the surface plane (where fine `E_y`, `E_z` live).
+    ///
+    /// The four signs per face come from `J = sign · x̂ × H` and
+    /// `M = -sign · x̂ × E`:
+    ///
+    /// ```text
+    /// J_y = -sign · H_z        ⇒ E_y += +sign · (dt/(ε·dx)) · H_z_fine
+    /// J_z = +sign · H_y        ⇒ E_z += -sign · (dt/(ε·dx)) · H_y_fine
+    /// M_y = +sign · E_z        ⇒ H_y += -sign · (dt/(μ·dx)) · E_z_fine
+    /// M_z = -sign · E_y        ⇒ H_z += +sign · (dt/(μ·dx)) · E_y_fine
+    /// ```
+    ///
+    /// (Sign of the E-equation contribution: `ε ∂E/∂t = ∇×H - J_s`,
+    /// surface delta integrated over a coarse cell gives `J_s/dx_n`
+    /// as the effective volumetric current, hence `E_t += -dt/ε ·
+    /// J_t/dx`.)
+    ///
+    /// Spatial averaging: each coarse face cell `(i_c_*, j_c, k_c)`
+    /// receives the arithmetic mean of the two fine `H_y` (or `H_z`)
+    /// cells covering it along the tangential half-cell — analogous
+    /// to [`Self::avg_face_x`]. The fine `E_y`, `E_z` are averaged
+    /// over two fine edges per coarse edge — analogous to
+    /// [`Self::overwrite_face_x`].
+    #[allow(clippy::too_many_arguments)]
+    fn inject_x_face(
+        parent: &mut YeeGrid,
+        lo: (usize, usize, usize),
+        hi: (usize, usize, usize),
+        fine: &YeeGrid,
+        fine_hy_t: &Array3<f64>,
+        fine_hz_t: &Array3<f64>,
+        sign: f64,
+        i_c_surface: usize,
+        i_c_inside_h: usize,
+        fine_i_h: usize,
+        fine_i_e: usize,
+        coeff_e: f64,
+        coeff_h: f64,
+    ) {
+        let dx = parent.dx;
+        let ce = coeff_e / dx;
+        let ch = coeff_h / dx;
+
+        // -------- J term: write to E_y, E_z on the surface plane. --------
+
+        // E_y on the surface: coarse ey[(i_c_surface, j_c, k_c)],
+        // j_c ∈ [lo.1, hi.1), k_c ∈ [lo.2, hi.2].
+        // Source: H_z at fine cell-centered x = fine_i_h, averaged in
+        // the tangential half-cell direction. Fine H_z lives on faces
+        // normal to z → shape [fine_nx, fine_ny, fine_nz+1], staggered
+        // half-cell in (x, y), integer in z (cell-centered in x, in y).
+        // Wait — H_z has shape [nx, ny, nz+1]: cell-centered (i, j),
+        // node (k). For a coarse cell (j_c, k_c) at the surface:
+        //   coarse E_y edge: j_c (cell-centered y), k_c (node z).
+        //   fine H_z to map: fine_i = fine_i_h, fine_j ∈ {2·(j_c-lo.1),
+        //     2·(j_c-lo.1)+1}, fine_k_node = 2·(k_c-lo.2).
+        // Average 2 fine H_z values per coarse E_y position.
+        for j_c in lo.1..hi.1 {
+            let j_f0 = 2 * (j_c - lo.1);
+            for k_c in lo.2..=hi.2 {
+                let k_f = 2 * (k_c - lo.2);
+                let hz_avg =
+                    0.5 * (fine_hz_t[(fine_i_h, j_f0, k_f)] + fine_hz_t[(fine_i_h, j_f0 + 1, k_f)]);
+                parent.ey[(i_c_surface, j_c, k_c)] += sign * ce * hz_avg;
+            }
+        }
+
+        // E_z on the surface: coarse ez[(i_c_surface, j_c, k_c)],
+        // j_c ∈ [lo.1, hi.1], k_c ∈ [lo.2, hi.2).
+        // Source: H_y at fine cell-centered x = fine_i_h, shape
+        // [nx, ny+1, nz]. Fine H_y: cell-centered (i, k), node (j).
+        // For a coarse E_z edge at (j_c, k_c):
+        //   fine_j_node = 2·(j_c - lo.1), fine_k ∈ {2·(k_c-lo.2),
+        //     2·(k_c-lo.2)+1}.
+        for j_c in lo.1..=hi.1 {
+            let j_f = 2 * (j_c - lo.1);
+            for k_c in lo.2..hi.2 {
+                let k_f0 = 2 * (k_c - lo.2);
+                let hy_avg =
+                    0.5 * (fine_hy_t[(fine_i_h, j_f, k_f0)] + fine_hy_t[(fine_i_h, j_f, k_f0 + 1)]);
+                parent.ez[(i_c_surface, j_c, k_c)] -= sign * ce * hy_avg;
+            }
+        }
+
+        // -------- M term: write to H_y, H_z on the layer just inside. --------
+
+        // H_y on the layer: coarse hy[(i_c_inside_h, j_c, k_c)],
+        // j_c ∈ [lo.1, hi.1], k_c ∈ [lo.2, hi.2).
+        // Source: E_z on the surface (fine_i = fine_i_e), shape of fine
+        // ez is [nx+1, ny+1, nz]. For a coarse H_y at (j_c, k_c):
+        //   fine_j_node = 2·(j_c-lo.1), fine_k ∈ {2·(k_c-lo.2),
+        //     2·(k_c-lo.2)+1}.
+        for j_c in lo.1..=hi.1 {
+            let j_f = 2 * (j_c - lo.1);
+            for k_c in lo.2..hi.2 {
+                let k_f0 = 2 * (k_c - lo.2);
+                let ez_avg =
+                    0.5 * (fine.ez[(fine_i_e, j_f, k_f0)] + fine.ez[(fine_i_e, j_f, k_f0 + 1)]);
+                parent.hy[(i_c_inside_h, j_c, k_c)] -= sign * ch * ez_avg;
+            }
+        }
+
+        // H_z on the layer: coarse hz[(i_c_inside_h, j_c, k_c)],
+        // j_c ∈ [lo.1, hi.1), k_c ∈ [lo.2, hi.2].
+        // Source: E_y on the surface (fine_i = fine_i_e), shape of fine
+        // ey is [nx+1, ny, nz+1]. For a coarse H_z at (j_c, k_c):
+        //   fine_j ∈ {2·(j_c-lo.1), 2·(j_c-lo.1)+1}, fine_k_node =
+        //   2·(k_c-lo.2).
+        for j_c in lo.1..hi.1 {
+            let j_f0 = 2 * (j_c - lo.1);
+            for k_c in lo.2..=hi.2 {
+                let k_f = 2 * (k_c - lo.2);
+                let ey_avg =
+                    0.5 * (fine.ey[(fine_i_e, j_f0, k_f)] + fine.ey[(fine_i_e, j_f0 + 1, k_f)]);
+                parent.hz[(i_c_inside_h, j_c, k_c)] += sign * ch * ey_avg;
+            }
+        }
+    }
+
+    /// Inject corrections on one `±y` face. Mirror of
+    /// [`Self::inject_x_face`] with cyclic axis permutation
+    /// `(x, y, z) → (y, z, x)`:
+    ///
+    /// ```text
+    /// J_z = -sign · H_x        ⇒ E_z += +sign · (dt/(ε·dy)) · H_x_fine
+    /// J_x = +sign · H_z        ⇒ E_x += -sign · (dt/(ε·dy)) · H_z_fine
+    /// M_z = +sign · E_x        ⇒ H_z += -sign · (dt/(μ·dy)) · E_x_fine
+    /// M_x = -sign · E_z        ⇒ H_x += +sign · (dt/(μ·dy)) · E_z_fine
+    /// ```
+    ///
+    /// (Same derivation: `J = sign · ŷ × H = sign · (Hz, 0, -Hx)`,
+    /// `M = -sign · ŷ × E = -sign · (Ez, 0, -Ex)`.)
+    #[allow(clippy::too_many_arguments)]
+    fn inject_y_face(
+        parent: &mut YeeGrid,
+        lo: (usize, usize, usize),
+        hi: (usize, usize, usize),
+        fine: &YeeGrid,
+        fine_hx_t: &Array3<f64>,
+        fine_hz_t: &Array3<f64>,
+        sign: f64,
+        j_c_surface: usize,
+        j_c_inside_h: usize,
+        fine_j_h: usize,
+        fine_j_e: usize,
+        coeff_e: f64,
+        coeff_h: f64,
+    ) {
+        let dy = parent.dy;
+        let ce = coeff_e / dy;
+        let ch = coeff_h / dy;
+
+        // -------- J term: write to E_x, E_z on the surface plane. --------
+
+        // E_z on the surface: coarse ez[(i_c, j_c_surface, k_c)],
+        // i_c ∈ [lo.0, hi.0], k_c ∈ [lo.2, hi.2). (Cuboid edges at
+        // i = lo.0 and i = hi.0 are owned by ±x faces — but the
+        // surface E_z[(lo.0, j_c_surface, k_c)] / E_z[(hi.0, ...)] is
+        // a different array cell than the ±x face's targets, so no
+        // double-count. We use the full range here.)
+        for i_c in lo.0..=hi.0 {
+            let i_f = 2 * (i_c - lo.0);
+            for k_c in lo.2..hi.2 {
+                let k_f0 = 2 * (k_c - lo.2);
+                let hx_avg =
+                    0.5 * (fine_hx_t[(i_f, fine_j_h, k_f0)] + fine_hx_t[(i_f, fine_j_h, k_f0 + 1)]);
+                parent.ez[(i_c, j_c_surface, k_c)] += sign * ce * hx_avg;
+            }
+        }
+
+        // E_x on the surface: coarse ex[(i_c, j_c_surface, k_c)],
+        // i_c ∈ [lo.0, hi.0), k_c ∈ [lo.2, hi.2].
+        for i_c in lo.0..hi.0 {
+            let i_f0 = 2 * (i_c - lo.0);
+            for k_c in lo.2..=hi.2 {
+                let k_f = 2 * (k_c - lo.2);
+                let hz_avg =
+                    0.5 * (fine_hz_t[(i_f0, fine_j_h, k_f)] + fine_hz_t[(i_f0 + 1, fine_j_h, k_f)]);
+                parent.ex[(i_c, j_c_surface, k_c)] -= sign * ce * hz_avg;
+            }
+        }
+
+        // -------- M term: write to H_z, H_x on the layer just inside. --------
+
+        // H_z on the layer: coarse hz[(i_c, j_c_inside_h, k_c)],
+        // i_c ∈ [lo.0, hi.0), k_c ∈ [lo.2, hi.2].
+        // Source: E_x on the surface (fine_j = fine_j_e).
+        // fine ex shape: [nx, ny+1, nz+1].
+        for i_c in lo.0..hi.0 {
+            let i_f0 = 2 * (i_c - lo.0);
+            for k_c in lo.2..=hi.2 {
+                let k_f = 2 * (k_c - lo.2);
+                let ex_avg =
+                    0.5 * (fine.ex[(i_f0, fine_j_e, k_f)] + fine.ex[(i_f0 + 1, fine_j_e, k_f)]);
+                parent.hz[(i_c, j_c_inside_h, k_c)] -= sign * ch * ex_avg;
+            }
+        }
+
+        // H_x on the layer: coarse hx[(i_c, j_c_inside_h, k_c)],
+        // i_c ∈ [lo.0, hi.0], k_c ∈ [lo.2, hi.2).
+        // Source: E_z on the surface (fine_j = fine_j_e).
+        for i_c in lo.0..=hi.0 {
+            let i_f = 2 * (i_c - lo.0);
+            for k_c in lo.2..hi.2 {
+                let k_f0 = 2 * (k_c - lo.2);
+                let ez_avg =
+                    0.5 * (fine.ez[(i_f, fine_j_e, k_f0)] + fine.ez[(i_f, fine_j_e, k_f0 + 1)]);
+                parent.hx[(i_c, j_c_inside_h, k_c)] += sign * ch * ez_avg;
+            }
+        }
+    }
+
+    /// Inject corrections on one `±z` face. Mirror of
+    /// [`Self::inject_x_face`] with cyclic axis permutation
+    /// `(x, y, z) → (z, x, y)`:
+    ///
+    /// ```text
+    /// J_x = -sign · H_y        ⇒ E_x += +sign · (dt/(ε·dz)) · H_y_fine
+    /// J_y = +sign · H_x        ⇒ E_y += -sign · (dt/(ε·dz)) · H_x_fine
+    /// M_x = +sign · E_y        ⇒ H_x += -sign · (dt/(μ·dz)) · E_y_fine
+    /// M_y = -sign · E_x        ⇒ H_y += +sign · (dt/(μ·dz)) · E_x_fine
+    /// ```
+    ///
+    /// (`J = sign · ẑ × H = sign · (-Hy, Hx, 0)`,
+    /// `M = -sign · ẑ × E = -sign · (-Ey, Ex, 0)`.)
+    #[allow(clippy::too_many_arguments)]
+    fn inject_z_face(
+        parent: &mut YeeGrid,
+        lo: (usize, usize, usize),
+        hi: (usize, usize, usize),
+        fine: &YeeGrid,
+        fine_hx_t: &Array3<f64>,
+        fine_hy_t: &Array3<f64>,
+        sign: f64,
+        k_c_surface: usize,
+        k_c_inside_h: usize,
+        fine_k_h: usize,
+        fine_k_e: usize,
+        coeff_e: f64,
+        coeff_h: f64,
+    ) {
+        let dz = parent.dz;
+        let ce = coeff_e / dz;
+        let ch = coeff_h / dz;
+
+        // -------- J term: write to E_x, E_y on the surface plane. --------
+
+        // E_x on the surface: coarse ex[(i_c, j_c, k_c_surface)],
+        // i_c ∈ [lo.0, hi.0), j_c ∈ [lo.1, hi.1].
+        for i_c in lo.0..hi.0 {
+            let i_f0 = 2 * (i_c - lo.0);
+            for j_c in lo.1..=hi.1 {
+                let j_f = 2 * (j_c - lo.1);
+                let hy_avg =
+                    0.5 * (fine_hy_t[(i_f0, j_f, fine_k_h)] + fine_hy_t[(i_f0 + 1, j_f, fine_k_h)]);
+                parent.ex[(i_c, j_c, k_c_surface)] += sign * ce * hy_avg;
+            }
+        }
+
+        // E_y on the surface: coarse ey[(i_c, j_c, k_c_surface)],
+        // i_c ∈ [lo.0, hi.0], j_c ∈ [lo.1, hi.1).
+        for i_c in lo.0..=hi.0 {
+            let i_f = 2 * (i_c - lo.0);
+            for j_c in lo.1..hi.1 {
+                let j_f0 = 2 * (j_c - lo.1);
+                let hx_avg =
+                    0.5 * (fine_hx_t[(i_f, j_f0, fine_k_h)] + fine_hx_t[(i_f, j_f0 + 1, fine_k_h)]);
+                parent.ey[(i_c, j_c, k_c_surface)] -= sign * ce * hx_avg;
+            }
+        }
+
+        // -------- M term: write to H_x, H_y on the layer just inside. --------
+
+        // H_x on the layer: coarse hx[(i_c, j_c, k_c_inside_h)],
+        // i_c ∈ [lo.0, hi.0], j_c ∈ [lo.1, hi.1).
+        // Source: E_y on the surface (fine_k = fine_k_e).
+        for i_c in lo.0..=hi.0 {
+            let i_f = 2 * (i_c - lo.0);
+            for j_c in lo.1..hi.1 {
+                let j_f0 = 2 * (j_c - lo.1);
+                let ey_avg =
+                    0.5 * (fine.ey[(i_f, j_f0, fine_k_e)] + fine.ey[(i_f, j_f0 + 1, fine_k_e)]);
+                parent.hx[(i_c, j_c, k_c_inside_h)] -= sign * ch * ey_avg;
+            }
+        }
+
+        // H_y on the layer: coarse hy[(i_c, j_c, k_c_inside_h)],
+        // i_c ∈ [lo.0, hi.0), j_c ∈ [lo.1, hi.1].
+        // Source: E_x on the surface (fine_k = fine_k_e).
+        for i_c in lo.0..hi.0 {
+            let i_f0 = 2 * (i_c - lo.0);
+            for j_c in lo.1..=hi.1 {
+                let j_f = 2 * (j_c - lo.1);
+                let ex_avg =
+                    0.5 * (fine.ex[(i_f0, j_f, fine_k_e)] + fine.ex[(i_f0 + 1, j_f, fine_k_e)]);
+                parent.hy[(i_c, j_c, k_c_inside_h)] += sign * ch * ex_avg;
+            }
+        }
     }
 
     /// Enumerate the coarse-cell `(i, j, k)` triples on each of the six
@@ -1510,26 +1986,37 @@ impl SubgriddedSolver {
 
     /// Advance the simulation by one coarse step.
     ///
-    /// Implements the seven-stage spec §3 time-step sequence:
+    /// Phase 2.fdtd.7.x B2 — Berenger 2006 Huygens-surface closure
+    /// (`docs/src/decisions/0035-berenger-huygens-subgridding.md`).
+    ///
+    /// The step is composed of the Q1 per-stage helpers in the
+    /// following order:
     ///
     /// 1. Coarse `update_h_only`.
     /// 2. Coarse `apply_cpml_h` (no-op outside any configured CPML face).
     /// 3. Snapshot the coarse `E_t` on the six interface faces (start).
     /// 4. Fine sub-step `k = 1`: interpolate coarse `E_t` at `frac = 0.25`
-    ///    onto the fine boundary, `update_fine_h`, **snapshot fine H** at
-    ///    `t = n + 1/4` for the Q4.1 time-centered fine → coarse H
-    ///    closure, then `update_fine_e`.
+    ///    onto the fine boundary, `update_fine_h`, **snapshot fine H**
+    ///    (Q4.1; supplies the time-centered `H_tot` for the
+    ///    `J = +n̂ × H` source), then `update_fine_e`.
     /// 5. Coarse `update_e_only`, then `apply_cpml_e`.
     /// 6. Snapshot the coarse `E_t` again (end-of-coarse-step) so the
     ///    second fine sub-step blends against the post-E-update parent.
-    /// 7. Fine sub-step `k = 2`: interpolate at `frac = 0.75`, then bulk
-    ///    `update_h` and `update_e` on the fine grid.
-    /// 8. Average the fine `H_t` onto the coarse interface layer
-    ///    (`average_fine_h_to_coarse`, time-centered against the stage-4
-    ///    snapshot) and overwrite the coarse `E_t` on the interface
-    ///    planes (`overwrite_coarse_e_from_fine`) — Chevalier 1997 §IV
-    ///    closure of the discrete energy balance.
+    /// 7. Fine sub-step `k = 2`: interpolate at `frac = 0.75`, bulk
+    ///    `update_fine_h`, `update_fine_e`.
+    /// 8. **Berenger fine → coarse closure** —
+    ///    [`SubgridRegion::inject_equivalent_currents_to_coarse`] injects
+    ///    equivalent surface currents `J = +n̂ × H_tot`,
+    ///    `M = -n̂ × E_tot` from the fine subdomain onto the coarse
+    ///    grid's `E_t`, `H_t` arrays at the six Huygens faces. The
+    ///    fine grid's storage is read only; the coarse grid's storage
+    ///    is mutated only on the interface plane (TF/SF accumulation).
     /// 9. Advance the coarse clock by one `dt_coarse`.
+    ///
+    /// Replaces the prior spec `2026-05-18` §3 stage-6 / 7
+    /// `average_fine_h_to_coarse` + `overwrite_coarse_e_from_fine`
+    /// bidirectional direct-copy closure (diagnosed energy-balance
+    /// unstable late-time by Track VVVVVV in commit `72c825c`).
     ///
     /// When no [`SubgridRegion`] is attached this collapses to the
     /// bare `WalkingSkeletonSolver` helper sequence, matching
@@ -1544,18 +2031,6 @@ impl SubgriddedSolver {
             return;
         };
 
-        // Per the brief, the two fine sub-steps bracket the coarse
-        // E-update with frac = 0.25 / 0.75 against the start/end
-        // snapshots. The start snapshot is taken at t = n (after the
-        // coarse H-half-step but before the coarse E-half-step) and the
-        // end snapshot at t = n + 1 (after the coarse E-half-step). On
-        // the first sub-step the not-yet-written end buffer carries the
-        // previous coarse interval's end value, which by construction
-        // equals the current start value — so the 0.25 blend collapses
-        // to the start value, leaving the fine sub-step momentarily
-        // first-order in time at the boundary while sub-step 2 recovers
-        // second order. See spec §3.
-
         // 1–2. Coarse H half-step and outer-boundary closure.
         self.inner.update_h_only();
         self.inner.apply_cpml_h();
@@ -1564,11 +2039,9 @@ impl SubgriddedSolver {
         region.snapshot_coarse_e_t(self.inner.grid());
 
         // 4. Fine sub-step k = 1 (interpolate at t = n + 1/4).
-        //    After update_fine_h here the fine H is at wall-clock time
-        //    t = n + 1/4 (per the spec's labelling convention); snapshot
-        //    it so the Q4.1 closure can average against the
-        //    post-sub-step-2 H (at t = n + 3/4) to recover the
-        //    time-centered t = n + 1/2 value the coarse slot wants.
+        //    Mid-step snapshot of fine H captures the t = n + 1/4 value;
+        //    the Berenger J source averages this with the post-sub-step-2
+        //    fine H (t = n + 3/4) to get the time-centered t = n + 1/2.
         region.interpolate_coarse_e_to_fine(0.25);
         region.update_fine_h();
         region.snapshot_fine_h_mid_step();
@@ -1586,11 +2059,10 @@ impl SubgriddedSolver {
         region.update_fine_h();
         region.update_fine_e();
 
-        // 8. Close the energy balance.
+        // 8. Berenger fine → coarse equivalent-current injection.
         {
             let (parent_grid, _) = self.inner.grid_and_cpml_mut();
-            region.average_fine_h_to_coarse(parent_grid);
-            region.overwrite_coarse_e_from_fine(parent_grid);
+            region.inject_equivalent_currents_to_coarse(parent_grid);
         }
 
         // 9. Advance the coarse clock.
@@ -1643,7 +2115,7 @@ impl SubgriddedSolver {
         region.snapshot_coarse_e_t(self.inner.grid());
 
         // 4. Fine sub-step k = 1 with mid-step fine-H snapshot for the
-        //    Q4.1 time-centered closure.
+        //    Berenger time-centered J = +n̂ × H source.
         region.interpolate_coarse_e_to_fine(0.25);
         region.update_fine_h();
         region.snapshot_fine_h_mid_step();
@@ -1662,11 +2134,10 @@ impl SubgriddedSolver {
         region.update_fine_h();
         region.update_fine_e();
 
-        // 8. Close the energy balance.
+        // 8. Berenger fine → coarse equivalent-current injection.
         {
             let (parent_grid, _) = self.inner.grid_and_cpml_mut();
-            region.average_fine_h_to_coarse(parent_grid);
-            region.overwrite_coarse_e_from_fine(parent_grid);
+            region.inject_equivalent_currents_to_coarse(parent_grid);
         }
 
         // 9. Advance the coarse clock.
