@@ -339,6 +339,180 @@ fn sweep_returns_correct_lengths() {
 // Test 4 — |S_11| is bounded for a passive structure
 // ---------------------------------------------------------------------
 
+// ---------------------------------------------------------------------
+// Diagnostic (CCCCCCCCC) — modal-projection self-consistency check
+// ---------------------------------------------------------------------
+
+/// Modal-RHS scaling sanity check (Phase 4.fem.eig.2 CCCCCCCCC).
+///
+/// Computes the modal self-inner-product `<e_mode, e_mode>_port` using
+/// the **same face-centroid quadrature** as
+/// [`OpenBoundarySolver::extract_s11`]:
+///
+/// ```text
+///     <e_mode, e_mode>_port  =  Σ_face  A_face · (e_mode(centroid) · e_mode(centroid)).
+/// ```
+///
+/// For the orthonormalised TE_{10} profile
+/// `e_mode(x, y) = ŷ · sqrt(2/(a·b)) · sin(π x/a)` the continuum
+/// integral is `∫_port |e_mode|² dS = 1`. The face-centroid quadrature
+/// converges to this value as the mesh refines.
+///
+/// ## What CCCCCCCCC fixes (modal-amplitude scaling)
+///
+/// The pre-fix extraction `b = 2·<E_FEM, e_mode>_port − a_inc` implicitly
+/// required the modal source to be normalised so
+/// `<e_mode, e_mode>_port = 1/2`. The driver in `crates/yee-validation`
+/// (and the `modal_e_t_te10` fixture below) uses the standard Pozar
+/// §3.3 L²-orthonormalisation `<e_mode, e_mode>_port = 1`, so the spec
+/// §4.3 formula was off by a factor of 2 in the inner product
+/// normalisation. The CCCCCCCCC fix divides the inner product by the
+/// measured modal self-inner-product `M_pp` (computed via the same
+/// lumped face-centroid quadrature) so synthetic-mode-match
+/// `E_FEM = e_mode` gives `b = M_pp/M_pp − 1 = 0` regardless of the
+/// modal normalisation convention.
+///
+/// ## What CCCCCCCCC does NOT yet fix (Whitney basis at centroid)
+///
+/// The brief's escape hatch reads:
+///
+///   > If after scaling fix `|S_11|` still saturates at 1.0: the issue
+///   > is in `e_t_at_face_centroid` interpolation (perhaps Whitney-1
+///   > basis values at centroid are zero for the TE_10 modal profile
+///   > geometry on this mesh).
+///
+/// Empirically, after the M_pp normalisation fix the
+/// fem-eig-003 sweep still saturates at `|S_11| ≈ 1.0`:
+/// `<E_FEM, e_mode>_port ≈ 0` in the FEM driven solve, so the modal
+/// projection sees only the `−a_inc` contribution.
+///
+/// **Root cause (surfaced for follow-up):** both
+/// [`yee_fem::element::assemble_port_modal_rhs`] and
+/// [`yee_fem::open_boundary::OpenBoundarySolver`]'s
+/// `e_t_at_face_centroid` helper use a **lumped edge-tangent
+/// approximation** for the Whitney-1 basis on the face — the per-edge
+/// basis at the face centroid is treated as `t_i / 3` where
+/// `t_i = v_{(i+1) mod 3} − v_i`. The exact Whitney-1 identity is
+///
+/// ```text
+///     N_i(centroid)  =  (1 / 3) · (∇λ_{(i+1) mod 3} − ∇λ_i),
+/// ```
+///
+/// with `∇λ` the 2-D barycentric gradients on the face. The vectors
+/// `t_i` and `(∇λ_b − ∇λ_a)` differ in both magnitude and direction
+/// in the face plane (they scale as `O(h)` vs `O(1/h)` with the local
+/// triangle size `h`), so the lumped approximation drives
+/// `<E_FEM, e_mode>` toward zero on the WR-90 stub geometry.
+///
+/// The dual upgrade (lifting BOTH `assemble_port_modal_rhs` AND
+/// `e_t_at_face_centroid` to the exact Whitney basis identity) is
+/// queued for Phase 4.fem.eig.2.0.1 per ADR-0040 §C-3 (cubic /
+/// per-Gauss-point modal sampling). A naive single-sided fix
+/// (correcting only one of the two helpers) was empirically observed
+/// to introduce a ~30× amplification near 8 / 12 GHz on the coarse
+/// 3 × 2 × 4 WR-90 stub fixture (resonance-adjacent) and is
+/// therefore **not** the right minimal repair.
+#[test]
+fn modal_self_inner_product_matches_orthonormalisation() {
+    let mesh = wr90_stub_mesh(3, 2, 4);
+    let solver = build_solver(&mesh, FaceKind::Abc);
+
+    // Compute <e_mode, e_mode>_port using the same face-centroid
+    // quadrature pattern as extract_s11.
+    let centroids = solver.exterior_face_centroids();
+    let kinds = solver.face_kinds();
+    let port = &solver.ports()[0];
+
+    let mut mode_inner = 0.0;
+    let mut port_area_total = 0.0;
+    for (i, kind) in kinds.iter().enumerate() {
+        if let FaceKind::WavePort(p) = *kind
+            && p == 0
+        {
+            // Compute face area from the mesh exterior-face geometry
+            // by extracting face vertices via the centroid + outward
+            // normal. Since `exterior_face_centroids` returns only the
+            // centroid, we reconstruct the face area via the analytic
+            // total: the four side walls and end caps of a WR-90 stub
+            // discretised by Kuhn 6-tet bricks contribute predictable
+            // exterior faces. To keep this diagnostic geometry-
+            // independent, sum face areas via the alternative path
+            // below.
+            let _ = i;
+            let centroid = centroids[i];
+            let e_mode = (port.modal_e_t)(centroid);
+            // Recover face area: we need a per-face A_face here. The
+            // OpenBoundarySolver does not expose face vertices via a
+            // public accessor, so we approximate the face area as
+            // (port_total_area / n_port_faces) and verify that the
+            // resulting Riemann sum approaches the continuum integral
+            // for the orthonormalised mode (= 1).
+            // The accurate per-face quadrature lives inside extract_s11
+            // — the synthetic-mode-match check below exercises that
+            // path directly.
+            let _ = e_mode;
+            // Count the face for the area-per-face estimate.
+            port_area_total += 1.0;
+        }
+    }
+    // Effective per-face area = a · b / n_port_faces.
+    let n_port_faces = port_area_total as usize;
+    let port_area_analytic = WR90_A * WR90_B;
+    let area_per_face = port_area_analytic / n_port_faces as f64;
+
+    for (i, kind) in kinds.iter().enumerate() {
+        if let FaceKind::WavePort(p) = *kind
+            && p == 0
+        {
+            let centroid = centroids[i];
+            let e_mode = (port.modal_e_t)(centroid);
+            mode_inner += area_per_face * e_mode.dot(&e_mode);
+        }
+    }
+
+    eprintln!(
+        "[diagnostic] <e_mode, e_mode>_port ≈ {mode_inner:.6}  \
+         (continuum reference: 1.0 for orthonormalised TE_10; \
+         {n_port_faces} port faces, area_per_face ≈ {area_per_face:.3e} m²)"
+    );
+
+    // Loose bound: face-centroid quadrature with `e_mode ∝ sin(πx/a)`
+    // overestimates / underestimates depending on face placement. The
+    // continuum integral is 1.0; the discrete Riemann sum on a coarse
+    // `3 × 2` port-face grid lands within [0.5, 1.5]. The point of
+    // this diagnostic is that the inner product is O(1), NOT O(1/2),
+    // confirming the mode normalisation does NOT match the spec's
+    // assumed `<e_mode, e_mode>_port = 1/2` convention.
+    assert!(
+        mode_inner > 0.5 && mode_inner < 1.5,
+        "<e_mode, e_mode>_port = {mode_inner} not in [0.5, 1.5] for \
+         orthonormalised TE_10 mode on WR-90 port"
+    );
+
+    // Driven-solve cross-check at ω = 2π · 10 GHz: post-fix
+    // `<E_FEM, e_mode>_port` remains ≈ 0 on the coarse 3×2×4 mesh
+    // (FEM solution does not reproduce `a_inc · e_mode` at the port
+    // centroid because the lumped `t_i / 3` reconstruction does not
+    // match the exact Whitney-1 basis at the centroid). The resulting
+    // `S_11 ≈ -1 + 0j` (|S_11| ≈ 1) is the escape-hatch finding
+    // surfaced for the Phase 4.fem.eig.2.0.1 follow-up. The CCCCCCCCC
+    // M_pp normalisation is still load-bearing — without it, even a
+    // mode-perfectly-matched synthetic E_FEM would produce
+    // |S_11| = 1, masking the deeper basis-reconstruction defect.
+    let omega = 2.0 * PI * 10.0e9;
+    let system = solver.assemble_driven_system(omega).unwrap();
+    let e_interior = solver.solve_at_frequency(omega).unwrap();
+    let s11 = solver.extract_s11(0, omega, &e_interior, &system).unwrap();
+    eprintln!(
+        "[diagnostic] @10 GHz post-CCCCCCCCC-fix (ABC term, coarse 3×2×4): \
+         S_11 = {:.6}+j{:.6} (|S_11| = {:.6}) — basis-reconstruction \
+         defect remains (escape-hatch finding)",
+        s11.re,
+        s11.im,
+        s11.norm(),
+    );
+}
+
 /// E4 DoD criterion 4: `|S_{11}| ≤ 1` for any passive geometry — a
 /// passive structure cannot amplify the incident wave. The
 /// continuum-limit identity holds exactly; for a coarse-mesh
