@@ -162,7 +162,7 @@ use std::collections::{HashMap, HashSet};
 
 use faer::linalg::solvers::SolveCore;
 use faer::sparse::{SparseColMat, Triplet, linalg::solvers::Lu};
-use nalgebra::Vector3;
+use nalgebra::{DMatrix, Vector3};
 use num_complex::Complex64;
 use yee_core::Error;
 use yee_core::units::C0;
@@ -352,6 +352,61 @@ pub struct SParameters {
     /// equals the number of [`PortDefinition`]s registered with the
     /// solver; length of each inner vector equals `omegas.len()`.
     pub s_pp: Vec<Vec<Complex64>>,
+}
+
+/// Frequency-swept full multi-port S-parameter matrix
+/// (Phase 4.fem.eig.3 step F5 output of
+/// [`OpenBoundarySolver::sweep_matrix`]).
+///
+/// Carries the **complete** `n_ports × n_ports` scattering matrix per
+/// swept frequency. Entry `s[k][(q, p)]` is `S_{q,p}(omegas[k])` — the
+/// modal amplitude received at port `q` when port `p` is driven with
+/// `a_inc_p = 1` and every other port is matched (`a_inc_q = 0` for
+/// `q ≠ p`).
+///
+/// # Layout
+///
+/// `s.len() == omegas.len()` and every `s[k]` is an
+/// `(n_ports × n_ports)` complex dense matrix. Indexing follows the
+/// nalgebra convention `(row, col) = (q, p)`: rows index the receive
+/// port, columns index the excited port.
+///
+/// # Per-frequency cost model
+///
+/// Per spec §7, the driven matrix `A(ω)` is **independent** of which
+/// port is excited (every wave-port face contributes its
+/// `+ j β B_port` stiffness block unconditionally — only the RHS
+/// carries the `a_inc_p` selection). The implementation therefore
+/// factors `A(ω)` once per frequency and back-substitutes once per
+/// excited port, giving an asymptotic per-frequency cost of
+/// `O(LU(N) + n_ports · BS(N))` rather than the naive
+/// `O(n_ports · LU(N))`.
+///
+/// # References
+///
+/// * Phase 4.fem.eig.3 spec
+///   `docs/superpowers/specs/2026-05-19-phase-4-fem-eig-3-design.md`
+///   §4.3 (multi-port column-extraction convention) and §7 (LU-factor
+///   reuse).
+/// * Sheen, D. M., Ali, S. M., Abouzahra, M. D., Katehi, P. B. L.,
+///   "Application of the three-dimensional finite-difference time-domain
+///   method to the analysis of planar microstrip circuits",
+///   *IEEE Trans. Microwave Theory Tech.* 38(7) (1990), pp. 849-857
+///   — eq. 7 column extraction.
+/// * Pozar, D. M., *Microwave Engineering*, 4th ed., Wiley 2012, §4.3
+///   — reciprocity `S_{p,q} = S_{q,p}` for lossless multi-ports.
+#[derive(Debug, Clone)]
+pub struct SParametersMatrix {
+    /// Real-valued angular frequencies (rad/s) at which the sweep was
+    /// evaluated; matches the order of the slice passed to
+    /// [`OpenBoundarySolver::sweep_matrix`].
+    pub omegas: Vec<f64>,
+    /// Per-frequency `n_ports × n_ports` complex S-parameter matrix.
+    /// `s[k][(q, p)]` is `S_{q,p}(omegas[k])` — response at port `q`
+    /// driven by port `p`. Length of the outer vector equals
+    /// `omegas.len()`; every inner matrix has shape
+    /// `(n_ports, n_ports)`.
+    pub s: Vec<DMatrix<Complex64>>,
 }
 
 /// Phase 4.fem.eig.2 open-boundary FEM driven solver.
@@ -893,6 +948,319 @@ impl<'m> OpenBoundarySolver<'m> {
             omegas: omegas.to_vec(),
             s_pp,
         })
+    }
+
+    /// Frequency-sweep driven solve returning the full multi-port
+    /// `S_{p,q}` matrix (Phase 4.fem.eig.3 step F5).
+    ///
+    /// For each `ω` in `omegas`:
+    ///
+    /// 1. Assemble the driven system `A(ω) e = b(ω)` once via
+    ///    [`Self::assemble_driven_system`] — the matrix is independent
+    ///    of which port is excited, so we factor it via
+    ///    `faer::sparse::Lu<usize, Complex64>` exactly once per
+    ///    frequency.
+    /// 2. For each excited port `p ∈ 0..n_ports`: build a port-specific
+    ///    RHS in which **only** port `p`'s modal contribution is
+    ///    included (`a_inc_p = 1`, `a_inc_q = 0` for `q ≠ p`); the
+    ///    other ports' face stiffness blocks remain in the matrix so
+    ///    the matched-port condition is enforced naturally by the wave-
+    ///    port bilinear form (Pozar §3.3 / Jin §10.5). Back-substitute
+    ///    against the cached LU factor to obtain
+    ///    `e_interior(ω; driven by p)`.
+    /// 3. For each receive port `q ∈ 0..n_ports`: extract
+    ///    `S_{q,p}(ω) = ⟨E_FEM, e_mode_q⟩_port / M_qq − a_inc_q`, where
+    ///    `a_inc_q = δ_{q,p}` (i.e. `1` on the diagonal, `0`
+    ///    off-diagonal). Pack into the entry `s[k][(q, p)]` of the
+    ///    output matrix.
+    ///
+    /// # Arguments
+    ///
+    /// * `omegas` — non-empty slice of real-valued angular frequencies
+    ///   (rad/s). Every entry must be positive; below-cutoff behaviour
+    ///   is governed by each port's
+    ///   [`PortDefinition::beta_mode`] closure (same convention as
+    ///   [`Self::sweep`]).
+    ///
+    /// # Returns
+    ///
+    /// [`SParametersMatrix`] carrying one `n_ports × n_ports` complex
+    /// dense matrix per swept frequency. Entry `(q, p)` follows the
+    /// Sheen–Ali–Abouzahra–Katehi 1990 column-extraction convention —
+    /// `S_{q,p}` is the modal amplitude at port `q` when port `p` is
+    /// driven.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Invalid`] if `omegas` is empty. Propagates any
+    /// error from [`Self::assemble_driven_system`] (mesh / material
+    /// shape mismatch) and surfaces an [`Error::Numerical`] variant if
+    /// the sparse LU of the driven matrix fails at any frequency or if
+    /// any port's modal self-inner-product is numerically zero.
+    pub fn sweep_matrix(&self, omegas: &[f64]) -> Result<SParametersMatrix, Error> {
+        if omegas.is_empty() {
+            return Err(Error::Invalid(
+                "OpenBoundarySolver::sweep_matrix: omegas slice is empty".to_string(),
+            ));
+        }
+
+        let n_ports = self.ports.len();
+        let mut s_out: Vec<DMatrix<Complex64>> = Vec::with_capacity(omegas.len());
+
+        for &omega in omegas {
+            // Assemble the driven system once at this frequency. The
+            // matrix carries every port's `+ j β B_port` stiffness
+            // block regardless of which port is excited, so the same
+            // factor handles every excited-port RHS in the inner loop.
+            // We discard `system.rhs` because it bundles every port's
+            // modal-current contribution simultaneously; per spec §4.3
+            // the multi-port extraction needs the RHS to isolate one
+            // excited port at a time.
+            let system = self.assemble_driven_system(omega)?;
+            let n_interior = system.rhs.len();
+
+            let lu: Lu<usize, Complex64> = system.matrix.sp_lu().map_err(|e| {
+                Error::Numerical(format!(
+                    "OpenBoundarySolver::sweep_matrix: sparse LU of driven matrix at \
+                     omega = {omega} failed: {e:?}"
+                ))
+            })?;
+
+            // Allocate the n_ports × n_ports output for this frequency.
+            let mut s_k = DMatrix::<Complex64>::zeros(n_ports, n_ports);
+
+            for p in 0..n_ports {
+                // Build the per-excited-port RHS. Only port `p`
+                // contributes its modal-current term (a_inc_p = 1);
+                // all other ports contribute zero RHS (a_inc_q = 0)
+                // because the modal-current scatter is linear in
+                // `e_t` and `e_t = a_inc · e_mode`.
+                let rhs_p = self.build_rhs_for_excited_port(
+                    omega,
+                    p,
+                    &system.interior_dof_of_edge,
+                    n_interior,
+                )?;
+
+                // Back-substitute against the cached LU factor.
+                let mut rhs_mat = faer::Mat::<Complex64>::zeros(n_interior, 1);
+                for (i, &b_i) in rhs_p.iter().enumerate() {
+                    rhs_mat[(i, 0)] = b_i;
+                }
+                lu.solve_in_place_with_conj(faer::Conj::No, rhs_mat.as_mut());
+
+                let e_interior: Vec<Complex64> = (0..n_interior).map(|i| rhs_mat[(i, 0)]).collect();
+
+                // Extract S_{q, p} for every receive port q. The
+                // `extract_s_qp` helper subtracts `a_inc_q = δ_{q,p}`
+                // (1 on the diagonal, 0 off-diagonal) per the
+                // Sheen et al. 1990 convention.
+                for q in 0..n_ports {
+                    let a_inc_q = if q == p { 1.0 } else { 0.0 };
+                    let s_qp = self.extract_s_qp(q, a_inc_q, &e_interior, &system)?;
+                    s_k[(q, p)] = s_qp;
+                }
+            }
+
+            s_out.push(s_k);
+        }
+
+        Ok(SParametersMatrix {
+            omegas: omegas.to_vec(),
+            s: s_out,
+        })
+    }
+
+    /// Build a port-specific RHS vector for the multi-port sweep
+    /// (Phase 4.fem.eig.3 F5 helper).
+    ///
+    /// Returns a fresh RHS in which **only** wave-port faces tagged
+    /// `WavePort(excited_port)` contribute their modal-current scatter;
+    /// every other port's RHS contribution is zero (`a_inc_q = 0` for
+    /// `q ≠ excited_port`). The matrix stays unchanged because the
+    /// wave-port bilinear form `+ j β B_port` is intrinsic to the
+    /// boundary condition — every wave-port face contributes its
+    /// stiffness block regardless of whether it is driven or matched.
+    ///
+    /// This is a thin wrapper around the same scatter helpers used by
+    /// [`Self::assemble_driven_system`] (`scatter_port_face` for the
+    /// v2 lumped path; `scatter_port_face_gauss` for the
+    /// coupled-Whitney path), with the matrix-side accumulation
+    /// discarded. PEC-precedence handling and per-edge orientation
+    /// signs are inherited unchanged from the v2 scatter path.
+    fn build_rhs_for_excited_port(
+        &self,
+        omega: f64,
+        excited_port: PortId,
+        interior_dof_of_edge: &[Option<usize>],
+        n_interior: usize,
+    ) -> Result<Vec<Complex64>, Error> {
+        if excited_port >= self.ports.len() {
+            return Err(Error::Invalid(format!(
+                "OpenBoundarySolver::build_rhs_for_excited_port: \
+                 excited_port = {excited_port} out of range (n_ports = {})",
+                self.ports.len()
+            )));
+        }
+
+        let mut rhs: Vec<Complex64> = vec![Complex64::new(0.0, 0.0); n_interior];
+        // Scratch matrix-side triplets — discarded after the helper
+        // returns. The scatter helpers accept a `&mut Vec<Triplet>`
+        // unconditionally; we feed them a local sink so the RHS path
+        // is exercised without polluting the (already-factored) matrix.
+        let mut sink: Vec<Triplet<usize, usize, Complex64>> = Vec::new();
+
+        for (i, kind) in self.face_kinds.iter().enumerate() {
+            if let FaceKind::WavePort(p) = *kind
+                && p == excited_port
+            {
+                let face = &self.exterior_faces.faces[i];
+                let port = &self.ports[p];
+                let beta = (port.beta_mode)(omega);
+                if self.coupled_whitney {
+                    let face_vertices = face.world_vertices(self.mesh);
+                    let mut e_t_gauss = [Vector3::<f64>::zeros(); 3];
+                    for (g, bary) in TRI_GAUSS_3PT_BARY.iter().enumerate() {
+                        let p_g = bary[0] * face_vertices[0]
+                            + bary[1] * face_vertices[1]
+                            + bary[2] * face_vertices[2];
+                        e_t_gauss[g] = (port.modal_e_t)(p_g);
+                    }
+                    self.scatter_port_face_gauss(
+                        face,
+                        beta,
+                        e_t_gauss,
+                        interior_dof_of_edge,
+                        &mut sink,
+                        &mut rhs,
+                    );
+                } else {
+                    let centroid = face.centroid(self.mesh);
+                    let e_t = (port.modal_e_t)(centroid);
+                    self.scatter_port_face(
+                        face,
+                        beta,
+                        e_t,
+                        interior_dof_of_edge,
+                        &mut sink,
+                        &mut rhs,
+                    );
+                }
+            }
+        }
+
+        Ok(rhs)
+    }
+
+    /// Extract `S_{q,p}(ω)` for a generic receive port `q` with
+    /// caller-supplied `a_inc_q` (Phase 4.fem.eig.3 F5 helper).
+    ///
+    /// Implements the Sheen–Ali–Abouzahra–Katehi 1990 eq. 7 column
+    /// extraction
+    ///
+    /// ```text
+    ///     b_q  =  ⟨ E_FEM , e_mode_q ⟩_port / M_qq  −  a_inc_q,
+    ///     S_{q,p}  =  b_q / a_inc_p   =   b_q          (a_inc_p = 1),
+    /// ```
+    ///
+    /// where `a_inc_q = δ_{q,p}` is the incident amplitude at the
+    /// receive port (`1` on the diagonal entry, `0` off-diagonal).
+    /// The modal-projection inner product and `M_qq` self-inner-
+    /// product use the same face-centroid (or three-point Gauss-
+    /// quadrature, under [`Self::coupled_whitney`]) integration as
+    /// [`Self::extract_s11`].
+    ///
+    /// This is the multi-port generalisation of [`Self::extract_s11`]:
+    /// the single-port case `q = p, a_inc_q = 1` reproduces
+    /// `extract_s11(p, ...)` bit-for-bit.
+    ///
+    /// # Arguments
+    ///
+    /// * `port_id` — receive port `q` (matched against
+    ///   `FaceKind::WavePort(q)` tags).
+    /// * `a_inc_q` — incident amplitude at port `q`. Conventionally
+    ///   `1.0` if `q` is the driven port, `0.0` otherwise.
+    /// * `e_interior` — interior-DoF complex solution from the per-
+    ///   excited-port back-substitution.
+    /// * `system` — driven system returned by
+    ///   [`Self::assemble_driven_system`] (provides the lift map).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Invalid`] if `port_id` is out of range.
+    /// Returns [`Error::Numerical`] if the modal self-inner-product
+    /// `M_qq` is numerically zero.
+    fn extract_s_qp(
+        &self,
+        port_id: PortId,
+        a_inc_q: f64,
+        e_interior: &[Complex64],
+        system: &DrivenSystem,
+    ) -> Result<Complex64, Error> {
+        if port_id >= self.ports.len() {
+            return Err(Error::Invalid(format!(
+                "OpenBoundarySolver::extract_s_qp: port_id = {port_id} \
+                 out of range (n_ports = {})",
+                self.ports.len()
+            )));
+        }
+
+        let port = &self.ports[port_id];
+        let mut inner_product = Complex64::new(0.0, 0.0);
+        let mut mode_self_inner = 0.0_f64;
+
+        for (i, kind) in self.face_kinds.iter().enumerate() {
+            if let FaceKind::WavePort(p) = *kind
+                && p == port_id
+            {
+                let face = &self.exterior_faces.faces[i];
+                let face_vertices = face.world_vertices(self.mesh);
+
+                let t0 = face_vertices[1] - face_vertices[0];
+                let t1 = face_vertices[2] - face_vertices[1];
+                let face_area = 0.5 * t0.cross(&t1).norm();
+
+                if self.coupled_whitney {
+                    let e_fem_g =
+                        self.e_t_at_face_gauss_pts(face, e_interior, &system.interior_dof_of_edge);
+                    let w_g = face_area / 3.0;
+                    for (g, bary) in TRI_GAUSS_3PT_BARY.iter().enumerate() {
+                        let p_g = bary[0] * face_vertices[0]
+                            + bary[1] * face_vertices[1]
+                            + bary[2] * face_vertices[2];
+                        let e_mode_g = (port.modal_e_t)(p_g);
+                        let e_fem = e_fem_g[g];
+                        let dot_g = e_fem.x * Complex64::new(e_mode_g.x, 0.0)
+                            + e_fem.y * Complex64::new(e_mode_g.y, 0.0)
+                            + e_fem.z * Complex64::new(e_mode_g.z, 0.0);
+                        inner_product += Complex64::new(w_g, 0.0) * dot_g;
+                        mode_self_inner += w_g * e_mode_g.dot(&e_mode_g);
+                    }
+                } else {
+                    let centroid = face.centroid(self.mesh);
+                    let e_mode = (port.modal_e_t)(centroid);
+                    let e_fem =
+                        self.e_t_at_face_centroid(face, e_interior, &system.interior_dof_of_edge);
+                    let face_dot = e_fem.x * Complex64::new(e_mode.x, 0.0)
+                        + e_fem.y * Complex64::new(e_mode.y, 0.0)
+                        + e_fem.z * Complex64::new(e_mode.z, 0.0);
+                    inner_product += Complex64::new(face_area, 0.0) * face_dot;
+                    mode_self_inner += face_area * e_mode.dot(&e_mode);
+                }
+            }
+        }
+
+        if mode_self_inner <= f64::EPSILON {
+            return Err(Error::Numerical(format!(
+                "OpenBoundarySolver::extract_s_qp: modal self-inner-product \
+                 ⟨e_mode, e_mode⟩_port = {mode_self_inner} is numerically \
+                 zero for port {port_id}; cannot normalise extraction"
+            )));
+        }
+
+        let m_qq = Complex64::new(mode_self_inner, 0.0);
+        let a_inc_c = Complex64::new(a_inc_q, 0.0);
+        Ok(inner_product / m_qq - a_inc_c)
     }
 
     /// Extract `S_{p,p}(ω)` for a single port from an interior-DoF
