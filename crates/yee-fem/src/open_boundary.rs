@@ -221,8 +221,8 @@ pub enum FaceKind {
     WavePort(PortId),
 }
 
-/// Selects the Engquist–Majda ABC bilinear form on
-/// [`FaceKind::Abc`]-tagged exterior faces (Phase 4.fem.eig.3 step F4).
+/// Selects the open-boundary truncation kernel on
+/// [`FaceKind::Abc`]-tagged exterior faces.
 ///
 /// The default is [`AbcOrder::First`], which reproduces the
 /// Phase 4.fem.eig.2 v2 + CCCCCCCCC behaviour bit-for-bit: every ABC
@@ -239,7 +239,16 @@ pub enum FaceKind {
 /// has a **real** scalar prefactor while the 1st-order part stays
 /// purely imaginary, so the composite block is complex-symmetric with
 /// non-trivial real *and* imaginary content.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+///
+/// [`AbcOrder::CfsPml`] (Phase 4.fem.eig.3.5) replaces the
+/// surface-integral Engquist–Majda kernel with a volumetric CFS-PML
+/// (Roden–Gedney 2000) buffer-layer absorber. The PML is a thin shell
+/// of additional tetrahedra outside the original cavity volume, in
+/// which the constitutive tensor `ε(ω)` becomes the stretched-coordinate
+/// form `ε · Λ(ω)` and absorbs off-normal and evanescent modal content
+/// that the local Engquist–Majda operators cannot. See [`PmlConfig`]
+/// for the grading-parameter surface.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub enum AbcOrder {
     /// 1st-order Engquist–Majda absorbing boundary. The v0 / v2 default
     /// — reproduces the shipped behaviour bit-for-bit. Reflection floor
@@ -250,6 +259,120 @@ pub enum AbcOrder {
     /// tangential-curl correction term per Engquist–Majda 1979 eq. 9.
     /// Reflection floor `~ −60 dB` at normal incidence (Jin §10.4).
     Second,
+    /// CFS-PML (Roden–Gedney 2000) volumetric buffer-layer absorber
+    /// (Phase 4.fem.eig.3.5). Replaces the surface-integral
+    /// Engquist–Majda kernel with a thin shell of extra tetrahedra
+    /// outside the original cavity in which `ε → ε · Λ(ω)` with
+    /// stretched-coordinate factor
+    /// `s_α(ω) = κ_α + σ_α / (α_α + j ω ε_0)`. The variant payload
+    /// carries the grading parameters; see [`PmlConfig`].
+    CfsPml(PmlConfig),
+}
+
+/// CFS-PML grading-parameter configuration (Phase 4.fem.eig.3.5;
+/// Roden–Gedney 2000, *IEEE MWCL* 10:5).
+///
+/// One [`PmlConfig`] applies symmetrically to every PML-tagged face.
+/// The grading parameters control the polynomial-graded conductivity
+/// `σ_α(d) = σ_max · (d/D)^m`, coordinate stretching
+/// `κ_α(d) = 1 + (κ_max − 1) · (d/D)^m`, and the CFS frequency-shift
+/// `α_α(d) = α_max`. The depth `d ∈ [0, D]` is measured inward from the
+/// PML's outer truncation surface; at the inner boundary (`d = 0`) both
+/// `σ` and `κ − 1` vanish so the material is continuous with the
+/// cavity interior, eliminating surface-reflection spurious modes.
+///
+/// Default values follow Roden–Gedney 2000 §III + Table I for microwave
+/// waveguide benchmarks. `sigma_max` and `alpha_max` use sentinel
+/// zeros at construction; the
+/// [`OpenBoundarySolver::with_cfs_pml`] builder recomputes them from
+/// the band-centre `ω` and mean tet edge length using the recommended
+/// `σ_max ≈ (m + 1) / (150 π · h · √ε_r)` and `α_max ≈ ω₀ ε_0`
+/// formulae. Callers wanting full control can populate either field
+/// explicitly; the [`Self::resolved`] helper returns a fully-populated
+/// copy.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PmlConfig {
+    /// PML shell thickness in tet layers. Default 6 (Roden–Gedney 2000
+    /// §III recommends 6 to 10 cells for microwave applications).
+    pub thickness_cells: usize,
+    /// Maximum conductivity (S/m) at the outer truncation surface.
+    /// `0.0` is the sentinel meaning "recompute from frequency and
+    /// mesh"; [`Self::resolved`] fills this in.
+    pub sigma_max: f64,
+    /// CFS frequency-shift parameter `α_max` (rad·s⁻¹ × ε₀, i.e. the
+    /// same units as `j ω ε_0`). `0.0` is the sentinel; [`Self::resolved`]
+    /// sets it to `ω₀ ε_0` per Roden–Gedney 2000 §IV.
+    pub alpha_max: f64,
+    /// Coordinate-stretching parameter `κ_max`. Default 5.0 per
+    /// Roden–Gedney 2000 Table I for microwave-waveguide benchmarks.
+    pub kappa_max: f64,
+    /// Polynomial grading order `m` for `σ_α(d) = σ_max · (d/D)^m`.
+    /// Default 3. Values 2, 3, 4 are typical; higher orders steepen the
+    /// gradient near the outer truncation surface and the inner cavity
+    /// boundary.
+    pub m: usize,
+}
+
+impl Default for PmlConfig {
+    fn default() -> Self {
+        Self {
+            thickness_cells: 6,
+            sigma_max: 0.0,
+            alpha_max: 0.0,
+            kappa_max: 5.0,
+            m: 3,
+        }
+    }
+}
+
+impl PmlConfig {
+    /// Resolve sentinel `0.0` values for `sigma_max` and `alpha_max`
+    /// against a band-centre frequency `freq_hz` and a mean PML tet
+    /// edge length `h_cell` (m).
+    ///
+    /// Per Roden–Gedney 2000 §III + §IV:
+    ///
+    /// * `σ_max ≈ (m + 1) / (150 π · h_cell · √ε_r)` with `ε_r = 1`
+    ///   (PML built outside an air-filled cavity).
+    /// * `α_max ≈ 2 π · freq_hz · ε_0` (band-centre rule of thumb).
+    ///
+    /// Non-zero `sigma_max` / `alpha_max` are passed through verbatim
+    /// (callers retain full control). `kappa_max`, `thickness_cells`,
+    /// `m` are never touched.
+    pub fn resolved(self, freq_hz: f64, h_cell: f64) -> Self {
+        let mut out = self;
+        if out.sigma_max == 0.0 {
+            let m_plus_1 = (self.m as f64) + 1.0;
+            // ε_r = 1 (PML against air).
+            out.sigma_max = m_plus_1 / (150.0 * std::f64::consts::PI * h_cell.max(1e-12));
+        }
+        if out.alpha_max == 0.0 {
+            // ω₀ ε_0 with ω₀ = 2 π f₀.
+            out.alpha_max = 2.0 * std::f64::consts::PI * freq_hz * yee_core::units::EPS0;
+        }
+        out
+    }
+}
+
+/// Caller-supplied designation of which exterior faces become
+/// PML-fronted (Phase 4.fem.eig.3.5).
+///
+/// One [`PmlRegion`] is consumed by
+/// [`OpenBoundarySolver::with_cfs_pml`]; if absent, the builder
+/// defaults to "every [`FaceKind::Abc`]-tagged face is PML-fronted",
+/// which is the standard one-shell-per-ABC pattern used by
+/// fem-eig-003 and fem-eig-006. The per-axis [`PmlConfig`] travels in
+/// the [`Self::config`] payload; if `None`, the solver-level default
+/// applies.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PmlRegion {
+    /// Faces in the original mesh's [`FaceKind::Abc`] set that should
+    /// be replaced with a PML shell. An empty `faces` set is "every
+    /// ABC face becomes PML-fronted" (the spec §6 default).
+    pub faces: Vec<FaceKind>,
+    /// Per-axis PML configuration. If `None`, the solver-level
+    /// [`PmlConfig`] default applies.
+    pub config: Option<PmlConfig>,
 }
 
 /// Caller-supplied wave-port descriptor.
@@ -690,6 +813,18 @@ impl<'m> OpenBoundarySolver<'m> {
             return Err(Error::Invalid(format!(
                 "OpenBoundarySolver::assemble_driven_system: omega = {omega} must be positive"
             )));
+        }
+
+        // Phase 4.fem.eig.3.5 P1 wire-only guard: the CFS-PML variant
+        // exists in the enum but its volumetric assembly wires in at P4
+        // (`with_cfs_pml` builder + mesh extension + per-tet anisotropic
+        // ε tensor). Until then, exercising the variant from the
+        // surface-integral assembly path is a configuration error.
+        if matches!(self.abc_order, AbcOrder::CfsPml(_)) {
+            return Err(Error::Unimplemented(
+                "CFS-PML assembly not wired until P4 — \
+                 `with_cfs_pml` lands in Phase 4.fem.eig.3.5 step P4",
+            ));
         }
 
         // ---- Step 1: assemble the PEC-reduced complex K(ω), M(ω).
@@ -1498,6 +1633,16 @@ impl<'m> OpenBoundarySolver<'m> {
             }
             AbcOrder::Second => {
                 assemble_abc2_face_block(face.world_vertices(self.mesh), face.normal, k0, 1.0)
+            }
+            AbcOrder::CfsPml(_) => {
+                // Unreachable: `assemble_driven_system` returns
+                // `Error::NotEnabled` before reaching this scatter when
+                // `abc_order` is `CfsPml`. The volumetric PML path
+                // wires in at Phase 4.fem.eig.3.5 P4.
+                unreachable!(
+                    "scatter_abc_face called with AbcOrder::CfsPml; \
+                     guarded out by assemble_driven_system early return"
+                );
             }
         };
         for i in 0..3 {
