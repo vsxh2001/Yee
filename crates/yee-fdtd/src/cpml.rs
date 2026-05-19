@@ -338,6 +338,12 @@ impl CpmlState {
     ///
     /// The `(1 − 1/κ)` term collapses to zero for the standard choice
     /// `κ_max = 1` but is included for completeness.
+    ///
+    /// When `grid.eps_r_cells` is `Some`, the coefficient `Δt/(ε₀ ε_r)` is
+    /// recomputed per cell from the per-cell map (mirroring the convention
+    /// used by [`crate::update::update_e`]); otherwise the scalar
+    /// `grid.eps_r` is used and the loop body matches the pre-percell
+    /// behaviour bit-for-bit.
     pub fn update_e(&mut self, grid: &mut YeeGrid) {
         let nx = grid.nx;
         let ny = grid.ny;
@@ -346,7 +352,8 @@ impl CpmlState {
         let dy = grid.dy;
         let dz = grid.dz;
         let dt = grid.dt;
-        let coeff = dt / (EPS0 * grid.eps_r);
+        let coeff_scalar = dt / (EPS0 * grid.eps_r);
+        let eps_r_cells = grid.eps_r_cells.as_ref();
 
         // ---- E_x: shape [nx, ny+1, nz+1] ----
         // ∂H_z/∂y term -> ψ_E_xy[i,j,k]; PML active when j-1 or j is in y-PML.
@@ -362,6 +369,10 @@ impl CpmlState {
                     }
                     let dhz_dy = (grid.hz[(i, j, k)] - grid.hz[(i, j - 1, k)]) / dy;
                     let dhy_dz = (grid.hy[(i, j, k)] - grid.hy[(i, j, k - 1)]) / dz;
+                    let coeff = match eps_r_cells {
+                        None => coeff_scalar,
+                        Some(e) => dt / (EPS0 * e[(i, j, k)]),
+                    };
 
                     if let Some((d, _)) = dep_y {
                         let b = self.b[d];
@@ -401,6 +412,10 @@ impl CpmlState {
                     }
                     let dhx_dz = (grid.hx[(i, j, k)] - grid.hx[(i, j, k - 1)]) / dz;
                     let dhz_dx = (grid.hz[(i, j, k)] - grid.hz[(i - 1, j, k)]) / dx;
+                    let coeff = match eps_r_cells {
+                        None => coeff_scalar,
+                        Some(e) => dt / (EPS0 * e[(i, j, k)]),
+                    };
 
                     if let Some((d, _)) = dep_z {
                         let b = self.b[d];
@@ -436,6 +451,10 @@ impl CpmlState {
                 for k in 0..nz {
                     let dhy_dx = (grid.hy[(i, j, k)] - grid.hy[(i - 1, j, k)]) / dx;
                     let dhx_dy = (grid.hx[(i, j, k)] - grid.hx[(i, j - 1, k)]) / dy;
+                    let coeff = match eps_r_cells {
+                        None => coeff_scalar,
+                        Some(e) => dt / (EPS0 * e[(i, j, k)]),
+                    };
 
                     if let Some((d, _)) = dep_x {
                         let b = self.b[d];
@@ -465,6 +484,12 @@ impl CpmlState {
     /// variables in `psi_h` are updated with the appropriate `∂E/∂ξ`
     /// derivative and then added to the H field with the matching sign from
     /// the standard Yee curl.
+    ///
+    /// When `grid.mu_r_cells` is `Some`, the coefficient `Δt/(μ₀ μ_r)` is
+    /// recomputed per cell from the per-cell map (mirroring the convention
+    /// used by [`crate::update::update_h`]); otherwise the scalar
+    /// `grid.mu_r` is used and the loop body matches the pre-percell
+    /// behaviour bit-for-bit.
     pub fn update_h(&mut self, grid: &mut YeeGrid) {
         let nx = grid.nx;
         let ny = grid.ny;
@@ -473,7 +498,8 @@ impl CpmlState {
         let dy = grid.dy;
         let dz = grid.dz;
         let dt = grid.dt;
-        let coeff = dt / (MU0 * grid.mu_r);
+        let coeff_scalar = dt / (MU0 * grid.mu_r);
+        let mu_r_cells = grid.mu_r_cells.as_ref();
 
         // ---- H_x: shape [nx+1, ny, nz] ----
         // H_x sits at (x_int, y+0.5, z+0.5); along y and z it uses the
@@ -489,6 +515,10 @@ impl CpmlState {
                     }
                     let dey_dz = (grid.ey[(i, j, k + 1)] - grid.ey[(i, j, k)]) / dz;
                     let dez_dy = (grid.ez[(i, j + 1, k)] - grid.ez[(i, j, k)]) / dy;
+                    let coeff = match mu_r_cells {
+                        None => coeff_scalar,
+                        Some(m) => dt / (MU0 * m[(i, j, k)]),
+                    };
 
                     if let Some((d, _)) = dep_z {
                         let b = self.b_h[d];
@@ -524,6 +554,10 @@ impl CpmlState {
                     }
                     let dez_dx = (grid.ez[(i + 1, j, k)] - grid.ez[(i, j, k)]) / dx;
                     let dex_dz = (grid.ex[(i, j, k + 1)] - grid.ex[(i, j, k)]) / dz;
+                    let coeff = match mu_r_cells {
+                        None => coeff_scalar,
+                        Some(m) => dt / (MU0 * m[(i, j, k)]),
+                    };
 
                     if let Some((d, _)) = dep_x {
                         let b = self.b_h[d];
@@ -559,6 +593,10 @@ impl CpmlState {
                 for k in 0..=nz {
                     let dex_dy = (grid.ex[(i, j + 1, k)] - grid.ex[(i, j, k)]) / dy;
                     let dey_dx = (grid.ey[(i + 1, j, k)] - grid.ey[(i, j, k)]) / dx;
+                    let coeff = match mu_r_cells {
+                        None => coeff_scalar,
+                        Some(m) => dt / (MU0 * m[(i, j, k)]),
+                    };
 
                     if let Some((d, _)) = dep_y {
                         let b = self.b_h[d];
