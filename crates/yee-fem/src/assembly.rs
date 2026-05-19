@@ -66,9 +66,11 @@
 use std::collections::HashMap;
 
 use nalgebra_sparse::{coo::CooMatrix, csr::CsrMatrix};
+use num_complex::Complex64;
 use yee_mesh::TetMesh3D;
 
-use crate::element::{LOCAL_EDGES, assemble_tet_element};
+use crate::element::{LOCAL_EDGES, assemble_tet_element, assemble_tet_element_complex};
+use crate::material::MaterialDatabase;
 
 /// Output of [`FemEigenAssembly::assemble`] — the interior-DoF-reduced
 /// curl-curl stiffness `K`, vector mass `M`, and the lift map from
@@ -89,6 +91,42 @@ pub struct AssembledMatrices {
     /// Lift map: `interior_edges[i]` is the full-edge index of the
     /// interior DoF at row/column `i`. Used to scatter eigenvector
     /// components back to the full edge basis at solve time.
+    pub interior_edges: Vec<usize>,
+}
+
+/// Output of [`FemEigenAssembly::assemble_complex`] — the
+/// interior-DoF-reduced **complex** curl-curl stiffness `K(ω)`, vector
+/// mass `M(ω)`, and the lift map from interior-DoF index to full-edge
+/// index for eigenvector recovery.
+///
+/// `K` and `M` are complex symmetric (not Hermitian — see ADR-0039 §6
+/// and `solve.rs` module docs) with identical sparsity pattern. They
+/// are returned in [`nalgebra_sparse::csr::CsrMatrix`] of [`Complex64`]
+/// so the downstream Phase 4.fem.eig.1 complex sparse eigensolve
+/// ([`crate::solve::ComplexInverseIterEigen`]) can consume them with
+/// no further format conversion.
+///
+/// For inputs whose per-tet `ε(ω)`, `μ(ω)` are purely real, the
+/// imaginary parts of every entry are bit-for-bit zero and `.re` agrees
+/// with [`AssembledMatrices`] from the real path on the same mesh; this
+/// is the backward-compatibility invariant exercised by the
+/// `dispersive_solve` integration tests.
+#[derive(Debug, Clone)]
+pub struct AssembledMatricesComplex {
+    /// Curl-curl stiffness
+    /// `K[i,j] = Σ_e (1/μ_e(ω)) ∫_T_e (∇×N_i)·(∇×N_j) dV`
+    /// reduced to interior edges by PEC Dirichlet row/column
+    /// elimination.
+    pub k: CsrMatrix<Complex64>,
+    /// Vector mass `M[i,j] = Σ_e ε_e(ω) ∫_T_e N_i · N_j dV`, reduced to
+    /// the same interior-DoF basis as [`Self::k`].
+    pub m: CsrMatrix<Complex64>,
+    /// Lift map: `interior_edges[i]` is the full-edge index of the
+    /// interior DoF at row/column `i`. Used to scatter eigenvector
+    /// components back to the full edge basis at solve time. Identical
+    /// to [`AssembledMatrices::interior_edges`] for the same mesh —
+    /// orientation and boundary classification are geometric, not
+    /// material-dependent.
     pub interior_edges: Vec<usize>,
 }
 
@@ -241,6 +279,122 @@ impl<'m> FemEigenAssembly<'m> {
         let m = CsrMatrix::from(&m_coo);
 
         Ok(AssembledMatrices {
+            k,
+            m,
+            interior_edges,
+        })
+    }
+
+    /// Assemble the global **complex** sparse `K(ω)`, `M(ω)` at angular
+    /// frequency `omega` (rad/s) and apply PEC Dirichlet elimination.
+    ///
+    /// Walks the same per-tet pipeline as [`Self::assemble`] but looks
+    /// up `(ε(ω), μ(ω))` per-tet from the supplied [`MaterialDatabase`]
+    /// keyed by [`yee_mesh::TetMesh3D::tetrahedron_material`], and
+    /// calls [`crate::element::assemble_tet_element_complex`] instead
+    /// of the real path. The scatter, orientation signs, boundary-edge
+    /// classifier, and PEC row/column elimination are geometric (not
+    /// material-dependent) and are reused verbatim from the real path.
+    ///
+    /// For materials whose `ε(ω)`, `μ(ω)` are purely real at the
+    /// supplied `omega` (e.g. [`crate::material::Material::default`]
+    /// free-space response) the returned blocks have
+    /// `Im(K[i,j]) = Im(M[i,j]) = 0` bit-for-bit and `.re` agrees with
+    /// the real [`Self::assemble`] output on the same mesh. The
+    /// `assemble_complex_at_real_eps_matches_real_assemble` integration
+    /// test pins this invariant — it is the load-bearing
+    /// backward-compatibility check per ADR-0039 §4.
+    ///
+    /// # Arguments
+    ///
+    /// * `omega` — trial angular frequency (rad/s). Real-valued by
+    ///   design: the Phase 4.fem.eig.1 Newton tracker (plan step D5)
+    ///   sweeps the linearised eigenproblem along the **real** ω axis
+    ///   and lets the complex eigenvalue `k²` carry the imaginary part.
+    ///   A complex trial frequency would force `assemble_tet_element`
+    ///   to evaluate `ε`, `μ` at complex argument, which the
+    ///   single-pole [`crate::material::Material::eps_at`] surface does
+    ///   not support in v1.
+    /// * `db` — [`MaterialDatabase`] keyed by [`yee_mesh::MaterialTag`].
+    ///   Unregistered tags fall back to free-space `ε = μ = 1`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`yee_core::Error::Invalid`] if the mesh is empty (no
+    /// tetrahedra). The per-tet material lookup itself does not fail —
+    /// unregistered tags return free-space `ε = μ = 1` per
+    /// [`MaterialDatabase::eps_at`] / [`MaterialDatabase::mu_at`].
+    pub fn assemble_complex(
+        &self,
+        omega: f64,
+        db: &MaterialDatabase,
+    ) -> Result<AssembledMatricesComplex, yee_core::Error> {
+        if self.mesh.tetrahedra.is_empty() {
+            return Err(yee_core::Error::Invalid(
+                "cannot assemble FEM matrices on a mesh with zero tetrahedra".to_string(),
+            ));
+        }
+
+        // ---- Step 1+2: build the global edge table and per-tet
+        // local-to-global edge map with orientation signs.  This
+        // mirrors [`Self::assemble`] line-for-line because the
+        // geometry / topology is material-independent.
+        let table = TetEdgeTable::build(self.mesh);
+        let n_edges = table.edges.len();
+
+        // ---- Step 4 (pre-scatter): classify each global edge as
+        // boundary or interior, and build the lift map.
+        let interior_edges: Vec<usize> = (0..n_edges).filter(|&e| !table.is_boundary[e]).collect();
+        let n_interior = interior_edges.len();
+        let mut interior_dof_of_edge: Vec<Option<usize>> = vec![None; n_edges];
+        for (dof, &gid) in interior_edges.iter().enumerate() {
+            interior_dof_of_edge[gid] = Some(dof);
+        }
+
+        // ---- Step 3+5: scatter signed 6×6 complex local blocks into
+        // COO, skipping boundary DoFs as we go.  The orientation sign
+        // `sa * sb ∈ {-1, +1}` is real and applied as a real scalar to
+        // the complex block, matching the real path bit-for-bit on the
+        // sign convention.
+        let mut k_coo: CooMatrix<Complex64> = CooMatrix::new(n_interior, n_interior);
+        let mut m_coo: CooMatrix<Complex64> = CooMatrix::new(n_interior, n_interior);
+
+        for (tet_idx, conn) in table.tet_edges.iter().enumerate() {
+            let tet = &self.mesh.tetrahedra[tet_idx];
+            let vertices = [
+                self.mesh.vertices[tet[0]],
+                self.mesh.vertices[tet[1]],
+                self.mesh.vertices[tet[2]],
+                self.mesh.vertices[tet[3]],
+            ];
+            let tag = self.mesh.tetrahedron_material[tet_idx];
+            let eps_omega = db.eps_at(tag, omega);
+            let mu_omega = db.mu_at(tag, omega);
+            let elem = assemble_tet_element_complex(vertices, eps_omega, mu_omega);
+
+            for alpha in 0..6 {
+                let gi = conn.global_edge[alpha];
+                let Some(ii) = interior_dof_of_edge[gi] else {
+                    continue;
+                };
+                let sa = conn.sign[alpha];
+                for beta in 0..6 {
+                    let gj = conn.global_edge[beta];
+                    let Some(jj) = interior_dof_of_edge[gj] else {
+                        continue;
+                    };
+                    let sb = conn.sign[beta];
+                    let signed = Complex64::new(sa * sb, 0.0);
+                    k_coo.push(ii, jj, signed * elem.k_local[(alpha, beta)]);
+                    m_coo.push(ii, jj, signed * elem.m_local[(alpha, beta)]);
+                }
+            }
+        }
+
+        let k = CsrMatrix::from(&k_coo);
+        let m = CsrMatrix::from(&m_coo);
+
+        Ok(AssembledMatricesComplex {
             k,
             m,
             interior_edges,
