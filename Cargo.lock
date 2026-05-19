@@ -6495,11 +6495,15 @@ dependencies = [
  "clap_complete",
  "num-complex",
  "predicates",
+ "regex",
+ "serde",
  "serde_json",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "yee-core",
  "yee-cuda",
+ "yee-design",
  "yee-fdtd",
  "yee-io",
  "yee-mesh",
@@ -6532,6 +6536,7 @@ dependencies = [
 name = "yee-design"
 version = "0.0.0"
 dependencies = [
+ "regex",
  "serde",
  "serde_json",
  "sha2",

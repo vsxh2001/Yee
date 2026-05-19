@@ -1,0 +1,26 @@
+# Canonical natural-language prompts for the Phase 3.nl.0 design surface.
+#
+# Spec §9 / plan R5 — the 10 prompts the offline parser
+# (`yee_design::offline::parse`) and the LLM sidecar
+# (`yee.design.from_prompt_llm`) must both handle end-to-end. The R5
+# integration test (`crates/yee-cli/tests/design_offline.rs`) loops over this
+# array. The R6 solver gate (`nl-001`) consumes it too, asserting
+# `|f_min − f_target| / f_target ≤ 0.05` after running the emitted project
+# file through `yee run`.
+#
+# Each prompt exercises one frequency-unit / substrate-name combination from
+# the Phase 3.nl.0 walking-skeleton support matrix
+# (GHz/MHz × {FR4, RO4003C, RO5880, AluminaTC, default}).
+
+prompts = [
+    "2.4 GHz patch on FR4",
+    "5.8 GHz patch on RO4003C",
+    "915 MHz patch for IoT",
+    "10 GHz patch on RO5880",
+    "3.5 GHz 5G patch antenna on RO4003C",
+    "1.575 GHz GPS patch on FR4",
+    "433 MHz LoRa patch on FR4",
+    "24 GHz radar patch on AluminaTC",
+    "868 MHz patch on RO5880",
+    "2.45GHz ISM patch on RO4003C",
+]

@@ -29,6 +29,7 @@
 pub mod emit;
 pub mod estimate;
 pub mod intent;
+pub mod offline;
 
 pub use emit::{ProjectFile, emit};
 pub use estimate::{Error, InitialEstimate, ResolvedSubstrate};
@@ -36,3 +37,4 @@ pub use intent::{
     DesignIntent, GeometryFamily, NamedSubstrate, Provenance, Substrate, SubstrateLibrary,
     SubstrateOverride, SubstrateRecord, substrate_library,
 };
+pub use offline::parse as parse_offline;

@@ -21,6 +21,13 @@
 //!   `cargo bench -p yee-bench` for the chosen benchmark binary (or all of
 //!   them with `all`). Stdout/stderr are inherited so criterion's live
 //!   progress output is preserved.
+//! - `yee design <prompt> --output <p.toml> [--offline] [--model <id>]` —
+//!   Phase 3.nl.0 natural-language → `yee.toml` surface. Default path is the
+//!   deterministic offline parser (`yee_design::offline::parse`) when
+//!   `--offline` is set or `ANTHROPIC_API_KEY` is unset; the live LLM path
+//!   is provided by the `yee-py` Python sidecar (`yee.design.from_prompt_llm`)
+//!   and PyO3 in-process embedding from this binary is deferred to
+//!   Phase 3.nl.0.1 per the R5 escape hatch.
 //! - `yee run <project>` — Phase 0 stub from the scaffold.
 
 use std::io;
@@ -135,6 +142,43 @@ enum Command {
         #[arg(last = true)]
         extra: Vec<String>,
     },
+    /// Synthesise a `yee.toml` project file from a natural-language prompt.
+    ///
+    /// Phase 3.nl.0 walking skeleton: turn `"2.4 GHz patch on FR4"` into a
+    /// typed [`yee_design::DesignIntent`], run the Balanis Ch. 14 +
+    /// Pozar §3.8 closed-form synthesis ([`yee_design::InitialEstimate::from_intent`]),
+    /// then emit a deterministic project TOML via [`yee_design::emit()`]. Two
+    /// artefacts are written: `<output>` (the TOML) and
+    /// `<output>.intent.json` (the typed [`yee_design::DesignIntent`] for
+    /// round-trip / provenance).
+    ///
+    /// Stage-1 (prompt → intent) selection:
+    /// - If `--offline` is passed **or** `ANTHROPIC_API_KEY` is unset,
+    ///   [`yee_design::offline::parse`] is invoked deterministically.
+    /// - Otherwise this CLI surfaces a "live LLM path lives in the yee-py
+    ///   sidecar" message and exits non-zero. Per the R5 escape hatch,
+    ///   PyO3 in-process embedding from `yee-cli` is deferred to
+    ///   Phase 3.nl.0.1; callers wanting the LLM path today must use
+    ///   `python -c "import yee; ..."` against the `yee-py` bindings.
+    Design {
+        /// Free-form natural-language prompt, e.g.
+        /// `"2.4 GHz inset-fed patch on RO4003C"`.
+        prompt: String,
+        /// Output project-TOML path. A sidecar `<output>.intent.json` is
+        /// written next to it.
+        #[arg(long, short)]
+        output: PathBuf,
+        /// Force the deterministic offline parser instead of the LLM path.
+        ///
+        /// The offline parser is always selected if `ANTHROPIC_API_KEY` is
+        /// unset in the environment, regardless of this flag.
+        #[arg(long)]
+        offline: bool,
+        /// Optional LLM model id to forward to the sidecar
+        /// (e.g. `"claude-sonnet-4-5"`). Ignored in the offline path.
+        #[arg(long)]
+        model: Option<String>,
+    },
     /// Run an FDTD simulation end-to-end and emit the radiation pattern as JSON.
     ///
     /// Composes [`yee_fdtd::FdtdDriver`] from a vacuum [`yee_fdtd::YeeGrid`]
@@ -172,6 +216,19 @@ enum Command {
         #[arg(long)]
         output: Option<PathBuf>,
     },
+}
+
+/// Arguments to [`run_design`], mirroring the [`Command::Design`] variant.
+///
+/// Held in a struct so the dispatch in [`run`] stays readable and so the
+/// handler can be unit-tested independently of clap parsing.
+#[derive(Debug, Clone)]
+struct DesignArgs {
+    prompt: String,
+    output: PathBuf,
+    offline: bool,
+    #[allow(dead_code)] // populated by clap; consumed by the LLM-path stub.
+    model: Option<String>,
 }
 
 /// Arguments to [`run_fdtd`], mirroring the [`Command::FdtdRun`] variant.
@@ -297,6 +354,17 @@ fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Bench { target, extra } => run_bench(target, extra),
+        Command::Design {
+            prompt,
+            output,
+            offline,
+            model,
+        } => run_design(DesignArgs {
+            prompt,
+            output,
+            offline,
+            model,
+        }),
         Command::FdtdRun {
             grid,
             dx,
@@ -360,6 +428,100 @@ fn run_fdtd(args: FdtdArgs) -> Result<ExitCode> {
     }
 
     Ok(ExitCode::SUCCESS)
+}
+
+/// Phase 3.nl.0 walking-skeleton handler for `yee design`.
+///
+/// Pipeline:
+///
+/// 1. Stage-1: resolve the prompt → [`yee_design::DesignIntent`].
+///    - `--offline` or no `ANTHROPIC_API_KEY` ⇒ deterministic
+///      [`yee_design::offline::parse`].
+///    - Otherwise: print a message pointing at the `yee-py` sidecar
+///      (`yee.design.from_prompt_llm`) and exit non-zero. PyO3 in-process
+///      embedding from `yee-cli` is deferred to Phase 3.nl.0.1 per the R5
+///      escape hatch.
+/// 2. Stage-3: [`yee_design::InitialEstimate::from_intent`] computes the
+///    Balanis Ch. 14 + Pozar §3.8 closed-form dimensions.
+/// 3. Stage-5: [`yee_design::emit()`] renders the deterministic project TOML +
+///    `intent.json` sidecar. Both are written to disk.
+/// 4. The resolved dimensions are echoed to stdout in millimetres for the
+///    engineer to eyeball.
+///
+/// Returns `ExitCode::SUCCESS` iff every stage succeeds. Errors propagate as
+/// `anyhow` errors and the binary's top-level handler renders them on stderr
+/// with `ExitCode::FAILURE`. The "LLM path not wired" surface is also
+/// non-zero exit so a script that forgets `--offline` does not silently no-op.
+fn run_design(args: DesignArgs) -> Result<ExitCode> {
+    // Stage 1 — prompt → DesignIntent.
+    let use_offline = args.offline || std::env::var_os("ANTHROPIC_API_KEY").is_none();
+    let intent = if use_offline {
+        yee_design::offline::parse(&args.prompt)
+            .map_err(|e| anyhow::anyhow!("offline parser: {e}"))?
+    } else {
+        // Per the R5 escape hatch, the live LLM path lives in `yee-py`'s
+        // `yee.design.from_prompt_llm`. Embedding the Python interpreter
+        // in-process from the `yee` binary is deferred to Phase 3.nl.0.1
+        // (it requires opting `yee-cli` into PyO3 and a `python3` toolchain
+        // at link time — a tech-stack change out of scope for R5).
+        eprintln!(
+            "yee design: live LLM path is provided by the yee-py sidecar \
+             (yee.design.from_prompt_llm). Rerun with --offline, or invoke \
+             the sidecar from Python yourself. PyO3 in-process embedding \
+             from yee-cli is deferred to Phase 3.nl.0.1."
+        );
+        return Ok(ExitCode::from(2));
+    };
+
+    // Stage 3 — DesignIntent → InitialEstimate.
+    let estimate = yee_design::InitialEstimate::from_intent(&intent)
+        .map_err(|e| anyhow::anyhow!("initial-estimate synthesis: {e}"))?;
+
+    // Stage 5 — emit project TOML + intent.json sidecar.
+    let artefacts = yee_design::emit(&estimate, &intent);
+
+    std::fs::write(&args.output, &artefacts.toml)
+        .map_err(|e| anyhow::anyhow!("writing project TOML to {}: {e}", args.output.display()))?;
+
+    let intent_path = intent_sidecar_path(&args.output);
+    std::fs::write(&intent_path, &artefacts.intent_json)
+        .map_err(|e| anyhow::anyhow!("writing intent sidecar to {}: {e}", intent_path.display()))?;
+
+    // Stdout summary — millimetre-scaled, plus the resolved permittivity and
+    // centre frequency so the engineer can eyeball the result without
+    // having to re-open the TOML.
+    println!("Wrote {}", args.output.display());
+    println!("Wrote {}", intent_path.display());
+    println!("Resolved design:");
+    println!(
+        "  center_frequency = {:.4} GHz",
+        intent.target_frequency_hz / 1.0e9
+    );
+    println!("  substrate eps_r  = {:.4}", estimate.substrate.eps_r);
+    println!("  width            = {:.4} mm", estimate.width_m * 1.0e3);
+    println!("  length           = {:.4} mm", estimate.length_m * 1.0e3);
+    println!(
+        "  inset_offset     = {:.4} mm",
+        estimate.inset_offset_m * 1.0e3
+    );
+    println!(
+        "  feed_width       = {:.4} mm",
+        estimate.feed_width_m * 1.0e3
+    );
+
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Compute the `<output>.intent.json` sidecar path next to the project TOML.
+///
+/// Suffix-append — `foo/bar.toml` → `foo/bar.toml.intent.json`. We do not
+/// replace the extension because a downstream consumer reading
+/// `<project>.intent.json` from the project-file directory should not have
+/// to know whether the project file ended in `.toml`, `.yee`, or nothing.
+fn intent_sidecar_path(project: &std::path::Path) -> PathBuf {
+    let mut s = project.as_os_str().to_owned();
+    s.push(".intent.json");
+    PathBuf::from(s)
 }
 
 /// Shell out to `cargo bench -p yee-bench [--bench <name>] [-- <extra>...]`.
