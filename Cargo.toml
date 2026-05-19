@@ -15,6 +15,7 @@ members = [
     "crates/yee-surrogate",
     "crates/yee-validation",
     "crates/yee-bench",
+    "crates/yee-design",
     "examples/half-wave-dipole",
     "examples/microstrip-line",
     "examples/patch-2g4",
@@ -44,6 +45,7 @@ yee-io    = { path = "crates/yee-io",    version = "0.0.0" }
 yee-plotters = { path = "crates/yee-plotters", version = "0.0.0" }
 yee-surrogate = { path = "crates/yee-surrogate", version = "0.0.0" }
 yee-validation = { path = "crates/yee-validation", version = "0.0.0" }
+yee-design   = { path = "crates/yee-design",  version = "0.0.0" }
 
 # CUDA (one binding for the whole project)
 cudarc = { version = "0.19", default-features = false, features = [

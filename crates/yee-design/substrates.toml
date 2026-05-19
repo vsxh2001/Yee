@@ -1,0 +1,33 @@
+# Yee substrate library — Phase 3.nl.0 (walking skeleton).
+#
+# Values are single-frequency literals from publicly cited datasheets, kept
+# minimal to stay within THIRD_PARTY_LICENSES.md fair-use bounds (spec §10
+# TBD on full eps_r(f) curves). Bumping `version` is required whenever any
+# row changes; `Provenance.substrate_library_version` records this so a saved
+# `intent.json` can detect drift (spec §10 risk #2).
+
+version = "1"
+
+[[substrate]]
+name         = "FR4"
+eps_r        = 4.4
+h_mm         = 1.6
+loss_tangent = 0.02
+
+[[substrate]]
+name         = "RO4003C"
+eps_r        = 3.55
+h_mm         = 0.508
+loss_tangent = 0.0027
+
+[[substrate]]
+name         = "RO5880"
+eps_r        = 2.2
+h_mm         = 0.787
+loss_tangent = 0.0009
+
+[[substrate]]
+name         = "AluminaTC"
+eps_r        = 9.8
+h_mm         = 0.635
+loss_tangent = 0.0001

@@ -1,0 +1,21 @@
+[package]
+name         = "yee-design"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "Yee design: natural-language → DesignIntent → yee.toml surface (Phase 3.nl.0)."
+
+[lints.rust]
+unsafe_code  = "forbid"
+missing_docs = "warn"
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+# `toml` is not in the workspace dep table at base SHA; declare directly.
+# Phase 3.nl.0 plan (Step R3) will promote `toml_edit` for the emitter; the
+# scaffold here only needs read-side parsing for `substrates.toml`.
+toml       = "0.8"
