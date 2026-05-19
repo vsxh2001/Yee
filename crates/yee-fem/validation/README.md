@@ -136,7 +136,7 @@ relative errors, Newton iteration count, and pass/fail status.
 
 | ID | Case | Tolerance | Wall-time |
 |----|------|-----------|-----------|
-| `fem-eig-003 (WR-90 stub + ABC)` | Air-filled WR-90 rectangular waveguide stub (`a = 22.86 mm`, `b = 10.16 mm`, `d = 30 mm`) meshed with `(nx, ny, nz) = (16, 8, 24)` Kuhn 6-tet bricks (18 432 tets); face `z = 0` tagged `FaceKind::Abc`, face `z = d` tagged `FaceKind::WavePort(0)` with the analytic TE_{10} modal profile `e_mode = ŷ · sqrt(2/(a·b)) · sin(π x/a)` and `β(ω) = sqrt((ω/c)² − (π/a)²)`; four longitudinal sidewalls tagged PEC. Sweep `|S_{11}(f)|` across 50 uniform points in 8-12 GHz (80 MHz spacing). **Phase 4.fem.eig.3 F6 status (JJJJJJJJJ):** driver now enables F1+F2 coupled exact-Whitney-1 modal RHS + projection (`with_coupled_whitney(true)`) and F3+F4 2nd-order Engquist–Majda ABC (`with_abc_order(AbcOrder::Second)`). Spec §8 absorption-window target: `20·log10(|S_{11}|) ∈ [-45, -35] dB`. | (A) `|S_{11}|` band within `[-45, -35] dB` window per spec §8 + ADR-0040 / ADR-0042 — **still `#[ignore]`'d**: with F1-F4 enabled the measured band drops from BBBBBBBBB's `[≈-1e-15, 0.0] dB` saturation to `[-5.0e-2, -8.1e-5] dB`, a non-trivial improvement but still well outside the spec window (mesh-refinement constraint, see Findings); (B) `|S_{11}| ≤ 1 + ε_num` (passive) — default-CI; strict `< 1` continuum bound **still `#[ignore]`'d** but the measured `|S_11|` band `[0.9945, 0.99999]` is *numerically* strictly < 1 (gate would pass; kept ignored coupled with the absorption-floor gate); (C) adjacent-bin `|Δ(20·log10|S_{11}|)| ≤ 10 dB` smoothness, default-CI; (D) wall-time informational | `~30 s` in `--release` per driver invocation (3 default-CI tests ≈ 90 s file total); plan §8 budget `< 240 s` |
+| `fem-eig-003 (WR-90 stub + ABC)` | Air-filled WR-90 rectangular waveguide stub (`a = 22.86 mm`, `b = 10.16 mm`, `d = 30 mm`) meshed with `(nx, ny, nz) = (24, 12, 36)` Kuhn 6-tet bricks (62 208 tets) — refined per Phase 4.fem.eig.3.0.3 (Track NNNNNNNNN) from the spec-scale `(16, 8, 24) = 18 432 tets` to raise the cross-section sampling from ~16 to ~24 linear samples; face `z = 0` tagged `FaceKind::Abc`, face `z = d` tagged `FaceKind::WavePort(0)` with the analytic TE_{10} modal profile `e_mode = ŷ · sqrt(2/(a·b)) · sin(π x/a)` and `β(ω) = sqrt((ω/c)² − (π/a)²)`; four longitudinal sidewalls tagged PEC. Sweep `|S_{11}(f)|` across 50 uniform points in 8-12 GHz (80 MHz spacing). Driver enables F1+F2 coupled exact-Whitney-1 modal RHS + projection (`with_coupled_whitney(true)`) and F3+F4 2nd-order Engquist–Majda ABC (`with_abc_order(AbcOrder::Second)`). Spec §8 absorption-window target: `20·log10(|S_{11}|) ∈ [-45, -35] dB`. | (A) `|S_{11}|` band within `[-45, -35] dB` window per spec §8 + ADR-0040 / ADR-0042 — **still `#[ignore]`'d**: refined-mesh band `[-2.22e-2, -2.86e-5] dB`, ~2× better in dB than JJJJJJJJJ's `(16, 8, 24)` baseline (`[-5.0e-2, -8.1e-5] dB`) but still ~35 dB above the spec window — binding constraint is 2nd-order Engquist-Majda intrinsic floor for off-normal modal content, **queued for Phase 4.fem.eig.3.5 CFS-PML** per ADR-0042 §risks; (B) `|S_{11}| ≤ 1 + ε_num` (passive) — default-CI; strict `< 1` continuum bound **still `#[ignore]`'d** but the measured `|S_11|` band `[0.9976, 0.99997]` is *numerically* strictly < 1 (gate would pass; kept ignored coupled with the absorption-floor gate); (C) adjacent-bin `|Δ(20·log10|S_{11}|)| ≤ 10 dB` smoothness, default-CI; (D) wall-time informational | `~213 s` in `--release` per driver invocation on the `(24, 12, 36)` mesh (3 default-CI tests ≈ 640 s file total); plan §8 budget `< 240 s` per call met |
 | `fem-eig-004 (WR-90 thru-line)` | Lossless air-filled WR-90 section (`a × b × d = 22.86 × 10.16 × 30 mm`) meshed with `(12, 6, 18)` Kuhn 6-tet bricks (~7.8 k tets); faces `z = 0` and `z = d` tagged `FaceKind::WavePort(0)` / `WavePort(1)` with the analytic TE_{10} modal profile on each, four sidewalls PEC. Five-point sweep `{9.8, 9.9, 10.0, 10.1, 10.2} GHz` via [`yee_fem::OpenBoundarySolver::sweep_matrix`] with F1+F2 coupled exact-Whitney-1 enabled (no ABC faces). At 10 GHz: measured `|S_{21}| = -0.045 dB`, `|S_{11}| = -53.0 dB`, `|S_{12} − S_{21}| = 2.0e-15` — all gates clear by wide margins. | (A) `|S_{21}(10 GHz)|` within ±0.1 dB of 0 dB — **default-CI**, passes (-0.045 dB); (B) `|S_{11}(10 GHz)| < -20 dB` — **default-CI**, passes (-53 dB); (C) reciprocity `|S_{12} − S_{21}| < 1e-3` at 10 GHz — **default-CI**, passes (2e-15) | `~2 s` in `--release` for the full file (4 tests, default-CI) |
 | `fem-eig-005 (3-port T-junction)` | Lossless air-filled 30 mm cubic box meshed with `(10, 10, 10)` Kuhn 6-tet bricks (6 000 tets); three faces tagged `WavePort(p)` (`z = 0` → 0, `z = L` → 1, `x = 0` → 2), the three remaining faces PEC. Each port carries a half-cosine TE-like profile `e_t = ŷ · sin(π·u / (2L))` with broad-wall coordinate `u`, putting the modal cutoff at `c/(4L) = 2.5 GHz` comfortably below the 5 GHz test point. Single-frequency `sweep_matrix([2π · 5 GHz])` with F1+F2 enabled. Per spec §8 fem-eig-005 — **no assertion on individual S-parameter magnitudes** (the T-junction has no closed-form analytic S-matrix); only general scattering invariants tested. Measured passivity sums `Σ_q\|S_{q,p}\|²` = `[0.454, 0.553, 0.508]`; max reciprocity residual `\|S_{q,p} − S_{p,q}\|` = `1.5e-15`. | (A) passivity `Σ_q\|S_{q,p}\|² ≤ 1 + ε_num` (`ε_num = 0.05`) for every excited port `p` — **default-CI**, passes by wide margin; (B) reciprocity `max_{q,p} \|S_{q,p} − S_{p,q}\| ≤ 1e-3` — **default-CI**, passes (1.5e-15) | `< 1 s` in `--release` for the full file (3 tests, default-CI) |
 
@@ -211,6 +211,58 @@ plan E5 escape hatch.
   (Jin §10.4 table 10.1). Queued for **Phase 4.fem.eig.3.0.3
   mesh-refinement** track per ADR-0042 §risks; refine to
   `(24, 12, 36) = ~ 62 k tets` (~3.5× cost) and retry.
+
+  *Update (Track NNNNNNNNN, Phase 4.fem.eig.3.0.3):* mesh-refinement
+  executed; result is roughly 2× better in dB
+  (`[-2.22e-2, -2.86e-5] dB` on `(24, 12, 36)`) but still ~35 dB
+  above the window. The Jin §10.4 ~30-samples/wavelength rule is now
+  satisfied at the cross-section (~24 samples), yet the floor barely
+  budged — so the binding constraint is **not** modal-sampling
+  discretisation, it is the 2nd-order Engquist–Majda ABC intrinsic
+  floor for off-normal modal content (the closed WR-90 stub generates
+  near-cutoff TE_{10n} reactive standing-wave content that the local
+  2nd-order operator cannot absorb). Re-queued for **Phase
+  4.fem.eig.3.5 CFS-PML** per ADR-0042 §risks.
+
+### Findings surfaced during the Phase 4.fem.eig.3.0.3 landing (Track NNNNNNNNN)
+
+* **fem-eig-003 mesh-refinement: 1.5× per-axis (3.4× tets) halved the
+  residual in dB but did not retire the strict gate.** Mesh bumped from
+  `(16, 8, 24) = 18 432 tets` to `(24, 12, 36) = 62 208 tets` per the
+  Track NNNNNNNNN brief (raises the WR-90 broad-wall sampling from ~16
+  to ~24 linear samples — above the Jin §10.4 table 10.1 ~30-samples/
+  wavelength guideline applied to `λ_g ≈ 30.3 mm` at 10 GHz). Measured
+  `|S_{11}(f)|` band: `[0.9976, 0.99997]` →
+  `s11_db ∈ [-2.22e-2, -2.86e-5] dB` (vs JJJJJJJJJ baseline
+  `[-5.0e-2, -8.1e-5] dB` at the spec-scale mesh) — ~2× better in dB,
+  yet still ~35 dB above the spec §8 `[-45, -35] dB` window.
+
+  *Diagnosis (revised from JJJJJJJJJ):* with the cross-section now
+  resolved above the Jin sampling threshold, the residual is no longer
+  mesh-bound. The binding constraint is the **2nd-order Engquist–Majda
+  ABC intrinsic floor** for the off-normal modal content scattered by
+  the closed-stub TE_{10n} near-resonant reactive standing wave
+  (spec §10 risk register). Local 2nd-order ABCs achieve `~ -40 dB`
+  only for plane waves at near-normal incidence; the WR-90 closed
+  stub's modal field includes significant evanescent + off-normal
+  content that the local operator cannot absorb.
+
+  *Disposition:* per the Track NNNNNNNNN brief escape hatch ("strict
+  gate still fails > 5 dB above -35 dB even at refined mesh →
+  fundamental limit reached; queue Phase 4.fem.eig.3.5 PML and leave
+  gates ignored"), both strict gates remain `#[ignore]`'d. The lift
+  PR is the Phase 4.fem.eig.3.5 CFS-PML follow-up.
+
+* **Wall-time on the refined mesh: ~213 s per driver invocation
+  (`--release`).** Comfortably inside the plan §8 `< 240 s` per-call
+  budget and the Track NNNNNNNNN brief's `< 300 s` (5 min) per-sweep
+  budget. The three default-CI tests each invoke the driver
+  independently, so the file's wall-time rises from JJJJJJJJJ's
+  `~ 3 × 30 s ≈ 90 s` to `~ 3 × 213 s ≈ 640 s`. Each test asserts a
+  different gate (smoke / passive / smoothness) so the
+  independent-invocation pattern is intentional — a consolidated
+  single-invocation variant remains a candidate refactor if CI cost
+  becomes load-bearing.
 
 * **fem-eig-004 thru-line passes every gate by wide margins.** All
   three gates clear with margin to spare: `|S_{21}(10 GHz)| =
