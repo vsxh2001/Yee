@@ -584,8 +584,21 @@ fn find_surface_wave_poles(
         if !(0.99..=eps_r.sqrt() * 1.01).contains(&ratio) {
             continue;
         }
-        let Ok(res) = residue(channel, pole, eps_r, h, k0) else {
+        let Ok(res_raw) = residue(channel, pole, eps_r, h, k0) else {
             continue;
+        };
+        // `sommerfeld::residue` returns the residue of the **Pozar
+        // TM-Fresnel** form (the meromorphic function whose contour
+        // integral SSSSSS / TTTTTT verified). Track DDDDDDD flipped
+        // `slab_reflection`'s TM branch to the Michalski-Mosig 1997
+        // scalar-potential kernel `F_q = -R_TM_Pozar`, so the residue
+        // of the spectral function the DCIM / surface-wave reconstruction
+        // actually consumes is `-residue(...)` on the TM channel. The
+        // TE channel is unchanged (Pozar and MM-1997 agree on sign
+        // there).
+        let res = match channel {
+            SwChannel::Te => res_raw,
+            SwChannel::Tm => -res_raw,
         };
         // Modal k_zd at the pole (needed by the z-profile evaluator).
         let kzd = sommerfeld::k_zd(pole, eps_r, k0);
@@ -704,12 +717,29 @@ fn k_zd_from_k_z0(k_z0: Complex64, eps_r: f64, k0: f64) -> Complex64 {
 /// short at `z = -h`. Looking down from `z = 0+`, the input impedance
 /// seen at the substrate top is `Z_in = j Z_d tan(k_{zd} h)`, where
 /// `Z_d` is the characteristic impedance of the dielectric in the
-/// requested polarisation; the reflection at the air-substrate
-/// interface is `R = (Z_in − Z_0) / (Z_in + Z_0)`. After clearing the
-/// `(ω μ_0)` / `(ω ε_0)` factors:
+/// requested polarisation. The kernel form expected by the MPIE
+/// scalar-potential / vector-potential DCIM expansion — i.e. the
+/// spectral function whose `Σ b_n exp(-j k_{z0} (-a_n))` image-sum
+/// representation we want GPOF to recover — is the **Michalski-Mosig
+/// 1997** scalar-potential kernel `F_q` (and its TE counterpart),
+/// **not** the Pozar TM-Fresnel `R_TM`. The two differ by an overall
+/// sign on the TM channel:
 ///
 /// TE: `R = (j k_{z0} tan(k_{zd} h) − k_{zd})  / (j k_{z0} tan(k_{zd} h) + k_{zd})`.
-/// TM: `R = (j k_{zd} tan(k_{zd} h) − ε_r k_{z0}) / (j k_{zd} tan(k_{zd} h) + ε_r k_{z0})`.
+/// TM: `R = (ε_r k_{z0} − j k_{zd} tan(k_{zd} h)) / (ε_r k_{z0} + j k_{zd} tan(k_{zd} h))`.
+///
+/// At normal incidence (`k_z0 = k_0`, `k_ρ = 0`) with FR-4 / 1 GHz /
+/// `h = 1.6 mm` the TM branch evaluates to `R ≈ 1 − j·0.067` —
+/// positive-real, matching the +1 PEC reflection convention for TM
+/// scalar potential — and the GPOF fit therefore recovers a leading
+/// DCIM image with `b ≈ +(ε_r − 1) / (ε_r + 1) ≈ +0.629` at
+/// `a ≈ -2 h`, in agreement with Chow 1991. Track DDDDDDD (this
+/// commit) flipped the TM branch from the Pozar form
+/// `(j k_zd tan − ε_r k_z0) / (j k_zd tan + ε_r k_z0)` to the
+/// MM-1997 form above; the corresponding sign change in the
+/// per-pole residue is applied at the storage site in
+/// [`find_surface_wave_poles`] so the Hankel reconstruction in
+/// [`MultilayerGreens::surface_wave_sum`] remains consistent.
 ///
 /// Near multiples of `π` in `k_{zd} h` the `tan` is singular — that
 /// is a physical slab resonance and the caller's fit will surface it
@@ -734,8 +764,12 @@ fn slab_reflection(
             num / den
         }
         SpectralKernel::Tm => {
-            let num = j * k_zd * t - Complex64::new(eps_r, 0.0) * k_z0;
-            let den = j * k_zd * t + Complex64::new(eps_r, 0.0) * k_z0;
+            // Michalski-Mosig 1997 scalar-potential kernel `F_q`. Numerator
+            // and denominator are the **negation** of the Pozar TM-Fresnel
+            // form so the DCIM image train recovers
+            // `b ≈ +(ε_r − 1) / (ε_r + 1)` at `a ≈ -2 h` per Chow 1991.
+            let num = Complex64::new(eps_r, 0.0) * k_z0 - j * k_zd * t;
+            let den = Complex64::new(eps_r, 0.0) * k_z0 + j * k_zd * t;
             num / den
         }
     }

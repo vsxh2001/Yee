@@ -590,7 +590,7 @@ const MOM_002_SOMMERFELD_N_POLES: usize = 1;
 /// only from docstrings (i.e. semantically used, but not reachable
 /// from the public-facing case-runner code path).
 #[allow(dead_code)]
-const MOM_002_Z_IN_MEASURED_OHM: f64 = 2214.741;
+const MOM_002_Z_IN_MEASURED_OHM: f64 = 2568.975;
 
 /// Coarse frequency-sweep extent for the plot artifacts. 0.5 GHz to
 /// 1.5 GHz brackets the 1 GHz probe point on either side without
