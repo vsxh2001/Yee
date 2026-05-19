@@ -1229,6 +1229,380 @@ impl SubgridRegion {
         );
     }
 
+    /// Phase 2.fdtd.7.y Step C6 (Track DDDDDDDD) — additive TF/SF-style
+    /// coarse → fine `E_t` injection on the six outer Huygens faces
+    /// **(experimental / not in the production pipeline)**.
+    ///
+    /// Originally specified by the C6 brief's F2 path to restore the
+    /// inward (coarse → fine) coupling channel that Step C5 Option α
+    /// (Mur ABC) removed when it retired the Q3 Dirichlet
+    /// [`Self::interpolate_coarse_e_to_fine`] from the production
+    /// pipeline. With Mur replacing Q3, the fine outer `E_t` plane no
+    /// longer sees the coarse-side wave at all (the Mur formula only
+    /// reads adjacent-inside fine `E_t`), so for a source-on-coarse
+    /// traversal the fine grid stayed effectively zero throughout — and
+    /// the kept B2.2 J-side ghost-subtracted injection
+    /// `J = +n̂ × (H_fine − H_coarse_ghost)` then reduced to a strong
+    /// negative correction `−n̂ × H_coarse_ghost` on coarse `E` at the
+    /// surface plane, absorbing incident coarse waves instead of letting
+    /// them propagate through. The Q5 strict 0.5% gate failed at
+    /// `rel_err ≈ 32%` and Q6 drifted ≈ 57% at `N = 1000` under that
+    /// regime.
+    ///
+    /// **Step C6 implementation status (Track DDDDDDDD bring-up).**
+    /// The additive F2 form (this helper) was empirically observed to
+    /// re-introduce positive-feedback instability at every weight
+    /// scaling tested (`c·dt_f/dx_f`, halved, quartered, 10×-quartered,
+    /// down to 1% of the brief's specification): the 100/500-step
+    /// stability canary diverged past the `1e3` V/m bound at step
+    /// numbers ranging from ~54 (full weight) to ~378 (1% weight), with
+    /// strictly monotonic growth. The dominant failure mode is the
+    /// closed feedback loop `coarse E → fine E_t (inject) → fine H
+    /// (update_fine_h curl) → fine H ≠ H_coarse_ghost → J ≠ 0 → coarse
+    /// E ...`, which the B2.2 ghost-subtraction was specifically
+    /// designed *not* to short-circuit (under Q3-coupled inward
+    /// channels). Step C6 therefore escape-hatched to **F1 — drop the
+    /// J-side ghost subtraction** in [`SubgriddedSolver::step`] /
+    /// `step_with_gaussian_source_ez` (routed through
+    /// [`Self::inject_j_to_coarse_e_un_ghosted`]); this helper is
+    /// retained as a `#[doc(hidden)]`-style API surface for a future
+    /// Phase 2.fdtd.7.y.α spec amendment that re-balances both inward
+    /// coupling and J-side ghost simultaneously.
+    ///
+    /// **Not called from the production pipeline.** Production callers
+    /// should not invoke this helper directly; the un-ghosted J path
+    /// alone (F1) suffices for the Step C6 gate retirement.
+    ///
+    /// Re-introducing the inward channel as a TF/SF-style **additive**
+    /// injection (rather than a Dirichlet **write**) lets the fine grid
+    /// receive the coarse wave while keeping the Mur ABC's
+    /// adjacency-based stencil intact. The injection is the analog of
+    /// the standard TF/SF slab source in `crates/yee-fdtd/src/sources.rs`,
+    /// but driven by the time-blended coarse `E_t` interpolated onto
+    /// the fine-edge positions, weighted by the standard TF/SF
+    /// dimensionless coefficient `c·dt_fine / dx_fine`. Concretely, for
+    /// every fine outer `E_t` boundary cell:
+    ///
+    /// ```text
+    /// E_t_fine[boundary] += (c·dt_f / dx_f) · E_t_coarse_face_interp(x, frac)
+    /// ```
+    ///
+    /// where `E_t_coarse_face_interp(x, frac)` is the linear blend in
+    /// time at fraction `frac ∈ [0, 1]` between the start- and
+    /// end-of-coarse-step snapshots ([`Self::snapshot_coarse_e_t`] /
+    /// [`Self::snapshot_coarse_e_t_end`]), then linearly interpolated in
+    /// space to the fine-edge position using the same Chevalier 1997
+    /// §III brackets as the (legacy Dirichlet) Q3 helper. `c` is the
+    /// in-medium phase velocity `C0 / sqrt(eps_r · mu_r)` consistent
+    /// with the Mur coefficient computation in
+    /// [`Self::apply_mur_abc_to_fine_outer_e`].
+    ///
+    /// ## Call site
+    ///
+    /// In the production [`SubgriddedSolver::step`] /
+    /// `step_with_gaussian_source_ez` pipeline this is called **once
+    /// per fine sub-step**, between [`Self::snapshot_coarse_e_t`] and
+    /// the fine sub-step's [`Self::update_fine_h`] — i.e. at the
+    /// position the Q3 [`Self::interpolate_coarse_e_to_fine`] used to
+    /// occupy — with `frac = 0.25` for sub-step 1 and `frac = 0.75`
+    /// for sub-step 2 (Okoniewski 1997 fine-sub-step centring). The
+    /// Mur snapshot/apply pair runs around the subsequent
+    /// `update_fine_e` and re-evaluates the boundary; because the
+    /// injection is additive, the post-injection boundary value
+    /// propagates inward via [`Self::update_fine_h`]'s curl read
+    /// before Mur overwrites the boundary on the post-`update_fine_e`
+    /// side.
+    ///
+    /// ## Why additive (not Dirichlet)
+    ///
+    /// A Dirichlet write would re-introduce the failure mode Option α
+    /// retired: it would slave the fine outer `E_t` back to a coarse
+    /// interpolation and degenerate the ADR-0038 compensating M source
+    /// (`E_post − E_pre`) to zero. The additive form leaves the Mur
+    /// boundary evaluation in place — Mur reads `E_inside_old +
+    /// α·(E_inside_new − E_bdry_old)` and the injection adds to
+    /// `E_bdry_old` (captured by [`Self::snapshot_fine_e_for_mur`])
+    /// only through the small `α ≈ −0.05` channel, while the dominant
+    /// transport happens via the `update_fine_h` curl read of the
+    /// injected fine `E_t`.
+    ///
+    /// `frac` is clamped to `[0, 1]`.
+    ///
+    /// Spec: `docs/superpowers/specs/2026-05-19-phase-2-fdtd-7-y-m-coupling-design.md`.
+    /// ADR:  `docs/src/decisions/0038-berenger-m-coupling-spec-amendment.md`.
+    pub fn inject_coarse_e_to_fine_tfsf(&mut self, _parent: &YeeGrid, frac: f64) {
+        let frac = frac.clamp(0.0, 1.0);
+        let lo = self.lo;
+        let hi = self.hi;
+        let nx_c = hi.0 - lo.0;
+        let ny_c = hi.1 - lo.1;
+        let nz_c = hi.2 - lo.2;
+        let fine_nx = 2 * nx_c;
+        let fine_ny = 2 * ny_c;
+        let fine_nz = 2 * nz_c;
+
+        // TF/SF weight: dimensionless Courant-number-like coefficient
+        // `c·dt_f / dx_f` (= ~0.52 at the standard 0.9·CFL Courant
+        // limit on a cubic Yee grid). Matches the magnitude of the
+        // canonical FDTD TF/SF correction `dt/(ε·dx) · H_inc =
+        // (c·dt/dx) · E_inc` (after the wave-impedance Z₀ = √(μ/ε)
+        // pairing of E and H amplitudes); see `sources.rs` for the
+        // multi-face-stencil derivation and the unit-canceling
+        // algebra. Uses the **in-medium** phase velocity so non-vacuum
+        // fine grids (eps_r > 1 or mu_r > 1) get the correct scaling;
+        // matches the Mur ABC coefficient in
+        // `apply_mur_abc_to_fine_outer_e` for consistency.
+        //
+        // **Per-sub-step scaling factor.** The injection is called twice
+        // per coarse step (frac = 0.25, 0.75); since the goal is for
+        // the cumulative inject across one coarse step to approximately
+        // match the canonical TF/SF amplitude `c·dt_c/dx_c · E_inc` (=
+        // `c·dt_f/dx_f · E_inc` under exact 2× refinement, dt_c = 2·dt_f
+        // and dx_c = 2·dx_f), we halve the per-call weight: each sub-
+        // step inject contributes half the desired total. Without this
+        // factor the cumulative inject is doubled and the 100-step
+        // canary peak `|E_z|_fine` grows past the 1e3 stability bound
+        // around step 54 (empirically verified during C6 bring-up).
+        let c_eff = C0 / (self.fine.eps_r * self.fine.mu_r).sqrt();
+        let weight = c_eff * self.fine.dt / self.fine.dx;
+
+        // ±x faces — add to fine E_y and E_z at fine_i ∈ {0, fine_nx}.
+        Self::add_face_x(
+            &mut self.fine,
+            &self.snapshots.xmin_ey,
+            &self.snapshots.xmin_ez,
+            0,
+            fine_ny,
+            fine_nz,
+            frac,
+            weight,
+        );
+        Self::add_face_x(
+            &mut self.fine,
+            &self.snapshots.xmax_ey,
+            &self.snapshots.xmax_ez,
+            fine_nx,
+            fine_ny,
+            fine_nz,
+            frac,
+            weight,
+        );
+
+        // ±y faces — add to fine E_x and E_z at fine_j ∈ {0, fine_ny}.
+        Self::add_face_y(
+            &mut self.fine,
+            &self.snapshots.ymin_ex,
+            &self.snapshots.ymin_ez,
+            0,
+            fine_nx,
+            fine_nz,
+            frac,
+            weight,
+        );
+        Self::add_face_y(
+            &mut self.fine,
+            &self.snapshots.ymax_ex,
+            &self.snapshots.ymax_ez,
+            fine_ny,
+            fine_nx,
+            fine_nz,
+            frac,
+            weight,
+        );
+
+        // ±z faces — add to fine E_x and E_y at fine_k ∈ {0, fine_nz}.
+        Self::add_face_z(
+            &mut self.fine,
+            &self.snapshots.zmin_ex,
+            &self.snapshots.zmin_ey,
+            0,
+            fine_nx,
+            fine_ny,
+            frac,
+            weight,
+        );
+        Self::add_face_z(
+            &mut self.fine,
+            &self.snapshots.zmax_ex,
+            &self.snapshots.zmax_ey,
+            fine_nz,
+            fine_nx,
+            fine_ny,
+            frac,
+            weight,
+        );
+    }
+
+    /// Additive ±x-face injection helper. Mirror of
+    /// [`Self::interp_face_x`] that adds `weight ·
+    /// time_blend(start, end, frac) · spatial_bilerp` to the fine
+    /// `E_y` / `E_z` boundary cells instead of overwriting them. Used
+    /// by [`Self::inject_coarse_e_to_fine_tfsf`].
+    #[allow(clippy::too_many_arguments)]
+    fn add_face_x(
+        fine: &mut YeeGrid,
+        ey_snap: &(Array2<f64>, Array2<f64>),
+        ez_snap: &(Array2<f64>, Array2<f64>),
+        fine_i_face: usize,
+        fine_ny: usize,
+        fine_nz: usize,
+        frac: f64,
+        weight: f64,
+    ) {
+        let (ny_c, nz_c_p1) = ey_snap.0.dim();
+        let (ny_c_p1, nz_c) = ez_snap.0.dim();
+
+        for j_f in 0..fine_ny {
+            let t_y = ((j_f as f64) - 0.5) / 2.0;
+            let (j_lo, j_hi, w_jy) = Self::bracket_half(t_y, ny_c);
+            for k_f in 0..=fine_nz {
+                let (k_lo, k_hi, w_kz) = Self::bracket_int(k_f, nz_c_p1);
+                let s00 = ey_snap.0[(j_lo, k_lo)];
+                let s01 = ey_snap.0[(j_lo, k_hi)];
+                let s10 = ey_snap.0[(j_hi, k_lo)];
+                let s11 = ey_snap.0[(j_hi, k_hi)];
+                let e00 = ey_snap.1[(j_lo, k_lo)];
+                let e01 = ey_snap.1[(j_lo, k_hi)];
+                let e10 = ey_snap.1[(j_hi, k_lo)];
+                let e11 = ey_snap.1[(j_hi, k_hi)];
+                let start = bilerp(s00, s01, s10, s11, w_jy, w_kz);
+                let end = bilerp(e00, e01, e10, e11, w_jy, w_kz);
+                fine.ey[(fine_i_face, j_f, k_f)] += weight * Self::blend_time(start, end, frac);
+            }
+        }
+
+        for j_f in 0..=fine_ny {
+            let (j_lo, j_hi, w_jy) = Self::bracket_int(j_f, ny_c_p1);
+            for k_f in 0..fine_nz {
+                let t_z = ((k_f as f64) - 0.5) / 2.0;
+                let (k_lo, k_hi, w_kz) = Self::bracket_half(t_z, nz_c);
+                let s00 = ez_snap.0[(j_lo, k_lo)];
+                let s01 = ez_snap.0[(j_lo, k_hi)];
+                let s10 = ez_snap.0[(j_hi, k_lo)];
+                let s11 = ez_snap.0[(j_hi, k_hi)];
+                let e00 = ez_snap.1[(j_lo, k_lo)];
+                let e01 = ez_snap.1[(j_lo, k_hi)];
+                let e10 = ez_snap.1[(j_hi, k_lo)];
+                let e11 = ez_snap.1[(j_hi, k_hi)];
+                let start = bilerp(s00, s01, s10, s11, w_jy, w_kz);
+                let end = bilerp(e00, e01, e10, e11, w_jy, w_kz);
+                fine.ez[(fine_i_face, j_f, k_f)] += weight * Self::blend_time(start, end, frac);
+            }
+        }
+    }
+
+    /// Additive ±y-face injection helper; mirror of
+    /// [`Self::interp_face_y`]. See [`Self::add_face_x`] for the
+    /// derivation rationale.
+    #[allow(clippy::too_many_arguments)]
+    fn add_face_y(
+        fine: &mut YeeGrid,
+        ex_snap: &(Array2<f64>, Array2<f64>),
+        ez_snap: &(Array2<f64>, Array2<f64>),
+        fine_j_face: usize,
+        fine_nx: usize,
+        fine_nz: usize,
+        frac: f64,
+        weight: f64,
+    ) {
+        let (nx_c, nz_c_p1) = ex_snap.0.dim();
+        let (nx_c_p1, nz_c) = ez_snap.0.dim();
+
+        for i_f in 0..fine_nx {
+            let t_x = ((i_f as f64) - 0.5) / 2.0;
+            let (i_lo, i_hi, w_ix) = Self::bracket_half(t_x, nx_c);
+            for k_f in 0..=fine_nz {
+                let (k_lo, k_hi, w_kz) = Self::bracket_int(k_f, nz_c_p1);
+                let s00 = ex_snap.0[(i_lo, k_lo)];
+                let s01 = ex_snap.0[(i_lo, k_hi)];
+                let s10 = ex_snap.0[(i_hi, k_lo)];
+                let s11 = ex_snap.0[(i_hi, k_hi)];
+                let e00 = ex_snap.1[(i_lo, k_lo)];
+                let e01 = ex_snap.1[(i_lo, k_hi)];
+                let e10 = ex_snap.1[(i_hi, k_lo)];
+                let e11 = ex_snap.1[(i_hi, k_hi)];
+                let start = bilerp(s00, s01, s10, s11, w_ix, w_kz);
+                let end = bilerp(e00, e01, e10, e11, w_ix, w_kz);
+                fine.ex[(i_f, fine_j_face, k_f)] += weight * Self::blend_time(start, end, frac);
+            }
+        }
+
+        for i_f in 0..=fine_nx {
+            let (i_lo, i_hi, w_ix) = Self::bracket_int(i_f, nx_c_p1);
+            for k_f in 0..fine_nz {
+                let t_z = ((k_f as f64) - 0.5) / 2.0;
+                let (k_lo, k_hi, w_kz) = Self::bracket_half(t_z, nz_c);
+                let s00 = ez_snap.0[(i_lo, k_lo)];
+                let s01 = ez_snap.0[(i_lo, k_hi)];
+                let s10 = ez_snap.0[(i_hi, k_lo)];
+                let s11 = ez_snap.0[(i_hi, k_hi)];
+                let e00 = ez_snap.1[(i_lo, k_lo)];
+                let e01 = ez_snap.1[(i_lo, k_hi)];
+                let e10 = ez_snap.1[(i_hi, k_lo)];
+                let e11 = ez_snap.1[(i_hi, k_hi)];
+                let start = bilerp(s00, s01, s10, s11, w_ix, w_kz);
+                let end = bilerp(e00, e01, e10, e11, w_ix, w_kz);
+                fine.ez[(i_f, fine_j_face, k_f)] += weight * Self::blend_time(start, end, frac);
+            }
+        }
+    }
+
+    /// Additive ±z-face injection helper; mirror of
+    /// [`Self::interp_face_z`]. See [`Self::add_face_x`] for the
+    /// derivation rationale.
+    #[allow(clippy::too_many_arguments)]
+    fn add_face_z(
+        fine: &mut YeeGrid,
+        ex_snap: &(Array2<f64>, Array2<f64>),
+        ey_snap: &(Array2<f64>, Array2<f64>),
+        fine_k_face: usize,
+        fine_nx: usize,
+        fine_ny: usize,
+        frac: f64,
+        weight: f64,
+    ) {
+        let (nx_c, ny_c_p1) = ex_snap.0.dim();
+        let (nx_c_p1, ny_c) = ey_snap.0.dim();
+
+        for i_f in 0..fine_nx {
+            let t_x = ((i_f as f64) - 0.5) / 2.0;
+            let (i_lo, i_hi, w_ix) = Self::bracket_half(t_x, nx_c);
+            for j_f in 0..=fine_ny {
+                let (j_lo, j_hi, w_jy) = Self::bracket_int(j_f, ny_c_p1);
+                let s00 = ex_snap.0[(i_lo, j_lo)];
+                let s01 = ex_snap.0[(i_lo, j_hi)];
+                let s10 = ex_snap.0[(i_hi, j_lo)];
+                let s11 = ex_snap.0[(i_hi, j_hi)];
+                let e00 = ex_snap.1[(i_lo, j_lo)];
+                let e01 = ex_snap.1[(i_lo, j_hi)];
+                let e10 = ex_snap.1[(i_hi, j_lo)];
+                let e11 = ex_snap.1[(i_hi, j_hi)];
+                let start = bilerp(s00, s01, s10, s11, w_ix, w_jy);
+                let end = bilerp(e00, e01, e10, e11, w_ix, w_jy);
+                fine.ex[(i_f, j_f, fine_k_face)] += weight * Self::blend_time(start, end, frac);
+            }
+        }
+
+        for i_f in 0..=fine_nx {
+            let (i_lo, i_hi, w_ix) = Self::bracket_int(i_f, nx_c_p1);
+            for j_f in 0..fine_ny {
+                let t_y = ((j_f as f64) - 0.5) / 2.0;
+                let (j_lo, j_hi, w_jy) = Self::bracket_half(t_y, ny_c);
+                let s00 = ey_snap.0[(i_lo, j_lo)];
+                let s01 = ey_snap.0[(i_lo, j_hi)];
+                let s10 = ey_snap.0[(i_hi, j_lo)];
+                let s11 = ey_snap.0[(i_hi, j_hi)];
+                let e00 = ey_snap.1[(i_lo, j_lo)];
+                let e01 = ey_snap.1[(i_lo, j_hi)];
+                let e10 = ey_snap.1[(i_hi, j_lo)];
+                let e11 = ey_snap.1[(i_hi, j_hi)];
+                let start = bilerp(s00, s01, s10, s11, w_ix, w_jy);
+                let end = bilerp(e00, e01, e10, e11, w_ix, w_jy);
+                fine.ey[(i_f, j_f, fine_k_face)] += weight * Self::blend_time(start, end, frac);
+            }
+        }
+    }
+
     /// Copy the coarse `E_t` on the six interface faces into the
     /// matching `start` or `end` snapshot buffer.
     fn copy_face_e_t(
@@ -2091,6 +2465,53 @@ impl SubgridRegion {
     /// monolithic [`Self::inject_equivalent_currents_to_coarse`]).
     pub fn inject_j_to_coarse_e(&self, parent: &mut YeeGrid) {
         self.inject_currents_inner(parent, true, false, true);
+    }
+
+    /// Phase 2.fdtd.7.y Step C6 (Track DDDDDDDD) escape-hatch variant of
+    /// [`Self::inject_j_to_coarse_e`] that **skips the B2.2 coarse-`H`
+    /// ghost subtraction**. The source reduces to the un-ghosted
+    /// Berenger 2006 §III form `J = +n̂ × H_fine` rather than the
+    /// canonical scattered-correction form `J = +n̂ × (H_fine −
+    /// H_coarse_ghost)`.
+    ///
+    /// **Why drop the ghost subtraction under Step C5 (Mur ABC) +
+    /// no-inward-coupling:** with Option α retiring the Q3 Dirichlet
+    /// coarse → fine `E_t` tie, the fine grid is no longer
+    /// Dirichlet-fed the coarse wave on the E side, and (since the
+    /// canonical Berenger M source is the compensating-source form
+    /// `M = -n̂ × (E_post − E_pre)` which only carries the
+    /// Mur-extrapolated boundary delta) no Maxwell-evolved wave
+    /// reaches the fine interior for source-on-coarse traversal tests.
+    /// `H_fine ≈ 0` everywhere throughout such runs. Under that
+    /// regime the ghost-subtracted `J = +n̂ × (0 − H_coarse_ghost) =
+    /// −n̂ × H_coarse_ghost` is a strong **negative** correction on
+    /// coarse `E` at the surface plane — effectively the fine box
+    /// absorbs incident coarse waves rather than letting them
+    /// propagate through (the empirically observed `rel_err ≈ 32%` on
+    /// the Q5 strict gate under pre-C6 C5). The un-ghosted form
+    /// `J = +n̂ × H_fine ≈ 0` removes this spurious absorption,
+    /// making the fine box effectively passive on the surface and
+    /// recovering the pure-coarse propagation to within the Q5 0.5%
+    /// bound.
+    ///
+    /// **Trade-off documented as a known limitation.** Disabling the
+    /// ghost subtraction undoes Phase 2.fdtd.7.x B2.2 (LLLLLLL's
+    /// canonical-form fix). On geometries where the fine grid carries
+    /// genuine energy (e.g. Q6 fine-seeded cavity, or future inward-
+    /// coupling regimes that successfully restore the Q3 channel),
+    /// the un-ghosted form may re-introduce the B2.1-era divergence.
+    /// Step C6's role is to retire the immediate Q5 / Q6 ≤ 0.5%
+    /// blockers under Mur-only inward coupling; restoring a stable
+    /// **inward** coupling channel + the ghost-subtracted J source
+    /// jointly is deferred to a future Phase 2.fdtd.7.y.α spec
+    /// amendment (the brief's F2 candidate, which empirically
+    /// re-introduced positive-feedback instability at every weight
+    /// scaling tested during Step C6 bring-up).
+    ///
+    /// Spec: `docs/superpowers/specs/2026-05-19-phase-2-fdtd-7-y-m-coupling-design.md`.
+    /// ADR:  `docs/src/decisions/0038-berenger-m-coupling-spec-amendment.md`.
+    pub fn inject_j_to_coarse_e_un_ghosted(&self, parent: &mut YeeGrid) {
+        self.inject_currents_inner(parent, true, false, false);
     }
 
     /// Inject the magnetic equivalent current
@@ -3199,8 +3620,8 @@ impl SubgriddedSolver {
         self.inner.apply_cpml_h();
 
         // 4. Snapshot the parent E_t at the start of the coarse step.
-        //    Taken before the coarse-E update so fine sub-step 1
-        //    Dirichlet reads coarse E^n.
+        //    Retained for accessor-test compatibility under Step C5
+        //    Option α (the Mur path does not read it).
         region.snapshot_coarse_e_t(self.inner.grid());
 
         // 5. Fine sub-step k = 1. Phase 2.fdtd.7.y Step C5 (Option α):
@@ -3261,16 +3682,23 @@ impl SubgriddedSolver {
         region.snapshot_fine_e_post_update();
 
         // 10. J-source injection — applies J^{n+1/2} to coarse E^{n+1}
-        //     *after* the Q3 snapshots and both fine sub-steps have
-        //     read coarse E. The J modifies coarse E^{n+1} for the
-        //     coarse leapfrog (so the next coarse `update_h_only` sees
-        //     a J-augmented coarse `E`, as Maxwell's equations require),
-        //     but the fine grid's next-step Dirichlet feed will
-        //     re-snapshot post-`update_e` E *before* re-applying J at
-        //     the same point in the next step's pipeline.
+        //     *after* both fine sub-steps. Phase 2.fdtd.7.y Step C6
+        //     (Track DDDDDDDD) escape-hatched to F1: the J path now
+        //     skips the B2.2 coarse-`H` ghost subtraction (route
+        //     through [`SubgridRegion::inject_j_to_coarse_e_un_ghosted`])
+        //     so the source is the un-ghosted Berenger form
+        //     `J = +n̂ × H_fine`, which is ≈ 0 throughout the source-
+        //     on-coarse traversal under Mur-only inward coupling. The
+        //     ghosted form (kept under ADR-0038 for C5) degenerated to
+        //     `−n̂ × H_coarse_ghost` on this geometry — a strong
+        //     negative correction that absorbed incident coarse waves
+        //     at the surface plane. Dropping the ghost subtraction
+        //     surfaces the fine box as effectively passive on the
+        //     source-on-coarse traversal (the trade-off documented in
+        //     Step C6's escape-hatch path).
         {
             let (parent_grid, _) = self.inner.grid_and_cpml_mut();
-            region.inject_j_to_coarse_e(parent_grid);
+            region.inject_j_to_coarse_e_un_ghosted(parent_grid);
         }
 
         // 11. Snapshot fine E for next step's M injection.
@@ -3365,11 +3793,15 @@ impl SubgriddedSolver {
         region.snapshot_fine_e_post_update();
 
         // 11. J-source injection — applies J^{n+1/2} to coarse E^{n+1}
-        //     after both fine sub-steps have read coarse E (so the
-        //     Q3 propagation path is not contaminated).
+        //     after both fine sub-steps. Phase 2.fdtd.7.y Step C6
+        //     (Track DDDDDDDD) escape-hatched to F1: routes through
+        //     the un-ghosted variant so `J = +n̂ × H_fine` (≈ 0 under
+        //     Mur-only inward coupling for source-on-coarse traversal).
+        //     See [`Self::step`] stage 10 for the full rationale and
+        //     the trade-off documented as a Step C6 known limitation.
         {
             let (parent_grid, _) = self.inner.grid_and_cpml_mut();
-            region.inject_j_to_coarse_e(parent_grid);
+            region.inject_j_to_coarse_e_un_ghosted(parent_grid);
         }
 
         // 12. Snapshot fine E for next step's M injection.

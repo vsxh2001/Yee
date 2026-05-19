@@ -322,14 +322,17 @@ fn q6_energy_accounting_initial_state() {
 /// subgrid_energy_balance -- --include-ignored` to reproduce the
 /// regression-tracked drift values.
 #[test]
-#[ignore = "Phase 2.fdtd.7.y C5 (Option α — Mur ABC): catastrophic ≈ 2.7e114 divergence \
-            retired (energy now grows monotonically to ≈ 1.55× W(0) by N = 1000, finite \
-            throughout), but the 0.5% bound is not met — drift sits at ≈ 57% at N = 1000. \
-            The growth mode under Option α reflects the same J-side asymmetry described on \
-            the Q5 strict gate: the Mur ABC dissipates fine-grid energy non-conservatively \
-            while the B2.2 J injection (kept per ADR-0038) pumps coarse-side energy back \
-            in. Resolution deferred to a Phase 2.fdtd.7.y.α spec amendment re-balancing \
-            the J side under Option α."]
+#[ignore = "Phase 2.fdtd.7.y C6 (Track DDDDDDDD escape-hatched to F1 — drop J-side coarse-H \
+            ghost subtraction): finite (≈ 75% drift at N = 1000, ≈ 79% at N = 10000) but \
+            still above the 0.5% bound. Q6 seeds an initial pulse on the fine grid; under \
+            Mur-only inward coupling + un-ghosted J source, the fine-side pulse couples into \
+            the coarse via J = +n̂ × H_fine ≠ 0 but the magnetic equivalent current \
+            M = -n̂ × (E_post - E_pre) is now the compensating-source form (not the canonical \
+            -n̂ × E_fine), so the energy ledger does not close at the discrete level on this \
+            fine-seeded geometry. Resolution requires restoring a stable inward coupling \
+            channel together with the matching M-source re-balance — the F2 candidate that \
+            re-introduced positive-feedback instability during C6 bring-up. Deferred to a \
+            Phase 2.fdtd.7.y.α spec amendment."]
 fn q6_round_trip_smoke_1000_steps() {
     let (w0, wn) = run_and_measure(N_SHORT);
     assert!(w0.is_finite() && w0 > 0.0, "W(0) must be finite, got {w0}");
@@ -363,12 +366,12 @@ fn q6_round_trip_smoke_1000_steps() {
 /// Run with `cargo test -p yee-fdtd --release --test
 /// subgrid_energy_balance -- --include-ignored` to exercise.
 #[test]
-#[ignore = "Phase 2.fdtd.7.y C5 (Option α — Mur ABC): non-finite divergence retired (W(N) \
-            is finite throughout the 10000-step run), but the 0.5% bound is not met — drift \
-            sits at ≈ 82% at N = 10000 with energy plateauing as Mur asymptotically \
-            equilibrates with the J-side pumping. See the matching note on \
-            q6_round_trip_smoke_1000_steps for the J-side asymmetry rationale. \
-            Resolution deferred to a Phase 2.fdtd.7.y.α spec amendment."]
+#[ignore = "Phase 2.fdtd.7.y C6 (Track DDDDDDDD escape-hatched to F1): drift ≈ 79% at \
+            N = 10000 with W(N) finite throughout. See the matching note on \
+            q6_round_trip_smoke_1000_steps for the un-ghosted-J + compensating-M asymmetry \
+            rationale on this fine-seeded cavity. Resolution deferred to a Phase 2.fdtd.7.y.α \
+            spec amendment that restores stable inward coupling + the matching M-source \
+            re-balance."]
 fn q6_round_trip_10000_steps() {
     const N: usize = 10_000;
     let (w0, wn) = run_and_measure(N);

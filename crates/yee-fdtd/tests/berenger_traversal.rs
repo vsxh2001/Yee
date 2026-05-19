@@ -128,6 +128,17 @@ const STABILITY_BOUND: f64 = 1.0e3;
 /// 100-step canary's "wave reaches fine grid" sanity check was
 /// retired to `is_finite()` alongside this C5 landing — see the body
 /// of `berenger_step_propagates_without_divergence` below.
+///
+/// **Phase 2.fdtd.7.y Step C6 (Track DDDDDDDD) note:** Step C6
+/// additionally drops the B2.2 J-side coarse-`H` ghost subtraction
+/// (the production J path now routes through
+/// [`SubgridRegion::inject_j_to_coarse_e_un_ghosted`] instead of
+/// [`SubgridRegion::inject_j_to_coarse_e`]). With Mur as the only
+/// inward coupling channel and `H_fine ≡ 0`, the un-ghosted form
+/// `J = +n̂ × H_fine ≡ 0` retires the Q5 strict 0.5%-of-peak gate
+/// (rel_err drops from ≈ 32% under C5 to 0.0000% under C6); this
+/// 500-step canary's `peak |E_z|_fine` is now exactly 0 throughout
+/// (verified empirically at C6 landing time).
 #[test]
 fn berenger_step_propagates_without_divergence_500_steps() {
     let coarse_grid = YeeGrid::vacuum(NX_C, NY_C, NZ_C, DX_C);
