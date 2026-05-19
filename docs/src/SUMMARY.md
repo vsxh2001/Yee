@@ -70,3 +70,4 @@
 - [ADR-0038: Berenger M-side closure compensating-source amendment (Phase 2.fdtd.7.y)](decisions/0038-berenger-m-coupling-spec-amendment.md)
 - [ADR-0039: Phase 4.fem.eig.1 dispersive ε_r(ω) scope](decisions/0039-phase-4-fem-eig-1-dispersive-scope.md)
 - [ADR-0040: Phase 4.fem.eig.2 open-boundary scope (ABC + wave ports)](decisions/0040-phase-4-fem-eig-2-open-boundary-scope.md)
+- [ADR-0041: fdtd-007 Maloney-Smith reference correction (open question)](decisions/0041-fdtd-007-reference-correction.md)
