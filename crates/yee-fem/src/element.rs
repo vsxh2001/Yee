@@ -616,6 +616,267 @@ pub fn assemble_port_modal_rhs(
     rhs
 }
 
+/// Three-point Gauss-quadrature points on the reference triangle in
+/// barycentric coordinates. Each point carries weight `A / 3` where `A`
+/// is the triangle area. Together they integrate polynomials up to
+/// degree 2 exactly on the reference triangle (Strang & Fix 1973;
+/// equivalent to the "second-order" rule in Cowper 1973).
+///
+/// Each row is `(λ_0, λ_1, λ_2)` for one Gauss point. The three points
+/// `(2/3, 1/6, 1/6)`, `(1/6, 2/3, 1/6)`, `(1/6, 1/6, 2/3)` are the
+/// canonical permutation-symmetric set placed at the edge midpoints'
+/// reflections.
+const TRI_GAUSS_3PT_BARY: [[f64; 3]; 3] = [
+    [2.0 / 3.0, 1.0 / 6.0, 1.0 / 6.0],
+    [1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0],
+    [1.0 / 6.0, 1.0 / 6.0, 2.0 / 3.0],
+];
+
+/// Compute the three in-plane barycentric gradients `∇λ_a, ∇λ_b, ∇λ_c`
+/// for a triangular face in 3-space and the face area `A`.
+///
+/// For a triangle with vertices `(v_0, v_1, v_2)` in CCW order seen from
+/// the outward-normal side, the in-plane barycentric coordinate gradient
+/// is (Bossavit 1988; Jin §8.4)
+///
+/// ```text
+///     ∇λ_a = (v_b − v_c) × n̂ / (2 A),
+/// ```
+///
+/// where `(a, b, c)` is a cyclic permutation of `(0, 1, 2)` and
+/// `n̂` is the outward unit normal. The gradient lies in the face plane
+/// (`∇λ_a · n̂ = 0`) and points toward `v_a` (in the half-plane bounded
+/// by edge `b → c`). Each `∇λ_a` is constant across the face because the
+/// barycentric coordinates are linear in space.
+///
+/// Returns `(grads, area)` where `grads[a]` is `∇λ_a` and
+/// `area = 0.5 · ||(v_1 − v_0) × (v_2 − v_0)||`.
+fn face_barycentric_gradients_and_area(
+    face_vertices: &[Vector3<f64>; 3],
+    outward_normal: Vector3<f64>,
+) -> ([Vector3<f64>; 3], f64) {
+    let v0 = face_vertices[0];
+    let v1 = face_vertices[1];
+    let v2 = face_vertices[2];
+
+    // Face area from the cross product of any two edges.
+    let face_area = 0.5 * (v1 - v0).cross(&(v2 - v0)).norm();
+
+    // Normalise the outward normal (caller may supply a non-unit vector).
+    let n_norm = outward_normal.norm();
+    let n_hat = if n_norm > 0.0 {
+        outward_normal / n_norm
+    } else {
+        outward_normal
+    };
+
+    let inv_two_a = if face_area > 0.0 {
+        1.0 / (2.0 * face_area)
+    } else {
+        0.0
+    };
+
+    // ∇λ_a = (v_b − v_c) × n̂ / (2 A) with (a, b, c) cyclic.
+    let grad_0 = (v1 - v2).cross(&n_hat) * inv_two_a;
+    let grad_1 = (v2 - v0).cross(&n_hat) * inv_two_a;
+    let grad_2 = (v0 - v1).cross(&n_hat) * inv_two_a;
+
+    ([grad_0, grad_1, grad_2], face_area)
+}
+
+/// Assemble the per-face wave-port stiffness block evaluated at
+/// 3-point Gauss quadrature with the **exact Whitney-1 basis**
+/// (Phase 4.fem.eig.3 F1).
+///
+/// This is the coupled-Whitney upgrade of
+/// [`assemble_port_face_block`], lifting the lumped
+/// `N_i ≈ t_i` proxy to the exact Whitney-1 identity
+/// `N_i(ξ) = λ_a(ξ) ∇λ_b − λ_b(ξ) ∇λ_a` evaluated at the three Gauss
+/// points
+///
+/// ```text
+///     ξ_g ∈ { (2/3, 1/6, 1/6), (1/6, 2/3, 1/6), (1/6, 1/6, 2/3) }
+/// ```
+///
+/// in barycentric coordinates on the reference triangle (each weighted
+/// `w_g = A / 3`). The 3×3 block entries are
+///
+/// ```text
+///     B[i][j]  =  j · β_mode · (1/μ_r,face) · Σ_g  w_g
+///                   · (n̂ × N_i(ξ_g)) · (n̂ × N_j(ξ_g)).
+/// ```
+///
+/// Indexed by the three directed edges `i = 0, 1, 2` with endpoints
+/// `(a, b) = (i, (i+1) mod 3)` in CCW order — same canonical local-edge
+/// orientation as [`assemble_port_face_block`]; the assembly layer
+/// applies any local-to-global sign flip during scatter.
+///
+/// The block is **complex-symmetric** (`B == B^T`, NOT Hermitian)
+/// because the imaginary prefactor `j β_mode` is scalar and the real
+/// `(n̂ × N_i) · (n̂ × N_j)` Gram form is symmetric. When `β_mode = 0`
+/// (modal cutoff) every entry is identically zero.
+///
+/// `β_mode` is taken as `Complex64` for full generality (e.g. below-cutoff
+/// evanescent regime where `β_mode = j α`); the v2 entry point with
+/// `f64` propagation constant lifts to `Complex64::new(β, 0)` at the
+/// caller boundary.
+///
+/// ## Why this differs from the lumped centroid path
+///
+/// At the face centroid `ξ_c = (1/3, 1/3, 1/3)` the exact Whitney-1
+/// identity gives `N_i(ξ_c) = (1/3)(∇λ_b − ∇λ_a)`, **not** the lumped
+/// proxy `t_i / 3` used by [`assemble_port_face_block`]. The two
+/// vectors agree only on an equilateral triangle; on every Kuhn-
+/// decomposed face the lumped proxy mis-evaluates `N_i(centroid)` and
+/// drives the round-trip modal-RHS-then-projection cancellation away
+/// from the Pozar §3.3 matched-port identity. F1's coupled fix
+/// (paired with [`assemble_port_face_rhs_gauss_pts`] in the RHS and the
+/// `e_t_at_face_gauss_pts` projection helper in `OpenBoundarySolver`)
+/// preserves the round-trip identity at the exact-basis level.
+///
+/// ## References
+///
+/// * Bossavit, A., "Whitney forms: a class of finite elements for
+///   three-dimensional computations in electromagnetism", *IEE Proc.*
+///   135-A (1988), pp. 493–500.
+/// * Jin, J.-M., *The Finite Element Method in Electromagnetics*,
+///   3rd ed., Wiley 2014, §10.5 (wave-port modal decomposition).
+/// * Cowper, G. R., "Gaussian quadrature formulas for triangles",
+///   *Int. J. Numer. Meth. Eng.* 7 (1973), pp. 405–408 — the 3-point
+///   rule used here.
+/// * Phase 4.fem.eig.3 spec
+///   `docs/superpowers/specs/2026-05-19-phase-4-fem-eig-3-design.md`
+///   §4.1 — the bilinear form this helper implements.
+pub fn assemble_port_face_block_gauss_pts(
+    face_vertices: [Vector3<f64>; 3],
+    outward_normal: Vector3<f64>,
+    beta_mode: Complex64,
+    mu_r_face: f64,
+) -> SMatrix<Complex64, 3, 3> {
+    let (grads, face_area) = face_barycentric_gradients_and_area(&face_vertices, outward_normal);
+
+    // Normalise outward normal once for the (n̂ × ·) operations below.
+    let n_norm = outward_normal.norm();
+    let n_hat = if n_norm > 0.0 {
+        outward_normal / n_norm
+    } else {
+        outward_normal
+    };
+
+    // Outer prefactor: j · β_mode · (1 / μ_r,face). Complex.
+    let prefactor = Complex64::new(0.0, 1.0) * beta_mode * Complex64::new(1.0 / mu_r_face, 0.0);
+
+    // Per-Gauss-point quadrature weight w_g = A / 3.
+    let w_g = face_area / 3.0;
+
+    let mut block = SMatrix::<Complex64, 3, 3>::zeros();
+
+    for bary in &TRI_GAUSS_3PT_BARY {
+        // Evaluate all three Whitney-1 edge basis functions at this
+        // Gauss point. Edge i runs from vertex a = i to vertex
+        // b = (i + 1) mod 3, so N_i(ξ) = λ_a ∇λ_b − λ_b ∇λ_a.
+        let mut basis = [Vector3::<f64>::zeros(); 3];
+        for (i, basis_i) in basis.iter_mut().enumerate() {
+            let a = i;
+            let b = (i + 1) % 3;
+            *basis_i = bary[a] * grads[b] - bary[b] * grads[a];
+        }
+
+        // Pre-compute (n̂ × N_i) per edge.
+        let n_cross_n = [
+            n_hat.cross(&basis[0]),
+            n_hat.cross(&basis[1]),
+            n_hat.cross(&basis[2]),
+        ];
+
+        for i in 0..3 {
+            for j in 0..3 {
+                let gram_entry = n_cross_n[i].dot(&n_cross_n[j]);
+                block[(i, j)] += prefactor * Complex64::new(w_g * gram_entry, 0.0);
+            }
+        }
+    }
+
+    block
+}
+
+/// Assemble the per-face wave-port right-hand-side contribution at
+/// 3-point Gauss quadrature with the **exact Whitney-1 basis**
+/// (Phase 4.fem.eig.3 F1).
+///
+/// Companion of [`assemble_port_face_block_gauss_pts`]. The caller
+/// pre-evaluates the modal tangential E-field at the three Gauss
+/// points on the reference triangle (typically by sampling a
+/// `NumericalCrossSection::e_tangential_at` or evaluating an analytic
+/// modal profile at the corresponding world-space points). The RHS
+/// entries are
+///
+/// ```text
+///     b_i  =  2 j β_mode  ·  Σ_g  w_g · N_i(ξ_g) · E_t_mode(ξ_g),
+/// ```
+///
+/// with `w_g = A / 3` and the same Whitney-1 identity
+/// `N_i(ξ) = λ_a(ξ) ∇λ_b − λ_b(ξ) ∇λ_a` as the stiffness block. The
+/// factor of `2` is the matched-port double-amplitude convention from
+/// Pozar §3.3 (the boundary sees `E_inc + E_refl = 2 · E_inc` at a
+/// matched termination).
+///
+/// `modal_e_t_at_gauss_pts[g]` is the **tangential** incident-mode
+/// E-field at the world-space point corresponding to barycentric Gauss
+/// point `g` (already scaled by the caller's incident amplitude
+/// `a_inc`). Any out-of-plane component is dropped by the dot product
+/// with `N_i(ξ_g)` (which lies in the face plane by construction).
+///
+/// The returned `SVector<Complex64, 3>` is indexed by the three face
+/// edges `(0 → 1, 1 → 2, 2 → 0)` in canonical CCW traversal — same
+/// orientation convention as [`assemble_port_modal_rhs`]. The assembly
+/// layer applies any local-to-global sign flip during scatter.
+///
+/// `β_mode` is taken as `Complex64` for the same reason as the
+/// stiffness block helper above.
+///
+/// ## References
+///
+/// * Phase 4.fem.eig.3 spec
+///   `docs/superpowers/specs/2026-05-19-phase-4-fem-eig-3-design.md`
+///   §4.1 — the RHS bilinear form this helper implements.
+/// * Pozar, D. M., *Microwave Engineering*, 4th ed., Wiley 2012, §3.3.
+pub fn assemble_port_face_rhs_gauss_pts(
+    face_vertices: [Vector3<f64>; 3],
+    outward_normal: Vector3<f64>,
+    beta_mode: Complex64,
+    modal_e_t_at_gauss_pts: [Vector3<f64>; 3],
+) -> SVector<Complex64, 3> {
+    let (grads, face_area) = face_barycentric_gradients_and_area(&face_vertices, outward_normal);
+
+    // Outer prefactor: 2 j β_mode. Complex.
+    let prefactor = Complex64::new(0.0, 2.0) * beta_mode;
+
+    // Per-Gauss-point quadrature weight w_g = A / 3.
+    let w_g = face_area / 3.0;
+
+    let mut rhs = SVector::<Complex64, 3>::zeros();
+
+    for (g, bary) in TRI_GAUSS_3PT_BARY.iter().enumerate() {
+        // Whitney-1 edge basis at this Gauss point — identical
+        // identity as in the stiffness block above.
+        let mut basis = [Vector3::<f64>::zeros(); 3];
+        for (i, basis_i) in basis.iter_mut().enumerate() {
+            let a = i;
+            let b = (i + 1) % 3;
+            *basis_i = bary[a] * grads[b] - bary[b] * grads[a];
+        }
+
+        let e_t_g = modal_e_t_at_gauss_pts[g];
+        for i in 0..3 {
+            let dot = basis[i].dot(&e_t_g);
+            rhs[i] += prefactor * Complex64::new(w_g * dot, 0.0);
+        }
+    }
+
+    rhs
+}
+
 /// Assemble the `6 × 6` Nedelec local stiffness + mass block for a
 /// single tetrahedron with scalar real `ε_r`, `μ_r`.
 ///
