@@ -245,14 +245,15 @@ pub enum ModalDistribution {
     /// Numerical 2-D cross-section mode, computed by FEM eigensolve on
     /// an externally supplied [`TriMesh2D`]. See [`NumericalCrossSection`].
     ///
-    /// **Status (Phase 1.3.1.1 step 0-1 stub):** the variant carries the
-    /// mesh + material data and a (currently unfilled) cache of `β` /
-    /// `Z_w`, but the eigensolve itself is not implemented. Until step
-    /// 2-5 lands, [`WavePort::rhs`] falls back to the uniform
-    /// distribution for this variant, so a `Numerical2D` port is
-    /// bit-for-bit equivalent to a `Uniform` port at the same voltage
-    /// and tag. This preserves the mom-001 gate and the existing
-    /// wave-port test suite.
+    /// **Status (Phase 1.3.1.1 step 7, this commit):** the eigensolve
+    /// and Nedelec interpolation are wired in. After
+    /// [`NumericalCrossSection::solve`] runs, the cached
+    /// `mode_profile` is sampled at each port-edge midpoint via
+    /// [`NumericalCrossSection::e_tangential_at`] and projected onto
+    /// the edge's tangent unit vector — see [`WavePort::rhs`] for the
+    /// formula. Before [`NumericalCrossSection::solve`] has run, the
+    /// RHS is identically zero (the documented programmer-error
+    /// path); callers must call `solve` first.
     ///
     /// Boxed because a [`NumericalCrossSection`] carries a full
     /// [`TriMesh2D`] (potentially hundreds of triangles) — keeping the
@@ -293,7 +294,34 @@ pub struct NumericalCrossSection {
     /// Wave impedance `Z_w` cached at the most recent [`Self::solve`]
     /// frequency. `None` before any successful solve.
     pub z_w: Option<Complex64>,
+    /// Dominant-mode eigenvector (Nedelec edge-DoF amplitudes,
+    /// **global-edge** indexing — already scattered out from the
+    /// interior-edge DoF set with Dirichlet boundary edges set to 0).
+    /// Cached on a successful [`Self::solve`]. `None` otherwise.
+    ///
+    /// Real-valued on the Phase 1.3.1.1 step 3 lossless path; stored
+    /// as `Complex64` to mirror the future-proofed `beta` / `z_w`
+    /// API and the assembly module's complex storage.
+    ///
+    /// Used by [`Self::e_tangential_at`] (Phase 1.3.1.1 step 7) to
+    /// build the wave-port RHS by interpolating the modal `E_t`
+    /// field at port-edge midpoints in the MoM-side mesh.
+    pub mode_profile: Option<Vec<Complex64>>,
+    /// Per-triangle local→global edge map (the `EdgeTable::tri_edges`
+    /// payload) cached on a successful [`Self::solve`]. Needed by
+    /// [`Self::e_tangential_at`] to interpolate the Nedelec edge basis
+    /// without rebuilding the edge table on every sample. `None`
+    /// otherwise.
+    pub(crate) tri_edges_cache: Option<Vec<TriEdgesCacheEntry>>,
 }
+
+/// Compact per-triangle cache entry for the [`NumericalCrossSection`]
+/// eigenmode-interpolation path: `(triangle_index, global_edge_indices,
+/// orientation_signs)`. Mirrors a `pub(crate)` shape of the
+/// `eigensolver::mesh::TriEdgeConnectivity` payload — kept here as a
+/// crate-local type alias so the public [`NumericalCrossSection`]
+/// struct does not re-export the assembly module's internals.
+pub(crate) type TriEdgesCacheEntry = (usize, [usize; 3], [f64; 3]);
 
 impl NumericalCrossSection {
     /// Build a cross-section mode descriptor with empty caches. The
@@ -311,6 +339,8 @@ impl NumericalCrossSection {
             mu_r,
             beta: None,
             z_w: None,
+            mode_profile: None,
+            tri_edges_cache: None,
         }
     }
 
@@ -363,7 +393,124 @@ impl NumericalCrossSection {
         let eta0_k0 = Complex64::new(yee_core::units::ETA0 * k0, 0.0);
         self.z_w = Some(eta0_k0 / beta);
 
+        // Scatter the interior-DoF eigenvector out to global-edge
+        // indexing. PEC boundary edges have E_t = 0 by Dirichlet
+        // elimination so they remain zero in the global profile.
+        let mut global_mode = vec![Complex64::new(0.0, 0.0); table.n_edges()];
+        for (i_dof, &gid) in asm.interior_to_global.iter().enumerate() {
+            global_mode[gid] = sol.eigenvector[i_dof];
+        }
+        self.mode_profile = Some(global_mode);
+
+        // Cache per-triangle (tri_idx, global_edge_indices, orientation
+        // signs) so e_tangential_at can interpolate without rebuilding
+        // the edge table. Compact tuple form avoids a public re-export
+        // of the crate-private `TriEdgeConnectivity` type.
+        let tri_edges: Vec<TriEdgesCacheEntry> = table
+            .tri_edges
+            .iter()
+            .enumerate()
+            .map(|(t, c)| (t, c.global_edge, c.sign))
+            .collect();
+        self.tri_edges_cache = Some(tri_edges);
+
         Ok(())
+    }
+
+    /// Evaluate the dominant-mode transverse electric field
+    /// `E_t = (E_x, E_y)` at cross-section coordinate `(x, y)` by
+    /// Nedelec interpolation.
+    ///
+    /// Locates the mesh triangle containing `(x, y)`, computes
+    /// barycentric coordinates, and sums the three local Nedelec edge
+    /// basis functions weighted by the cached eigenvector components.
+    /// Returns `[0.0, 0.0]` if `(x, y)` lies outside the mesh or
+    /// before [`Self::solve`] has been called.
+    ///
+    /// **Sign / scale convention.** The eigenvector returned by the
+    /// dense eigensolve is determined up to a global scalar
+    /// (eigenvectors of `M y = λ y` are scale-free). The Phase 1.3.1.1
+    /// step 3 path fixes the global sign so the largest-magnitude DoF
+    /// is positive but leaves the scale arbitrary — callers comparing
+    /// against an analytic reference must normalize. The Phase 1.3.1.1
+    /// step 7 wave-port RHS [`WavePort::rhs`] consumes this directly
+    /// in its `Numerical2D` arm and inherits the same scale-freedom;
+    /// the impedance `Z_in = V / I` is scale-invariant under any
+    /// global rescaling of the modal RHS, so this is benign for the
+    /// scattering / `Z_in` extraction. The downstream
+    /// `tests/wave_port_numerical_te10.rs` validation gate
+    /// explicitly renormalizes both `b_num` and `b_analytic` to unit
+    /// L2 norm before computing the 1 % agreement.
+    pub fn e_tangential_at(&self, x: f64, y: f64) -> [f64; 2] {
+        let Some(profile) = &self.mode_profile else {
+            return [0.0, 0.0];
+        };
+        let Some(tri_edges) = &self.tri_edges_cache else {
+            return [0.0, 0.0];
+        };
+        for (t_idx, global_edge, sign) in tri_edges {
+            let tri = self.mesh.triangles[*t_idx];
+            let v: [[f64; 2]; 3] = [
+                self.mesh.vertices[tri[0]],
+                self.mesh.vertices[tri[1]],
+                self.mesh.vertices[tri[2]],
+            ];
+            let area = self.mesh.area(*t_idx);
+            // Barycentric coordinates of (x, y) wrt CCW triangle v0,v1,v2.
+            // λ_i = ((b_i, c_i) · ((x,y) - v_origin) + const) / (2A),
+            // computed directly via sub-triangle areas.
+            let sub_area = |a: [f64; 2], b: [f64; 2], c: [f64; 2]| -> f64 {
+                0.5 * ((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]))
+            };
+            let p = [x, y];
+            let lam0 = sub_area(p, v[1], v[2]) / area;
+            let lam1 = sub_area(v[0], p, v[2]) / area;
+            let lam2 = sub_area(v[0], v[1], p) / area;
+            // Point lies inside iff all three barycentric coordinates
+            // are non-negative (small tolerance for floating-point noise
+            // on triangle boundaries).
+            let eps = -1e-12;
+            if lam0 < eps || lam1 < eps || lam2 < eps {
+                continue;
+            }
+            // ∇λ_i = (b_i, c_i) / (2A), with the Jin convention
+            // b[i] = y_{i+1} - y_{i+2}, c[i] = x_{i+2} - x_{i+1}.
+            let mut bb = [0.0; 3];
+            let mut cc = [0.0; 3];
+            for i in 0..3 {
+                let i1 = (i + 1) % 3;
+                let i2 = (i + 2) % 3;
+                bb[i] = v[i1][1] - v[i2][1];
+                cc[i] = v[i2][0] - v[i1][0];
+            }
+            let grad = |i: usize| -> [f64; 2] { [bb[i] / (2.0 * area), cc[i] / (2.0 * area)] };
+            let lam = [lam0, lam1, lam2];
+            // Local edge endpoints per `eigensolver::mesh::LOCAL_EDGES`:
+            // edge `e` opposite local vertex `e`, traversed CCW.
+            // Edge 0: v1 → v2, edge 1: v2 → v0, edge 2: v0 → v1.
+            let local_edges: [[usize; 2]; 3] = [[1, 2], [2, 0], [0, 1]];
+            let mut e_field = [0.0f64; 2];
+            for (le, &[a, b]) in local_edges.iter().enumerate() {
+                // Edge length matches the canonical `EdgeKey::new` ordering
+                // (smaller→larger vertex) since lengths are direction-
+                // independent.
+                let dx = v[b][0] - v[a][0];
+                let dy = v[b][1] - v[a][1];
+                let ell = (dx * dx + dy * dy).sqrt();
+                let sigma = sign[le];
+                let gid = global_edge[le];
+                let amp = profile[gid].re;
+                let ga = grad(a);
+                let gb = grad(b);
+                // N_e = ℓ σ (λ_a ∇λ_b − λ_b ∇λ_a)
+                let nx = ell * sigma * (lam[a] * gb[0] - lam[b] * ga[0]);
+                let ny = ell * sigma * (lam[a] * gb[1] - lam[b] * ga[1]);
+                e_field[0] += amp * nx;
+                e_field[1] += amp * ny;
+            }
+            return e_field;
+        }
+        [0.0, 0.0]
     }
 }
 
@@ -483,12 +630,12 @@ impl WavePort {
 
     /// Attach a numerical 2-D cross-section mode to this wave-port.
     ///
-    /// **Phase 1.3.1.1 step 0-1 stub:** the builder accepts the mesh +
-    /// material maps and stores them on the port, but the eigensolve
-    /// itself is not yet implemented. Until Phase 1.3.1.1 step 2-5
-    /// ships the assembly + solve, [`WavePort::rhs`] falls back to the
-    /// uniform / delta-gap-equivalent behaviour for this variant, so
-    /// the existing mom-001 / Phase 1.3.0 numerics are preserved.
+    /// Callers must invoke [`NumericalCrossSection::solve`] on `mode`
+    /// **before** placing it on the port — `WavePort::rhs` needs the
+    /// cached `mode_profile` to sample the Nedelec eigenmode at port-
+    /// edge midpoints. A `Numerical2D` port whose mode has not been
+    /// solved produces an all-zero RHS (the documented degenerate
+    /// path); see [`ModalDistribution::Numerical2D`] for the contract.
     pub fn with_numerical_cross_section(mut self, mode: NumericalCrossSection) -> Self {
         self.modal_distribution = ModalDistribution::Numerical2D(Box::new(mode));
         self
@@ -538,17 +685,66 @@ impl Port for WavePort {
                     b[(k, 0)] = self.voltage * Complex64::new(edge.length * profile, 0.0);
                 }
             }
-            ModalDistribution::Numerical2D(_mode) => {
-                // Phase 1.3.1.1 step 0-1 stub: until the eigensolver
-                // lands (step 2-5) the numerical-cross-section variant
-                // has no mode profile to sample, so we degenerate to
-                // the uniform / delta-gap-equivalent path. The mesh and
-                // material maps are still carried on the port so the
-                // eventual step-2 implementation can light up without
-                // an API change. mom-001 and the existing wave-port
-                // tests are bit-for-bit unaffected.
+            ModalDistribution::Numerical2D(mode) => {
+                // Phase 1.3.1.1 step 7: the numerical-cross-section
+                // wave-port RHS samples the Nedelec eigenmode at each
+                // port-edge midpoint and projects it onto the edge's
+                // tangent unit vector, weighted by edge length and the
+                // driving voltage.
+                //
+                //   b[k] = V · ℓ_k · (E_t(x_mid, y_mid) · t̂_k)
+                //
+                // The cross-section coordinate convention matches the
+                // [`ModalDistribution::Te10`] arm: the MoM-side mesh's
+                // (x, y) coordinates are taken as the cross-section
+                // (x, y) coordinates, so the same RWG port-edge mesh
+                // can be paired with either a closed-form TE10 or a
+                // numerical 2-D eigenmode by swapping the modal
+                // distribution.
+                //
+                // Sign convention: the dominant eigenvector returned
+                // by [`crate::eigensolver::solve_dense`] has its
+                // largest-magnitude DoF pinned positive; this
+                // corresponds to the positive-going wave (`β > 0`)
+                // selected by the smallest-strictly-positive `k_c²`
+                // branch. Callers comparing to analytic references
+                // typically renormalize both sides to unit L2 — see
+                // `tests/wave_port_numerical_te10.rs`.
+                //
+                // If the modal profile has not been solved yet, the
+                // mode field is zero everywhere and the resulting RHS
+                // is zero. This is the documented degenerate path
+                // (rather than the legacy uniform fallback) because a
+                // post-`new` / pre-`solve` `NumericalCrossSection` is
+                // a programmer error — the solver expects `solve`
+                // to have run.
+                if mode.mode_profile.is_none() {
+                    // No cached profile — falls back to all-zero RHS
+                    // for the Numerical2D arm. mom-001 and the existing
+                    // wave-port tests do not exercise this arm.
+                    // Returned `b` is already zero-initialized.
+                    return b;
+                }
                 for k in basis.port_basis_indices(self.tag) {
-                    b[(k, 0)] = self.voltage * Complex64::new(basis.edges[k].length, 0.0);
+                    let edge = &basis.edges[k];
+                    let p0 = basis.mesh.vertices[edge.v0 as usize];
+                    let p1 = basis.mesh.vertices[edge.v1 as usize];
+                    let mid_x = 0.5 * (p0.x + p1.x);
+                    let mid_y = 0.5 * (p0.y + p1.y);
+                    let e_field = mode.e_tangential_at(mid_x, mid_y);
+                    // Edge tangent unit vector in the cross-section
+                    // (x, y) plane. Use (v0 → v1) direction with the
+                    // 2-D projection.
+                    let tx = p1.x - p0.x;
+                    let ty = p1.y - p0.y;
+                    let tn = (tx * tx + ty * ty).sqrt();
+                    let (tux, tuy) = if tn > 0.0 {
+                        (tx / tn, ty / tn)
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    let projection = e_field[0] * tux + e_field[1] * tuy;
+                    b[(k, 0)] = self.voltage * Complex64::new(edge.length * projection, 0.0);
                 }
             }
         }
@@ -671,18 +867,17 @@ mod tests {
     }
 
     #[test]
-    fn wave_port_numerical_stub_matches_uniform_before_solve() {
-        // The Numerical2D RHS path is a stub that degenerates to the
-        // uniform / delta-gap-equivalent form until the eigensolve
-        // lands. This is the gate that protects mom-001 and the
-        // existing wave-port suite from a stub-time regression.
+    fn wave_port_numerical_rhs_is_zero_before_solve() {
+        // Phase 1.3.1.1 step 7: the Numerical2D arm now requires the
+        // eigensolve to have run before it can sample the mode at port-
+        // edge midpoints. Without a cached `mode_profile` the RHS
+        // degenerates to all-zeros — programmer-error path (the test
+        // covers the documented zero-fallback). The previous "uniform
+        // fallback" behavior was a Phase 1.3.1.1 step 0-1 stub that
+        // existed only because the eigensolve was unimplemented.
+        // mom-001 / Phase 1.3.0 paths are untouched: they use
+        // `ModalDistribution::Uniform` or `DeltaGapPort` directly.
         let basis = RwgBasis::from_mesh(two_tri_mesh_with_port()).unwrap();
-        let uniform = WavePort {
-            tag: 1,
-            voltage: Complex64::new(1.0, 0.0),
-            mode_phase_velocity_factor: 1.0,
-            modal_distribution: ModalDistribution::Uniform,
-        };
         let numerical = WavePort {
             tag: 1,
             voltage: Complex64::new(1.0, 0.0),
@@ -691,13 +886,13 @@ mod tests {
                 unit_square_cross_section(),
             )),
         };
-        let b_uniform = uniform.rhs(&basis, 1.0e9);
         let b_numerical = numerical.rhs(&basis, 1.0e9);
         let n = basis.n_basis();
         for k in 0..n {
             assert!(
-                (b_uniform[(k, 0)] - b_numerical[(k, 0)]).norm() < 1e-15,
-                "stub Numerical2D RHS must equal Uniform RHS bit-for-bit at k={k}"
+                b_numerical[(k, 0)].norm() < 1e-15,
+                "pre-solve Numerical2D RHS must be zero at k={k}, got {:?}",
+                b_numerical[(k, 0)]
             );
         }
     }

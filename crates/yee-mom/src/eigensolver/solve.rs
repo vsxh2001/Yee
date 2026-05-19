@@ -42,6 +42,22 @@ pub(crate) struct EigenSolution {
     /// future-proof for the lossy / complex-symmetric path; the
     /// Phase 1.3.1.1 step 3 path always returns a real value.
     pub beta_sq: Complex64,
+    /// Eigenvector for the dominant mode in the **interior-edge DoF**
+    /// ordering of [`AssembledTransverse::interior_to_global`]. Length
+    /// equals the interior-edge DoF count `n`. Real-valued on the
+    /// lossless path (stored as `Complex64` to mirror the API contract
+    /// of [`Self::beta_sq`]).
+    ///
+    /// **Sign convention.** The eigenvector returned by
+    /// [`nalgebra::SymmetricEigen`] has an arbitrary global sign. To
+    /// fix it deterministically, [`solve_dense`] post-processes so the
+    /// largest-magnitude component is positive (`v[argmax |v|] > 0`).
+    /// Callers that need a physically-meaningful sign (e.g. picking
+    /// the positive-going wave for a wave-port RHS) should additionally
+    /// renormalize against a known reference point — see
+    /// [`crate::ports::NumericalCrossSection::e_tangential_at`] which
+    /// fixes the sign by `E_y > 0` at the cross-section centroid.
+    pub eigenvector: Vec<Complex64>,
 }
 
 /// Solve `S x = k_c² T x` densely on the lossless / real-symmetric path
@@ -129,17 +145,26 @@ pub(crate) fn solve_dense(
     let max_eig = eig.eigenvalues.iter().cloned().fold(0.0_f64, f64::max);
     let spurious_floor = max_eig * 1e-6;
 
-    let mut k_c_sq: Option<f64> = None;
-    for &lam in eig.eigenvalues.iter() {
+    // Track the (eigenvalue, eigenvector-column-index) of the dominant
+    // physical mode so we can recover its eigenvector after the
+    // standard-form back-transform `x = L⁻ᵀ y`.
+    let mut dominant: Option<(f64, usize)> = None;
+    for (col, &lam) in eig.eigenvalues.iter().enumerate() {
         if !lam.is_finite() || lam <= spurious_floor {
             continue;
         }
-        k_c_sq = Some(match k_c_sq {
-            None => lam,
-            Some(curr) => curr.min(lam),
+        dominant = Some(match dominant {
+            None => (lam, col),
+            Some((curr, curr_col)) => {
+                if lam < curr {
+                    (lam, col)
+                } else {
+                    (curr, curr_col)
+                }
+            }
         });
     }
-    let k_c_sq = k_c_sq.ok_or_else(|| {
+    let (k_c_sq, dom_col) = dominant.ok_or_else(|| {
         yee_core::Error::Numerical(
             "eigensolver: no strictly-positive k_c² eigenvalue above the spurious-mode floor"
                 .into(),
@@ -159,8 +184,43 @@ pub(crate) fn solve_dense(
             k0 * k0
         )));
     }
+
+    // Recover the eigenvector in the **original** (T-weighted) basis.
+    // SymmetricEigen solves `M y = λ y` with `M = L⁻¹ S L⁻ᵀ`; the
+    // generalized-problem eigenvector satisfies `S x = λ T x` with
+    // `x = L⁻ᵀ y`. So back-transform with one upper-triangular solve.
+    let y_dom = eig.eigenvectors.column(dom_col).clone_owned();
+    let l_t = l.transpose();
+    let x_dom = l_t.solve_upper_triangular(&y_dom).ok_or_else(|| {
+        yee_core::Error::Numerical(
+            "eigensolver: Lᵀ x = y back-transform failed (L from Cholesky should be non-singular)"
+                .into(),
+        )
+    })?;
+
+    // Fix the global sign deterministically: largest-magnitude
+    // component positive. Downstream consumers (e.g.
+    // `NumericalCrossSection::e_tangential_at`) renormalize against a
+    // physical reference point.
+    let argmax = x_dom
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| {
+            a.abs()
+                .partial_cmp(&b.abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let sign = if x_dom[argmax] < 0.0 { -1.0 } else { 1.0 };
+    let eigenvector: Vec<Complex64> = x_dom
+        .iter()
+        .map(|&v| Complex64::new(sign * v, 0.0))
+        .collect();
+
     Ok(EigenSolution {
         beta_sq: Complex64::new(beta_sq_re, 0.0),
+        eigenvector,
     })
 }
 
