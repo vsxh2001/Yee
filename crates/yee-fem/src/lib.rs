@@ -37,4 +37,11 @@ pub mod element;
 pub mod solve;
 
 pub use assembly::{AssembledMatrices, FemEigenAssembly};
-pub use solve::{EigenpairList, InverseIterEigen, SparseEigen};
+pub use element::{
+    LOCAL_EDGES, NedelecTetElement, NedelecTetElementComplex, assemble_tet_element,
+    assemble_tet_element_complex,
+};
+pub use solve::{
+    ComplexInverseIterEigen, EigenpairList, EigenpairListComplex, InverseIterEigen, SparseEigen,
+    SparseEigenComplex,
+};
