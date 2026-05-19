@@ -220,6 +220,12 @@ impl WalkingSkeletonSolver {
     /// Companion to [`Self::apply_cpml_h`]: CPML auxiliary update
     /// on E if a CPML state is configured, otherwise the deprecated
     /// hard-PEC clamp.
+    ///
+    /// After the outer boundary is resolved, any optional per-component
+    /// interior PEC mask on the grid
+    /// ([`YeeGrid::pec_mask_ex`] / `ey` / `ez`) is applied. The mask
+    /// path is a no-op when no masks are attached, preserving bit-exact
+    /// behaviour for legacy scalar-only grids.
     pub fn apply_cpml_e(&mut self) {
         if let Some(cpml) = self.cpml.as_mut() {
             cpml.update_e(&mut self.grid);
@@ -227,6 +233,10 @@ impl WalkingSkeletonSolver {
             #[allow(deprecated)]
             boundary::apply_pec(&mut self.grid);
         }
+        // Phase 2.fdtd.7.z: interior PEC mask, if any, is applied after the
+        // outer-boundary update so it overrides any value the CPML/PEC clamp
+        // wrote into a masked cell.
+        self.grid.apply_pec_mask();
     }
 
     /// Add a Gaussian-in-time pulse contribution to `E_z` at cell
