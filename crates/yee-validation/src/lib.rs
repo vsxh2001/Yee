@@ -1641,6 +1641,485 @@ pub fn run_fem_eig_001_rectangular_cavity() -> Result<FemEigValidationResult, ye
 }
 
 // ---------------------------------------------------------------------
+// fdtd-007: Phase 2.fdtd.7 Q7 production validation gate (dielectric-
+// loaded thin-slot antenna against Maloney & Smith 1993 Fig. 9).
+// ---------------------------------------------------------------------
+
+/// Slot length `L` (m) — Maloney & Smith 1993 Fig. 9 reference geometry.
+pub const FDTD_007_SLOT_LENGTH_M: f64 = 30.0e-3;
+/// Slot width `w` (m).
+pub const FDTD_007_SLOT_WIDTH_M: f64 = 0.5e-3;
+/// Substrate relative permittivity (`ε_r`).
+pub const FDTD_007_SUBSTRATE_EPS_R: f64 = 2.2;
+/// Substrate thickness `h` (m).
+pub const FDTD_007_SUBSTRATE_H_M: f64 = 1.524e-3;
+/// Coarse-grid cell size `dx_coarse` (m). Plan §Q7 fixture.
+pub const FDTD_007_DX_COARSE_M: f64 = 1.0e-3;
+/// Fine-grid cell size `dx_fine` (m) — 2× refinement.
+pub const FDTD_007_DX_FINE_M: f64 = 0.5e-3;
+/// Reference impedance for the slot port (Ω). The Maloney-Smith
+/// reference uses a 50 Ω feed; matching that here makes `Γ → S_11`
+/// the direct port reflection.
+pub const FDTD_007_Z0_REF_OHM: f64 = 50.0;
+/// Maloney & Smith 1993 Fig. 9 published resonance frequency (Hz)
+/// for the `w = 0.5 mm × L = 30 mm` slot on the `ε_r = 2.2`,
+/// `h = 1.524 mm` substrate. **TBD: this value is digitised from the
+/// figure to ±5 %**; tighten when the journal-figure scan is verified.
+pub const FDTD_007_FRES_REF_HZ: f64 = 8.9e9;
+/// Maloney & Smith 1993 Fig. 9 published `|S_11(f_res)|` (dB).
+/// **TBD: digitised to ±1 dB**; verify against the published figure.
+pub const FDTD_007_S11_DB_REF: f64 = -22.0;
+/// Tolerance on `f_res` relative error (`|df| / f_res ≤ 0.02`).
+pub const FDTD_007_TOL_FRES_REL: f64 = 0.02;
+/// Tolerance on `|S_11(f_res)|` absolute error (dB).
+pub const FDTD_007_TOL_S11_DB_ABS: f64 = 1.0;
+/// Tolerance on the subgrid-vs-uniform sanity-check `|df| / f`
+/// (frequency, per-bin).
+pub const FDTD_007_TOL_SANITY_FRES_REL: f64 = 0.003;
+/// Tolerance on the subgrid-vs-uniform sanity-check `|S_11|` (dB,
+/// per-bin).
+pub const FDTD_007_TOL_SANITY_S11_DB: f64 = 0.3;
+
+/// Result struct for [`run_fdtd_007_maloney_smith_slot`].
+#[derive(Debug, Clone)]
+pub struct Fdtd007ValidationResult {
+    /// Stable case identifier (`"fdtd-007"`).
+    pub id: String,
+    /// Measured resonant frequency on the subgridded run (Hz).
+    pub f_res_subgrid_hz: f64,
+    /// Measured resonant frequency on the uniform-fine reference (Hz).
+    pub f_res_uniform_hz: f64,
+    /// Measured `|S_11(f_res)|` on the subgridded run (dB).
+    pub s11_db_subgrid: f64,
+    /// Measured `|S_11(f_res)|` on the uniform-fine reference (dB).
+    pub s11_db_uniform: f64,
+    /// `|f_res − f_ref| / f_ref` against Maloney-Smith Fig. 9.
+    pub f_res_rel_error: f64,
+    /// `|S_11_db − S_11_db_ref|` (dB) against Maloney-Smith Fig. 9.
+    pub s11_db_abs_error: f64,
+    /// Maximum across the five sanity-check spot frequencies of
+    /// `|f_subgrid − f_uniform| / f_uniform` (1.0 means "comparator
+    /// failed").
+    pub sanity_max_fres_rel: f64,
+    /// Maximum across the five sanity-check spot frequencies of
+    /// `|S_11_db_subgrid − S_11_db_uniform|` (dB).
+    pub sanity_max_s11_db: f64,
+    /// Status: `Passed` iff every hard assertion in §Q7 DoD holds.
+    pub status: CaseStatus,
+    /// Diagnostic notes — same format as [`CaseResult::notes`].
+    pub notes: String,
+    /// Wall time spent inside the driver (seconds).
+    pub wall_time_seconds: f64,
+}
+
+/// Index a complex DFT bin from a real-valued time-domain trace at
+/// frequency `f` (Hz), sampled at step interval `dt` (s).
+///
+/// Sums `Σ_n x[n] · exp(-j·2π·f·n·dt)` over `n ∈ 0..x.len()`. Used by
+/// the `fdtd-007` driver to extract `V(f)` and `I(f)` from port-state
+/// recordings; cheap because each call is `O(N)` and we evaluate the
+/// transform on a hand-picked frequency list rather than the full FFT.
+fn dft_bin(x: &[f64], f_hz: f64, dt: f64) -> num_complex::Complex64 {
+    use num_complex::Complex64;
+    let two_pi_f_dt = std::f64::consts::TAU * f_hz * dt;
+    let mut acc = Complex64::new(0.0, 0.0);
+    for (n, &xn) in x.iter().enumerate() {
+        let phase = -two_pi_f_dt * (n as f64);
+        acc += Complex64::new(xn, 0.0) * Complex64::from_polar(1.0, phase);
+    }
+    acc
+}
+
+/// One time-domain run of the slot fixture, returning the recorded
+/// `(V(t), I(t))` port traces.
+///
+/// `use_subgrid = true` runs with the [`yee_fdtd::SubgriddedSolver`] +
+/// the spec §Q7 fine box (40 × 6 × 4) mm centred on the slot. `false`
+/// runs the same physical geometry on a globally uniform `dx = 0.5 mm`
+/// grid (no nest), used as the internal sanity comparator.
+///
+/// **Numerical caveats (Phase 2.fdtd.7 Q7 escape-hatch territory):**
+///
+/// 1. The `YeeGrid` is a uniform-`eps_r` scalar surface — the
+///    substrate's `ε_r = 2.2` slab cannot be modelled as a
+///    geometrically-localised region. We approximate the substrate by
+///    setting the fine sub-grid's `eps_r = 2.2` (which is the dominant
+///    volume of the slot's near-field), but the coarse grid stays at
+///    `eps_r = 1.0`. A heterogeneous `eps_r` map lands as Phase
+///    2.fdtd.7.z follow-up.
+/// 2. The ground plane is modelled via [`yee_fdtd::boundary::apply_pec`]
+///    on the outer faces of the coarse grid, *not* as a per-cell PEC
+///    sheet at `z = z_gp`. A proper per-cell PEC mask is Phase
+///    2.fdtd.7.z follow-up.
+/// 3. The Phase 2.fdtd.7.y Step C6 un-ghosted-J variant of the
+///    Berenger closure leaves the fine grid effectively passive on the
+///    source-on-coarse-grid run (the J source `+n̂ × H_fine ≈ 0`
+///    under Mur-only inward coupling). Consequence: the subgridded
+///    run's `S_11` traces are dominated by the coarse-grid response,
+///    not by the substrate-loaded fine box. This is the documented C6
+///    trade-off; tightening it requires the F2 inward-coupling
+///    restoration documented in spec §Q7 escape hatch.
+fn fdtd_007_run_one(use_subgrid: bool, n_steps: usize) -> (Vec<f64>, Vec<f64>, f64) {
+    use yee_fdtd::{
+        FdtdSolver, LumpedRlcPort, SourceWaveform, SubgridRegion, SubgriddedSolver,
+        WalkingSkeletonSolver, YeeGrid,
+    };
+
+    // Coarse-grid extent: span the slot in `x`, leave ~5 mm margin to
+    // each face for the PEC clamp. Slot is along `x`, centred in `y`
+    // at the geometric midpoint. The substrate thickness sets the
+    // minimum `z` span; the fine box (4 mm in `z`) brackets the slot
+    // plane plus the substrate.
+    //
+    // Sizes chosen for the wall-time budget (< 30 min release):
+    //  - coarse:   (60, 16, 14) cells at dx_coarse = 1 mm
+    //              = (60 × 16 × 14) mm volume
+    //  - fine box: (40, 6, 4)  coarse cells   → (80, 12, 8) fine cells
+    //              = (40 × 6 × 4) mm volume, centred at (lo + hi)/2
+    let (nx, ny, nz) = (60usize, 16usize, 14usize);
+    let dx = if use_subgrid {
+        FDTD_007_DX_COARSE_M
+    } else {
+        FDTD_007_DX_FINE_M
+    };
+    // For the uniform reference, double the cell count so the
+    // physical extent matches.
+    let (nxc, nyc, nzc) = if use_subgrid {
+        (nx, ny, nz)
+    } else {
+        (2 * nx, 2 * ny, 2 * nz)
+    };
+
+    let mut grid = YeeGrid::vacuum(nxc, nyc, nzc, dx);
+    // The fine box represents the substrate-loaded volume near the
+    // slot. Set the grid-level `eps_r` (uniform; per-cell maps are
+    // out of scope for Phase 2.fdtd.7.0).
+    grid.eps_r = if use_subgrid {
+        // Coarse grid carries air; the fine sub-grid below carries
+        // the substrate.
+        1.0
+    } else {
+        // No subgrid → the substrate is approximated uniformly across
+        // the whole domain. This is an explicit simplification; the
+        // sanity-check tolerance allows the resulting bias because we
+        // are comparing the subgrid run's coarse-grid-dominated
+        // response to the same coarse-grid stencil at a finer pitch.
+        FDTD_007_SUBSTRATE_EPS_R
+    };
+
+    // Locate the slot midpoint at the geometric centre of the coarse
+    // (or globally-uniform) grid. The port cell is the `E_z` edge at
+    // the slot midpoint; the port drives the slot delta-gap.
+    let port_cell = (nxc / 2, nyc / 2, nzc / 2);
+
+    // Gaussian-modulated sine source: centre carrier at 8 GHz to
+    // straddle the Maloney-Smith Fig. 9 resonance (~8.9 GHz), with
+    // ~6 GHz FWHM bandwidth so the spectrum is well-resolved over
+    // [5, 12] GHz.
+    let dt = grid.dt;
+    let t0_steps = 400usize;
+    let waveform = SourceWaveform::GaussianPulse {
+        v0: 1.0,
+        f0: 8.0e9,
+        bw: 6.0e9,
+        t0_steps,
+    };
+
+    // Build a 50 Ω lumped port at the slot midpoint. The series
+    // resistor + EMF emulates the delta-gap voltage drive with a
+    // matched source impedance; recording `V = E_z·dz` and
+    // `I = (V_src − V) / Z_0` lets us synthesise `S_11 = (V − V_inc) / V_inc`.
+    let mut port = LumpedRlcPort::pure_resistor(port_cell, FDTD_007_Z0_REF_OHM, waveform);
+
+    let dz = grid.dz;
+    let area = grid.dx * grid.dy;
+
+    let mut v_trace: Vec<f64> = Vec::with_capacity(n_steps);
+    let mut i_trace: Vec<f64> = Vec::with_capacity(n_steps);
+
+    if use_subgrid {
+        // Phase 2.fdtd.7 spec §Q7 fixture: (40 × 6 × 4) mm fine box
+        // centred on the slot. In coarse-cell units: (40, 6, 4).
+        let span = (40usize, 6usize, 4usize);
+        let lo = (
+            nxc / 2 - span.0 / 2,
+            nyc / 2 - span.1 / 2,
+            nzc / 2 - span.2 / 2,
+        );
+        let hi = (lo.0 + span.0, lo.1 + span.1, lo.2 + span.2);
+
+        let mut region =
+            SubgridRegion::new(&grid, lo, hi).expect("subgrid region bounds (Q7 fixture)");
+        // Load the substrate into the fine grid — uniform within the
+        // box, which is the best approximation available before the
+        // Phase 2.fdtd.7.z heterogeneous-ε_r map lands.
+        region.fine_grid_mut().eps_r = FDTD_007_SUBSTRATE_EPS_R;
+
+        let coarse_solver = WalkingSkeletonSolver::new(grid);
+        let mut solver = SubgriddedSolver::new(coarse_solver).with_region(region);
+
+        for n in 0..n_steps {
+            // Drive the coarse grid with the lumped slot port. The
+            // port's correction is applied *after* the coarse E-update
+            // each coarse step.
+            solver.step();
+            let inner = solver.inner_mut();
+            let (coarse_grid, _) = inner.grid_and_cpml_mut();
+            // Standard `step_with_source` body would have stopped at
+            // `update_e + cpml`; the lumped-port correction runs on
+            // top of that. Here we use `solver.step()` which folded
+            // those stages, so the correction lands on `E_z^{n+1}`.
+            port.correct_e(coarse_grid, n, dt);
+            // Record V = E_z * dz, I = (V_src − V) / Z_0.
+            let ez = coarse_grid.ez[port_cell];
+            let v_port = ez * dz;
+            let v_src = port.source_voltage.value(n, dt);
+            let i_port = (v_src - v_port) / FDTD_007_Z0_REF_OHM;
+            v_trace.push(v_port);
+            i_trace.push(i_port);
+            // Apply outer-face PEC clamp every step to emulate the
+            // ground plane (the deprecated `apply_pec` path is
+            // documented as fine for cavity-style runs, which is
+            // what we have here).
+            #[allow(deprecated)]
+            yee_fdtd::boundary::apply_pec(coarse_grid);
+        }
+        // Tag the `area` value as semantically used. dx is dx_coarse on
+        // the subgridded run.
+        let _ = area;
+    } else {
+        let mut solver = WalkingSkeletonSolver::new(grid);
+        for n in 0..n_steps {
+            solver.step();
+            let (g, _) = solver.grid_and_cpml_mut();
+            port.correct_e(g, n, dt);
+            let ez = g.ez[port_cell];
+            let v_port = ez * dz;
+            let v_src = port.source_voltage.value(n, dt);
+            let i_port = (v_src - v_port) / FDTD_007_Z0_REF_OHM;
+            v_trace.push(v_port);
+            i_trace.push(i_port);
+            #[allow(deprecated)]
+            yee_fdtd::boundary::apply_pec(g);
+        }
+        let _ = area;
+    }
+
+    (v_trace, i_trace, dt)
+}
+
+/// Compute `S_11(f) = (Z(f) - Z_0) / (Z(f) + Z_0)` where
+/// `Z(f) = V(f) / I(f)` via per-bin DFTs of the time-domain traces.
+///
+/// Returns one `(f, |S_11(f)| dB)` row per `freq_hz` entry.
+fn fdtd_007_s11_at_frequencies(
+    v_trace: &[f64],
+    i_trace: &[f64],
+    dt: f64,
+    freq_hz: &[f64],
+) -> Vec<(f64, f64)> {
+    use num_complex::Complex64;
+    let z0 = Complex64::new(FDTD_007_Z0_REF_OHM, 0.0);
+    let mut out = Vec::with_capacity(freq_hz.len());
+    for &f in freq_hz {
+        let v_f = dft_bin(v_trace, f, dt);
+        let i_f = dft_bin(i_trace, f, dt);
+        let z = if i_f.norm() > 0.0 {
+            v_f / i_f
+        } else {
+            Complex64::new(f64::INFINITY, 0.0)
+        };
+        let s11 = (z - z0) / (z + z0);
+        let mag = s11.norm().max(1.0e-300);
+        let s11_db = 20.0 * mag.log10();
+        out.push((f, s11_db));
+    }
+    out
+}
+
+/// `fdtd-007`: dielectric-loaded thin slot antenna gate
+/// (Maloney & Smith 1993 Fig. 9 reference).
+///
+/// **Phase 2.fdtd.7 Q7 production-gate driver — escape-hatch'd.** The
+/// driver builds the spec §5 fixture (slot `w = 0.5 mm × L = 30 mm` in
+/// a PEC ground plane on an `ε_r = 2.2`, `h = 1.524 mm` substrate),
+/// runs the coarse + subgridded simulation for `n_steps` coarse steps,
+/// FFTs the port `V(t)` and `I(t)` traces to extract `S_11(f)`, then
+/// reports `f_res` (the frequency at which `|S_11|` is minimum) and
+/// `|S_11(f_res)|`. The same problem is run on a globally uniform
+/// `dx = 0.5 mm` grid as an internal sanity comparator.
+///
+/// # Returns
+///
+/// A [`Fdtd007ValidationResult`] carrying the four measured numbers
+/// (`f_res_subgrid`, `f_res_uniform`, `|S_11_subgrid|`,
+/// `|S_11_uniform|` in dB), the relative / absolute errors against
+/// Maloney-Smith Fig. 9, and the worst-case sanity-check delta across
+/// five spot frequencies.
+///
+/// # Status (Phase 2.fdtd.7 Q7)
+///
+/// Per the brief's escape hatch, the production gate test is
+/// `#[ignore]`'d because:
+///
+/// 1. **Substrate `ε_r` is uniform on the YeeGrid surface.** The
+///    walking-skeleton `YeeGrid` exposes a scalar `eps_r`; no per-cell
+///    material map. The driver approximates the substrate by setting
+///    the fine sub-grid's `eps_r = 2.2` (the dominant volume near the
+///    slot) and the coarse grid stays at vacuum. A heterogeneous
+///    `eps_r` lands as Phase 2.fdtd.7.z.
+/// 2. **No per-cell PEC mask for the ground plane.** Only the
+///    deprecated outer-face `boundary::apply_pec` is available; the
+///    driver uses it as the cavity wall, which approximates the
+///    ground plane only in the limit where the slot sits on the
+///    domain boundary. A per-cell PEC sheet at `z = z_gp` lands as
+///    Phase 2.fdtd.7.z.
+/// 3. **Phase 2.fdtd.7.y Step C6 un-ghosted-J variant leaves the
+///    fine grid effectively passive** under source-on-coarse drive.
+///    Consequence: the subgridded run's `S_11` is dominated by the
+///    coarse-grid stencil, not by the substrate-loaded fine box. The
+///    F2 inward-coupling restoration (deferred from Track DDDDDDDD)
+///    lifts this constraint.
+///
+/// Net effect: the driver compiles, runs end-to-end, and produces
+/// measurements — but the `f_res` it reports is **not the
+/// Maloney-Smith dielectric-loaded resonance**, it is whatever
+/// resonance the C6-degenerate coarse stencil + 50 Ω port + coarse
+/// PEC cavity produces. The hard `±2 % / ±1 dB` gate is therefore
+/// `#[ignore]`'d as a known C6 limitation pending Phase 2.fdtd.7.z;
+/// the driver itself remains useful as the scaffolding the F2 work
+/// will plug into.
+///
+/// # Errors
+///
+/// Returns [`yee_core::Error::Invalid`] only if the fixture geometry
+/// would produce an empty `V` / `I` trace (e.g. `n_steps == 0`). All
+/// other failure modes surface via [`Fdtd007ValidationResult::status`]
+/// = [`CaseStatus::Failed`] with explanatory `notes`.
+pub fn run_fdtd_007_maloney_smith_slot() -> Result<Fdtd007ValidationResult, yee_core::Error> {
+    let t0 = Instant::now();
+
+    // 4000 coarse steps at dt ≈ 1.9 ps gives ~7.5 ns observation
+    // window (matching the spec §Q7 wall-time budget envelope —
+    // ~minutes release).
+    let n_steps = 4000usize;
+
+    // ---- 1. Subgridded run -----------------------------------------
+    let (v_sg, i_sg, dt_sg) = fdtd_007_run_one(true, n_steps);
+    // ---- 2. Uniform-fine reference run -----------------------------
+    let (v_un, i_un, dt_un) = fdtd_007_run_one(false, n_steps);
+
+    if v_sg.is_empty() || v_un.is_empty() {
+        return Err(yee_core::Error::Invalid(
+            "fdtd-007: empty V/I trace (n_steps == 0?)".into(),
+        ));
+    }
+
+    // ---- 3. Sweep |S_11(f)| across [4, 14] GHz for resonance ----
+    let n_freq = 101usize;
+    let f_lo = 4.0e9;
+    let f_hi = 14.0e9;
+    let f_grid: Vec<f64> = (0..n_freq)
+        .map(|i| f_lo + (f_hi - f_lo) * (i as f64) / ((n_freq - 1) as f64))
+        .collect();
+
+    let s11_sg = fdtd_007_s11_at_frequencies(&v_sg, &i_sg, dt_sg, &f_grid);
+    let s11_un = fdtd_007_s11_at_frequencies(&v_un, &i_un, dt_un, &f_grid);
+
+    // Locate the resonance dip (minimum |S_11| in dB).
+    let argmin = |rows: &[(f64, f64)]| -> (f64, f64) {
+        let mut best_idx = 0usize;
+        let mut best_db = f64::INFINITY;
+        for (idx, &(_, db)) in rows.iter().enumerate() {
+            if db < best_db {
+                best_db = db;
+                best_idx = idx;
+            }
+        }
+        rows[best_idx]
+    };
+
+    let (f_res_subgrid_hz, s11_db_subgrid) = argmin(&s11_sg);
+    let (f_res_uniform_hz, s11_db_uniform) = argmin(&s11_un);
+
+    let f_res_rel_error = (f_res_subgrid_hz - FDTD_007_FRES_REF_HZ).abs() / FDTD_007_FRES_REF_HZ;
+    let s11_db_abs_error = (s11_db_subgrid - FDTD_007_S11_DB_REF).abs();
+
+    // ---- 4. Sanity-check vs uniform-fine reference at five spot
+    //         frequencies bracketing the resonance.
+    let spot_freqs = [6.0e9, 7.5e9, 9.0e9, 10.5e9, 12.0e9];
+    let sg_spot = fdtd_007_s11_at_frequencies(&v_sg, &i_sg, dt_sg, &spot_freqs);
+    let un_spot = fdtd_007_s11_at_frequencies(&v_un, &i_un, dt_un, &spot_freqs);
+    let mut sanity_max_fres_rel = 0.0_f64;
+    let mut sanity_max_s11_db = 0.0_f64;
+    for ((fa, db_a), (fb, db_b)) in sg_spot.iter().zip(un_spot.iter()) {
+        let df_rel = (fa - fb).abs() / fb.max(f64::EPSILON);
+        let ddb = (db_a - db_b).abs();
+        if df_rel > sanity_max_fres_rel {
+            sanity_max_fres_rel = df_rel;
+        }
+        if ddb > sanity_max_s11_db {
+            sanity_max_s11_db = ddb;
+        }
+    }
+
+    // ---- 5. Hard gates ---------------------------------------------
+    let fres_ok = f_res_rel_error <= FDTD_007_TOL_FRES_REL;
+    let s11_ok = s11_db_abs_error <= FDTD_007_TOL_S11_DB_ABS;
+    let sanity_ok = sanity_max_fres_rel <= FDTD_007_TOL_SANITY_FRES_REL
+        && sanity_max_s11_db <= FDTD_007_TOL_SANITY_S11_DB;
+    let passed = fres_ok && s11_ok && sanity_ok;
+    let status = if passed {
+        CaseStatus::Passed
+    } else {
+        CaseStatus::Failed
+    };
+
+    let elapsed = t0.elapsed().as_secs_f64();
+    let notes = format!(
+        "f_res subgrid = {:.3} GHz, |S_11| = {:.2} dB; \
+         f_res uniform = {:.3} GHz, |S_11| = {:.2} dB; \
+         Maloney-Smith 1993 Fig. 9 ref f_res = {:.3} GHz (TBD ±5%), \
+         |S_11| = {:.1} dB (TBD ±1 dB); \
+         |df|/f = {:.4} (tol {:.3}), |dS_11| = {:.3} dB (tol {:.2}); \
+         sanity max |df|/f = {:.4} (tol {:.3}), max |dS_11| = {:.3} dB (tol {:.2}); \
+         wall = {:.2}s; n_steps = {}; \
+         Phase 2.fdtd.7 Q7 escape-hatched per C6 passive-fine-grid trade-off",
+        f_res_subgrid_hz * 1e-9,
+        s11_db_subgrid,
+        f_res_uniform_hz * 1e-9,
+        s11_db_uniform,
+        FDTD_007_FRES_REF_HZ * 1e-9,
+        FDTD_007_S11_DB_REF,
+        f_res_rel_error,
+        FDTD_007_TOL_FRES_REL,
+        s11_db_abs_error,
+        FDTD_007_TOL_S11_DB_ABS,
+        sanity_max_fres_rel,
+        FDTD_007_TOL_SANITY_FRES_REL,
+        sanity_max_s11_db,
+        FDTD_007_TOL_SANITY_S11_DB,
+        elapsed,
+        n_steps,
+    );
+
+    Ok(Fdtd007ValidationResult {
+        id: "fdtd-007".to_string(),
+        f_res_subgrid_hz,
+        f_res_uniform_hz,
+        s11_db_subgrid,
+        s11_db_uniform,
+        f_res_rel_error,
+        s11_db_abs_error,
+        sanity_max_fres_rel,
+        sanity_max_s11_db,
+        status,
+        notes,
+        wall_time_seconds: elapsed,
+    })
+}
+
+// ---------------------------------------------------------------------
 // nl-001: Phase 3.nl.0 production validation gate (10-prompt
 // end-to-end) — Track CCCCCCCC R6.
 // ---------------------------------------------------------------------
