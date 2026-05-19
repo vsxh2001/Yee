@@ -520,32 +520,45 @@ pub fn assemble_port_face_block(
 /// `a_inc · e_mode(x_c, y_c)`).
 ///
 /// For the first-order Whitney-1 face basis the basis vector
-/// `N_i` restricted to the triangular face reduces to the constant
-/// edge tangent `t_i = v_{(i+1) mod 3} − v_i` (see
-/// [`assemble_abc_face_block`] for the derivation), so the integrand
-/// `N_i · E_t_mode` is constant per face when the modal profile is
-/// approximated by its centroid value. The face-centroid quadrature
-/// therefore evaluates to
+/// `N_i` restricted to the triangular face is treated under the same
+/// lumped edge-tangent approximation as the ABC and wave-port
+/// face-block helpers above — `N_i|_face ≈ t_i / ||t_i||² · ||t_i||`
+/// in the dual sense — so the integrand `N_i · E_t_mode` is
+/// approximated by its face-centroid sample. The face-centroid
+/// quadrature evaluates to
 ///
 /// ```text
-///     ∫_face N_i · E_t_mode dS  ≈  (A / 3) · t_i · E_t_mode,
+///     ∫_face N_i · E_t_mode dS  ≈  (A / 3) · (t_i · E_t_mode),
 /// ```
 ///
-/// where the `1/3` factor is the Whitney-1 edge basis weight at the
-/// face centroid (each edge basis integrates to `A/3` against a
-/// constant test field over a triangular face). Substituting:
+/// where the `1/3` factor is the Whitney-1 lumped edge basis weight at
+/// the face centroid. Substituting:
 ///
 /// ```text
 ///     b_i  =  2 j β_mode · (A / 3) · (t_i · E_t_mode).
 /// ```
 ///
+/// ## CCCCCCCCC normalisation note
+///
+/// The lumped `t_i / 3` weighting is **not** the exact Whitney-1
+/// basis-at-centroid identity
+/// `N_i(centroid) = (1/3) · (∇λ_b − ∇λ_a)`. The lumped form is paired
+/// with the dual approximation in
+/// [`crate::open_boundary::OpenBoundarySolver::extract_s11`]'s
+/// `e_t_at_face_centroid` so the round-trip
+/// modal-RHS-then-modal-projection cancellation is preserved at the
+/// lumped level. The CCCCCCCCC scaling fix is in `extract_s11`, which
+/// divides the inner product by the modal self-inner-product computed
+/// via the same lumped quadrature. A future Phase 4.fem.eig.2.0.1
+/// refinement (ADR-0040 §C-3) will lift this RHS, the centroid
+/// reconstruction, and the per-Gauss-point modal sampling to the exact
+/// Whitney basis identity in a single coupled change.
+///
 /// The returned `SVector<Complex64, 3>` is indexed by the three face
 /// edges `(0→1, 1→2, 2→0)` in the canonical CCW traversal of the face
 /// vertices; the assembly layer (Phase 4.fem.eig.2 step E3) is
 /// responsible for the local-to-global orientation flips per shared
-/// edge. Higher-order quadrature (3-point Gauss) is a Phase
-/// 4.fem.eig.2.0.1 refinement if the face-centroid sampling proves
-/// insufficient on the fem-eig-003 sweep.
+/// edge.
 ///
 /// `mode_e_t_at_centroid` is the tangential E-field of the incident
 /// mode at the face centroid (typically `a_inc · e_mode(x_c, y_c)`

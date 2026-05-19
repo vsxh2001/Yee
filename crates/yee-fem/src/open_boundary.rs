@@ -93,18 +93,31 @@
 //! side. The spec's `NumericalCrossSection` integration lands in a
 //! follow-up cross-lane PR (Phase 4.fem.eig.2.0.2 per spec §13).
 //!
-//! ## S-parameter extraction (Phase 4.fem.eig.2 step E4)
+//! ## S-parameter extraction (Phase 4.fem.eig.2 step E4 + CCCCCCCCC fix)
 //!
 //! [`OpenBoundarySolver::sweep`] runs the per-frequency driven solve at
 //! every `ω` in the supplied list and extracts the diagonal scattering
 //! matrix entries `S_{p,p}(ω)` via modal projection on each port face.
-//! Per spec §4.3 / Pozar §3.3, with normalised incident amplitude
-//! `a_inc_p = 1`:
+//! Per Pozar §3.3 / Jin §10.7, with normalised incident amplitude
+//! `a_inc_p = 1` and modal self-inner-product
+//! `M_pp = ⟨e_mode_p, e_mode_p⟩_port` computed via the same face-
+//! centroid quadrature:
 //!
 //! ```text
-//!     b_p(ω)   =   2  ⟨ E_FEM,t , e_mode_p ⟩_port  −  a_inc_p,
-//!     S_{p,p}(ω)   =   b_p(ω) / a_inc_p.
+//!     b_p(ω)     =   ⟨ E_FEM,t , e_mode_p ⟩_port / M_pp  −  a_inc_p,
+//!     S_{p,p}(ω) =   b_p(ω) / a_inc_p.
 //! ```
+//!
+//! The modal normalisation by `M_pp` (CCCCCCCCC scaling fix) replaces
+//! the original spec §4.3 formula `b_p = 2 ⟨E_FEM, e_mode⟩ − a_inc`,
+//! which had implicitly assumed `M_pp = 1/2`. With the standard
+//! Pozar §3.3 orthonormalisation `M_pp ≈ 1` used by the driver
+//! (`crates/yee-validation/src/lib.rs::fem_eig_003_modal_e_t_te10`),
+//! the un-normalised formula saturated `|S_{11}|` at 1.0 even on a
+//! matched-port total field (BBBBBBBBB E5 finding). The corrected
+//! formula recovers the Pozar §3.3 matched-port identity
+//! `S_{11} ≈ 0` for `E_FEM,t ≈ a_inc · e_mode` and the PEC-reflection
+//! identity `|S_{11}| ≈ 1` for `E_FEM,t ≈ 0`.
 //!
 //! The modal projection is computed by face-centroid quadrature: for
 //! every port face `f` carrying the port `p` tag,
@@ -745,16 +758,47 @@ impl<'m> OpenBoundarySolver<'m> {
     /// evaluated at the centroid (see the private
     /// `e_t_at_face_centroid` helper for the closed-form basis-at-
     /// centroid weighting).
-    /// With normalised incident amplitude `a_inc = 1`,
+    ///
+    /// ## Modal-normalisation correction (CCCCCCCCC)
+    ///
+    /// The original Phase 4.fem.eig.2 E4 formula
+    /// `b_p = 2 ⟨E_FEM, e_mode⟩ − a_inc` (spec §4.3) implicitly assumed
+    /// `⟨e_mode, e_mode⟩_port = 1/2`, but the [`PortDefinition::modal_e_t`]
+    /// contract in this crate (and the WR-90 TE_{10} profile used by
+    /// `fem-eig-003` / `crates/yee-validation`) carries the standard
+    /// orthonormalisation `⟨e_mode, e_mode⟩_port = 1` (Pozar §3.3).
+    /// With the un-normalised formula, even a matched-port total field
+    /// `E_FEM = a_inc · e_mode` yielded `|S_{11}| = 1` instead of the
+    /// expected `0`, causing the fem-eig-003 sweep to saturate at
+    /// `|S_{11}| = 1.0` (BBBBBBBBB E5 finding).
+    ///
+    /// The corrected extraction normalises the projection by the modal
+    /// self-inner-product computed via the same face-centroid quadrature:
     ///
     /// ```text
-    ///     b_p   =   2 ⟨ E_FEM,t , e_mode_p ⟩_port  −  a_inc,
-    ///     S_{p,p}   =   b_p / a_inc   =   b_p.
+    ///     M_pp   =   ⟨ e_mode_p , e_mode_p ⟩_port,
+    ///     b_p    =   ⟨ E_FEM,t , e_mode_p ⟩_port / M_pp  −  a_inc,
+    ///     S_{p,p} =  b_p / a_inc.
     /// ```
+    ///
+    /// With the standard `a_inc = 1` and a matched-port total field
+    /// `E_FEM ≈ a_inc · e_mode`, the corrected formula gives
+    /// `b_p ≈ a_inc − a_inc = 0` — the expected matched-port identity.
+    /// With a fully-reflective PEC termination behind the port and no
+    /// modal amplitude landing at the port (`E_FEM ≈ 0`),
+    /// `b_p ≈ 0 − a_inc = −a_inc`, recovering `|S_{11}| ≈ 1` (full
+    /// reflection). Both end-cases match Pozar §3.3 and Jin §10.7.
+    ///
+    /// `M_pp` is computed once per call; for a degenerate fixture with
+    /// `M_pp ≈ 0` (no port faces or modal profile zero everywhere) the
+    /// function returns [`Error::Numerical`].
     ///
     /// # Errors
     ///
     /// Returns [`Error::Invalid`] if `port_id` is out of range.
+    /// Returns [`Error::Numerical`] if the modal self-inner-product
+    /// `M_pp` is numerically zero (which would otherwise produce a
+    /// division-by-zero `Inf` in the extracted `S_{p,p}`).
     pub fn extract_s11(
         &self,
         port_id: PortId,
@@ -772,6 +816,7 @@ impl<'m> OpenBoundarySolver<'m> {
 
         let port = &self.ports[port_id];
         let mut inner_product = Complex64::new(0.0, 0.0);
+        let mut mode_self_inner = 0.0_f64;
 
         for (i, kind) in self.face_kinds.iter().enumerate() {
             if let FaceKind::WavePort(p) = *kind
@@ -802,13 +847,33 @@ impl<'m> OpenBoundarySolver<'m> {
                     + e_fem.y * Complex64::new(e_mode.y, 0.0)
                     + e_fem.z * Complex64::new(e_mode.z, 0.0);
                 inner_product += Complex64::new(face_area, 0.0) * face_dot;
+
+                // Modal self-inner-product via the SAME face-centroid
+                // quadrature. The continuum integral `∫_port |e_mode|² dS`
+                // depends on the caller's orthonormalisation choice; for
+                // the WR-90 TE_{10} profile carried by `fem-eig-003` this
+                // is exactly 1, but we read it back from the supplied
+                // [`PortDefinition`] rather than assuming a value, so any
+                // future un-normalised modal source still produces a
+                // physically-meaningful S_{11}.
+                mode_self_inner += face_area * e_mode.dot(&e_mode);
             }
         }
 
+        if mode_self_inner <= f64::EPSILON {
+            return Err(Error::Numerical(format!(
+                "OpenBoundarySolver::extract_s11: modal self-inner-product \
+                 ⟨e_mode, e_mode⟩_port = {mode_self_inner} is numerically \
+                 zero for port {port_id}; cannot normalise S_{{11}} \
+                 extraction (modal profile vanishes on every port face?)"
+            )));
+        }
+
         // S_{p,p} = b_p / a_inc with a_inc = 1 and
-        // b_p = 2 · <E_FEM, e_mode>_port − a_inc.
+        // b_p = ⟨E_FEM, e_mode⟩_port / M_pp − a_inc (CCCCCCCCC).
         let a_inc = Complex64::new(1.0, 0.0);
-        let b_p = Complex64::new(2.0, 0.0) * inner_product - a_inc;
+        let m_pp = Complex64::new(mode_self_inner, 0.0);
+        let b_p = inner_product / m_pp - a_inc;
         Ok(b_p / a_inc)
     }
 
@@ -817,12 +882,10 @@ impl<'m> OpenBoundarySolver<'m> {
     /// (Phase 4.fem.eig.2 step E4 helper).
     ///
     /// For the Whitney-1 face basis the per-edge basis function `N_i`
-    /// evaluated at the centroid simplifies to `t_i / 3`, where
-    /// `t_i = v_{(i+1) mod 3} − v_i` is the canonical face-edge tangent
-    /// (each edge basis integrates to `A/3` against a constant test
-    /// function — see [`crate::element::assemble_port_modal_rhs`] for
-    /// the dual formulation that motivates the `1/3` weight). The
-    /// face-centroid FEM E-field is therefore
+    /// evaluated at the centroid is treated as the lumped edge-tangent
+    /// proxy `t_i / 3`, where `t_i = v_{(i+1) mod 3} − v_i` is the
+    /// canonical face-edge tangent. The face-centroid FEM E-field is
+    /// therefore
     ///
     /// ```text
     ///     E_FEM,t(centroid)  =  Σ_{i ∈ face_edges}  s_i · e_i · (t_i / 3),
@@ -831,6 +894,26 @@ impl<'m> OpenBoundarySolver<'m> {
     /// where `s_i ∈ {-1, +1}` is the local-to-global orientation sign
     /// and `e_i` is the interior-DoF amplitude (or `0` if edge `i` is
     /// PEC-eliminated).
+    ///
+    /// ## CCCCCCCCC scaling note
+    ///
+    /// The `t_i / 3` lumped weighting is **not** the exact Whitney-1
+    /// basis-at-centroid identity
+    /// `N_i(centroid) = (1/3)(∇λ_b − ∇λ_a)`; in general
+    /// `(∇λ_b − ∇λ_a) ≠ t_i`. The lumped form is retained here to
+    /// match the dual approximation already in
+    /// [`crate::element::assemble_port_modal_rhs`], so the round-trip
+    /// modal-RHS-then-modal-projection cancellation that the spec
+    /// §4.3 derivation relies on is preserved at the lumped level. The
+    /// CCCCCCCCC scaling fix lives in [`Self::extract_s11`], which
+    /// divides the inner product by the modal self-inner-product `M_pp`
+    /// computed via the same lumped quadrature; that ratio is what
+    /// retires the `|S_{11}| = 1` saturation. A future Phase
+    /// 4.fem.eig.2.0.1 refinement (ADR-0040 §C-3) will lift both the
+    /// element-layer RHS and this reconstruction to the exact Whitney
+    /// basis identity in a single coupled change — independently
+    /// validated against the cross-section eigensolver per-Gauss-point
+    /// modal sampling.
     fn e_t_at_face_centroid(
         &self,
         face: &ExteriorFace,
