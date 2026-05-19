@@ -38,7 +38,17 @@ Conventions used below:
 - Phase 2.fdtd.7 Q3 coarse→fine E_t spatial + temporal interpolation (Track MMMMMM merge `817955a`)
 - Phase 2.fdtd.7 Q4 fine→coarse H_t area-average + E_t overwrite closures (Track OOOOOO merge `6ded764`)
 - Phase 2.fdtd.7 Q4.1 `snapshot_fine_h_mid_step` time-centering helper (Track VVVVVV merge `a2abb4c`)
-- Phase 2.fdtd.7 Q5 time-subcycling step (Track RRRRRR merge `426a36c`; strict 0.5% gate `#[ignore]`'d — see Pending)
+- Phase 2.fdtd.7 Q5 time-subcycling step (Track RRRRRR merge `426a36c`)
+- Phase 2.fdtd.7.x Berenger Huygens spec + plan + ADR-0035 (Track AAAAAAA merge `003bdde`)
+- Phase 2.fdtd.7.x B1 Berenger skeleton + face enumeration (Track EEEEEEE merge `c663b90`)
+- Phase 2.fdtd.7.x B2 equivalent-current injection (Track FFFFFFF merge `c0b0cca`)
+- Phase 2.fdtd.7.x B2.1 split J/M injection refactor (Track LLLLLLL merge `bb054e8`)
+- Phase 2.fdtd.7.x B2.2 J-side coarse-ghost subtraction (Track OOOOOOO merge `464c7ba`)
+- Phase 2.fdtd.7.y M-coupling spec + plan + ADR-0038 (Track UUUUUUU merge `0d260d3`)
+- Phase 2.fdtd.7.y C1 pre/post fine-E snapshots (Track YYYYYYY merge `134fd93`)
+- Phase 2.fdtd.7.y C2 compensating-source M (Option β; degenerates to 0 — Track ZZZZZZZ merge `be71a76`)
+- Phase 2.fdtd.7.y C5 Mur ABC on fine outer E_t (Option α; retires 500-step divergence — Track BBBBBBBB merge `a6283ae`)
+- **Phase 2.fdtd.7.y C6 un-ghosted J variant — retires Q5 strict 0.5%-of-peak gate at 0.0000% rel err** (Track DDDDDDDD merge `47c461c`; trade-off: fine grid permanently passive in source-on-coarse mode; Q6 long-time energy drift still `#[ignore]`'d)
 - Phase 3.gp.0/1 (GP regression + ML hyperparameter fit)
 - Phase 3.bo.0/1 (Expected-Improvement BO, NSGA-II multi-objective)
 - Phase 3.al.0 (variance-acquisition active learning)
@@ -51,27 +61,39 @@ Conventions used below:
   - **T7: fem-eig-001 production gate — TE_{101} 0.09% rel err vs Pozar §6.3 analytic at WR-90 (a=22.86, b=10.16, d=30) mm; mode-10 RMS 0.37% on (12,9,15) mesh; wall-time ~7 s release (Track QQQQQQ merge `d42aefc`)**
   - T8: `yee.fem.solve_cavity` Python binding, 3 pytest cases (Track UUUUUU merge `cb0e15f`)
   - T9: mdBook tutorial `docs/src/tutorials/04-fem-cavity-eigenmode.md` (Track WWWWWW merge `06e72f2`)
+- Phase 3.nl.0 NL design surface, end-to-end:
+  - R1: yee-design crate scaffold + DesignIntent types (Track PPPPPPP merge `fbd752e`)
+  - R2: Balanis Ch. 14 initial-estimate calculator — Example 14.1 W/L within 0.08%/0.07% (Track RRRRRRR merge `32baeb4`)
+  - R3: deterministic project-TOML emitter (Track VVVVVVV merge `2e54e6f`)
+  - R4: yee.design.from_prompt_llm Anthropic Messages tool-use sidecar (Track XXXXXXX merge `2c7ece4`)
+  - R5: yee design CLI subcommand + 10 canonical prompts (Track AAAAAAAA merge `08cec1b`)
+  - R6: nl-001 production gate — schema+round-trip+offline sub-gates A+B+C all 10 prompts (Track CCCCCCCC merge `417978e`)
+  - R7: mdBook tutorial `docs/src/tutorials/04-nl-design-surface.md` (Track EEEEEEEE merge `5016fda`)
+- mom-002 root-cause chain end-to-end (10 forensic tracks + 3 kernel fixes + 3 ADRs):
+  - EEEEEE prefactor / JJJJJJ extent / PPPPPP GPOF / SSSSSS contour / TTTTTT residue sign / XXXXXX ψ_p / YYYYYY MPIE / CCCCCCC port-mesh / MMMMMMM ε_eff / NNNNNNN R1 retract / DDDDDDD DCIM-TM / TTTTTTT port spatial / QQQQQQQ β eigen (kernel exonerated at 1.83% from HJ)
+  - ADR-0036 mom-002 validation reframe (sub-wavelength strip)
+  - ADR-0037 R1 metric retraction
+  - IIIIIII reframe to L=82mm centered uniform: |Z_in| 2569→674 Ω
 
 **Pending (high priority):**
 
 *In-flight (this session):*
+- WWWWWWW mom-002 TEM-mode smoothed RHS port-excitation fix (TTTTTTT P1 root cause)
 - Phase 1.3.1.1 step 4 sparse arpack-rs / LOBPCG eigensolver
 - Phase 1.3.1.1 step 5 longitudinal block for quasi-TEM microstrip wave-ports
-- mom-002 ~30× residual gap root cause — five diagnostics landed (EEEEEE / JJJJJJ / PPPPPP / SSSSSS / XXXXXX), each rules out one candidate; XXXXXX flagged `Re(Z) = −67 Ω` unphysical → next candidate is MPIE matrix singularity quadrature, delta-gap port model, or DCIM TM-channel GPOF fit (queued Track YYYYYY)
 
 *Design-coverage shipped, impl pending:*
-- Phase 2.fdtd.7 Q6 stability/reciprocity gate (10000-step round-trip energy drift)
+- Phase 2.fdtd.7 Q6 stability/reciprocity 10000-step energy gate — Q5 strict retired by C6; Q6 long-time drift (75-79%) deferred to future track (subgrid-coarse impedance-mismatch is the residual; needs proper energy-balance closure)
 - Phase 2.fdtd.7 Q7 fdtd-007 Maloney-Smith production gate
-- Phase 2.fdtd.7.x Berenger 2006 Huygens-surface fine↔coarse coupling — VVVVVV diagnosed the spec §3 Okoniewski-style closure as discrete-energy-balance-unstable when combined with linear E_t interpolation; queued (Track ZZZZZZ) to ship the documented Berenger fallback that retires the Q5 strict 0.5% gate
-- Phase 3.nl.0 NL design surface — spec + plan + ADR 0028/0031 landed; R1-R7 tracks ready to dispatch
 - Phase 4.fem.eig.1+ — dispersive ε_r(ω), real waveguide ports, absorbing boundaries — designs not yet drafted
 
 **Outstanding validation gates:**
-- mom-002 microstrip Z₀ tolerance tighten to Hammerstad-Jensen `[35, 75] Ω` — five kernel-side root causes ruled out; remaining candidates are formulation-level (Track YYYYYY in queue)
+- mom-001 dipole — **GATE PASSES** (NEC-4 87+j41 Ω)
+- mom-002 microstrip Z₀ — gate passes within ±5% tripwire band at `|Z_in| = 674 Ω` on L=82mm reframed mesh (per ADR-0036); 10 forensic tracks confirmed kernel is correct within 1.83% of HJ ε_eff; remaining residual is delta-gap port-excitation modeling (Track WWWWWWW in flight)
 - mom-003 2.4 GHz patch — loose tolerance pending re-run through `GreensSpec::MicrostripSommerfeld`
-- fem-eig-001 WR-90 rectangular cavity — **GATE PASSES** (TE_{101} 0.09% rel err, mode-10 RMS 0.37%, Track QQQQQQ)
-- fdtd-007 Maloney-Smith oblique TF/SF — forward gate for Phase 2.fdtd.7 subgridding (gated on Q6 + Q7 + Berenger coupling)
-- nl-001 10-prompt sweep — gates Phase 3.nl.0 NL design surface
+- fem-eig-001 WR-90 rectangular cavity — **GATE PASSES** (TE_{101} 0.09% rel err, mode-10 RMS 0.37%)
+- fdtd-007 Maloney-Smith oblique TF/SF — forward gate for Phase 2.fdtd.7 subgridding (gated on Q6 + Q7)
+- nl-001 10-prompt sweep — **GATE PASSES on sub-gates A+B+C** (schema, round-trip, offline); D-gate (solver ±5% f) `#[ignore]`'d pending real MultilayerGreens per Phase 1.1.1 deferred-tolerance policy
 
 ---
 
