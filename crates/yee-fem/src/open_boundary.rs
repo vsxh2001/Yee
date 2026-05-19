@@ -170,9 +170,24 @@ use yee_mesh::TetMesh3D;
 
 use crate::assembly::FemEigenAssembly;
 use crate::element::{
-    LOCAL_EDGES, assemble_abc_face_block, assemble_port_face_block, assemble_port_modal_rhs,
+    LOCAL_EDGES, assemble_abc_face_block, assemble_port_face_block,
+    assemble_port_face_block_gauss_pts, assemble_port_face_rhs_gauss_pts, assemble_port_modal_rhs,
 };
 use crate::material::MaterialDatabase;
+
+/// Three-point Gauss-quadrature barycentric coordinates on the
+/// reference triangle (mirror of `element::TRI_GAUSS_3PT_BARY` —
+/// kept private here so the open-boundary helper can sample modal
+/// profiles at the same Gauss-point world-space positions as the
+/// element-layer F1 helpers consume).
+///
+/// Each row is `(λ_0, λ_1, λ_2)` for one Gauss point; the
+/// corresponding weight is `A / 3` (uniform).
+const TRI_GAUSS_3PT_BARY: [[f64; 3]; 3] = [
+    [2.0 / 3.0, 1.0 / 6.0, 1.0 / 6.0],
+    [1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0],
+    [1.0 / 6.0, 1.0 / 6.0, 2.0 / 3.0],
+];
 
 /// Identifier of a wave-port descriptor in
 /// [`OpenBoundarySolver::ports`]. Stable across calls to
@@ -345,6 +360,12 @@ pub struct OpenBoundarySolver<'m> {
     /// Computed once at construction; consumed by every
     /// [`Self::solve_at_frequency`] call.
     pec_global_edges: HashSet<usize>,
+    /// If `true`, scatter wave-port faces and project the FEM solution
+    /// using the **exact Whitney-1 basis** at 3-point Gauss quadrature
+    /// (Phase 4.fem.eig.3 F1+F2). Default `false` reproduces the v2 +
+    /// CCCCCCCCC lumped-centroid behaviour bit-for-bit. Toggled by
+    /// [`Self::with_coupled_whitney`].
+    coupled_whitney: bool,
 }
 
 impl<'m> OpenBoundarySolver<'m> {
@@ -430,7 +451,51 @@ impl<'m> OpenBoundarySolver<'m> {
             ports,
             exterior_faces,
             pec_global_edges,
+            coupled_whitney: false,
         })
+    }
+
+    /// Toggle the **coupled exact-Whitney-1** wave-port path
+    /// (Phase 4.fem.eig.3 F1+F2).
+    ///
+    /// When `coupled = false` (the default), the wave-port scatter path
+    /// uses the v2 lumped face-centroid quadrature
+    /// ([`crate::element::assemble_port_face_block`] +
+    /// [`crate::element::assemble_port_modal_rhs`]) and
+    /// [`Self::extract_s11`]'s `E_FEM`-reconstruction uses the lumped
+    /// `t_i / 3` proxy — bit-for-bit identical to the v2 + CCCCCCCCC
+    /// shipped behaviour.
+    ///
+    /// When `coupled = true`, both the modal RHS and the FEM-side
+    /// projection are lifted to the **exact Whitney-1 identity**
+    /// `N_i(ξ) = λ_a(ξ) ∇λ_b − λ_b(ξ) ∇λ_a` evaluated at the three
+    /// Gauss points
+    ///
+    /// ```text
+    ///     ξ_g ∈ { (2/3, 1/6, 1/6), (1/6, 2/3, 1/6), (1/6, 1/6, 2/3) }
+    /// ```
+    ///
+    /// on the reference triangle (each weighted `A / 3`). The two
+    /// paths are changed together so the modal round-trip
+    /// cancellation that Pozar §3.3 / Jin §10.5 derives is preserved
+    /// at the exact-basis level, not the lumped level.
+    ///
+    /// The stiffness face block computed via the F1 entry point
+    /// [`crate::element::assemble_port_face_block_gauss_pts`] is also
+    /// substituted for the v2 lumped block; for a planar face the two
+    /// stiffness blocks agree numerically (the Gauss-rule sum is
+    /// degree-2 exact and the integrand `(n̂ × N_i) · (n̂ × N_j)` is
+    /// linear × linear = degree 2), so the coupled stiffness path
+    /// produces the same matrix to round-off — only the RHS and the
+    /// `extract_s11` projection actually differ between the two paths.
+    pub fn with_coupled_whitney(mut self, coupled: bool) -> Self {
+        self.coupled_whitney = coupled;
+        self
+    }
+
+    /// Read-only borrow of the `coupled_whitney` flag.
+    pub fn coupled_whitney(&self) -> bool {
+        self.coupled_whitney
     }
 
     /// Number of exterior faces classified by this solver. Equal to
@@ -574,16 +639,39 @@ impl<'m> OpenBoundarySolver<'m> {
                 FaceKind::WavePort(p) => {
                     let port = &self.ports[p];
                     let beta = (port.beta_mode)(omega);
-                    let centroid = face.centroid(self.mesh);
-                    let e_t = (port.modal_e_t)(centroid);
-                    self.scatter_port_face(
-                        face,
-                        beta,
-                        e_t,
-                        &interior_dof_of_edge,
-                        &mut triplets,
-                        &mut rhs,
-                    );
+                    if self.coupled_whitney {
+                        // Phase 4.fem.eig.3 F1+F2 path: sample the
+                        // modal profile at the three Gauss points on
+                        // the reference triangle and call the exact-
+                        // Whitney face-block + RHS helpers.
+                        let face_vertices = face.world_vertices(self.mesh);
+                        let mut e_t_gauss = [Vector3::<f64>::zeros(); 3];
+                        for (g, bary) in TRI_GAUSS_3PT_BARY.iter().enumerate() {
+                            let p_g = bary[0] * face_vertices[0]
+                                + bary[1] * face_vertices[1]
+                                + bary[2] * face_vertices[2];
+                            e_t_gauss[g] = (port.modal_e_t)(p_g);
+                        }
+                        self.scatter_port_face_gauss(
+                            face,
+                            beta,
+                            e_t_gauss,
+                            &interior_dof_of_edge,
+                            &mut triplets,
+                            &mut rhs,
+                        );
+                    } else {
+                        let centroid = face.centroid(self.mesh);
+                        let e_t = (port.modal_e_t)(centroid);
+                        self.scatter_port_face(
+                            face,
+                            beta,
+                            e_t,
+                            &interior_dof_of_edge,
+                            &mut triplets,
+                            &mut rhs,
+                        );
+                    }
                 }
             }
         }
@@ -830,33 +918,44 @@ impl<'m> OpenBoundarySolver<'m> {
                 let t1 = face_vertices[2] - face_vertices[1];
                 let face_area = 0.5 * t0.cross(&t1).norm();
 
-                // Modal profile at the face centroid (already includes
-                // a_inc normalisation per PortDefinition contract).
-                let centroid = face.centroid(self.mesh);
-                let e_mode = (port.modal_e_t)(centroid);
+                if self.coupled_whitney {
+                    // Phase 4.fem.eig.3 F1+F2 path: project E_FEM and
+                    // the modal profile at the same three Gauss points
+                    // used by `assemble_port_face_rhs_gauss_pts`. The
+                    // round-trip cancellation now holds at the exact
+                    // Whitney-1 basis level (Pozar §3.3 matched-port
+                    // identity), not just the CCCCCCCCC M_pp level.
+                    let e_fem_g =
+                        self.e_t_at_face_gauss_pts(face, e_interior, &system.interior_dof_of_edge);
+                    let w_g = face_area / 3.0;
+                    for (g, bary) in TRI_GAUSS_3PT_BARY.iter().enumerate() {
+                        let p_g = bary[0] * face_vertices[0]
+                            + bary[1] * face_vertices[1]
+                            + bary[2] * face_vertices[2];
+                        let e_mode_g = (port.modal_e_t)(p_g);
+                        let e_fem = e_fem_g[g];
+                        let dot_g = e_fem.x * Complex64::new(e_mode_g.x, 0.0)
+                            + e_fem.y * Complex64::new(e_mode_g.y, 0.0)
+                            + e_fem.z * Complex64::new(e_mode_g.z, 0.0);
+                        inner_product += Complex64::new(w_g, 0.0) * dot_g;
+                        mode_self_inner += w_g * e_mode_g.dot(&e_mode_g);
+                    }
+                } else {
+                    // v2 + CCCCCCCCC lumped-centroid path. Bit-for-bit
+                    // unchanged from the Phase 4.fem.eig.2 shipped
+                    // behaviour.
+                    let centroid = face.centroid(self.mesh);
+                    let e_mode = (port.modal_e_t)(centroid);
 
-                // FEM-solution tangential E at the face centroid.
-                let e_fem =
-                    self.e_t_at_face_centroid(face, e_interior, &system.interior_dof_of_edge);
+                    let e_fem =
+                        self.e_t_at_face_centroid(face, e_interior, &system.interior_dof_of_edge);
 
-                // E_FEM(centroid) · e_mode(centroid) — complex × real
-                // dot product (e_mode is a real 3-vector, e_fem is
-                // complex). The face-centroid quadrature weights each
-                // sample by the face area.
-                let face_dot = e_fem.x * Complex64::new(e_mode.x, 0.0)
-                    + e_fem.y * Complex64::new(e_mode.y, 0.0)
-                    + e_fem.z * Complex64::new(e_mode.z, 0.0);
-                inner_product += Complex64::new(face_area, 0.0) * face_dot;
-
-                // Modal self-inner-product via the SAME face-centroid
-                // quadrature. The continuum integral `∫_port |e_mode|² dS`
-                // depends on the caller's orthonormalisation choice; for
-                // the WR-90 TE_{10} profile carried by `fem-eig-003` this
-                // is exactly 1, but we read it back from the supplied
-                // [`PortDefinition`] rather than assuming a value, so any
-                // future un-normalised modal source still produces a
-                // physically-meaningful S_{11}.
-                mode_self_inner += face_area * e_mode.dot(&e_mode);
+                    let face_dot = e_fem.x * Complex64::new(e_mode.x, 0.0)
+                        + e_fem.y * Complex64::new(e_mode.y, 0.0)
+                        + e_fem.z * Complex64::new(e_mode.z, 0.0);
+                    inner_product += Complex64::new(face_area, 0.0) * face_dot;
+                    mode_self_inner += face_area * e_mode.dot(&e_mode);
+                }
             }
         }
 
@@ -1032,6 +1131,165 @@ impl<'m> OpenBoundarySolver<'m> {
             let sign = Complex64::new(si, 0.0);
             rhs[ii] += sign * rhs_block[i];
         }
+    }
+
+    /// Coupled-Whitney variant of [`Self::scatter_port_face`]
+    /// (Phase 4.fem.eig.3 F1+F2). Scatters the wave-port face block +
+    /// RHS computed via the exact Whitney-1 basis at three Gauss
+    /// points on the reference triangle. PEC-precedence and per-edge
+    /// orientation-sign handling are identical to v2.
+    fn scatter_port_face_gauss(
+        &self,
+        face: &ExteriorFace,
+        beta: f64,
+        e_t_gauss: [Vector3<f64>; 3],
+        interior_dof_of_edge: &[Option<usize>],
+        triplets: &mut Vec<Triplet<usize, usize, Complex64>>,
+        rhs: &mut [Complex64],
+    ) {
+        let face_vertices = face.world_vertices(self.mesh);
+        let beta_c = Complex64::new(beta, 0.0);
+
+        // Stiffness contribution via the exact-Whitney Gauss-pt block.
+        let block = assemble_port_face_block_gauss_pts(face_vertices, face.normal, beta_c, 1.0);
+        for i in 0..3 {
+            let gi = face.global_edges[i];
+            if self.pec_global_edges.contains(&gi) {
+                continue;
+            }
+            let Some(ii) = interior_dof_of_edge[gi] else {
+                continue;
+            };
+            let si = face.signs[i];
+            for j in 0..3 {
+                let gj = face.global_edges[j];
+                if self.pec_global_edges.contains(&gj) {
+                    continue;
+                }
+                let Some(jj) = interior_dof_of_edge[gj] else {
+                    continue;
+                };
+                let sj = face.signs[j];
+                let sign = Complex64::new(si * sj, 0.0);
+                triplets.push(Triplet::new(ii, jj, sign * block[(i, j)]));
+            }
+        }
+
+        // RHS contribution via the exact-Whitney Gauss-pt RHS helper.
+        let rhs_block =
+            assemble_port_face_rhs_gauss_pts(face_vertices, face.normal, beta_c, e_t_gauss);
+        for i in 0..3 {
+            let gi = face.global_edges[i];
+            if self.pec_global_edges.contains(&gi) {
+                continue;
+            }
+            let Some(ii) = interior_dof_of_edge[gi] else {
+                continue;
+            };
+            let si = face.signs[i];
+            let sign = Complex64::new(si, 0.0);
+            rhs[ii] += sign * rhs_block[i];
+        }
+    }
+
+    /// Reconstruct the tangential `E`-field at the three reference-
+    /// triangle Gauss points of a port face from the global interior-
+    /// DoF complex solution vector (Phase 4.fem.eig.3 F2 helper).
+    ///
+    /// For each Gauss point `ξ_g ∈ {(2/3, 1/6, 1/6), (1/6, 2/3, 1/6),
+    /// (1/6, 1/6, 2/3)}` the FEM-side tangential E-field is the sum
+    /// over the three face edges
+    ///
+    /// ```text
+    ///     E_FEM,t(ξ_g)  =  Σ_{i ∈ face_edges}  s_i · e_i · N_i(ξ_g),
+    /// ```
+    ///
+    /// where `s_i ∈ {-1, +1}` is the local-to-global orientation sign,
+    /// `e_i` is the interior-DoF amplitude (or `0` if edge `i` is
+    /// PEC-eliminated), and `N_i(ξ_g)` is the **exact** Whitney-1 edge
+    /// basis at the Gauss point, computed from the in-plane
+    /// barycentric gradients `∇λ_a, ∇λ_b, ∇λ_c` and the Whitney
+    /// identity `N_i = λ_a ∇λ_b − λ_b ∇λ_a`.
+    ///
+    /// Pairs with [`Self::scatter_port_face_gauss`] in the coupled-
+    /// Whitney path enabled by [`Self::with_coupled_whitney`]; the two
+    /// helpers share the same Gauss-point set, the same per-face
+    /// gradient construction, and the same Whitney-1 basis identity,
+    /// preserving the modal-RHS-then-projection round-trip
+    /// cancellation that Pozar §3.3 / Jin §10.5 derives at the
+    /// exact-basis level.
+    fn e_t_at_face_gauss_pts(
+        &self,
+        face: &ExteriorFace,
+        e_interior: &[Complex64],
+        interior_dof_of_edge: &[Option<usize>],
+    ) -> [nalgebra::Vector3<Complex64>; 3] {
+        let face_vertices = face.world_vertices(self.mesh);
+
+        // In-plane barycentric gradients ∇λ_a (same identity as the
+        // element-layer F1 helpers). For a triangle with vertices
+        // (v_0, v_1, v_2) in CCW order seen from +n̂:
+        //
+        //     ∇λ_a = (v_b − v_c) × n̂ / (2 A),
+        //
+        // with (a, b, c) cyclic.
+        let v0 = face_vertices[0];
+        let v1 = face_vertices[1];
+        let v2 = face_vertices[2];
+        let face_area = 0.5 * (v1 - v0).cross(&(v2 - v0)).norm();
+
+        let n_norm = face.normal.norm();
+        let n_hat = if n_norm > 0.0 {
+            face.normal / n_norm
+        } else {
+            face.normal
+        };
+
+        let inv_two_a = if face_area > 0.0 {
+            1.0 / (2.0 * face_area)
+        } else {
+            0.0
+        };
+        let grad = [
+            (v1 - v2).cross(&n_hat) * inv_two_a,
+            (v2 - v0).cross(&n_hat) * inv_two_a,
+            (v0 - v1).cross(&n_hat) * inv_two_a,
+        ];
+
+        // Per-edge weighted DoF amplitude s_i · e_i with PEC-eliminated
+        // edges contributing zero.
+        let mut edge_coeff = [Complex64::new(0.0, 0.0); 3];
+        for (i, slot) in edge_coeff.iter_mut().enumerate() {
+            let gi = face.global_edges[i];
+            if let Some(dof) = interior_dof_of_edge[gi] {
+                let coeff = e_interior[dof];
+                let sign = Complex64::new(face.signs[i], 0.0);
+                *slot = sign * coeff;
+            }
+        }
+
+        let mut out = [nalgebra::Vector3::<Complex64>::zeros(); 3];
+        for (g, bary) in TRI_GAUSS_3PT_BARY.iter().enumerate() {
+            // Exact Whitney-1 basis N_i(ξ_g) for i = 0, 1, 2 (edge i
+            // runs from a = i to b = (i + 1) mod 3).
+            let mut basis = [nalgebra::Vector3::<f64>::zeros(); 3];
+            for (i, basis_i) in basis.iter_mut().enumerate() {
+                let a = i;
+                let b = (i + 1) % 3;
+                *basis_i = bary[a] * grad[b] - bary[b] * grad[a];
+            }
+
+            let mut e_t = nalgebra::Vector3::<Complex64>::zeros();
+            for (i, basis_i) in basis.iter().enumerate() {
+                let c = edge_coeff[i];
+                e_t.x += c * Complex64::new(basis_i.x, 0.0);
+                e_t.y += c * Complex64::new(basis_i.y, 0.0);
+                e_t.z += c * Complex64::new(basis_i.z, 0.0);
+            }
+            out[g] = e_t;
+        }
+
+        out
     }
 }
 
