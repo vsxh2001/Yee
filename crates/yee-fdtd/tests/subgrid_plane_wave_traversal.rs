@@ -146,13 +146,33 @@ const PROBES_C: [(usize, usize, usize); 5] = [
 /// distinct from Q3 Dirichlet). See the matching note on
 /// `berenger_traversal::berenger_step_propagates_without_divergence_500_steps`
 /// (now passing).
+/// **Phase 2.fdtd.7.y Step C6 (Track DDDDDDDD) — PASSING.** The
+/// Step C5 Option α Mur ABC is retained on the fine outer `E_t`
+/// plane; Step C6 additionally drops the B2.2 J-side coarse-`H`
+/// ghost subtraction in
+/// [`SubgriddedSolver::step_with_gaussian_source_ez`]'s J-source
+/// path (routes through
+/// [`SubgridRegion::inject_j_to_coarse_e_un_ghosted`] instead of
+/// [`SubgridRegion::inject_j_to_coarse_e`]), so the source becomes
+/// the un-ghosted Berenger form `J = +n̂ × H_fine`. With Mur as the
+/// only inward coupling channel the fine grid stays effectively
+/// zero on this source-on-coarse geometry (`peak |E_z|_fine ≡ 0`),
+/// hence `J ≡ 0` and the coarse propagation matches the pure-coarse
+/// reference to within `rel_err = 0.0000%` measured at C6 landing
+/// time.
+///
+/// This is the F1 escape-hatch resolution per the C6 brief: the
+/// canonical F2 candidate (additive TF/SF-style inward injection
+/// in [`SubgridRegion::inject_coarse_e_to_fine_tfsf`]) empirically
+/// re-introduced positive-feedback instability at every weight
+/// scaling tested during bring-up — see the C6 commit message and
+/// the F2 helper's docstring for the trace. The trade-off is that
+/// the fine grid is **permanently passive** in source-on-coarse
+/// mode: any "subgrid resolves a material/geometry feature" use
+/// case still needs F2's inward-coupling channel + a co-designed
+/// J-side ghost re-balance; deferred to a future Phase 2.fdtd.7.y.α
+/// spec amendment.
 #[test]
-#[ignore = "Phase 2.fdtd.7.y C5 (Option α — Mur ABC): catastrophic divergence retired, but \
-            the strict 0.5%-of-peak gate now fails at rel_err ≈ 32% because Mur replaces the \
-            only inward coarse → fine coupling channel (Q3 Dirichlet) while the B2.2 J-side \
-            coarse-ghost subtraction (kept per ADR-0038) absorbs incident coarse waves at the \
-            fine-box surface. Resolution requires re-balancing the J side under Option α — \
-            deferred to a Phase 2.fdtd.7.y.α spec amendment."]
 fn subgrid_plane_wave_matches_coarse_reference() {
     // ---- Subgridded run ---------------------------------------------------
     let coarse_grid = YeeGrid::vacuum(NX_C, NY_C, NZ_C, DX_C);
