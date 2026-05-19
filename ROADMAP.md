@@ -83,6 +83,22 @@ Conventions used below:
 - Track MMMMMMMM yee-fdtd per-cell ε_r/μ_r + PEC mask infrastructure (merge `cb6f8ed`)
 - Track PPPPPPPP CPML reads per-cell ε_r/μ_r (lifts MMMMMMMM workaround; reflection floor 69.33 dB preserved; merge `c57592f`)
 - Track LLLLLLLL fdtd-007 Maloney-Smith driver+gates committed `#[ignore]`'d pending fdtd infra (3 blockers documented; merge `30b2d2c`)
+- Phase 4.fem.eig.1 corrections + production gate:
+  - Track QQQQQQQQ fem-eig-002 lossy SiO₂ cavity production gate PASSES (Re(f) 1.3e-3, Im(f) 2.96e-3; merge `60ed512`)
+  - Track TTTTTTTT D5 ε-double-divide fix (0.19% Re(f) Lorentz analytic-compare; merge `c1af4d9`)
+- Phase 4.fem.eig.2 open-boundary FEM design + E1-E6 walking skeleton:
+  - VVVVVVVV design spec + plan + ADR-0040 (Engquist-Majda ABC + wave-port modal RHS; merge `4063783`)
+  - WWWWWWWW E1 ABC face-block element helper (5 tests; merge `933f10f`)
+  - YYYYYYYY E2 wave-port face-block + modal RHS (6 tests; merge `15f78fb`)
+  - ZZZZZZZZ E3 OpenBoundarySolver + face-kind assembly (4 tests; merge `f1dda44`)
+  - AAAAAAAAA E4 sweep + S-parameter extraction (4 tests; merge `da13bb9`)
+  - BBBBBBBBB E5 fem-eig-003 production gate — smoke + bounded default CI; strict [-45,-35] dB gate `#[ignore]`'d (|S_11|=1.0 saturation pending modal-RHS scaling per CCCCCCCCC in flight) (merge `fb68c61`)
+  - DDDDDDDDD E6 yee.fem.solve_open_cavity Python binding (3 pytest; merge `53d649a`)
+- Phase 2.fdtd.7.z infra unblocks:
+  - MMMMMMMM yee-fdtd per-cell ε_r/μ_r + PEC mask (Fresnel 16.7% rel err; PEC transmission 0.0; merge `cb6f8ed`)
+  - PPPPPPPP CPML reads per-cell ε_r/μ_r (reflection floor 69.33 dB preserved; merge `c57592f`)
+  - UUUUUUUU fdtd-007 rewire smoke gate retires (uniform-fine path; physics gates remain ignored pending citation verification; merge `462c37d`)
+  - XXXXXXXX ADR-0041 fdtd-007 reference correction (Wu-King cylindrical-monopole mismatch documented; citation TBD; merge `3d0327b`)
 - mom-002 root-cause chain end-to-end (10 forensic tracks + 3 kernel fixes + 3 ADRs):
   - EEEEEE prefactor / JJJJJJ extent / PPPPPP GPOF / SSSSSS contour / TTTTTT residue sign / XXXXXX ψ_p / YYYYYY MPIE / CCCCCCC port-mesh / MMMMMMM ε_eff / NNNNNNN R1 retract / DDDDDDD DCIM-TM / TTTTTTT port spatial / QQQQQQQ β eigen (kernel exonerated at 1.83% from HJ)
   - ADR-0036 mom-002 validation reframe (sub-wavelength strip)
