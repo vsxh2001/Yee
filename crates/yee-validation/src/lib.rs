@@ -2861,7 +2861,9 @@ fn fem_eig_003_modal_e_t_te10(p: nalgebra::Vector3<f64>) -> nalgebra::Vector3<f6
 /// docstring. The driver itself always returns the full result struct;
 /// the disposition decision lives in the test layer.
 pub fn run_fem_eig_003_wr90_stub_abc() -> Result<FemEig003ValidationResult, yee_core::Error> {
-    use yee_fem::{FaceKind, MaterialDatabase, OpenBoundarySolver, PortDefinition, SParameters};
+    use yee_fem::{
+        AbcOrder, FaceKind, MaterialDatabase, OpenBoundarySolver, PortDefinition, SParameters,
+    };
     use yee_mesh::TetMesh3D;
 
     let t0 = Instant::now();
@@ -2938,7 +2940,21 @@ pub fn run_fem_eig_003_wr90_stub_abc() -> Result<FemEig003ValidationResult, yee_
         modal_e_t: Box::new(fem_eig_003_modal_e_t_te10),
     };
 
-    let solver = OpenBoundarySolver::new(&mesh, face_kinds, vec![port], MaterialDatabase::new())?;
+    // ---- 4b. Phase 4.fem.eig.3 F2 + F4 — enable the coupled exact-
+    // Whitney-1 modal RHS / projection (`with_coupled_whitney(true)`)
+    // and the 2nd-order Engquist–Majda ABC bilinear form
+    // (`with_abc_order(AbcOrder::Second)`). The F2 + F4 wiring retires
+    // the BBBBBBBBB walking-skeleton `|S_{11}| ≈ 1.0` saturation by
+    // (a) lifting the lumped `N_i(centroid) ≈ t_i / 3` edge-tangent
+    // proxy to the exact Whitney-1 identity evaluated at 3-point Gauss
+    // quadrature (spec §4.1) and (b) lowering the ABC reflection floor
+    // from `~ −40 dB` (1st-order Mur) to `~ −60 dB` at normal incidence
+    // (spec §4.2 / Engquist–Majda 1979 eq. 9). Both flags are *off* in
+    // the v2 default; the Phase 4.fem.eig.3 plan F6 step turns them on
+    // for the fem-eig-003 strict re-gate.
+    let solver = OpenBoundarySolver::new(&mesh, face_kinds, vec![port], MaterialDatabase::new())?
+        .with_coupled_whitney(true)
+        .with_abc_order(AbcOrder::Second);
 
     // ---- 5. Build the uniform-frequency sweep and execute the driven
     // solve. 50 points across [8.0, 12.0] GHz at 80 MHz spacing per
@@ -3060,6 +3076,562 @@ pub fn run_fem_eig_003_wr90_stub_abc() -> Result<FemEig003ValidationResult, yee_
         gate_b_passive_ok,
         gate_c_smoothness_ok,
         max_adjacent_db_jump,
+        status,
+        notes,
+        wall_time_seconds: elapsed,
+    })
+}
+
+// ---------------------------------------------------------------------
+// fem-eig-004: Phase 4.fem.eig.3 step F6 production validation gate —
+// WR-90 two-port thru-line at 10 GHz. Exercises the multi-port
+// `sweep_matrix` entry point introduced in F5, with F1+F2 coupled
+// exact-Whitney-1 modal RHS / projection enabled. No ABC faces (both
+// end faces are wave-ports), so `abc_order` defaults to
+// `AbcOrder::First` (unused).
+// ---------------------------------------------------------------------
+
+/// WR-90 broad-wall dimension (m) for the fem-eig-004 thru-line.
+pub const FEM_EIG_004_A_M: f64 = 0.02286;
+/// WR-90 narrow-wall dimension (m) for the fem-eig-004 thru-line.
+pub const FEM_EIG_004_B_M: f64 = 0.01016;
+/// Thru-line axial length (m) — agent brief geometry specifies 30 mm.
+/// Short enough to keep the assembly cost modest while resolving the
+/// 10 GHz wavelength comfortably (`λ_g ≈ 39 mm`).
+pub const FEM_EIG_004_D_M: f64 = 0.030;
+/// Mesh subdivisions along the broad-wall axis.
+pub const FEM_EIG_004_NX: usize = 12;
+/// Mesh subdivisions along the narrow-wall axis.
+pub const FEM_EIG_004_NY: usize = 6;
+/// Mesh subdivisions along the axial direction.
+pub const FEM_EIG_004_NZ: usize = 18;
+
+/// Public driver result for the `fem-eig-004` validation gate.
+///
+/// Carries the per-frequency `2 × 2` S-matrix from
+/// [`yee_fem::OpenBoundarySolver::sweep_matrix`] (linear complex
+/// entries), the per-gate booleans for the spec §8 fem-eig-004
+/// criteria, and the wall-time. Mirrors the
+/// [`FemEig003ValidationResult`] shape so the validation aggregator
+/// can fold the result without re-parsing the notes string.
+#[derive(Debug, Clone)]
+pub struct FemEig004ValidationResult {
+    /// Stable case identifier (`"fem-eig-004"`).
+    pub id: String,
+    /// Real-valued frequencies (Hz) at which the sweep was evaluated.
+    pub frequencies_hz: Vec<f64>,
+    /// Per-frequency `2 × 2` complex S-matrix (Sheen et al. 1990
+    /// column-extraction convention; `s[k][(q, p)] = S_{q,p}(f_k)`).
+    pub s: Vec<nalgebra::DMatrix<Complex64>>,
+    /// `|S_{21}(10 GHz)|` in dB (informational; gate A asserts this is
+    /// within `±0.1 dB` of 0 dB).
+    pub s21_db_at_10ghz: f64,
+    /// `|S_{11}(10 GHz)|` in dB (informational; gate B asserts this is
+    /// `< -20 dB`).
+    pub s11_db_at_10ghz: f64,
+    /// `|S_{12}(10 GHz) − S_{21}(10 GHz)|` magnitude (reciprocity
+    /// canary; gate C asserts `< 1e-3`).
+    pub reciprocity_residual_at_10ghz: f64,
+    /// Gate (A) — `|S_{21}(10 GHz)|` within `±0.1 dB` of 0 dB
+    /// (perfect transmission through a lossless thru-line).
+    pub gate_a_through_transmission_ok: bool,
+    /// Gate (B) — `|S_{11}(10 GHz)| < -20 dB` (low matched-port
+    /// reflection).
+    pub gate_b_matched_reflection_ok: bool,
+    /// Gate (C) — `|S_{12} − S_{21}| < 1e-3` at 10 GHz (reciprocity,
+    /// Pozar §4.3).
+    pub gate_c_reciprocity_ok: bool,
+    /// Overall pass/fail (Passed iff every hard gate (A) (B) (C) holds).
+    pub status: CaseStatus,
+    /// Diagnostic notes.
+    pub notes: String,
+    /// Wall time spent inside the driver (seconds).
+    pub wall_time_seconds: f64,
+}
+
+/// Compute the TE_{10} propagation constant on WR-90 for the
+/// fem-eig-004 thru-line.
+fn fem_eig_004_beta_te10(omega: f64) -> f64 {
+    let c0 = yee_core::units::C0;
+    let k0_sq = (omega / c0).powi(2);
+    let kc_sq = (std::f64::consts::PI / FEM_EIG_004_A_M).powi(2);
+    let arg = k0_sq - kc_sq;
+    if arg <= 0.0 { 0.0 } else { arg.sqrt() }
+}
+
+/// Orthonormalised TE_{10} tangential modal profile for the
+/// fem-eig-004 ports (both end faces carry the same WR-90 TE_{10}
+/// mode).
+fn fem_eig_004_modal_e_t_te10(p: nalgebra::Vector3<f64>) -> nalgebra::Vector3<f64> {
+    let norm = (2.0 / (FEM_EIG_004_A_M * FEM_EIG_004_B_M)).sqrt();
+    let amp = norm * (std::f64::consts::PI * p.x / FEM_EIG_004_A_M).sin();
+    nalgebra::Vector3::new(0.0, amp, 0.0)
+}
+
+/// `fem-eig-004`: WR-90 two-port thru-line at 10 GHz.
+///
+/// Constructs a lossless air-filled WR-90 section (`a × b × d =
+/// 22.86 × 10.16 × 30 mm`) meshed with `(12, 6, 18)` Kuhn 6-tet bricks
+/// (~7.8 k tets). Face `z = 0` is tagged `WavePort(0)`, face `z = d`
+/// is tagged `WavePort(1)`; the four longitudinal sidewalls are PEC.
+/// Both ports carry the TE_{10} modal profile
+/// `e_mode = ŷ · sqrt(2/(a·b)) · sin(π x/a)` and the analytic
+/// `β(ω) = sqrt((ω/c)² − (π/a)²)`.
+///
+/// The driver sweeps five points `{9.8, 9.9, 10.0, 10.1, 10.2} GHz`
+/// via [`yee_fem::OpenBoundarySolver::sweep_matrix`], then asserts
+/// three hard gates at the 10 GHz center frequency:
+///
+/// * **(A)** `|S_{21}(10 GHz)|` within `±0.1 dB` of 0 dB — perfect
+///   transmission through a lossless thru-line.
+/// * **(B)** `|S_{11}(10 GHz)| < -20 dB` — low matched-port
+///   reflection.
+/// * **(C)** `|S_{12} − S_{21}| < 1e-3` at 10 GHz — reciprocity
+///   invariant (Pozar §4.3).
+///
+/// The driver enables F1+F2 coupled exact-Whitney-1 modal RHS +
+/// projection (`with_coupled_whitney(true)`); the ABC order is
+/// irrelevant here because no faces are tagged `FaceKind::Abc`.
+///
+/// # Errors
+///
+/// Returns [`yee_core::Error::Invalid`] on mesh / face-kind shape
+/// mismatch and [`yee_core::Error::Numerical`] on sparse-LU failure.
+pub fn run_fem_eig_004_wr90_thruline() -> Result<FemEig004ValidationResult, yee_core::Error> {
+    use yee_fem::{FaceKind, MaterialDatabase, OpenBoundarySolver, PortDefinition};
+    use yee_mesh::TetMesh3D;
+
+    let t0 = Instant::now();
+
+    // ---- 1. Build the WR-90 thru-line mesh --------------------------
+    let mesh = TetMesh3D::cavity_uniform(
+        FEM_EIG_004_A_M,
+        FEM_EIG_004_B_M,
+        FEM_EIG_004_D_M,
+        FEM_EIG_004_NX,
+        FEM_EIG_004_NY,
+        FEM_EIG_004_NZ,
+    )
+    .map_err(|e| yee_core::Error::Invalid(format!("fem-eig-004 cavity_uniform: {e}")))?;
+
+    // ---- 2. Resolve exterior-face count via a placeholder solver. ---
+    let placeholder_kinds = {
+        let mut face_map: std::collections::HashMap<[usize; 3], usize> =
+            std::collections::HashMap::new();
+        const TET_FACES: [[usize; 3]; 4] = [[1, 2, 3], [0, 2, 3], [0, 1, 3], [0, 1, 2]];
+        for tet in &mesh.tetrahedra {
+            for &[a, b, c] in TET_FACES.iter() {
+                let mut key = [tet[a], tet[b], tet[c]];
+                key.sort_unstable();
+                *face_map.entry(key).or_insert(0) += 1;
+            }
+        }
+        let n_exterior = face_map.values().filter(|&&c| c == 1).count();
+        vec![FaceKind::Pec; n_exterior]
+    };
+    let placeholder = OpenBoundarySolver::new(
+        &mesh,
+        placeholder_kinds,
+        Vec::new(),
+        MaterialDatabase::new(),
+    )?;
+    let centroids = placeholder.exterior_face_centroids();
+
+    // ---- 3. Classify faces: z=0 → WavePort(0); z=d → WavePort(1);
+    // sidewalls → PEC.
+    let mut face_kinds: Vec<FaceKind> = Vec::with_capacity(centroids.len());
+    let tol = 1e-9;
+    for c in &centroids {
+        let kind = if c.z < tol {
+            FaceKind::WavePort(0)
+        } else if (c.z - FEM_EIG_004_D_M).abs() < tol {
+            FaceKind::WavePort(1)
+        } else {
+            FaceKind::Pec
+        };
+        face_kinds.push(kind);
+    }
+
+    // ---- 4. Two-port definitions — both ports carry the same WR-90
+    // TE_{10} modal profile (the two end faces are geometrically
+    // identical modulo translation).
+    let port_0 = PortDefinition {
+        beta_mode: Box::new(fem_eig_004_beta_te10),
+        modal_e_t: Box::new(fem_eig_004_modal_e_t_te10),
+    };
+    let port_1 = PortDefinition {
+        beta_mode: Box::new(fem_eig_004_beta_te10),
+        modal_e_t: Box::new(fem_eig_004_modal_e_t_te10),
+    };
+
+    let solver = OpenBoundarySolver::new(
+        &mesh,
+        face_kinds,
+        vec![port_0, port_1],
+        MaterialDatabase::new(),
+    )?
+    .with_coupled_whitney(true);
+
+    // ---- 5. Five-point sweep around 10 GHz --------------------------
+    let frequencies_hz: Vec<f64> = vec![9.8e9, 9.9e9, 10.0e9, 10.1e9, 10.2e9];
+    let omegas: Vec<f64> = frequencies_hz
+        .iter()
+        .map(|&f| 2.0 * std::f64::consts::PI * f)
+        .collect();
+
+    let sweep = solver.sweep_matrix(&omegas)?;
+
+    // ---- 6. Extract 10 GHz slice (index 2) and evaluate gates -------
+    let center_idx = 2;
+    let s_center = &sweep.s[center_idx];
+    let s11 = s_center[(0, 0)];
+    let s21 = s_center[(1, 0)];
+    let s12 = s_center[(0, 1)];
+
+    let s21_mag = s21.norm();
+    let s11_mag = s11.norm();
+    let s21_db = if s21_mag > 0.0 {
+        20.0 * s21_mag.log10()
+    } else {
+        f64::NEG_INFINITY
+    };
+    let s11_db = if s11_mag > 0.0 {
+        20.0 * s11_mag.log10()
+    } else {
+        f64::NEG_INFINITY
+    };
+    let reciprocity = (s12 - s21).norm();
+
+    // Gate (A) — |S_{21}| within ±0.1 dB of 0 dB (i.e. |S_{21}|
+    // between 10^(-0.005) ≈ 0.9886 and 10^(0.005) ≈ 1.0116).
+    let gate_a_through_transmission_ok = s21_db.is_finite() && s21_db.abs() <= 0.1;
+
+    // Gate (B) — |S_{11}| < -20 dB.
+    let gate_b_matched_reflection_ok = s11_db < -20.0;
+
+    // Gate (C) — reciprocity |S_{12} − S_{21}| < 1e-3.
+    let gate_c_reciprocity_ok = reciprocity < 1.0e-3;
+
+    let passed =
+        gate_a_through_transmission_ok && gate_b_matched_reflection_ok && gate_c_reciprocity_ok;
+    let status = if passed {
+        CaseStatus::Passed
+    } else {
+        CaseStatus::Failed
+    };
+
+    let elapsed = t0.elapsed().as_secs_f64();
+    let notes = format!(
+        "fem-eig-004 WR-90 thru-line ({nx}×{ny}×{nz} = {tets} tets); \
+         sweep f ∈ {{9.8, 9.9, 10.0, 10.1, 10.2}} GHz; \
+         at 10 GHz: |S_21| = {s21_lin:.6} ({s21db:.3} dB), \
+         |S_11| = {s11_lin:.6} ({s11db:.3} dB), \
+         |S_12 − S_21| = {recip:.3e}; \
+         gate(A)={a} (|S_21| dB ±0.1), \
+         gate(B)={b} (|S_11| < -20 dB), \
+         gate(C)={c} (reciprocity < 1e-3); \
+         wall = {wall:.2}s",
+        nx = FEM_EIG_004_NX,
+        ny = FEM_EIG_004_NY,
+        nz = FEM_EIG_004_NZ,
+        tets = mesh.tetrahedra.len(),
+        s21_lin = s21_mag,
+        s21db = s21_db,
+        s11_lin = s11_mag,
+        s11db = s11_db,
+        recip = reciprocity,
+        a = gate_a_through_transmission_ok,
+        b = gate_b_matched_reflection_ok,
+        c = gate_c_reciprocity_ok,
+        wall = elapsed,
+    );
+
+    Ok(FemEig004ValidationResult {
+        id: "fem-eig-004".to_string(),
+        frequencies_hz,
+        s: sweep.s,
+        s21_db_at_10ghz: s21_db,
+        s11_db_at_10ghz: s11_db,
+        reciprocity_residual_at_10ghz: reciprocity,
+        gate_a_through_transmission_ok,
+        gate_b_matched_reflection_ok,
+        gate_c_reciprocity_ok,
+        status,
+        notes,
+        wall_time_seconds: elapsed,
+    })
+}
+
+// ---------------------------------------------------------------------
+// fem-eig-005: Phase 4.fem.eig.3 step F6 production validation gate —
+// three-port T-junction at 5 GHz. Exercises `sweep_matrix` with
+// `n_ports = 3`, asserting only general invariants (passivity +
+// reciprocity); individual S-parameter magnitudes are not known
+// analytically for this geometry.
+// ---------------------------------------------------------------------
+
+/// Cubic box edge length (m) — agent brief specifies 30 mm cubic.
+pub const FEM_EIG_005_L_M: f64 = 0.030;
+/// Mesh subdivisions along each axis.
+pub const FEM_EIG_005_N: usize = 10;
+/// Test frequency (Hz) — agent brief specifies 5 GHz.
+pub const FEM_EIG_005_F_HZ: f64 = 5.0e9;
+
+/// Public driver result for the `fem-eig-005` validation gate.
+///
+/// Carries the single-frequency `3 × 3` S-matrix from
+/// [`yee_fem::OpenBoundarySolver::sweep_matrix`], the per-excited-port
+/// magnitude-conservation sums, the worst-case reciprocity residual,
+/// and the per-gate booleans for the spec §8 fem-eig-005 invariant
+/// criteria.
+#[derive(Debug, Clone)]
+pub struct FemEig005ValidationResult {
+    /// Stable case identifier (`"fem-eig-005"`).
+    pub id: String,
+    /// Test frequency (Hz).
+    pub frequency_hz: f64,
+    /// `3 × 3` complex S-matrix at `frequency_hz`.
+    pub s: nalgebra::DMatrix<Complex64>,
+    /// Per-excited-port magnitude-conservation sum
+    /// `Σ_q |S_{q, p}|²` for `p ∈ {0, 1, 2}`.
+    pub passivity_sums: [f64; 3],
+    /// Worst-case off-diagonal reciprocity residual
+    /// `max_{q < p} |S_{q, p} − S_{p, q}|`.
+    pub max_reciprocity_residual: f64,
+    /// Gate (A) — passivity: every `passivity_sums[p] ≤ 1 + ε_num`.
+    pub gate_a_passivity_ok: bool,
+    /// Gate (B) — reciprocity: `max_reciprocity_residual ≤ 1e-3`.
+    pub gate_b_reciprocity_ok: bool,
+    /// Overall pass/fail.
+    pub status: CaseStatus,
+    /// Diagnostic notes.
+    pub notes: String,
+    /// Wall time spent inside the driver (seconds).
+    pub wall_time_seconds: f64,
+}
+
+/// Numerical-discretisation margin on the passivity gate (A) of
+/// fem-eig-005. The continuum identity is
+/// `Σ_q |S_{q,p}|² = 1` exactly (lossless 3-port); the walking-
+/// skeleton coarse-mesh + modal-projection discretisation introduces a
+/// small over-shoot.
+pub const FEM_EIG_005_PASSIVITY_MARGIN: f64 = 0.05;
+
+/// 3-port T-junction modal-profile helper:
+/// β(ω) for a half-wavelength-fit TE-like mode with effective
+/// half-broad-wall `a_eff = 2 · L`, putting cutoff at
+/// `c / (4 · L) = 2.5 GHz` (well below the 5 GHz test point) so the
+/// propagation constant is comfortably positive.
+fn fem_eig_005_beta(omega: f64) -> f64 {
+    let c0 = yee_core::units::C0;
+    let k0_sq = (omega / c0).powi(2);
+    // a_eff = 2 · L → cutoff c/(4 L) = 2.5 GHz on a 30 mm box.
+    let a_eff = 2.0 * FEM_EIG_005_L_M;
+    let kc_sq = (std::f64::consts::PI / a_eff).powi(2);
+    let arg = k0_sq - kc_sq;
+    if arg <= 0.0 { 0.0 } else { arg.sqrt() }
+}
+
+/// Tangential profile on the `z = 0` and `z = L` port faces (normal
+/// along `±z`). The mode is `e_mode(x, y) = ŷ · sqrt(2/(L·L)) ·
+/// sin(π x / (2 L))` — a half-cosine over the broad wall, peaking at
+/// `x = L` (the far edge). The orthonormalisation factor uses the
+/// face area `L · L`.
+fn fem_eig_005_modal_e_t_z_face(p: nalgebra::Vector3<f64>) -> nalgebra::Vector3<f64> {
+    let l = FEM_EIG_005_L_M;
+    let norm = (2.0 / (l * l)).sqrt();
+    let amp = norm * (std::f64::consts::PI * p.x / (2.0 * l)).sin();
+    nalgebra::Vector3::new(0.0, amp, 0.0)
+}
+
+/// Tangential profile on the `x = 0` port face (normal along `-x`).
+/// The mode is `e_mode(y, z) = ŷ · sqrt(2/(L·L)) · sin(π z / (2 L))`
+/// — a half-cosine over the broad wall along `z`.
+fn fem_eig_005_modal_e_t_x_face(p: nalgebra::Vector3<f64>) -> nalgebra::Vector3<f64> {
+    let l = FEM_EIG_005_L_M;
+    let norm = (2.0 / (l * l)).sqrt();
+    let amp = norm * (std::f64::consts::PI * p.z / (2.0 * l)).sin();
+    nalgebra::Vector3::new(0.0, amp, 0.0)
+}
+
+/// `fem-eig-005`: 3-port T-junction at 5 GHz on a 30 mm cubic box.
+///
+/// Constructs an air-filled 30 × 30 × 30 mm cubic box meshed with
+/// `(10, 10, 10)` Kuhn 6-tet bricks (6 000 tets). Three faces are
+/// tagged `WavePort`: `z = 0` → port 0, `z = L` → port 1,
+/// `x = 0` → port 2. The remaining three faces (`y = 0`, `y = L`,
+/// `x = L`) are PEC. Each port carries a TE-like half-cosine modal
+/// profile (`e_t = ŷ · sin(π·u / (2 L))` with `u` the broad-wall
+/// coordinate), chosen so the cutoff `c / (4 L) = 2.5 GHz` is
+/// comfortably below the 5 GHz test point.
+///
+/// At 5 GHz the driver calls
+/// [`yee_fem::OpenBoundarySolver::sweep_matrix`] once and asserts
+/// **only** general scattering-matrix invariants:
+///
+/// * **(A)** Passivity: `Σ_q |S_{q,p}|² ≤ 1 + ε_num` for every
+///   excited port `p` (lossless 3-port; Pozar §4.3 continuum identity
+///   `Σ_q |S_{q,p}|² = 1`).
+/// * **(B)** Reciprocity: `max_{q,p} |S_{q,p} − S_{p,q}| ≤ 1e-3`
+///   (passive lossless structure; Pozar §4.3).
+///
+/// **No assertion is made on individual S-parameter magnitudes** —
+/// the T-junction has no closed-form analytic S-matrix at this
+/// geometry; the test exercises only the multi-port sweep
+/// infrastructure and the general scattering invariants. F1+F2
+/// coupled exact-Whitney-1 is enabled; ABC order is irrelevant (no
+/// `Abc` faces).
+///
+/// # Errors
+///
+/// Returns [`yee_core::Error::Invalid`] on mesh / face-kind shape
+/// mismatch and [`yee_core::Error::Numerical`] on sparse-LU failure.
+pub fn run_fem_eig_005_t_junction() -> Result<FemEig005ValidationResult, yee_core::Error> {
+    use yee_fem::{FaceKind, MaterialDatabase, OpenBoundarySolver, PortDefinition};
+    use yee_mesh::TetMesh3D;
+
+    let t0 = Instant::now();
+
+    let l = FEM_EIG_005_L_M;
+    let n = FEM_EIG_005_N;
+
+    // ---- 1. Build the cubic box mesh --------------------------------
+    let mesh = TetMesh3D::cavity_uniform(l, l, l, n, n, n)
+        .map_err(|e| yee_core::Error::Invalid(format!("fem-eig-005 cavity_uniform: {e}")))?;
+
+    // ---- 2. Resolve exterior-face count -----------------------------
+    let placeholder_kinds = {
+        let mut face_map: std::collections::HashMap<[usize; 3], usize> =
+            std::collections::HashMap::new();
+        const TET_FACES: [[usize; 3]; 4] = [[1, 2, 3], [0, 2, 3], [0, 1, 3], [0, 1, 2]];
+        for tet in &mesh.tetrahedra {
+            for &[a, b, c] in TET_FACES.iter() {
+                let mut key = [tet[a], tet[b], tet[c]];
+                key.sort_unstable();
+                *face_map.entry(key).or_insert(0) += 1;
+            }
+        }
+        let n_exterior = face_map.values().filter(|&&c| c == 1).count();
+        vec![FaceKind::Pec; n_exterior]
+    };
+    let placeholder = OpenBoundarySolver::new(
+        &mesh,
+        placeholder_kinds,
+        Vec::new(),
+        MaterialDatabase::new(),
+    )?;
+    let centroids = placeholder.exterior_face_centroids();
+
+    // ---- 3. Classify the six box faces: ----------------------------
+    //   z ≈ 0 → WavePort(0)        (port 0: "z-bottom")
+    //   z ≈ L → WavePort(1)        (port 1: "z-top")
+    //   x ≈ 0 → WavePort(2)        (port 2: "x-low")
+    //   x ≈ L, y ≈ 0, y ≈ L → PEC  (the remaining three faces)
+    let mut face_kinds: Vec<FaceKind> = Vec::with_capacity(centroids.len());
+    let tol = 1e-9;
+    for c in &centroids {
+        let kind = if c.z < tol {
+            FaceKind::WavePort(0)
+        } else if (c.z - l).abs() < tol {
+            FaceKind::WavePort(1)
+        } else if c.x < tol {
+            FaceKind::WavePort(2)
+        } else {
+            FaceKind::Pec
+        };
+        face_kinds.push(kind);
+    }
+
+    // ---- 4. Three-port modal definitions ----------------------------
+    let port_0 = PortDefinition {
+        beta_mode: Box::new(fem_eig_005_beta),
+        modal_e_t: Box::new(fem_eig_005_modal_e_t_z_face),
+    };
+    let port_1 = PortDefinition {
+        beta_mode: Box::new(fem_eig_005_beta),
+        modal_e_t: Box::new(fem_eig_005_modal_e_t_z_face),
+    };
+    let port_2 = PortDefinition {
+        beta_mode: Box::new(fem_eig_005_beta),
+        modal_e_t: Box::new(fem_eig_005_modal_e_t_x_face),
+    };
+
+    let solver = OpenBoundarySolver::new(
+        &mesh,
+        face_kinds,
+        vec![port_0, port_1, port_2],
+        MaterialDatabase::new(),
+    )?
+    .with_coupled_whitney(true);
+
+    // ---- 5. Single-frequency sweep at 5 GHz -------------------------
+    let omega = 2.0 * std::f64::consts::PI * FEM_EIG_005_F_HZ;
+    let sweep = solver.sweep_matrix(&[omega])?;
+    let s = sweep.s[0].clone();
+
+    // ---- 6. Evaluate invariants -------------------------------------
+    // (A) Passivity: Σ_q |S_{q,p}|² ≤ 1 + ε_num for every excited p.
+    let mut passivity_sums = [0.0f64; 3];
+    for p in 0..3 {
+        let mut sum = 0.0f64;
+        for q in 0..3 {
+            sum += s[(q, p)].norm_sqr();
+        }
+        passivity_sums[p] = sum;
+    }
+    let gate_a_passivity_ok = passivity_sums
+        .iter()
+        .all(|&sum| sum <= 1.0 + FEM_EIG_005_PASSIVITY_MARGIN);
+
+    // (B) Reciprocity: max_{q < p} |S_{q,p} − S_{p,q}| ≤ 1e-3.
+    let mut max_reciprocity_residual = 0.0f64;
+    for p in 0..3 {
+        for q in 0..p {
+            let diff = (s[(q, p)] - s[(p, q)]).norm();
+            if diff > max_reciprocity_residual {
+                max_reciprocity_residual = diff;
+            }
+        }
+    }
+    let gate_b_reciprocity_ok = max_reciprocity_residual <= 1.0e-3;
+
+    let passed = gate_a_passivity_ok && gate_b_reciprocity_ok;
+    let status = if passed {
+        CaseStatus::Passed
+    } else {
+        CaseStatus::Failed
+    };
+
+    let elapsed = t0.elapsed().as_secs_f64();
+    let notes = format!(
+        "fem-eig-005 3-port T-junction (cubic {l:.0}mm × ({n}, {n}, {n}) = {tets} tets); \
+         f = {f_ghz:.2} GHz; passivity sums Σ|S_{{q,p}}|² = [{p0:.4}, {p1:.4}, {p2:.4}]; \
+         max reciprocity residual = {recip:.3e}; \
+         gate(A)={a} (≤ 1 + {margin}), \
+         gate(B)={b} (≤ 1e-3); \
+         wall = {wall:.2}s",
+        l = l * 1e3,
+        n = n,
+        tets = mesh.tetrahedra.len(),
+        f_ghz = FEM_EIG_005_F_HZ * 1e-9,
+        p0 = passivity_sums[0],
+        p1 = passivity_sums[1],
+        p2 = passivity_sums[2],
+        recip = max_reciprocity_residual,
+        a = gate_a_passivity_ok,
+        margin = FEM_EIG_005_PASSIVITY_MARGIN,
+        b = gate_b_reciprocity_ok,
+        wall = elapsed,
+    );
+
+    Ok(FemEig005ValidationResult {
+        id: "fem-eig-005".to_string(),
+        frequency_hz: FEM_EIG_005_F_HZ,
+        s,
+        passivity_sums,
+        max_reciprocity_residual,
+        gate_a_passivity_ok,
+        gate_b_reciprocity_ok,
         status,
         notes,
         wall_time_seconds: elapsed,
