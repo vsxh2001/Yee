@@ -145,45 +145,42 @@ fn fem_eig_003_passive_structure_no_amplification() {
 /// **Continuum-limit gate (B) tripwire.** `|S_{11}(f)| < 1` strictly
 /// at every swept frequency — the Pozar §3.3 passive-structure
 /// identity in its un-relaxed form. `#[ignore]`'d under the same Phase
-/// 4.fem.eig.2 E5 escape hatch as the strict absorption-floor gate;
-/// the v0 walking-skeleton ABC face-block at `(16, 8, 24)` saturates
-/// `|S_{11}|` at exactly `1.0` (measured numerical band `[-1e-15,
-/// 0.0]` dB across the 8-12 GHz sweep), so the strict `< 1` continuum
-/// bound is not yet resolved.
+/// 4.fem.eig.2 E5 escape hatch as the strict absorption-floor gate.
 ///
-/// **CCCCCCCCC status (2026-05-19).** Track CCCCCCCCC applied a modal-
-/// amplitude normalisation fix to
-/// [`yee_fem::OpenBoundarySolver::extract_s11`] — dividing the inner
-/// product `⟨E_FEM, e_mode⟩_port` by the modal self-inner-product
-/// `M_pp` (Pozar §3.3 / Jin §10.7 standard form) so the spec §4.3
-/// formula `b = 2·⟨·,·⟩ − a_inc` (which silently assumed
-/// `M_pp = 1/2`) was replaced with `b = ⟨·,·⟩ / M_pp − a_inc`. The
-/// normalisation fix is load-bearing: without it, a synthetic
-/// matched-port `E_FEM = a_inc · e_mode` produced `|S_{11}| = 1`
-/// rather than the expected `0`. **However**, the underlying
-/// `|S_{11}| ≈ 1.0` saturation in the fem-eig-003 sweep is **not**
-/// retired by the normalisation alone: the FEM driven solve's
-/// reconstructed `E_FEM(centroid)` is still ≈ 0 on the port face,
-/// because both
-/// [`yee_fem::element::assemble_port_modal_rhs`] and the
-/// `e_t_at_face_centroid` helper use a **lumped edge-tangent
-/// approximation** `N_i(centroid) ≈ t_i / 3` instead of the exact
-/// Whitney-1 identity `N_i(centroid) = (∇λ_b − ∇λ_a) / 3`. Lifting
-/// both helpers to the exact identity is a coupled change queued for
-/// Phase 4.fem.eig.2.0.1 per ADR-0040 §C-3 (cubic / per-Gauss-point
-/// modal sampling).
+/// **JJJJJJJJJ status (2026-05-19, Phase 4.fem.eig.3 F6).** With the
+/// F2 coupled exact-Whitney-1 modal RHS + projection and the F4
+/// 2nd-order Engquist–Majda ABC both enabled on the spec-scale
+/// `(16, 8, 24)` mesh (18 432 tets), the driver now measures
+/// `|S_{11}(f)|` band `[0.9945, 0.99999]` (corresponding `s11_db` band
+/// `[-5.0e-2, -8.1e-5] dB`) across the 8-12 GHz sweep — every magnitude
+/// is **strictly less than 1.0**, so the strict passive bound is
+/// *numerically* satisfied at the un-rounded floating-point level. The
+/// `#[ignore]` is retained, however, because the F2 + F4 fix did not
+/// restore the absorption floor to the documented `~ -40 dB`
+/// Engquist–Majda window (see
+/// [`fem_eig_003_strict_absorption_floor_gate`]): the surface still
+/// reflects almost all incident power. Once the mesh is refined and
+/// the absorption floor lands in `[-45, -35] dB` (Phase
+/// 4.fem.eig.3.0.3 mesh-refinement track), this strict-passive gate
+/// will pass with comfortable margin and the `#[ignore]` lifts in
+/// the same PR.
 ///
-/// Lift the `#[ignore]` together with the absorption-floor gate once
-/// Phase 4.fem.eig.2.0.1 / 4.fem.eig.2.5 restores the floor to the
-/// documented `~ -40 dB` band — the strict passive bound and the
-/// absorption floor are coupled: both come from the same modal-source
-/// + face-block discretisation pipeline.
+/// **Historical context (CCCCCCCCC partial fix).** Track CCCCCCCCC
+/// applied the modal-amplitude `M_pp` normalisation fix to
+/// [`yee_fem::OpenBoundarySolver::extract_s11`]; that retired the
+/// **synthetic** matched-port identity but did not retire the
+/// empirical `|S_{11}| ≈ 1.0` saturation. F2 retires the saturation
+/// by lifting the lumped `N_i(centroid) ≈ t_i / 3` proxy to the exact
+/// Whitney-1 identity at 3-point Gauss quadrature — the FEM-projected
+/// `E_FEM` is now non-trivially non-zero on the port face — but the
+/// remaining `~ 0.005` reflection budget is still dominated by the
+/// coarse-mesh ABC numerical reflection rather than the continuum
+/// limit.
 #[test]
-#[ignore = "fem-eig-003 strict passive bound: deferred per Phase 4.fem.eig.2 E5 escape hatch \
-            (CCCCCCCCC M_pp normalisation in extract_s11 is in place, but the dual lumped \
-            Whitney-1 edge-tangent approximation in assemble_port_modal_rhs + \
-            e_t_at_face_centroid still drives <E_FEM, e_mode>≈0; coupled with the \
-            absorption-floor gate's deferral)"]
+#[ignore = "fem-eig-003 strict passive bound: F2 coupled Whitney + F4 2nd-order ABC enabled, \
+            measured |S_11| band [0.9945, 0.99999] strictly < 1 (gate would pass) but kept \
+            #[ignore]'d coupled with the still-failing absorption-floor gate per Phase \
+            4.fem.eig.3.0.3 mesh-refinement queue"]
 fn fem_eig_003_strict_passive_bound_continuum_limit() {
     let result = run_fem_eig_003_wr90_stub_abc().expect("fem-eig-003 driver");
     let strict_passive_ok = result.s11_magnitude.iter().all(|&m| m < 1.0);
@@ -212,42 +209,53 @@ fn fem_eig_003_sweep_smoothness_no_spurious_resonance() {
     );
 }
 
-/// Gate (A) — Engquist-Majda 1st-order absorption floor.
+/// Gate (A) — Engquist–Majda absorption floor.
 /// `20·log10(|S_{11}(f)|) ∈ [-45, -35] dB` at every swept frequency
-/// (spec §8 + ADR-0040).
+/// (spec §8 + ADR-0040 / ADR-0042).
 ///
-/// **`#[ignore]`'d per the Phase 4.fem.eig.2 plan E5 escape hatch.**
-/// The Phase 4.fem.eig.2 E4 sibling at
-/// `crates/yee-fem/tests/open_boundary_sweep.rs` documented that the
-/// upstream ABC face-block + modal-RHS pipeline measures `|S_{11}| ≈
-/// 1.0` (`-∞ dB` ⇒ outside the gate window) at coarse mesh
-/// resolution. The plan E5 escape hatch reads: "if walking-skeleton
-/// physics doesn't resolve `-40 dB` at 25 k tets, document and
-/// continue."
+/// **`#[ignore]`'d per the Phase 4.fem.eig.3 plan F6 escape hatch.**
 ///
-/// **CCCCCCCCC status (2026-05-19).** The modal-amplitude
-/// normalisation fix (M_pp division) shipped in
-/// [`yee_fem::OpenBoundarySolver::extract_s11`] retires the
-/// **synthetic** matched-port-match identity (`E_FEM = a_inc · e_mode`
-/// ⇒ `S_{11} = 0`), but does **not** retire the empirical
-/// `|S_{11}| ≈ 1.0` saturation on this fixture: the lumped Whitney-1
-/// edge-tangent approximation in `assemble_port_modal_rhs` +
-/// `e_t_at_face_centroid` drives the FEM-reconstructed `E_FEM` at
-/// port centroids toward zero. See the docstring on
-/// [`fem_eig_003_strict_passive_bound_continuum_limit`] above for the
-/// full disposition; both `#[ignore]`'s lift together with the
-/// Phase 4.fem.eig.2.0.1 coupled basis-reconstruction upgrade.
+/// **JJJJJJJJJ status (2026-05-19, F6).** With F1+F2 coupled exact-
+/// Whitney-1 modal RHS + projection and F3+F4 2nd-order Engquist–Majda
+/// ABC both enabled (`OpenBoundarySolver::with_coupled_whitney(true)
+/// .with_abc_order(AbcOrder::Second)`) the spec-scale
+/// `(16, 8, 24) = 18 432 tets` mesh measures `|S_{11}(f)|` band
+/// `[0.9945, 0.99999]` → `s11_db ∈ [-5.0e-2, -8.1e-5] dB` across the
+/// 8-12 GHz sweep. The 2nd-order ABC + coupled Whitney path lowered
+/// the `|S_{11}|` floor measurably from the BBBBBBBBB walking-skeleton
+/// saturation at `1.000_000_000` (numerical band `[-1e-15, 0.0] dB`)
+/// down to a non-trivial `~ -0.05 dB` band — i.e. **the absorber now
+/// dissipates some power**, but the spec §8 target `[-45, -35] dB`
+/// remains far below the measured floor.
 ///
-/// Lift the `#[ignore]` once Phase 4.fem.eig.2.0.1 (cubic / per-Gauss-
-/// point modal sampling, ADR-0040) or Phase 4.fem.eig.2.5 (2nd-order
-/// Engquist-Majda / CFS-PML) restores the floor to the documented
-/// `~-40 dB` band. The driver's `notes` string records the actual
-/// measured band so the gap is visible without re-running.
+/// **Failure-mode diagnosis.** The remaining gap is a mesh-refinement
+/// constraint, not a missing physics term: at `(16, 8, 24)` the
+/// in-plane port-face element pitch is `~ 1.43 mm × 1.27 mm`, which
+/// resolves the WR-90 TE_{10} mode tangential profile to only ~16
+/// linear samples across the broad wall. The Engquist–Majda 1979
+/// 2nd-order absorber needs ~30+ linear samples per cross-section
+/// wavelength to hit the `~ -60 dB` continuum floor (Jin §10.4 table
+/// 10.1); below that, modal-projection discretisation error
+/// dominates the absorber's intrinsic floor.
+///
+/// **Queued follow-up: Phase 4.fem.eig.3.0.3 mesh-refinement track.**
+/// Refine to `(24, 12, 36) = ~ 62 k tets` (~3.5× cost; estimated
+/// wall-time ~6 min `--release` per sweep call vs ~30 s at
+/// `(16, 8, 24)`) and re-measure. ADR-0042 §risks records this as the
+/// expected failure mode for the F6 strict gate. If the refined mesh
+/// lands in `[-45, -35] dB`, lift this `#[ignore]` in the
+/// Phase 4.fem.eig.3.0.3 PR alongside the
+/// [`fem_eig_003_strict_passive_bound_continuum_limit`] lift.
+///
+/// If the refined mesh **also** does not reach the window, then the
+/// binding constraint is the 2nd-order ABC ill-conditioning near the
+/// closed-stub TE_{10n} resonances (8 GHz n=1 / 12 GHz n=2) per spec
+/// §10 risk register — defer to Phase 4.fem.eig.3.5 (CFS-PML).
 #[test]
-#[ignore = "fem-eig-003 strict absorption floor: deferred per Phase 4.fem.eig.2 E5 escape hatch \
-            (CCCCCCCCC M_pp normalisation in place but lumped t_i/3 Whitney basis in \
-            assemble_port_modal_rhs + e_t_at_face_centroid still drives the floor toward 0 dB; \
-            queue Phase 4.fem.eig.2.0.1 follow-up for the coupled exact-Whitney basis fix)"]
+#[ignore = "fem-eig-003 strict absorption floor: F1-F4 enabled, measured |S_11| band \
+            [0.9945, 0.99999] (s11_db [-5.0e-2, -8.1e-5] dB) — better than the BBBBBBBBB \
+            walking-skeleton 1.000 floor but well outside the spec §8 [-45, -35] dB window; \
+            queue Phase 4.fem.eig.3.0.3 mesh-refinement track per ADR-0042"]
 fn fem_eig_003_strict_absorption_floor_gate() {
     let result = run_fem_eig_003_wr90_stub_abc().expect("fem-eig-003 driver");
     assert!(
