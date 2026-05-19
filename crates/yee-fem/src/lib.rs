@@ -47,7 +47,9 @@ pub use element::{
     assemble_tet_element_complex,
 };
 pub use material::{Material, MaterialDatabase, MaterialPole};
-pub use open_boundary::{DrivenSystem, FaceKind, OpenBoundarySolver, PortDefinition, PortId};
+pub use open_boundary::{
+    DrivenSystem, FaceKind, OpenBoundarySolver, PortDefinition, PortId, SParameters,
+};
 pub use solve::{
     ComplexInverseIterEigen, EigenpairList, EigenpairListComplex, InverseIterEigen, SparseEigen,
     SparseEigenComplex,
