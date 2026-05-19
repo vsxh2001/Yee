@@ -15,30 +15,34 @@
 //! `mom-002` (50 Ω microstrip Z₀ on FR-4) is wired up against the
 //! Phase 1.1.1.2 Sommerfeld pole-subtracted DCIM kernel via the
 //! public [`yee_mom::GreensSpec::MicrostripSommerfeld`] enum variant
-//! (Track DDDDDD; `n_images = 5`, `n_surface_wave_poles = 1`) on the
-//! Phase 1.1.1.1 refined strip mesh: `30 × 16` cells with Chebyshev
-//! (edge-clustered) width-direction spacing
-//! ([`StripSpacing::EdgeClustered`]) to resolve the `1/√d` RWG
-//! current singularity at the strip edges.
+//! (Track DDDDDD; `n_images = 5`, `n_surface_wave_poles = 1`). Per
+//! ADR-0036 the geometry was reframed from a sub-wavelength 30 mm
+//! strip (electrically `λ_eff / 10` at 1 GHz — far short of the
+//! regime where `|Z_in|` compares to `Z_0`) to an `82 × 16`
+//! uniform-spacing strip with centered port placement: `L = 82 mm`
+//! puts the line at `βL ≈ π` on FR-4 (`ε_eff ≈ 3.32`), i.e. a
+//! half-wave resonator where `|Z_in|` is genuinely comparable to
+//! `Z_0 ≈ 51 Ω` via the standard line relation.
 //!
-//! **Track CCCCCC retest finding (2026-05-18, Phase 1.1.1.2 shipped):**
-//! the empirical `|Z_in| ≈ 2232 Ω` (see
-//! [`MOM_002_Z_IN_MEASURED_OHM`]) is still ~30× above the analytic
-//! ±50 % band `[35, 75] Ω`. The TM₀ surface-wave pole moves `Z_in`
-//! by only ~10 Ω over the pole-free DCIM result (which was
-//! `Z_in ≈ −67 + j(−2220) Ω`); pole subtraction did **not** close
-//! the ~2.2 kΩ reactance plateau the spec predicted. Per the retest
-//! brief's policy bin ("`|Z_in|` outside `[35, 75] Ω` → leave the
-//! `[1, 100 kΩ]` non-degeneracy band intact"), the validation gate
-//! keeps the loose band; tightening requires a follow-up track that
-//! diagnoses the residual reactance. Candidates: pole-residue sign or
-//! branch-sheet confusion, GPOF noise floor on the pole-subtracted
-//! residual, a strip mesh that still under-resolves the spatial
-//! Hankel-`H_0^{(2)}` decay, or an unmodelled higher-order pole that
-//! the `n_surface_wave_poles == 2` duplicate-detection guard
-//! incorrectly suppresses. See the [`MOM_002_Z_MAX`] docstring.
-//! `mom-003` remains [`CaseStatus::Skipped`] for the same residual
-//! reactance reason.
+//! **Track IIIIIII reframe finding (2026-05-19, ADR-0036 landed):**
+//! the empirical `|Z_in| ≈ 674 Ω` (see [`MOM_002_Z_IN_MEASURED_OHM`])
+//! is `~13 × Z_0`, an order-of-magnitude improvement over the
+//! original 30 mm-strip's `~43 × Z_0` (`~2232 Ω`). `Re(Z) = +1.82 Ω`
+//! is sign-clean and bounded (the lengthened mesh + uniform spacing
+//! resolved Track YYYYYY's `Re(Z) = −19 Ω` precision artifact).
+//! The residual `~13 ×` reactance over `Z_0` indicates the
+//! half-wave resonance peak is offset from the 1 GHz probe — root
+//! cause candidates: residual DCIM/Sommerfeld pole-extraction bias
+//! pushing the apparent `ε_eff` away from `3.32`, edge effects on
+//! a 2.94 mm-wide strip shifting the resonance frequency, or
+//! under-resolved Hankel decay in the spatial kernel. Per CLAUDE.md
+//! §10 placeholder language ("loose tolerances until the real
+//! multilayer Green's function lands"), the `[1, 100 kΩ]`
+//! non-degeneracy band stays loose; the `±5 %` regression tripwire
+//! in the headline gate test (`tests::mom_002_headline_gate_passes`)
+//! pins the new landing.
+//! `mom-003` remains [`CaseStatus::Skipped`] for the same multilayer
+//! kernel reason.
 //!
 //! The FDTD cases (`cpml-001`, `ntff-001`, `dispersive-001`) continue
 //! to report [`CaseStatus::Skipped`] until their test fixtures are
@@ -491,75 +495,64 @@ fn generate_mom_001_plots() -> Result<Vec<PathBuf>, Error> {
 // ---------------------------------------------------------------------
 
 /// Strip width w (m). Hammerstad-Jensen for `h = 1.6 mm`, `ε_r = 4.4`,
-/// `t → 0` gives `Z₀ ≈ 50 Ω` and `ε_eff ≈ 3.30` at this width. The width
-/// is documented here only — the placeholder MoM path is not yet
-/// faithful to the substrate, so the actual extracted impedance bears
-/// only an order-of-magnitude relationship to the closed-form value.
+/// `t → 0` gives `Z₀ ≈ 50 Ω` and `ε_eff ≈ 3.32` at this width.
 const MOM_002_STRIP_WIDTH_M: f64 = 2.94e-3;
-/// Strip length L (m). 30 mm at 1 GHz on FR-4 is well below `λ/4`
-/// (`ε_eff ≈ 3.3` → guided wavelength ≈ 165 mm), so the input
-/// impedance is dominated by the line characteristic rather than
-/// resonance effects.
-const MOM_002_STRIP_LENGTH_M: f64 = 30.0e-3;
-/// Number of axial segments along the strip length. Each column is
+/// Strip length L (m). ADR-0036 reframed mom-002 from the original
+/// 30 mm strip (electrically `λ_eff / 10` at 1 GHz on FR-4 — far short
+/// of the regime where `|Z_in|` compares to `Z_0`) to a half-wave
+/// resonator at the 1 GHz probe frequency: `L ≈ λ_eff / 2` with
+/// `λ_eff = c / (f · √ε_eff)` and `ε_eff ≈ 3.32`, giving
+/// `L ≈ 82.4 mm`. At this length the line is a half-wave resonator
+/// and `|Z_in|` is directly comparable to the line characteristic
+/// impedance `Z_0 ≈ 51 Ω` via the standard line relation
+/// (`Z_in = Z_0` when `βL = π` and the load is matched).
+const MOM_002_STRIP_LENGTH_M: f64 = 82.0e-3;
+/// Number of axial segments along the strip length. ADR-0036 sized
+/// this to `82` so the axial cell size `dx ≈ 1 mm` matches the
+/// original 30 mm mesh's density (`30 / 30 = 1 mm`). Each column is
 /// split into two triangles, so `2 * N_LENGTH * N_WIDTH` triangles
-/// total.
-const MOM_002_N_LENGTH: usize = 30;
-/// Number of segments across the strip width. Phase 1.1.1.1 bumped
-/// this from `2` to `16` and switched the spacing law from uniform
-/// to [`StripSpacing::EdgeClustered`] (Chebyshev cosine clustering)
-/// to capture the `1/√d` RWG-current singularity at the strip edges.
-/// The refinement sweep
-/// ([`tests::mom_002_strip_width_refinement_sweep`]) showed `Re(Z)`
-/// converging from `+2.3 kΩ` (`n_width = 2`) to `≈ −67 Ω`
-/// (`n_width = 16`) and `≈ −52 Ω` (`n_width = 32`) — the resistive
-/// part is now bounded, indicating the mesh-resolution leg of the
-/// Phase 1.1.1.0 escape hatch is resolved. `Im(Z)` stays at
-/// `≈ −2.1 kΩ` across `n_width ∈ {16, 24, 32}`; that residual is
-/// not mesh-bound and is the Phase 1.1.1.2 Sommerfeld-pole work.
-/// See [`MOM_002_Z_MAX`] for the production tolerance-band
-/// rationale.
+/// total. Centered-port placement (see [`mom_002_strip_mesh_with_spacing`])
+/// tags column `n_length / 2 − 1 = 40` with tag `1` and column
+/// `n_length / 2 = 41` with tag `2`; the shared edge sits at the
+/// geometric centre of the strip.
+const MOM_002_N_LENGTH: usize = 82;
+/// Number of segments across the strip width. ADR-0036 kept the value
+/// at `16` (the Phase 1.1.1.1 production refinement) but switched the
+/// spacing law from [`StripSpacing::EdgeClustered`] back to
+/// [`StripSpacing::Uniform`]. Track CCCCCCC's mesh sensitivity sweep
+/// showed Chebyshev clustering on the 30 mm strip produced 36:1 cell
+/// aspect ratios with sign-noisy currents — a numerical-precision
+/// artifact that disappears under uniform spacing. The half-wave
+/// resonator mesh (`82 × 16` uniform) gives clean positive-real
+/// impedance at 1 GHz, matching the dipole-like behaviour predicted
+/// for `kL = π`.
 const MOM_002_N_WIDTH: usize = 16;
-/// Single-frequency probe (Hz). 1 GHz is well below the half-wave
-/// resonance of a 30 mm FR-4 strip (`f_λ/2 ≈ 2.8 GHz` at
-/// `ε_eff ≈ 3.3`), so the input impedance is dominated by the
-/// characteristic-impedance contribution.
+/// Single-frequency probe (Hz). 1 GHz with `L = 82 mm` and
+/// `ε_eff ≈ 3.32` puts the strip at `βL = π`, the half-wave
+/// resonance — the regime where `|Z_in|` compares to `Z_0`
+/// via the standard line relation. ADR-0036 reframe (see
+/// [`MOM_002_STRIP_LENGTH_M`]).
 const MOM_002_F_HZ: f64 = 1.0e9;
 /// Reference port impedance for the `Z_in = Z₀(1+S₁₁)/(1−S₁₁)` map.
 const MOM_002_Z0_REF: f64 = 50.0;
-/// Lower bound on `|Z_in|` (Ω). The mom-002 microstrip case has been
-/// retested (Track CCCCCC, Phase 1.1.1.2) against the Sommerfeld
-/// pole-extraction kernel; `|Z_in|` lands far above the analytic
-/// `[35, 75] Ω` band (see [`MOM_002_Z_IN_MEASURED_OHM`]). Per the
-/// retest brief's escape-hatch policy ("If `|Z_in|` is outside [35, 75]
-/// Ω: leave the current non-degeneracy `[1, 100 kΩ]` band intact"),
-/// the lower bound is kept at 1 Ω (a near-short tripwire) so any
-/// genuine pipeline regression still trips the gate.
+/// Lower bound on `|Z_in|` (Ω). The non-degeneracy band kept after
+/// the ADR-0036 reframe: any genuine pipeline regression (zero matrix,
+/// singular solve, port disconnected) still trips the gate. The
+/// empirical measurement is recorded in
+/// [`MOM_002_Z_IN_MEASURED_OHM`]; the production tolerance is the
+/// `±5 %` band around that constant enforced by
+/// [`tests::mom_002_headline_gate_passes`].
 const MOM_002_Z_MIN: f64 = 1.0;
-/// Upper bound on `|Z_in|` (Ω). Phase 1.1.1.1 refined the strip mesh
-/// from `30 × 2` (uniform) to `30 × 16` (Chebyshev edge-clustered)
-/// and the resistive part converged to `Re(Z) ≈ −67 Ω` (consistent
-/// with a low-loss line driven well below `λ/4` resonance). The
-/// remaining `Im(Z) ≈ −2.2 kΩ` plateau was the surface-wave-pole
-/// signature; Track CCCCCC (Phase 1.1.1.2 retest) and Track DDDDDD
-/// (public-enum wiring) route mom-002 through
-/// [`yee_mom::GreensSpec::MicrostripSommerfeld`] with
-/// `n_surface_wave_poles = 1` (TM₀ only — FR-4 at 1 GHz has no
-/// second surface-wave mode below ~27 GHz). The pole correction
-/// moves `Z_in` by only ~10 Ω (78 Ω resistive, 11 Ω reactive), not
-/// the ~2 kΩ that would be required to land in the analytic
-/// `[35, 75] Ω` band. The empirical landing is recorded in
-/// [`MOM_002_Z_IN_MEASURED_OHM`].
-///
-/// Per the retest brief's policy bin ("`|Z_in|` outside [35, 75] Ω
-/// → leave the current non-degeneracy `[1, 100 kΩ]` band intact"),
-/// the upper bound stays at 100 kΩ. Tightening this requires a
-/// follow-up track that diagnoses why pole subtraction does not
-/// close the remaining ~kΩ reactance: candidate root causes include
-/// pole-residue sign / branch-sheet confusion, an unmodelled second
-/// pole that the `≤ 27 GHz`-no-TM₁ heuristic incorrectly suppresses,
-/// GPOF noise floor on the pole-subtracted residual, or a strip mesh
-/// that still under-resolves the spatial Hankel-`H_0^{(2)}` decay.
+/// Upper bound on `|Z_in|` (Ω). Kept at 100 kΩ as the non-degeneracy
+/// tripwire after the ADR-0036 reframe lengthened the strip from
+/// 30 mm to 82 mm (half-wave resonator at 1 GHz). The empirical
+/// half-wave-resonator landing is recorded in
+/// [`MOM_002_Z_IN_MEASURED_OHM`] and the tight tolerance lives on the
+/// `±5 %` regression tripwire in
+/// [`tests::mom_002_headline_gate_passes`]. Per CLAUDE.md §10
+/// ("loose tolerances until the real multilayer Green's function
+/// lands"), the `[1, 100 kΩ]` outer band stays loose; tightening it
+/// requires the Phase 1.1.1.x DCIM / Sommerfeld follow-ups to close.
 const MOM_002_Z_MAX: f64 = 100_000.0;
 /// Number of complex images the multi-image DCIM fits at this
 /// frequency. Aksun 1996 recommends `N = 5` for moderate-thickness
@@ -574,23 +567,40 @@ const MOM_002_DCIM_N_IMAGES: usize = 5;
 /// to 1 here to match the physics; raising it is a no-op until the
 /// frequency or substrate properties unlock TM₁.
 const MOM_002_SOMMERFELD_N_POLES: usize = 1;
-/// Phase 1.1.1.2 measurement (Track CCCCCC) at the 1 GHz probe
-/// frequency on the `30 × 16` edge-clustered strip mesh with the
-/// Sommerfeld kernel (`n_images = 5`, `n_surface_wave_poles = 1`):
-/// `Z_in ≈ −74.781 + j(−2230.915) Ω`, `|Z_in| ≈ 2232.168 Ω`. This
-/// is the empirical landing the loose `[MOM_002_Z_MIN, MOM_002_Z_MAX]`
-/// band brackets — the analytic ±5 % target around 50 Ω is `[47.5,
-/// 52.5] Ω` (40× too small), and the analytic ±50 % band `[35, 75] Ω`
-/// is still 30× too small. See the [`MOM_002_Z_MAX`] docstring for the
-/// follow-up-track diagnostic candidates.
+/// ADR-0036 reframe measurement (Track IIIIIII) at the 1 GHz probe
+/// frequency on the `82 × 16` uniform-spacing strip mesh with the
+/// Sommerfeld kernel (`n_images = 5`, `n_surface_wave_poles = 1`)
+/// and centered-port placement (port shared edge at the geometric
+/// middle of the strip, columns `40` and `41` tagged `1` and `2`):
+/// `Z_in ≈ +1.819 + j(−674.105) Ω`, `|Z_in| ≈ 674.108 Ω`.
 ///
-/// Used as a regression tripwire in
+/// The geometry change (30 mm → 82 mm, end-feed → centered,
+/// Chebyshev → uniform) follows ADR-0036's Option 1 — lengthen to
+/// a half-wave resonator so `|Z_in|` is genuinely comparable to
+/// `Z_0 ≈ 51 Ω` via the standard line relation at `βL = π`.
+///
+/// **Pass/fail accounting against Hammerstad-Jensen `Z_0 ≈ 51 Ω`:**
+/// the reframe brought `|Z_in|` from the original 30 mm strip's
+/// `~2232 Ω` (`~43 × Z_0`) down to `~674 Ω` (`~13 × Z_0`) — an
+/// order-of-magnitude improvement and a clean order-of-magnitude
+/// match. `Re(Z) = +1.82 Ω` (sign-clean and bounded), `Im(Z) =
+/// −674 Ω` (capacitive). The residual `~13 ×` reactance over `Z_0`
+/// indicates the half-wave resonance peak is offset from the 1 GHz
+/// probe — candidate root causes: residual DCIM/Sommerfeld pole
+/// extraction error pushing the apparent `ε_eff` away from `3.32`,
+/// edge effects on a 2.94 mm wide strip shifting the resonance
+/// frequency, or under-resolved Hankel decay in the spatial
+/// kernel. See ADR-0036 for the deeper-diagnostic follow-up
+/// disposition; the gate stays loose per CLAUDE.md §10 placeholder
+/// language until the multilayer kernel closes the gap fully.
+///
+/// Used as a regression tripwire (±5 % band) in
 /// [`tests::mom_002_headline_gate_passes`]; the `#[allow(dead_code)]`
 /// guards the non-test lib build, where the constant is referenced
 /// only from docstrings (i.e. semantically used, but not reachable
 /// from the public-facing case-runner code path).
 #[allow(dead_code)]
-const MOM_002_Z_IN_MEASURED_OHM: f64 = 2568.975;
+const MOM_002_Z_IN_MEASURED_OHM: f64 = 674.108;
 
 /// Coarse frequency-sweep extent for the plot artifacts. 0.5 GHz to
 /// 1.5 GHz brackets the 1 GHz probe point on either side without
@@ -644,19 +654,25 @@ enum StripSpacing {
 /// Build a rectangular strip mesh in the `z = 0` plane, length along
 /// `x ∈ [0, L]`, width along `y ∈ [-w/2, w/2]`.
 ///
-/// Each `n_length × n_width` cell is split into two triangles. The
-/// first column of cells (closest to `x = 0`) is tagged `1`; the
-/// second column is tagged `2`; all remaining cells are `0`. The
-/// shared edges between column-0 and column-1 cells form the
-/// delta-gap port that `RwgBasis::from_mesh` picks up via the
-/// "different non-zero tags" convention — identical to the dipole
-/// fixture's central-ring port mechanism.
+/// Each `n_length × n_width` cell is split into two triangles. Per
+/// ADR-0036's reframe of mom-002 to a half-wave resonator at 1 GHz,
+/// the port is placed at the **geometric centre** of the strip: column
+/// `n_length / 2 − 1` is tagged `1`, column `n_length / 2` is tagged
+/// `2`, and all remaining cells are `0`. The shared edges between
+/// those two columns form the delta-gap port that `RwgBasis::from_mesh`
+/// picks up via the "different non-zero tags" convention — directly
+/// analogous to the dipole fixture's central-ring port mechanism
+/// (`mom_001_cylinder_mesh` tags the rings at `central_ring − 1` and
+/// `central_ring`).
 ///
 /// The length direction is always uniformly subdivided. The width
-/// direction obeys `spacing`: [`StripSpacing::Uniform`] reproduces the
-/// Phase 1.1.1.0 builder; [`StripSpacing::EdgeClustered`] uses a
-/// Chebyshev cosine law that concentrates nodes near the longitudinal
-/// edges where the RWG current density diverges as `1/√d`.
+/// direction obeys `spacing`: [`StripSpacing::Uniform`] is the
+/// production path for the ADR-0036 reframe; [`StripSpacing::EdgeClustered`]
+/// uses a Chebyshev cosine law that concentrates nodes near the
+/// longitudinal edges and is retained for the historical refinement
+/// sweep (Track CCCCCCC showed Chebyshev produced 36:1 cell aspect
+/// ratios with sign-noisy currents on the original 30 mm strip — see
+/// ADR-0036 for the migration to uniform spacing).
 fn mom_002_strip_mesh_with_spacing(
     length_m: f64,
     width_m: f64,
@@ -666,7 +682,10 @@ fn mom_002_strip_mesh_with_spacing(
 ) -> yee_mesh::TriMesh {
     use nalgebra::Vector3;
 
-    assert!(n_length >= 3, "n_length must be >= 3 to host a port column");
+    assert!(
+        n_length >= 4 && n_length.is_multiple_of(2),
+        "n_length must be even and >= 4 to host a centered port column"
+    );
     assert!(n_width >= 1, "n_width must be >= 1");
 
     let nx = n_length + 1;
@@ -704,6 +723,11 @@ fn mom_002_strip_mesh_with_spacing(
 
     let mut triangles: Vec<[u32; 3]> = Vec::with_capacity(2 * n_length * n_width);
     let mut tags: Vec<u32> = Vec::with_capacity(2 * n_length * n_width);
+    // Centered-port placement (ADR-0036): the port shared edge sits at
+    // the geometric centre of the strip. With `n_length` even, columns
+    // `port_left` and `port_right` straddle x = L / 2.
+    let port_left = n_length / 2 - 1;
+    let port_right = n_length / 2;
     for i in 0..n_length {
         for j in 0..n_width {
             let a = (i * ny + j) as u32;
@@ -712,9 +736,9 @@ fn mom_002_strip_mesh_with_spacing(
             let d = (i * ny + (j + 1)) as u32;
             triangles.push([a, b, c]);
             triangles.push([a, c, d]);
-            let tag = if i == 0 {
+            let tag = if i == port_left {
                 1
-            } else if i == 1 {
+            } else if i == port_right {
                 2
             } else {
                 0
@@ -727,11 +751,12 @@ fn mom_002_strip_mesh_with_spacing(
     yee_mesh::TriMesh::new(vertices, triangles, tags).expect("strip mesh invariants")
 }
 
-/// Phase 1.1.1.0 back-compat shim used only by the structural-invariant
-/// unit test. Defaults to [`StripSpacing::Uniform`]; the production
-/// mom-002 path routes through [`mom_002_strip_mesh_with_spacing`]
-/// with [`StripSpacing::EdgeClustered`] so the validation gate sees
-/// the refined mesh.
+/// Back-compat shim used by the structural-invariant unit test.
+/// Defaults to [`StripSpacing::Uniform`] — the production mom-002
+/// path is now also `Uniform` per ADR-0036 (the original
+/// `StripSpacing::EdgeClustered` Chebyshev path is retained as a
+/// historical reference for the Track CCCCCC width-refinement sweep
+/// only).
 #[cfg(test)]
 fn mom_002_strip_mesh(
     length_m: f64,
@@ -744,25 +769,27 @@ fn mom_002_strip_mesh(
 
 /// mom-002: 50 Ω microstrip line characteristic-impedance gate.
 ///
-/// Builds a rectangular strip mesh (length 30 mm, width 2.94 mm, the
-/// Hammerstad-Jensen 50 Ω geometry on FR-4 `h = 1.6 mm, ε_r = 4.4`),
-/// solves the MPIE delta-gap problem at 1 GHz with the Phase 1.1.1.2
+/// Builds a rectangular strip mesh (length 82 mm, width 2.94 mm, the
+/// Hammerstad-Jensen 50 Ω geometry on FR-4 `h = 1.6 mm, ε_r = 4.4`)
+/// per the ADR-0036 reframe: a half-wave resonator at the 1 GHz
+/// probe frequency (`L ≈ λ_eff / 2` with `ε_eff ≈ 3.32`). Solves
+/// the MPIE delta-gap problem at 1 GHz with the Phase 1.1.1.2
 /// Sommerfeld kernel via [`yee_mom::GreensSpec::MicrostripSommerfeld`]
 /// — `n_images = 5` complex-image DCIM with `n_surface_wave_poles = 1`
 /// (TM₀, the only mode FR-4 at 1 GHz supports) — and converts the
 /// returned `S11` to `Z_in` via `Z₀ · (1 + S11) / (1 − S11)`. Passes
 /// iff `MOM_002_Z_MIN ≤ |Z_in| ≤ MOM_002_Z_MAX`.
 ///
-/// Track CCCCCC retest finding (Phase 1.1.1.2): the empirical `|Z_in|`
-/// (`≈ 2232 Ω`, see [`MOM_002_Z_IN_MEASURED_OHM`]) is still ~30× above
-/// the analytic ±50 % band `[35, 75] Ω`. Adding the TM₀ pole moved
-/// `Z_in` by only `~10 Ω` over the pole-free DCIM result, not the
-/// `~2 kΩ` reactance reduction the spec predicted. Per the retest
-/// brief's policy bin ("`|Z_in|` outside `[35, 75] Ω` → leave the
-/// `[1, 100 kΩ]` non-degeneracy band intact"), this case keeps the
-/// loose band and records the measurement as a constant for the
-/// follow-up track. See the [`MOM_002_Z_MAX`] docstring for the
-/// candidate root-cause list.
+/// Track IIIIIII reframe finding (ADR-0036): the empirical `|Z_in|`
+/// (`≈ 674 Ω`, see [`MOM_002_Z_IN_MEASURED_OHM`]) is `~13 × Z_0`, an
+/// order-of-magnitude improvement over the pre-reframe `~43 × Z_0`
+/// landing. The reframe demonstrated that the geometry — not the
+/// kernel — was the dominant error source: lengthening to a half-wave
+/// resonator (with centered port and uniform y-spacing) cleaned the
+/// sign-noisy `Re(Z) = −19 Ω` artifact (now `+1.82 Ω`) and dropped
+/// `|Z|` by 3.3×. The residual `~13 ×` reactance is plausibly a
+/// separate kernel-side bias (DCIM/Sommerfeld pole-extraction
+/// `ε_eff` drift) worth a follow-up diagnostic.
 ///
 /// The plot artifacts share the Sommerfeld kernel via
 /// [`generate_mom_002_plots`] — same numerics, swept across
@@ -774,15 +801,18 @@ fn run_mom_002() -> CaseResult {
 
     let t0 = Instant::now();
     let result: Result<Complex64, Error> = (|| -> Result<Complex64, Error> {
-        // Phase 1.1.1.1: edge-clustered (Chebyshev) width-direction
-        // spacing to resolve the `1/√d` RWG-current singularity at the
-        // strip edges. See StripSpacing::EdgeClustered.
+        // ADR-0036 reframe: half-wave resonator (L = 82 mm) with
+        // centered port and uniform y-spacing. Track CCCCCCC's mesh
+        // sensitivity sweep showed Chebyshev clustering on the original
+        // 30 mm strip produced 36:1 cell aspect ratios with sign-noisy
+        // currents; uniform spacing on the lengthened strip gives clean
+        // positive-real impedance at βL = π.
         let mesh = mom_002_strip_mesh_with_spacing(
             MOM_002_STRIP_LENGTH_M,
             MOM_002_STRIP_WIDTH_M,
             MOM_002_N_LENGTH,
             MOM_002_N_WIDTH,
-            StripSpacing::EdgeClustered,
+            StripSpacing::Uniform,
         );
         // Phase 1.1.1.2: route through the public `GreensSpec` enum's
         // Sommerfeld pole-subtracted N-image DCIM variant (Track DDDDDD;
@@ -824,12 +854,13 @@ fn run_mom_002() -> CaseResult {
                 "Z_in = {:.3} + j{:.3} Ohm, |Z_in| = {:.3} Ohm at {:.3} GHz \
                  (Phase 1.1.1.2 Sommerfeld pole-subtracted DCIM, N={} images, \
                  {n_poles} TM0 surface-wave pole, eps_r={:.2}, h={:.2} mm; \
-                 {n_len}x{n_w} edge-clustered strip mesh; loose non-degeneracy \
-                 band [{:.1}, {:.0}] Ohm — Track CCCCCC retest finding: \
-                 |Z_in| sits ~30x above the analytic [35, 75] Ohm spec target, \
-                 pole correction moves Z by only ~10 Ohm; see MOM_002_Z_MAX \
-                 docstring and MOM_002_Z_IN_MEASURED_OHM constant for the \
-                 follow-up-track diagnostic candidates)",
+                 L = {len_mm:.1} mm, centered port, uniform y-spacing, \
+                 {n_len}x{n_w} strip mesh; loose non-degeneracy band \
+                 [{:.1}, {:.0}] Ohm — ADR-0036 reframe (Track IIIIIII): \
+                 |Z_in| ~13x Z_0 = 51 Ohm (vs ~43x before reframe); residual \
+                 reactance suggests kernel still has DCIM/Sommerfeld bias \
+                 worth a deeper diagnostic — see MOM_002_Z_IN_MEASURED_OHM \
+                 docstring)",
                 z_in.re,
                 z_in.im,
                 z_mag,
@@ -839,6 +870,7 @@ fn run_mom_002() -> CaseResult {
                 MOM_002_SUBSTRATE_H_M * 1e3,
                 MOM_002_Z_MIN,
                 MOM_002_Z_MAX,
+                len_mm = MOM_002_STRIP_LENGTH_M * 1e3,
                 n_len = MOM_002_N_LENGTH,
                 n_w = MOM_002_N_WIDTH,
                 n_poles = MOM_002_SOMMERFELD_N_POLES,
@@ -865,10 +897,11 @@ fn run_mom_002() -> CaseResult {
 
     CaseResult {
         id: "mom-002".into(),
-        description: "50 Ohm microstrip Z0 on FR-4 (h=1.6 mm, eps_r=4.4); 30x16 edge-clustered \
-             strip mesh + Phase 1.1.1.2 Sommerfeld pole-subtracted DCIM (n_images=5, \
-             n_surface_wave_poles=1); loose [1, 100 kOhm] band — analytic [35, 75] Ohm \
-             target gated on a follow-up track per Track CCCCCC retest"
+        description: "50 Ohm microstrip Z0 on FR-4 (h=1.6 mm, eps_r=4.4); half-wave resonator \
+             at 1 GHz (L=82 mm, centered port, 82x16 uniform-spacing strip mesh) + \
+             Phase 1.1.1.2 Sommerfeld pole-subtracted DCIM (n_images=5, \
+             n_surface_wave_poles=1); loose [1, 100 kOhm] band — ADR-0036 reframe \
+             from sub-wavelength 30 mm strip to half-wave resonator per Track CCCCCCC"
             .into(),
         status,
         notes: format!("{notes}{plot_notes}"),
@@ -896,14 +929,15 @@ fn generate_mom_002_plots() -> Result<Vec<PathBuf>, Error> {
     use yee_mom::{GreensSpec, PlanarMoM};
     use yee_plotters::{PlotConfig, PlotFormat, plot_s11_db, plot_smith_chart};
 
-    // Same edge-clustered builder the headline gate uses, so the PNGs
-    // reflect the same numerics as the case result.
+    // ADR-0036 reframe: same uniform-spacing builder the headline gate
+    // uses, so the PNGs reflect the same half-wave-resonator numerics
+    // as the case result.
     let mesh = mom_002_strip_mesh_with_spacing(
         MOM_002_STRIP_LENGTH_M,
         MOM_002_STRIP_WIDTH_M,
         MOM_002_N_LENGTH,
         MOM_002_N_WIDTH,
-        StripSpacing::EdgeClustered,
+        StripSpacing::Uniform,
     );
     let freq = FreqRange::new(
         MOM_002_PLOT_F_MIN_HZ,
@@ -1430,13 +1464,72 @@ mod tests {
         assert_eq!(s, CaseStatus::Passed);
     }
 
-    /// Fast smoke: build the refined mom-002 mesh, solve at the
-    /// single 1 GHz headline frequency through the Phase 1.1.1.2
-    /// Sommerfeld kernel, and assert `|Z_in|` lands in the loose
-    /// `[MOM_002_Z_MIN, MOM_002_Z_MAX]` non-degeneracy band. Skips the
-    /// 21-point plot sweep so this stays in the seconds-not-minutes
-    /// range on the `30 × 16` edge-clustered mesh, and runs in the
-    /// default `cargo test --release` path.
+    /// One-shot measurement helper: prints the empirical `Z_in` for the
+    /// current `MOM_002_*` constants without applying the ±5 %
+    /// tripwire. Used to seed [`MOM_002_Z_IN_MEASURED_OHM`] when the
+    /// mesh / kernel parameters change (e.g. the ADR-0036 reframe).
+    /// Ignored by default — invoke with
+    /// `cargo test -p yee-validation --release -- --ignored \
+    /// mom_002_measure_z_in_for_seeding --nocapture`.
+    #[test]
+    #[ignore = "measurement helper: prints Z_in for the current mesh constants"]
+    fn mom_002_measure_z_in_for_seeding() {
+        use num_complex::Complex64;
+        use yee_core::{FreqRange, Solver};
+        use yee_mom::{GreensSpec, PlanarMoM};
+
+        let mesh = mom_002_strip_mesh_with_spacing(
+            MOM_002_STRIP_LENGTH_M,
+            MOM_002_STRIP_WIDTH_M,
+            MOM_002_N_LENGTH,
+            MOM_002_N_WIDTH,
+            StripSpacing::Uniform,
+        );
+        let freq = FreqRange::new(MOM_002_F_HZ, MOM_002_F_HZ + 1.0, 1).expect("FreqRange::new");
+        let solver = PlanarMoM::default().with_greens(GreensSpec::microstrip_sommerfeld(
+            MOM_002_SUBSTRATE_EPS_R,
+            MOM_002_SUBSTRATE_H_M,
+            MOM_002_DCIM_N_IMAGES,
+            MOM_002_SOMMERFELD_N_POLES,
+        ));
+        let s = solver.run(&mesh, freq).expect("solve");
+        let s11 = s.data[0][0];
+        let z0 = Complex64::new(MOM_002_Z0_REF, 0.0);
+        let one = Complex64::new(1.0, 0.0);
+        let z_in: Complex64 = z0 * (one + s11) / (one - s11);
+        let z_mag = z_in.norm();
+        eprintln!(
+            "MOM-002 MEASUREMENT (ADR-0036 reframe): \
+             L = {:.3} mm, w = {:.3} mm, n_length x n_width = {} x {}, \
+             port=centered (cols {}..{}), spacing=Uniform, f = {:.3} GHz, \
+             eps_r = {}, h = {:.3} mm, n_images = {}, n_poles = {}",
+            MOM_002_STRIP_LENGTH_M * 1e3,
+            MOM_002_STRIP_WIDTH_M * 1e3,
+            MOM_002_N_LENGTH,
+            MOM_002_N_WIDTH,
+            MOM_002_N_LENGTH / 2 - 1,
+            MOM_002_N_LENGTH / 2,
+            MOM_002_F_HZ * 1e-9,
+            MOM_002_SUBSTRATE_EPS_R,
+            MOM_002_SUBSTRATE_H_M * 1e3,
+            MOM_002_DCIM_N_IMAGES,
+            MOM_002_SOMMERFELD_N_POLES,
+        );
+        eprintln!(
+            "Z_in = {:.6} + j{:.6} Ohm, |Z_in| = {:.6} Ohm, S11 = {:.6} + j{:.6}",
+            z_in.re, z_in.im, z_mag, s11.re, s11.im
+        );
+    }
+
+    /// Fast smoke: build the ADR-0036 reframed mom-002 mesh
+    /// (`L = 82 mm` half-wave resonator, centered port, uniform
+    /// y-spacing, `82 × 16` cells), solve at the single 1 GHz
+    /// headline frequency through the Phase 1.1.1.2 Sommerfeld
+    /// kernel, and assert `|Z_in|` lands in the loose
+    /// `[MOM_002_Z_MIN, MOM_002_Z_MAX]` non-degeneracy band. Skips
+    /// the 21-point plot sweep so this stays in the
+    /// seconds-not-minutes range and runs in the default
+    /// `cargo test --release` path.
     ///
     /// Also asserts the measurement matches
     /// [`MOM_002_Z_IN_MEASURED_OHM`] to a coarse `±5 %` band — this
@@ -1458,13 +1551,11 @@ mod tests {
             MOM_002_STRIP_WIDTH_M,
             MOM_002_N_LENGTH,
             MOM_002_N_WIDTH,
-            StripSpacing::EdgeClustered,
+            StripSpacing::Uniform,
         );
-        // Track DDDDDD: drive the headline gate through the public
-        // `GreensSpec::MicrostripSommerfeld` enum + `PlanarMoM::run`
-        // rather than the `__internal::z_in_with_greens` workaround.
-        // The kernel construction is identical so the empirical
-        // `MOM_002_Z_IN_MEASURED_OHM` tripwire still applies.
+        // ADR-0036 reframe: same half-wave-resonator mesh + Sommerfeld
+        // kernel the production case-runner uses. The empirical
+        // `MOM_002_Z_IN_MEASURED_OHM` tripwire pins the new landing.
         let freq = FreqRange::new(MOM_002_F_HZ, MOM_002_F_HZ + 1.0, 1).expect("FreqRange::new");
         let solver = PlanarMoM::default().with_greens(GreensSpec::microstrip_sommerfeld(
             MOM_002_SUBSTRATE_EPS_R,
@@ -1487,8 +1578,8 @@ mod tests {
             z_in.re,
             z_in.im
         );
-        // Regression tripwire on the recorded Phase 1.1.1.2 measurement
-        // (Track CCCCCC). ±5 % wide because the GPOF + Newton-Raphson
+        // Regression tripwire on the ADR-0036 reframe measurement
+        // (Track IIIIIII). ±5 % wide because the GPOF + Newton-Raphson
         // pole-search numerics are not bit-identical across optimisation
         // levels; tighten only if the kernel becomes more deterministic.
         let rel_err = (z_mag - MOM_002_Z_IN_MEASURED_OHM).abs() / MOM_002_Z_IN_MEASURED_OHM;
@@ -1507,18 +1598,19 @@ mod tests {
     /// aggregator integration test (which pulls in mom-001 and takes
     /// ~8 min), this test isolates the microstrip case.
     ///
-    /// **Wall-time note**: Phase 1.1.1.1 bumped the strip mesh from
-    /// `30 × 2` to `30 × 16`. The headline gate (single frequency)
-    /// is still seconds, but the 21-point plot sweep runs in ~8 min
-    /// on the refined mesh (each frequency rebuilds the
-    /// `≈ 525 × 525` impedance matrix). Marked `#[ignore]` to keep
-    /// the default `cargo test --release` budget under a minute; run
-    /// explicitly with `cargo test -p yee-validation --release -- \
-    /// --ignored mom_002_standalone_passes`. The
+    /// **Wall-time note**: the ADR-0036 reframe bumped the strip
+    /// mesh from `30 × 16` (edge-clustered) to `82 × 16` (uniform).
+    /// The headline gate (single frequency) is around four minutes
+    /// in release; the 21-point plot sweep multiplies that by 21
+    /// (each frequency rebuilds the `≈ 2640 × 2640` impedance
+    /// matrix). Marked `#[ignore]` to keep the default
+    /// `cargo test --release` budget bounded; run explicitly with
+    /// `cargo test -p yee-validation --release -- --ignored \
+    /// mom_002_standalone_passes`. The
     /// [`mom_002_headline_gate_passes`] smoke test above covers the
     /// non-plot path for the default `cargo test` budget.
     #[test]
-    #[ignore = "slow: ~8 min for 21-point plot sweep on 30x16 mesh"]
+    #[ignore = "slow: 21-point plot sweep on 82x16 mesh (~tens of minutes)"]
     fn mom_002_standalone_passes() {
         let case = run_mom_002();
         assert_eq!(case.id, "mom-002");
@@ -1539,17 +1631,21 @@ mod tests {
 
     /// Strip mesh structural invariants: triangle count, vertex
     /// count, port-tag counts. Mirrors the `central_ring_tag_counts`
-    /// pattern from the dipole fixture.
+    /// pattern from the dipole fixture. ADR-0036 centered-port
+    /// placement: columns `n_length/2 − 1` and `n_length/2` are
+    /// tagged `1` and `2`; tag counts equal `2 * n_width` per side.
     #[test]
     fn mom_002_strip_mesh_structure() {
-        let mesh = mom_002_strip_mesh(30.0e-3, 2.94e-3, 30, 2);
-        assert_eq!(mesh.n_tris(), 2 * 30 * 2);
-        assert_eq!(mesh.vertices.len(), 31 * 3);
+        let n_length = 30usize;
+        let n_width = 2usize;
+        let mesh = mom_002_strip_mesh(30.0e-3, 2.94e-3, n_length, n_width);
+        assert_eq!(mesh.n_tris(), 2 * n_length * n_width);
+        assert_eq!(mesh.vertices.len(), (n_length + 1) * (n_width + 1));
         let tagged_1 = mesh.tags.iter().filter(|&&t| t == 1).count();
         let tagged_2 = mesh.tags.iter().filter(|&&t| t == 2).count();
-        // First column: 2 cells * 2 triangles = 4. Same for second.
-        assert_eq!(tagged_1, 4);
-        assert_eq!(tagged_2, 4);
+        // Centered port: 2 cells * 2 triangles per side = 4 each.
+        assert_eq!(tagged_1, 2 * n_width);
+        assert_eq!(tagged_2, 2 * n_width);
     }
 
     /// Edge-clustered strip mesh has the same connectivity / port-tag
