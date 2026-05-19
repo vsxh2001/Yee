@@ -22,6 +22,11 @@ yee-plotters = { workspace = true }
 # the offline parser and the deterministic emitter from `yee-design`.
 yee-design   = { workspace = true }
 nalgebra     = { workspace = true }
+# Phase 2.fdtd.7.z (Track UUUUUUUU): per-cell ε_r maps and per-component
+# PEC masks for the rewired `fdtd-007` driver are constructed as
+# `ndarray::Array3` and handed to the `yee_fdtd::YeeGrid::with_*`
+# builders.
+ndarray      = { workspace = true }
 num-complex  = { workspace = true }
 serde        = { workspace = true, features = ["derive"] }
 serde_json   = { workspace = true }
