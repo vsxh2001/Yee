@@ -17,19 +17,26 @@
 //! [`DispersiveSolver::solve_at_frequency`] in an outer fixed-point
 //! iteration that closes the self-consistency relation
 //! `ω² ε(ω) μ_0 ε_0 = k²` for a single physical mode. At each
-//! iteration the linearised solver returns `k²(ω_n)` at the current
-//! trial real-valued frequency `Re(ω_n)`, and the next iterate is
+//! iteration the linearised solver returns the FEM generalised
+//! eigenvalue `λ(ω_n)` from `K(ω_n) e = λ M(ω_n) e`, where
+//! `K ∋ (1/μ)·curl·curl` is the stiffness matrix and
+//! `M ∋ ε(ω_n)·basis·basis` is the mass matrix — i.e. `ε(ω)` is
+//! **already** baked into `M` at assembly time. At a self-consistent
+//! dispersive eigenmode `λ(ω*) = (ω*/c)²`, so the fixed-point update
+//! is
 //!
 //! ```text
-//!     ω_{n+1} = sqrt( k²(ω_n) / (μ_0 ε_0 · ε_r(ω_n)) ),
+//!     ω_{n+1} = c · sqrt( λ(ω_n) )       (equivalently ω² = c² · λ).
 //! ```
 //!
-//! where `ε_r(ω_n)` is evaluated via the supplied [`MaterialDatabase`]
-//! at a caller-selected bulk material tag (`bulk_tag = 0` per
-//! ADR-0039 §4 — the convention assumed by all current callers; the
-//! signature does not yet take an explicit `bulk_tag` because every
-//! known consumer paints the bulk filler as tag `0`). When the relative
-//! step `|ω_{n+1} − ω_n| / |ω_n|` falls below
+//! This is **not** `ω² = k²/(μ₀ ε₀ ε(ω))` — applying that form would
+//! divide by `ε(ω)` a *second* time after the FEM `M` matrix already
+//! accounts for it, collapsing the converged `Re(f_FEM)` to
+//! `Re(f_analytic) / √ε_∞`. See `crates/yee-fem/validation/README.md`
+//! "fem-eig-002 D6 finding 1 — `solve_with_newton` ε double-divide"
+//! for the QQQQQQQQ-track bug history and the 1/√3.78 measured ratio
+//! that pinned the diagnosis. When the relative step
+//! `|ω_{n+1} − ω_n| / |ω_n|` falls below
 //! [`DispersiveSolver::newton_tol`], the iteration returns
 //! [`DispersiveEigenpair`] with the converged complex `k = ω · √(μ₀ ε₀ ε(ω))`.
 //! The two convergence knobs (inner-solver
@@ -78,7 +85,7 @@
 
 use nalgebra::DVector;
 use num_complex::Complex64;
-use yee_core::units::{EPS0, MU0};
+use yee_core::units::{C0, EPS0, MU0};
 use yee_mesh::{MaterialTag, TetMesh3D};
 
 use crate::assembly::FemEigenAssembly;
@@ -244,21 +251,32 @@ impl DispersiveSolver {
     /// Iterates the dispersive self-consistency relation
     ///
     /// ```text
-    ///     ω² ε_r(ω) μ_0 ε_0 = k²(ω)
+    ///     ω² ε_r(ω) μ_0 ε_0 = k_phys²(ω),
     /// ```
     ///
-    /// where `k²(ω)` is the smallest linearised eigenvalue returned by
-    /// [`Self::solve_at_frequency`] at trial real-valued `Re(ω_n)`. The
-    /// update rule is the fixed-point form
+    /// where the FEM generalised eigenvalue
+    /// `λ(ω) := K(ω) e / (M(ω) e)` already bakes `ε(ω)` into `M`, so at
+    /// a self-consistent dispersive eigenmode `λ(ω*) = (ω*/c)²` —
+    /// `ε(ω)` does **not** appear in the update rule. The fixed-point
+    /// form is therefore
     ///
     /// ```text
-    ///     ω_{n+1} = sqrt( k²(ω_n) / (μ_0 ε_0 · ε_r(ω_n)) ),
+    ///     ω_{n+1} = c · sqrt( λ(ω_n) ).
     /// ```
     ///
-    /// evaluated against the bulk material at tag [`BULK_TAG`]. The
-    /// returned [`DispersiveEigenpair`] carries the converged complex
-    /// `k = ω · √(μ₀ ε₀ ε(ω))` and the M-orthonormalised complex
-    /// eigenvector from the final inner solve.
+    /// This corrects a previous form `ω_{n+1}² = λ / (μ₀ε₀ε(ω))` that
+    /// divided by `ε(ω)` a *second* time after `M` already accounted
+    /// for it; that bug collapsed the converged `Re(f_FEM)` to
+    /// `Re(f_analytic) / √ε_∞` on the fem-eig-002 cavity (Track
+    /// QQQQQQQQ D6 finding 1 — see
+    /// `crates/yee-fem/validation/README.md`). The bulk-material `ε(ω)`
+    /// is still consumed by [`DispersiveEigenpair::k_complex`] to
+    /// compose the converged physical wavenumber, and is looked up at
+    /// tag [`BULK_TAG`].
+    ///
+    /// The returned [`DispersiveEigenpair`] carries the converged
+    /// complex `k = ω · √(μ₀ ε₀ ε(ω))` and the M-orthonormalised
+    /// complex eigenvector from the final inner solve.
     ///
     /// # Arguments
     ///
@@ -355,10 +373,18 @@ impl DispersiveSolver {
             let k_sq_lin = *k_sq_lin;
             let e_vec = DVector::from_column_slice(e_col.as_slice());
 
-            // Fixed-point update: ω_{n+1} = sqrt( k² / (μ₀ ε₀ ε(ω)) )
-            let eps_omega = self.material_db.eps_at(BULK_TAG, omega_re);
-            let denom = Complex64::new(MU0 * EPS0, 0.0) * eps_omega;
-            let omega_sq_new = k_sq_lin / denom;
+            // Fixed-point update: ω_{n+1} = c · √λ, equivalently
+            // ω_{n+1}² = c² · λ. The FEM generalised eigenvalue
+            // `λ = k_sq_lin` returned by `solve_at_frequency` is
+            // `(ω_phys/c)²` at a self-consistent dispersive eigenmode
+            // because `ε(ω)` is already baked into the `M` matrix at
+            // assembly time. The earlier `ω² = λ/(μ₀ε₀ε(ω))` form
+            // divided by `ε(ω)` a *second* time and collapsed the
+            // converged `Re(f_FEM)` to `Re(f_analytic)/√ε_∞` — see
+            // `crates/yee-fem/validation/README.md` "fem-eig-002 D6
+            // finding 1" for the bug history (Track QQQQQQQQ).
+            let c_sq = Complex64::new(C0 * C0, 0.0);
+            let omega_sq_new = c_sq * k_sq_lin;
             let omega_new = omega_sq_new.sqrt();
 
             // Convergence: relative step on |ω|.
