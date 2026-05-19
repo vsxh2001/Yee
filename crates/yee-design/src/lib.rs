@@ -26,9 +26,11 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod emit;
 pub mod estimate;
 pub mod intent;
 
+pub use emit::{ProjectFile, emit};
 pub use estimate::{Error, InitialEstimate, ResolvedSubstrate};
 pub use intent::{
     DesignIntent, GeometryFamily, NamedSubstrate, Provenance, Substrate, SubstrateLibrary,
