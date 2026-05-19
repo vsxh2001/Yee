@@ -441,6 +441,27 @@ pub mod __internal {
     /// real `basis` module to be `pub`.
     pub use crate::basis::RwgBasis;
 
+    /// Thin wrappers around `pub(crate)` `impedance_matrix` and
+    /// `delta_gap_rhs` for the mom-002 forensic diagnostics (Tracks
+    /// XXXXXX, QQQQQQQ, TTTTTTT, ...). The wrapped functions cannot be
+    /// re-exported directly because Rust's `E0364` blocks `pub use` of a
+    /// `pub(crate)` item, but a `pub fn` inside `__internal` that delegates
+    /// is legal. Both wrappers expose the production fill at production
+    /// accuracy (Duffy regularisation included), saving downstream probes
+    /// the ~400 LOC of re-implementing MoM matrix fill per probe. Not part
+    /// of the stable API.
+    pub fn impedance_matrix_for_test<G: crate::Greens + Sync>(
+        basis: &RwgBasis,
+        green: &G,
+    ) -> faer::Mat<Complex64> {
+        crate::fill::impedance_matrix(basis, green)
+    }
+
+    /// See [`impedance_matrix_for_test`].
+    pub fn delta_gap_rhs_for_test(basis: &RwgBasis, port_tag: u32) -> faer::Mat<Complex64> {
+        crate::solve::delta_gap_rhs(basis, port_tag)
+    }
+
     /// Public re-export of [`MultilayerGreens`] for the Phase 1.1
     /// integration tests. Not part of the stable API.
     pub use crate::multilayer::MultilayerGreens;
