@@ -150,13 +150,13 @@ The reciprocity guarantee comes from the area-average fine → coarse coupling c
 
 ## Validation gate
 
-**fdtd-007 — dielectric-loaded thin slot antenna (Maloney & Smith 1993).**
+**fdtd-007 — dielectric-loaded thin slot antenna ([TBD verify which Maloney-Smith paper] — see ADR-0041).**
 
 Geometry: a thin slot of width `w = 0.5 mm` and length `L = 30 mm` cut into an infinite PEC ground plane, with a dielectric slab (`ε_r = 2.2`, thickness `h = 1.524 mm`) backing the slot. Driven by a delta-gap voltage at the slot centre. Coarse grid `dx_coarse = 1 mm`, fine grid `dx_fine = 0.5 mm` covering a `(40 × 6 × 4) mm` box centred on the slot and substrate.
 
-- **Reference: Maloney, Smith, "A study of transient radiation from the Wu-King resistive monopole — FDTD analysis and experimental measurements", IEEE T-AP 1993, 41(5), Fig. 9** — the published `S_11` curve and resonant frequency.
-- Tolerance: resonant frequency within **±2%**, `|S_11|` at resonance within **±1 dB**.
-- Comparator: the **same problem run on a globally uniform `dx = 0.5 mm` grid** must produce a result within 0.3% / 0.3 dB of the subgridded result. This is the internal sanity check; the Maloney reference is the external gate.
+- **Reference: [TBD — citation under review.](../../src/decisions/0041-fdtd-007-reference-correction.md)** The original draft cited Maloney & Smith, "A study of transient radiation from the Wu-King resistive monopole — FDTD analysis and experimental measurements", IEEE T-AP 1993, 41(5), pp. 668–676, Fig. 9. **That paper is a cylindrical-monopole paper and does not contain the cited slot geometry** (Track UUUUUUUU finding, commit `d56c460`, verified by Track XXXXXXXX against IEEE Xplore document 222286). The `f_res = 8.9 GHz` and `|S_11| = -22 dB` figures encoded in `yee_validation::FDTD_007_FRES_REF_HZ` / `FDTD_007_S11_DB_REF` are therefore unverified; the physics gates remain `#[ignore]`'d pending `fdtd-007.1` resolution. See ADR-0041 for the chain of evidence and the candidate follow-ups.
+- Tolerance: resonant frequency within **±2%**, `|S_11|` at resonance within **±1 dB** — applies once the reference is resolved.
+- Comparator: the **same problem run on a globally uniform `dx = 0.5 mm` grid** must produce a result within 0.3% / 0.3 dB of the subgridded result. This is the internal sanity check; the (resolved) external reference is the external gate.
 
 Run time budget: `< 30 min` wall-time in `--release` on the CI Linux runner. If it overruns, the test is hardware-gated like the cuSOLVER tests (Phase 1.5 precedent).
 
@@ -192,5 +192,5 @@ The one internal refactor that makes this cleaner — but is not strictly requir
 - Okoniewski, M., Okoniewska, E., Stuchly, M. A., "Three-dimensional subgridding algorithm for FDTD", *IEEE Trans. Antennas Propag.* 45(3), 1997, pp. 422–429.
 - Chevalier, M. W., Luebbers, R. J., Cable, V. P., "FDTD local grid with material traverse", *IEEE Trans. Antennas Propag.* 45(3), 1997, pp. 411–421.
 - Berenger, J.-P., "A Huygens subgridding for the FDTD method", *IEEE Trans. Antennas Propag.* 54(12), 2006, pp. 3797–3804.
-- Maloney, J. G., Smith, G. S., "A study of transient radiation from the Wu-King resistive monopole — FDTD analysis and experimental measurements", *IEEE Trans. Antennas Propag.* 41(5), 1993, pp. 668–676.
+- Maloney, J. G., Smith, G. S., "A study of transient radiation from the Wu-King resistive monopole — FDTD analysis and experimental measurements", *IEEE Trans. Antennas Propag.* 41(5), 1993, pp. 668–676. **[TBD verify — this paper is a cylindrical-monopole paper, not a slot-antenna paper; the original `fdtd-007` attribution is disputed. See [ADR-0041](../../src/decisions/0041-fdtd-007-reference-correction.md).]**
 - Taflove, A., Hagness, S. C., *Computational Electrodynamics: The Finite-Difference Time-Domain Method*, 3rd ed., Artech House 2005, §13.
