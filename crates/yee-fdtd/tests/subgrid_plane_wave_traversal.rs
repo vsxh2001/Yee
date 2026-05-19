@@ -108,24 +108,51 @@ const PROBES_C: [(usize, usize, usize); 5] = [
 ///
 /// The 0.5% bound is preserved (not relaxed) per brief.
 ///
-/// **Phase 2.fdtd.7.y C2 (compensating-source M) status:** the M
-/// source switched to `M = -n̂ × (E_post − E_pre)` per ADR-0038
-/// Option β. Empirically `E_post − E_pre ≡ 0` on the fine outer
-/// surface plane (the only cells the M sampler touches) because
-/// `update_fine_e` skips boundary cells — so C2 effectively
-/// disables M. The strict 500-step traversal still fails
-/// catastrophically (rel_err = 100.0% with peak |E_z| ≈ 6e27 at
-/// step 499) — same failure mode as B2.2 with M off. Resolution is
-/// Step C5 (Option α — drop the Q3 Dirichlet for a Mur absorbing
-/// BC). See the matching note on
-/// `berenger_traversal::berenger_step_propagates_without_divergence_500_steps`.
+/// **Phase 2.fdtd.7.y C5 (Option α — Mur absorbing BC) status:** the
+/// Q3 coarse → fine Dirichlet `interpolate_coarse_e_to_fine` is
+/// replaced by a 1st-order Mur ABC on the fine outer `E_t` per
+/// ADR-0038 Option α. The 500-step Berenger canary now passes
+/// (peak `|E_z|_fine` bounded), and the catastrophic 1e27-class
+/// divergence from C2 / B2.2 is retired.
+///
+/// However, this strict 0.5%-of-peak traversal gate **still fails**,
+/// now at a finite (non-divergent) residual: empirical
+/// `rel_err ≈ 32%` at probe 1, step 54, against the pure-coarse
+/// reference. The failure mode under Option α is qualitatively
+/// different from the prior divergent regime: with Q3 Dirichlet
+/// gone, the fine grid no longer receives the coarse-grid wave on
+/// the E side, so fine `E` stays effectively zero throughout the
+/// source-on-coarse traversal. The B2.2 J-side coarse-ghost-
+/// subtracted injection `J = +n̂ × (H_fine − H_coarse_ghost)` (kept
+/// unchanged per ADR-0038 directive) then reduces to
+/// `J = −n̂ × H_coarse_ghost`, which acts as a strong negative
+/// correction on coarse `E` at the surface plane — effectively the
+/// fine box absorbs incident coarse-side waves rather than letting
+/// them propagate through, producing the 32% probe-trace
+/// discrepancy.
+///
+/// Spec §3 Option α trade-off acknowledged the ~−40 dB Mur
+/// reflection floor (`0.5%` ≈ −46 dB) as a possible accuracy
+/// ceiling, but the dominant residual here is the asymmetry between
+/// the (now-disconnected) inward E-side channel and the still-active
+/// J-side equivalent-current correction, not the Mur reflection
+/// floor itself. The published 0.5%-of-peak bound is preserved per
+/// the AAAAAAA plan B4 escape-hatch directive ("do NOT widen the
+/// bound when the closure surfaces a drift > 0.5%"); retirement of
+/// this gate is deferred to a future Phase 2.fdtd.7.y.α spec
+/// amendment that re-balances the J side under Option α (candidates:
+/// drop the J-side ghost subtraction when H_fine ≡ 0; or restore
+/// inward coarse → fine coupling via a TF/SF-style injection
+/// distinct from Q3 Dirichlet). See the matching note on
+/// `berenger_traversal::berenger_step_propagates_without_divergence_500_steps`
+/// (now passing).
 #[test]
-#[ignore = "Phase 2.fdtd.7.y C2 (compensating-source M): the M sample sites are on the fine \
-            outer surface plane which update_fine_e skips, so E_post − E_pre ≡ 0 (spec §6 \
-            risk 2 degeneration). 500-step strict gate still diverges (rel_err = 100%, peak \
-            |E_z| ≈ 6e27 at step 499). Resolution deferred to Step C5 (Option α — replace Q3 \
-            Dirichlet with a Mur absorbing BC so canonical M differencing recovers \
-            non-zero magnitude)."]
+#[ignore = "Phase 2.fdtd.7.y C5 (Option α — Mur ABC): catastrophic divergence retired, but \
+            the strict 0.5%-of-peak gate now fails at rel_err ≈ 32% because Mur replaces the \
+            only inward coarse → fine coupling channel (Q3 Dirichlet) while the B2.2 J-side \
+            coarse-ghost subtraction (kept per ADR-0038) absorbs incident coarse waves at the \
+            fine-box surface. Resolution requires re-balancing the J side under Option α — \
+            deferred to a Phase 2.fdtd.7.y.α spec amendment."]
 fn subgrid_plane_wave_matches_coarse_reference() {
     // ---- Subgridded run ---------------------------------------------------
     let coarse_grid = YeeGrid::vacuum(NX_C, NY_C, NZ_C, DX_C);

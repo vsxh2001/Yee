@@ -34,7 +34,7 @@
 
 use ndarray::{Array2, Array3};
 use yee_core::Error;
-use yee_core::units::{EPS0, MU0};
+use yee_core::units::{C0, EPS0, MU0};
 
 use crate::FdtdSolver;
 use crate::WalkingSkeletonSolver;
@@ -315,6 +315,37 @@ pub struct SubgridRegion {
     /// Spec: `docs/superpowers/specs/2026-05-19-phase-2-fdtd-7-y-m-coupling-design.md` §3.
     /// ADR:  `docs/src/decisions/0038-berenger-m-coupling-spec-amendment.md`.
     fine_e_post_snapshot: Option<FineESnapshot>,
+    /// Phase 2.fdtd.7.y Step C5 (Option α — Mur ABC) per-face cache of
+    /// the fine-grid tangential `E` values at the **boundary** and the
+    /// **first-cell-inside** layers, captured **immediately before** a
+    /// fine sub-step's [`Self::update_fine_e`] runs. Consumed
+    /// **immediately after** that `update_fine_e` by
+    /// [`Self::apply_mur_abc_to_fine_outer_e`] to evaluate the Mur
+    /// 1st-order absorbing boundary update
+    /// `E_t^{n+1}(boundary) = E_t^n(inside) + α · (E_t^{n+1}(inside) −
+    /// E_t^n(boundary))` with `α = (c·dt_fine − dx_fine) /
+    /// (c·dt_fine + dx_fine)`.
+    ///
+    /// Boundary-vs-inside layer indices per face (in fine-cell space):
+    ///
+    /// - `−x` face: boundary `i_f = 0`, inside `i_f = 1`.
+    /// - `+x` face: boundary `i_f = fine_nx`, inside `i_f = fine_nx − 1`.
+    /// - Similarly on `±y`, `±z`.
+    ///
+    /// `None` until [`Self::snapshot_fine_e_for_mur`] has been called at
+    /// least once. This snapshot replaces the Q3 Dirichlet
+    /// [`Self::interpolate_coarse_e_to_fine`] writes that previously fed
+    /// the fine outer `E_t` layer; see ADR-0038 Option α (escape hatch)
+    /// for the rationale.
+    ///
+    /// Spec: `docs/superpowers/specs/2026-05-19-phase-2-fdtd-7-y-m-coupling-design.md` §3 Option α.
+    /// ADR:  `docs/src/decisions/0038-berenger-m-coupling-spec-amendment.md` "Consequences".
+    /// Reference: Mur, G., "Absorbing Boundary Conditions for the
+    /// Finite-Difference Approximation of the Time-Domain
+    /// Electromagnetic-Field Equations", IEEE Trans. EMC EMC-23(4),
+    /// 1981, pp. 377–382, eq. 5 — 1st-order Mur on a Cartesian Yee
+    /// boundary.
+    fine_e_mur_snapshot: Option<FineEMurSnapshot>,
 }
 
 /// Mid-coarse-step snapshot of the fine `H` field components used by the
@@ -351,6 +382,57 @@ struct FineESnapshot {
     ex: Array3<f64>,
     ey: Array3<f64>,
     ez: Array3<f64>,
+}
+
+/// Phase 2.fdtd.7.y Step C5 (Option α — Mur ABC) per-face cache used to
+/// evaluate the 1st-order Mur absorbing boundary update on the fine
+/// outer `E_t` plane. Each per-face `(Array2, Array2)` tuple holds, in
+/// order:
+///
+/// - `.0` — the fine `E_t` value at the **boundary** cell (i.e. on the
+///   outer Huygens surface) at fine wall-clock time `t = n` (sampled
+///   right before [`SubgridRegion::update_fine_e`] runs).
+/// - `.1` — the fine `E_t` value at the **first-cell-inside** layer
+///   (one fine cell inward of the boundary along the face normal) at
+///   the same fine wall-clock time `t = n`.
+///
+/// After `update_fine_e` advances the inside layer to `t = n + 1` (the
+/// boundary cell is untouched — `crate::update::update_e` skips outer
+/// tangential faces, see the loop ranges in that module), the Mur
+/// update reads `E_t^n(inside) = .1`, `E_t^n(boundary) = .0`,
+/// `E_t^{n+1}(inside) = grid.e?[(boundary +/- 1, …)]` (live), and writes
+/// the new boundary value back into `grid.e?[(boundary, …)]`.
+///
+/// Component layout per face mirrors the existing
+/// [`InterfaceSnapshots`]-derived shapes but in **fine-cell** index
+/// space (every coarse cell is doubled in each tangential direction):
+///
+/// - `±x` faces — tangential components are `E_y` and `E_z`.
+/// - `±y` faces — tangential components are `E_x` and `E_z`.
+/// - `±z` faces — tangential components are `E_x` and `E_y`.
+///
+/// Spec: `docs/superpowers/specs/2026-05-19-phase-2-fdtd-7-y-m-coupling-design.md` §3 Option α.
+/// ADR:  `docs/src/decisions/0038-berenger-m-coupling-spec-amendment.md`.
+#[derive(Debug, Clone)]
+struct FineEMurSnapshot {
+    /// −x face: `(boundary, inside)` pairs for `E_y` and `E_z`.
+    xmin_ey: (Array2<f64>, Array2<f64>),
+    xmin_ez: (Array2<f64>, Array2<f64>),
+    /// +x face.
+    xmax_ey: (Array2<f64>, Array2<f64>),
+    xmax_ez: (Array2<f64>, Array2<f64>),
+    /// −y face: `(boundary, inside)` pairs for `E_x` and `E_z`.
+    ymin_ex: (Array2<f64>, Array2<f64>),
+    ymin_ez: (Array2<f64>, Array2<f64>),
+    /// +y face.
+    ymax_ex: (Array2<f64>, Array2<f64>),
+    ymax_ez: (Array2<f64>, Array2<f64>),
+    /// −z face: `(boundary, inside)` pairs for `E_x` and `E_y`.
+    zmin_ex: (Array2<f64>, Array2<f64>),
+    zmin_ey: (Array2<f64>, Array2<f64>),
+    /// +z face.
+    zmax_ex: (Array2<f64>, Array2<f64>),
+    zmax_ey: (Array2<f64>, Array2<f64>),
 }
 
 impl SubgridRegion {
@@ -426,6 +508,7 @@ impl SubgridRegion {
             fine_e_snapshot: None,
             fine_e_pre_snapshot: None,
             fine_e_post_snapshot: None,
+            fine_e_mur_snapshot: None,
         })
     }
 
@@ -679,6 +762,314 @@ impl SubgridRegion {
             .map(|s| (&s.ex, &s.ey, &s.ez))
     }
 
+    // ----------------------------------------------------------------
+    // Phase 2.fdtd.7.y Step C5 (Option α) — 1st-order Mur ABC on the
+    // fine outer E_t plane. Replaces the Q3 coarse → fine Dirichlet
+    // tie that previously held the outer fine `E_t` slaved to the
+    // coarse-side interpolation. The Q3 helper
+    // [`Self::interpolate_coarse_e_to_fine`] is retained for tests and
+    // as a `#[doc(hidden)]` rollback path; production callers
+    // ([`SubgriddedSolver::step`] / `step_with_gaussian_source_ez`)
+    // route through the Mur helpers below instead.
+    //
+    // Reference: Mur, G., "Absorbing Boundary Conditions for the
+    // Finite-Difference Approximation of the Time-Domain
+    // Electromagnetic-Field Equations", IEEE Trans. EMC EMC-23(4),
+    // 1981, pp. 377–382, eq. 5. The 1st-order Mur formula for an
+    // outward-propagating plane wave hitting a Yee grid boundary
+    // at `i = i_max` (analogous on the other 5 faces) reads
+    //
+    //   E_t^{n+1}(i_max, j, k) = E_t^n(i_max − 1, j, k)
+    //                          + α · (E_t^{n+1}(i_max − 1, j, k)
+    //                                 − E_t^n(i_max, j, k))
+    //
+    // with `α = (c·dt − dx) / (c·dt + dx)`. `α → 0` as `c·dt → dx`
+    // (the lattice CFL limit) — the boundary then becomes a perfect
+    // 1-cell upwind extrapolation. For the standard 0.9 × Courant
+    // step used in this crate `α ≈ −0.0526`, which yields the
+    // documented ~−40 dB reflection floor on plane waves at normal
+    // incidence (spec §3 Option α trade-off).
+    // ----------------------------------------------------------------
+
+    /// Snapshot the fine `E_t` field on the **boundary** and on the
+    /// **first-cell-inside** layer of each of the six outer Huygens
+    /// faces, at fine wall-clock time `t = n`. Call **immediately
+    /// before** [`Self::update_fine_e`] runs.
+    ///
+    /// The companion [`Self::apply_mur_abc_to_fine_outer_e`] consumes
+    /// this snapshot **immediately after** that same `update_fine_e`
+    /// completes (when the inside layer has advanced to `t = n + 1`
+    /// while the boundary cell, which `crate::update::update_e` skips,
+    /// still holds `t = n`). The Mur update then writes the new
+    /// `t = n + 1` boundary value back into `self.fine.e?`.
+    ///
+    /// Pairs of snapshots are kept per face per tangential component:
+    /// each pair `(boundary, inside)` is a 2-D fine-cell array sized to
+    /// match the corresponding face's tangential extent.
+    ///
+    /// Phase 2.fdtd.7.y Step C5 (Option α) — replaces the Q3
+    /// coarse → fine Dirichlet write that previously tied the fine
+    /// outer `E_t` to the coarse-side interpolation. See ADR-0038
+    /// "Consequences" and spec §3 Option α for the rationale (the Q3
+    /// tie made Berenger's canonical M source
+    /// `M = -n̂ × (E_TF_fine − E_SF_coarse_ghost)` degenerate to zero
+    /// because `update_fine_e` skips boundary cells; replacing Q3 with
+    /// a Mur ABC lets the fine outer `E_t` evolve as a function of
+    /// adjacent-inside fine `E_t` instead, recovering non-zero
+    /// `E_post − E_pre` differencing for the compensating-source M
+    /// path).
+    ///
+    /// Spec: `docs/superpowers/specs/2026-05-19-phase-2-fdtd-7-y-m-coupling-design.md` §3 Option α.
+    /// ADR:  `docs/src/decisions/0038-berenger-m-coupling-spec-amendment.md`.
+    pub fn snapshot_fine_e_for_mur(&mut self) {
+        let fine_nx = 2 * (self.hi.0 - self.lo.0);
+        let fine_ny = 2 * (self.hi.1 - self.lo.1);
+        let fine_nz = 2 * (self.hi.2 - self.lo.2);
+        let f = &self.fine;
+
+        // ±x faces — tangential `E_y` (shape `[*, fine_ny, fine_nz+1]`)
+        // and `E_z` (shape `[*, fine_ny+1, fine_nz]`).
+        let mut xmin_ey_b = Array2::<f64>::zeros((fine_ny, fine_nz + 1));
+        let mut xmin_ey_i = Array2::<f64>::zeros((fine_ny, fine_nz + 1));
+        let mut xmax_ey_b = Array2::<f64>::zeros((fine_ny, fine_nz + 1));
+        let mut xmax_ey_i = Array2::<f64>::zeros((fine_ny, fine_nz + 1));
+        for j in 0..fine_ny {
+            for k in 0..=fine_nz {
+                xmin_ey_b[(j, k)] = f.ey[(0, j, k)];
+                xmin_ey_i[(j, k)] = f.ey[(1, j, k)];
+                xmax_ey_b[(j, k)] = f.ey[(fine_nx, j, k)];
+                xmax_ey_i[(j, k)] = f.ey[(fine_nx - 1, j, k)];
+            }
+        }
+        let mut xmin_ez_b = Array2::<f64>::zeros((fine_ny + 1, fine_nz));
+        let mut xmin_ez_i = Array2::<f64>::zeros((fine_ny + 1, fine_nz));
+        let mut xmax_ez_b = Array2::<f64>::zeros((fine_ny + 1, fine_nz));
+        let mut xmax_ez_i = Array2::<f64>::zeros((fine_ny + 1, fine_nz));
+        for j in 0..=fine_ny {
+            for k in 0..fine_nz {
+                xmin_ez_b[(j, k)] = f.ez[(0, j, k)];
+                xmin_ez_i[(j, k)] = f.ez[(1, j, k)];
+                xmax_ez_b[(j, k)] = f.ez[(fine_nx, j, k)];
+                xmax_ez_i[(j, k)] = f.ez[(fine_nx - 1, j, k)];
+            }
+        }
+
+        // ±y faces — tangential `E_x` (shape `[fine_nx, *, fine_nz+1]`)
+        // and `E_z` (shape `[fine_nx+1, *, fine_nz]`).
+        let mut ymin_ex_b = Array2::<f64>::zeros((fine_nx, fine_nz + 1));
+        let mut ymin_ex_i = Array2::<f64>::zeros((fine_nx, fine_nz + 1));
+        let mut ymax_ex_b = Array2::<f64>::zeros((fine_nx, fine_nz + 1));
+        let mut ymax_ex_i = Array2::<f64>::zeros((fine_nx, fine_nz + 1));
+        for i in 0..fine_nx {
+            for k in 0..=fine_nz {
+                ymin_ex_b[(i, k)] = f.ex[(i, 0, k)];
+                ymin_ex_i[(i, k)] = f.ex[(i, 1, k)];
+                ymax_ex_b[(i, k)] = f.ex[(i, fine_ny, k)];
+                ymax_ex_i[(i, k)] = f.ex[(i, fine_ny - 1, k)];
+            }
+        }
+        let mut ymin_ez_b = Array2::<f64>::zeros((fine_nx + 1, fine_nz));
+        let mut ymin_ez_i = Array2::<f64>::zeros((fine_nx + 1, fine_nz));
+        let mut ymax_ez_b = Array2::<f64>::zeros((fine_nx + 1, fine_nz));
+        let mut ymax_ez_i = Array2::<f64>::zeros((fine_nx + 1, fine_nz));
+        for i in 0..=fine_nx {
+            for k in 0..fine_nz {
+                ymin_ez_b[(i, k)] = f.ez[(i, 0, k)];
+                ymin_ez_i[(i, k)] = f.ez[(i, 1, k)];
+                ymax_ez_b[(i, k)] = f.ez[(i, fine_ny, k)];
+                ymax_ez_i[(i, k)] = f.ez[(i, fine_ny - 1, k)];
+            }
+        }
+
+        // ±z faces — tangential `E_x` (shape `[fine_nx, fine_ny+1, *]`)
+        // and `E_y` (shape `[fine_nx+1, fine_ny, *]`).
+        let mut zmin_ex_b = Array2::<f64>::zeros((fine_nx, fine_ny + 1));
+        let mut zmin_ex_i = Array2::<f64>::zeros((fine_nx, fine_ny + 1));
+        let mut zmax_ex_b = Array2::<f64>::zeros((fine_nx, fine_ny + 1));
+        let mut zmax_ex_i = Array2::<f64>::zeros((fine_nx, fine_ny + 1));
+        for i in 0..fine_nx {
+            for j in 0..=fine_ny {
+                zmin_ex_b[(i, j)] = f.ex[(i, j, 0)];
+                zmin_ex_i[(i, j)] = f.ex[(i, j, 1)];
+                zmax_ex_b[(i, j)] = f.ex[(i, j, fine_nz)];
+                zmax_ex_i[(i, j)] = f.ex[(i, j, fine_nz - 1)];
+            }
+        }
+        let mut zmin_ey_b = Array2::<f64>::zeros((fine_nx + 1, fine_ny));
+        let mut zmin_ey_i = Array2::<f64>::zeros((fine_nx + 1, fine_ny));
+        let mut zmax_ey_b = Array2::<f64>::zeros((fine_nx + 1, fine_ny));
+        let mut zmax_ey_i = Array2::<f64>::zeros((fine_nx + 1, fine_ny));
+        for i in 0..=fine_nx {
+            for j in 0..fine_ny {
+                zmin_ey_b[(i, j)] = f.ey[(i, j, 0)];
+                zmin_ey_i[(i, j)] = f.ey[(i, j, 1)];
+                zmax_ey_b[(i, j)] = f.ey[(i, j, fine_nz)];
+                zmax_ey_i[(i, j)] = f.ey[(i, j, fine_nz - 1)];
+            }
+        }
+
+        self.fine_e_mur_snapshot = Some(FineEMurSnapshot {
+            xmin_ey: (xmin_ey_b, xmin_ey_i),
+            xmin_ez: (xmin_ez_b, xmin_ez_i),
+            xmax_ey: (xmax_ey_b, xmax_ey_i),
+            xmax_ez: (xmax_ez_b, xmax_ez_i),
+            ymin_ex: (ymin_ex_b, ymin_ex_i),
+            ymin_ez: (ymin_ez_b, ymin_ez_i),
+            ymax_ex: (ymax_ex_b, ymax_ex_i),
+            ymax_ez: (ymax_ez_b, ymax_ez_i),
+            zmin_ex: (zmin_ex_b, zmin_ex_i),
+            zmin_ey: (zmin_ey_b, zmin_ey_i),
+            zmax_ex: (zmax_ex_b, zmax_ex_i),
+            zmax_ey: (zmax_ey_b, zmax_ey_i),
+        });
+    }
+
+    /// Apply the 1st-order Mur absorbing boundary update to the fine
+    /// outer `E_t` plane on every one of the six Huygens faces. Call
+    /// **immediately after** [`Self::update_fine_e`] completes, with
+    /// the matching [`Self::snapshot_fine_e_for_mur`] having been
+    /// captured **immediately before** that same `update_fine_e`.
+    ///
+    /// Mur (1981) eq. 5 for the `+x` boundary (analogous on the other
+    /// five faces, with the appropriate "inside" index offset of `−1`
+    /// on `−` faces and `+1` on `+` faces — i.e. always one cell
+    /// *inward* of the boundary node):
+    ///
+    /// ```text
+    /// E_t^{n+1}(i_max, j, k) = E_t^n(i_max−1, j, k)
+    ///                        + α · (E_t^{n+1}(i_max−1, j, k)
+    ///                               − E_t^n(i_max,   j, k))
+    /// ```
+    ///
+    /// with `α = (c·dt_fine − dx_fine) / (c·dt_fine + dx_fine)`. The
+    /// inside cell's new value at `t = n + 1` is read live from the
+    /// fine grid (it was advanced by the preceding `update_fine_e`);
+    /// the two `E_t^n` reads come from the snapshot.
+    ///
+    /// `c` is the vacuum speed of light; the fine grid carries the
+    /// parent's `eps_r`, `mu_r` so the in-medium phase velocity is
+    /// `c / sqrt(eps_r · mu_r)`. For the Phase 2.fdtd.7 walking
+    /// skeleton both relative parameters are uniform vacuum (= 1), so
+    /// `c` is the bare vacuum value [`yee_core::units::C0`].
+    ///
+    /// No-op if no snapshot has been taken yet (defensive guard for
+    /// the first call after construction or for test paths that drive
+    /// `update_fine_e` directly without first taking the Mur
+    /// snapshot). The pre-Mur step in [`SubgriddedSolver::step`] /
+    /// `step_with_gaussian_source_ez` always pairs snapshot + apply
+    /// around `update_fine_e`.
+    ///
+    /// Phase 2.fdtd.7.y Step C5 (Option α). Spec / ADR references on
+    /// [`Self::snapshot_fine_e_for_mur`].
+    pub fn apply_mur_abc_to_fine_outer_e(&mut self) {
+        let Some(snap) = self.fine_e_mur_snapshot.as_ref() else {
+            return;
+        };
+
+        let fine_nx = 2 * (self.hi.0 - self.lo.0);
+        let fine_ny = 2 * (self.hi.1 - self.lo.1);
+        let fine_nz = 2 * (self.hi.2 - self.lo.2);
+
+        // Mur 1st-order coefficient. The fine grid is uniform-cubic
+        // (dx_fine = dy_fine = dz_fine) per `SubgridRegion::new`, so a
+        // single `α` per axis is correct. Compute per-axis anyway for
+        // robustness if anisotropic fine cells are ever wired (each
+        // face uses its own normal-axis `dx`).
+        let dt_f = self.fine.dt;
+        let c_eff = C0 / (self.fine.eps_r * self.fine.mu_r).sqrt();
+        let alpha_x = (c_eff * dt_f - self.fine.dx) / (c_eff * dt_f + self.fine.dx);
+        let alpha_y = (c_eff * dt_f - self.fine.dy) / (c_eff * dt_f + self.fine.dy);
+        let alpha_z = (c_eff * dt_f - self.fine.dz) / (c_eff * dt_f + self.fine.dz);
+
+        let f = &mut self.fine;
+
+        // ±x faces (Mur along x): outer `E_y` and `E_z`.
+        // `−x`: boundary `i = 0`, inside `i = 1`.
+        // `+x`: boundary `i = fine_nx`, inside `i = fine_nx − 1`.
+        for j in 0..fine_ny {
+            for k in 0..=fine_nz {
+                let e_inside_new = f.ey[(1, j, k)];
+                let e_inside_old = snap.xmin_ey.1[(j, k)];
+                let e_bdry_old = snap.xmin_ey.0[(j, k)];
+                f.ey[(0, j, k)] = e_inside_old + alpha_x * (e_inside_new - e_bdry_old);
+
+                let e_inside_new = f.ey[(fine_nx - 1, j, k)];
+                let e_inside_old = snap.xmax_ey.1[(j, k)];
+                let e_bdry_old = snap.xmax_ey.0[(j, k)];
+                f.ey[(fine_nx, j, k)] = e_inside_old + alpha_x * (e_inside_new - e_bdry_old);
+            }
+        }
+        for j in 0..=fine_ny {
+            for k in 0..fine_nz {
+                let e_inside_new = f.ez[(1, j, k)];
+                let e_inside_old = snap.xmin_ez.1[(j, k)];
+                let e_bdry_old = snap.xmin_ez.0[(j, k)];
+                f.ez[(0, j, k)] = e_inside_old + alpha_x * (e_inside_new - e_bdry_old);
+
+                let e_inside_new = f.ez[(fine_nx - 1, j, k)];
+                let e_inside_old = snap.xmax_ez.1[(j, k)];
+                let e_bdry_old = snap.xmax_ez.0[(j, k)];
+                f.ez[(fine_nx, j, k)] = e_inside_old + alpha_x * (e_inside_new - e_bdry_old);
+            }
+        }
+
+        // ±y faces (Mur along y): outer `E_x` and `E_z`.
+        for i in 0..fine_nx {
+            for k in 0..=fine_nz {
+                let e_inside_new = f.ex[(i, 1, k)];
+                let e_inside_old = snap.ymin_ex.1[(i, k)];
+                let e_bdry_old = snap.ymin_ex.0[(i, k)];
+                f.ex[(i, 0, k)] = e_inside_old + alpha_y * (e_inside_new - e_bdry_old);
+
+                let e_inside_new = f.ex[(i, fine_ny - 1, k)];
+                let e_inside_old = snap.ymax_ex.1[(i, k)];
+                let e_bdry_old = snap.ymax_ex.0[(i, k)];
+                f.ex[(i, fine_ny, k)] = e_inside_old + alpha_y * (e_inside_new - e_bdry_old);
+            }
+        }
+        for i in 0..=fine_nx {
+            for k in 0..fine_nz {
+                let e_inside_new = f.ez[(i, 1, k)];
+                let e_inside_old = snap.ymin_ez.1[(i, k)];
+                let e_bdry_old = snap.ymin_ez.0[(i, k)];
+                f.ez[(i, 0, k)] = e_inside_old + alpha_y * (e_inside_new - e_bdry_old);
+
+                let e_inside_new = f.ez[(i, fine_ny - 1, k)];
+                let e_inside_old = snap.ymax_ez.1[(i, k)];
+                let e_bdry_old = snap.ymax_ez.0[(i, k)];
+                f.ez[(i, fine_ny, k)] = e_inside_old + alpha_y * (e_inside_new - e_bdry_old);
+            }
+        }
+
+        // ±z faces (Mur along z): outer `E_x` and `E_y`.
+        for i in 0..fine_nx {
+            for j in 0..=fine_ny {
+                let e_inside_new = f.ex[(i, j, 1)];
+                let e_inside_old = snap.zmin_ex.1[(i, j)];
+                let e_bdry_old = snap.zmin_ex.0[(i, j)];
+                f.ex[(i, j, 0)] = e_inside_old + alpha_z * (e_inside_new - e_bdry_old);
+
+                let e_inside_new = f.ex[(i, j, fine_nz - 1)];
+                let e_inside_old = snap.zmax_ex.1[(i, j)];
+                let e_bdry_old = snap.zmax_ex.0[(i, j)];
+                f.ex[(i, j, fine_nz)] = e_inside_old + alpha_z * (e_inside_new - e_bdry_old);
+            }
+        }
+        for i in 0..=fine_nx {
+            for j in 0..fine_ny {
+                let e_inside_new = f.ey[(i, j, 1)];
+                let e_inside_old = snap.zmin_ey.1[(i, j)];
+                let e_bdry_old = snap.zmin_ey.0[(i, j)];
+                f.ey[(i, j, 0)] = e_inside_old + alpha_z * (e_inside_new - e_bdry_old);
+
+                let e_inside_new = f.ey[(i, j, fine_nz - 1)];
+                let e_inside_old = snap.zmax_ey.1[(i, j)];
+                let e_bdry_old = snap.zmax_ey.0[(i, j)];
+                f.ey[(i, j, fine_nz)] = e_inside_old + alpha_z * (e_inside_new - e_bdry_old);
+            }
+        }
+    }
+
     /// Base bounds validation: `lo < hi` per axis, `hi` inside the parent.
     fn check_bounds(
         parent: &YeeGrid,
@@ -753,6 +1144,19 @@ impl SubgridRegion {
     /// `frac` is clamped to `[0, 1]`; values outside the unit interval
     /// would imply extrapolation across a coarse interval, which is
     /// outside the Phase 2.fdtd.7.0 scope.
+    ///
+    /// **Phase 2.fdtd.7.y Step C5 (Option α) note:** as of Step C5 the
+    /// production pipeline ([`SubgriddedSolver::step`] /
+    /// `step_with_gaussian_source_ez`) no longer calls this helper —
+    /// the fine outer `E_t` plane is governed by the 1st-order Mur
+    /// absorbing BC ([`Self::snapshot_fine_e_for_mur`] +
+    /// [`Self::apply_mur_abc_to_fine_outer_e`]) instead. The Q3
+    /// Dirichlet helper is retained as a `#[doc(hidden)]` rollback
+    /// path per ADR-0038 "Consequences" and continues to be exercised
+    /// by the standalone Q3 / Q4 unit tests under
+    /// `crates/yee-fdtd/tests/subgrid_e_interp.rs` and
+    /// `crates/yee-fdtd/tests/subgrid_h_average.rs`.
+    #[doc(hidden)]
     pub fn interpolate_coarse_e_to_fine(&mut self, frac: f64) {
         let frac = frac.clamp(0.0, 1.0);
         let lo = self.lo;
@@ -2799,44 +3203,61 @@ impl SubgriddedSolver {
         //    Dirichlet reads coarse E^n.
         region.snapshot_coarse_e_t(self.inner.grid());
 
-        // 5. Fine sub-step k = 1 (interpolate at t = n + 1/4).
-        region.interpolate_coarse_e_to_fine(0.25);
+        // 5. Fine sub-step k = 1. Phase 2.fdtd.7.y Step C5 (Option α):
+        //    the Q3 coarse → fine Dirichlet `interpolate_coarse_e_to_fine`
+        //    is replaced by a 1st-order Mur ABC on the fine outer `E_t`
+        //    plane. The Mur sandwich is:
+        //      (a) snapshot adjacent-inside + boundary fine E_t at t = n
+        //          (`snapshot_fine_e_for_mur`),
+        //      (b) advance fine H then fine E via the usual updates
+        //          (`update_fine_h` / `update_fine_e`); the latter
+        //          deliberately skips the outer boundary cells per
+        //          `crate::update::update_e`,
+        //      (c) write the new boundary value via the Mur formula
+        //          using the snapshot + the post-update adjacent-inside
+        //          value (`apply_mur_abc_to_fine_outer_e`).
+        //    The mid-step fine-H snapshot stays where the spec §3
+        //    seven-stage sequence placed it (between `update_fine_h` and
+        //    `update_fine_e` for the Q4.1 time-centred J source).
+        region.snapshot_fine_e_for_mur();
         region.update_fine_h();
         region.snapshot_fine_h_mid_step();
         region.update_fine_e();
+        region.apply_mur_abc_to_fine_outer_e();
 
         // 6–7. Coarse E half-step *without* the J source. update_e_only
-        //      advances coarse E using only the natural curl(H^{n+1/2});
-        //      the resulting E^{n+1}_natural is what the fine sub-step 2
-        //      Dirichlet boundary will read via the end snapshot.
+        //      advances coarse E using only the natural curl(H^{n+1/2}).
+        //      The fine outer `E_t` is now absorbing (Mur) rather than
+        //      Dirichlet-coupled to the coarse boundary, so the
+        //      sub-step 2 reads of the coarse E_t snapshot remain in
+        //      place only as a no-op pair for the snapshot accessor
+        //      contract (Q3 helper kept available for tests and for
+        //      rollback per ADR-0038).
         self.inner.update_e_only();
         self.inner.apply_cpml_e();
 
-        // 8. Snapshot the parent E_t at the end of the coarse E update.
-        //    Captured *before* the J injection (stage 10) so the Q3
-        //    coarse → fine boundary feed in sub-step 2 (and in the
-        //    next coarse step's sub-step 1, which reads the post-step
-        //    coarse E via `snapshot_coarse_e_t`) does not loop the J
-        //    contribution straight back into the fine grid. Breaking
-        //    this direct Q3 propagation path is the Phase 2.fdtd.7.x
-        //    B2.1 fix for HHHHHHH's J-source feedback-loop diagnosis.
+        // 8. End-of-coarse-E snapshot. Retained for accessor-test
+        //    compatibility (the C5 Mur path does not read it; the
+        //    bracketing snapshot pair is harmless and cheap).
         region.snapshot_coarse_e_t_end(self.inner.grid());
 
-        // 9. Fine sub-step k = 2 (interpolate at t = n + 3/4 between
-        //    pre-J E^n and pre-J E^{n+1}).
-        region.interpolate_coarse_e_to_fine(0.75);
-        // Phase 2.fdtd.7.y Step C1: capture fine E *after* the Q3
-        // Dirichlet write but *before* update_fine_e. Populates the
-        // `E_pre` slot the compensating M source will consume in Step C2.
+        // 9. Fine sub-step k = 2. Same Mur sandwich as sub-step 1, with
+        //    the additional Phase 2.fdtd.7.y compensating-source pair
+        //    `snapshot_fine_e_pre_update` / `snapshot_fine_e_post_update`
+        //    around the inner `update_fine_e` + `apply_mur_abc_*` block.
+        //    Crucially `E_pre` is captured *before* `update_fine_e` and
+        //    `E_post` *after* `apply_mur_abc_to_fine_outer_e`, so the
+        //    Mur-written boundary value is included in `E_post`. With
+        //    Q3 retired, `E_post − E_pre` on the surface plane is now
+        //    governed entirely by the Mur ABC (which depends on the
+        //    adjacent-inside fine `E_t`), recovering non-zero
+        //    differencing for the canonical M source per ADR-0038
+        //    Option α.
+        region.snapshot_fine_e_for_mur();
         region.snapshot_fine_e_pre_update();
         region.update_fine_h();
         region.update_fine_e();
-        // Phase 2.fdtd.7.y Step C1: capture fine E *after* update_fine_e
-        // closes the fine sub-step. Together with the `E_pre` snapshot
-        // above, this gives the per-sub-step delta the compensating M
-        // source draws on in Step C2. Distinct from the
-        // `snapshot_fine_e_end_of_step` call below, which feeds the
-        // B2.1 deferred M source kept for one release cycle.
+        region.apply_mur_abc_to_fine_outer_e();
         region.snapshot_fine_e_post_update();
 
         // 10. J-source injection — applies J^{n+1/2} to coarse E^{n+1}
@@ -2909,12 +3330,14 @@ impl SubgriddedSolver {
         // 4. Start-of-step snapshot (taken before the coarse-E update).
         region.snapshot_coarse_e_t(self.inner.grid());
 
-        // 5. Fine sub-step k = 1 with mid-step fine-H snapshot for the
-        //    Berenger time-centered J = +n̂ × H source.
-        region.interpolate_coarse_e_to_fine(0.25);
+        // 5. Fine sub-step k = 1. Phase 2.fdtd.7.y Step C5 (Option α):
+        //    Mur ABC replaces the Q3 coarse → fine Dirichlet write. See
+        //    [`Self::step`] for the stage-by-stage rationale.
+        region.snapshot_fine_e_for_mur();
         region.update_fine_h();
         region.snapshot_fine_h_mid_step();
         region.update_fine_e();
+        region.apply_mur_abc_to_fine_outer_e();
 
         // 6. Coarse Gaussian source injection (between fine sub-step 1
         //    and the coarse E half-step — standard leapfrog timing).
@@ -2923,23 +3346,22 @@ impl SubgriddedSolver {
         // 7–8. Coarse E half-step *without* the Berenger J source, and
         //      CPML-E closure. update_e_only consumes the Gaussian
         //      source plus the natural curl(H^{n+1/2}); J^{n+1/2} is
-        //      injected later (stage 11) so the Q3 snapshot at stage 9
-        //      does not feed J back into the fine grid.
+        //      injected later (stage 11).
         self.inner.update_e_only();
         self.inner.apply_cpml_e();
 
-        // 9. End-of-coarse-E snapshot, taken *before* the J injection
-        //    so the fine sub-step 2 Dirichlet boundary reads the
-        //    natural (J-free) coarse E^{n+1}.
+        // 9. End-of-coarse-E snapshot retained for accessor contract
+        //    only (Mur path does not consume it).
         region.snapshot_coarse_e_t_end(self.inner.grid());
 
-        // 10. Fine sub-step k = 2.
-        region.interpolate_coarse_e_to_fine(0.75);
-        // Phase 2.fdtd.7.y Step C1: see [`Self::step`] for the
-        // E_pre / E_post snapshot rationale. Populated-but-unread in C1.
+        // 10. Fine sub-step k = 2 with the Mur sandwich plus the
+        //     compensating-source `E_pre` / `E_post` capture. See
+        //     [`Self::step`] for the rationale.
+        region.snapshot_fine_e_for_mur();
         region.snapshot_fine_e_pre_update();
         region.update_fine_h();
         region.update_fine_e();
+        region.apply_mur_abc_to_fine_outer_e();
         region.snapshot_fine_e_post_update();
 
         // 11. J-source injection — applies J^{n+1/2} to coarse E^{n+1}
