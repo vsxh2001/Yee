@@ -65,3 +65,4 @@
 - [ADR-0035: Berenger Huygens-surface subgridding (Phase 2.fdtd.7.x)](decisions/0035-berenger-huygens-subgridding.md)
 - [ADR-0036: mom-002 validation strategy — sub-wavelength strip needs reframe](decisions/0036-mom-002-validation-strategy.md)
 - [ADR-0037: mom-002 R1 ε_eff-biasing metric retracted](decisions/0037-mom-002-r1-metric-retracted.md)
+- [ADR-0038: Berenger M-side closure compensating-source amendment (Phase 2.fdtd.7.y)](decisions/0038-berenger-m-coupling-spec-amendment.md)
