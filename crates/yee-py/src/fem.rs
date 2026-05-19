@@ -34,8 +34,8 @@ use pyo3::types::{PyComplex, PyDict, PyList};
 use std::f64::consts::PI;
 use yee_core::units::C0;
 use yee_fem::{
-    DispersiveError, DispersiveSolver, FaceKind, FemEigenAssembly, InverseIterEigen, Material,
-    MaterialDatabase, MaterialPole, OpenBoundarySolver, PortDefinition, SparseEigen,
+    AbcOrder, DispersiveError, DispersiveSolver, FaceKind, FemEigenAssembly, InverseIterEigen,
+    Material, MaterialDatabase, MaterialPole, OpenBoundarySolver, PortDefinition, SparseEigen,
 };
 use yee_mesh::{MaterialTag, TetMesh3D};
 
@@ -482,6 +482,62 @@ fn side_is_high(s: &str) -> PyResult<bool> {
     }
 }
 
+/// Per-port-face modal-profile descriptor.
+///
+/// Phase 4.fem.eig.2 v0 accepts a constant tangential E-field
+/// ([`Self::Constant`]). Phase 4.fem.eig.3 F7 adds [`Self::Callable`],
+/// wrapping a Python callable that takes a 3-tuple ``(x, y, z)`` and
+/// returns a 3-tuple ``(Ex, Ey, Ez)`` so the wave-port can carry a
+/// spatially-varying analytic profile (e.g. TE_{10} `ŷ · sin(π · x / a)`).
+enum ModalProfile {
+    /// Spatially-constant tangential `E_t` across every face centroid /
+    /// Gauss point. The original v0 path.
+    Constant(Vector3<f64>),
+    /// Python callable `fn((x, y, z)) -> (Ex, Ey, Ez)` evaluated at each
+    /// face centroid / Gauss point. `Py<PyAny>` is `Send + Sync` since
+    /// PyO3 0.21; the call site re-acquires the GIL inside the closure
+    /// via [`Python::attach`].
+    Callable(Py<PyAny>),
+}
+
+impl ModalProfile {
+    /// Cheap clone — duplicates the constant variant by `Copy` and the
+    /// callable variant by [`Py::clone_ref`], which only increments the
+    /// Python reference count.
+    fn clone_with(&self, py: Python<'_>) -> Self {
+        match self {
+            Self::Constant(v) => Self::Constant(*v),
+            Self::Callable(callable) => Self::Callable(callable.clone_ref(py)),
+        }
+    }
+
+    /// Evaluate the modal profile at a world-space point.
+    ///
+    /// For the [`Self::Constant`] variant this returns the stored value
+    /// unconditionally. For the [`Self::Callable`] variant this
+    /// re-acquires the GIL, builds the input 3-tuple, calls the Python
+    /// callable, and extracts the 3-tuple result. A panic propagates
+    /// the error message via `expect`; callers must ensure the Python
+    /// callable does not raise — the binding pre-validates this with a
+    /// dry-run call in [`face_spec_from_pydict`].
+    fn evaluate(&self, p: Vector3<f64>) -> Vector3<f64> {
+        match self {
+            Self::Constant(v) => *v,
+            Self::Callable(callable) => Python::attach(|py| -> Vector3<f64> {
+                let args = ((p.x, p.y, p.z),);
+                let result = callable
+                    .bind(py)
+                    .call1(args)
+                    .expect("modal_e_t callable raised during FEM assembly");
+                let tup: (f64, f64, f64) = result
+                    .extract()
+                    .expect("modal_e_t callable returned non-(float, float, float) result");
+                Vector3::new(tup.0, tup.1, tup.2)
+            }),
+        }
+    }
+}
+
 /// Parsed face-plane descriptor produced by [`face_spec_from_pydict`].
 ///
 /// Wave-port faces fill `port_id` and `modal_e_t`; ABC faces leave both
@@ -491,13 +547,22 @@ struct FaceSpec {
     axis: usize,
     side_high: bool,
     port_id: Option<usize>,
-    modal_e_t: Option<Vector3<f64>>,
+    modal_e_t: Option<ModalProfile>,
 }
 
 /// Extract a [`FaceSpec`] from a Python face dict.
 ///
 /// Shape:
-/// `{"axis": "x"|"y"|"z", "side": "low"|"high", "port_id": int?, "modal_e_t": (Ex, Ey, Ez)?}`.
+/// `{"axis": "x"|"y"|"z", "side": "low"|"high", "port_id": int?,
+///   "modal_e_t": (Ex, Ey, Ez) | Callable((x, y, z)) -> (Ex, Ey, Ez)?}`.
+///
+/// The callable form is Phase 4.fem.eig.3 F7 — required for the WR-90
+/// thru-line gate which carries the analytic TE_{10} profile
+/// `ŷ · sqrt(2/(a·b)) · sin(π·x/a)`. A constant 3-tuple still works as
+/// the v0 fallback. The dispatcher tries `extract::<(f64, f64, f64)>`
+/// first (cheap, no GIL re-acquisition at call time); on failure it
+/// falls back to storing a `Py<PyAny>` that the closure re-binds via
+/// [`Python::with_gil`].
 fn face_spec_from_pydict(face_dict: &Bound<'_, PyDict>, want_port: bool) -> PyResult<FaceSpec> {
     let axis_str: String = face_dict
         .get_item("axis")?
@@ -521,12 +586,32 @@ fn face_spec_from_pydict(face_dict: &Bound<'_, PyDict>, want_port: bool) -> PyRe
         let modal_any = face_dict.get_item("modal_e_t")?.ok_or_else(|| {
             PyValueError::new_err("port face dict missing required key 'modal_e_t'")
         })?;
-        let tup: (f64, f64, f64) = modal_any.extract().map_err(|e| {
-            PyValueError::new_err(format!(
-                "port_face 'modal_e_t' must be a tuple of 3 floats (Ex, Ey, Ez): {e}"
-            ))
-        })?;
-        (Some(pid), Some(Vector3::new(tup.0, tup.1, tup.2)))
+        let profile = if let Ok(tup) = modal_any.extract::<(f64, f64, f64)>() {
+            ModalProfile::Constant(Vector3::new(tup.0, tup.1, tup.2))
+        } else if modal_any.is_callable() {
+            // Dry-run the callable on (0, 0, 0) so a malformed signature
+            // surfaces a ValueError up-front rather than panicking inside
+            // the FEM assembly. The Phase 4.fem.eig.3 F2 + F5 hot paths
+            // call the profile many times per face; bailing on the first
+            // call with `unwrap` keeps the closure trait-bounds clean
+            // (the FEM closure type is `Fn(...) -> Vector3<f64>`, not
+            // `Fn(...) -> Result<...>`).
+            let probe = modal_any.call1(((0.0_f64, 0.0_f64, 0.0_f64),))?;
+            let _: (f64, f64, f64) = probe.extract().map_err(|e| {
+                PyValueError::new_err(format!(
+                    "port_face 'modal_e_t' callable must return a (float, float, float) \
+                     tuple: {e}"
+                ))
+            })?;
+            ModalProfile::Callable(modal_any.unbind())
+        } else {
+            return Err(PyValueError::new_err(
+                "port_face 'modal_e_t' must be either a tuple of 3 floats \
+                 (Ex, Ey, Ez) or a callable taking a 3-tuple (x, y, z) and \
+                 returning a 3-tuple (Ex, Ey, Ez)",
+            ));
+        };
+        (Some(pid), Some(profile))
     } else {
         (None, None)
     };
@@ -542,9 +627,11 @@ fn face_spec_from_pydict(face_dict: &Bound<'_, PyDict>, want_port: bool) -> PyRe
 /// Solve a swept open-boundary FEM driven analysis on a rectangular
 /// cavity with ABC and modal wave-port faces.
 ///
-/// Phase 4.fem.eig.2 step E6 — Python binding for
-/// [`yee_fem::OpenBoundarySolver::sweep`]. Builds a Kuhn 6-tet uniform
-/// mesh via [`yee_mesh::TetMesh3D::cavity_uniform`], constructs a
+/// Phase 4.fem.eig.2 step E6 + Phase 4.fem.eig.3 step F7 — Python
+/// binding for [`yee_fem::OpenBoundarySolver::sweep`] (default) and
+/// [`yee_fem::OpenBoundarySolver::sweep_matrix`] (with
+/// ``multi_port=True``). Builds a Kuhn 6-tet uniform mesh via
+/// [`yee_mesh::TetMesh3D::cavity_uniform`], constructs a
 /// [`yee_fem::MaterialDatabase`] from the `materials` list (mirroring
 /// :func:`yee.fem.solve_cavity_dispersive`), classifies every exterior
 /// face by its centroid against the caller-supplied `port_faces` /
@@ -576,15 +663,41 @@ fn face_spec_from_pydict(face_dict: &Bound<'_, PyDict>, want_port: bool) -> PyRe
 /// omegas_hz : list[float]
 ///     Real-valued sweep frequencies in Hz. Internally converted to
 ///     `ω = 2π · f` (rad/s).
+/// coupled_whitney : bool, optional
+///     If ``True``, the underlying solver wires the coupled
+///     exact-Whitney-1 modal RHS + projection at three Gauss points
+///     per port face (Phase 4.fem.eig.3 F1+F2). Default ``False``
+///     reproduces the Phase 4.fem.eig.2 v2 + CCCCCCCCC lumped-centroid
+///     behaviour bit-for-bit. Forwards to
+///     [`yee_fem::OpenBoundarySolver::with_coupled_whitney`].
+/// abc_order : str, optional
+///     Order of the Engquist-Majda ABC bilinear form on
+///     ``FaceKind::Abc``-tagged faces. One of ``"first"`` (default,
+///     Phase 4.fem.eig.2 v2 1st-order Mur reproduced bit-for-bit) or
+///     ``"second"`` (Phase 4.fem.eig.3 F4 2nd-order tangential-curl
+///     correction, lowering the normal-incidence reflection floor from
+///     ~-40 dB to ~-60 dB). Forwards to
+///     [`yee_fem::OpenBoundarySolver::with_abc_order`]; any other
+///     string raises ``ValueError``.
+/// multi_port : bool, optional
+///     If ``True``, the binding calls
+///     [`yee_fem::OpenBoundarySolver::sweep_matrix`] (Phase 4.fem.eig.3
+///     F5), returning the full `n_ports × n_ports` complex S-matrix
+///     per frequency. Off-diagonal `S_{q,p}` entries are populated by
+///     the per-excited-port column extraction of Sheen et al. 1990.
+///     Default ``False`` falls back to the single-port
+///     [`yee_fem::OpenBoundarySolver::sweep`] path; the returned
+///     tensor still has shape `(n_omegas, n_ports, n_ports)` with
+///     off-diagonals set to zero.
 ///
 /// Returns
 /// -------
 /// numpy.ndarray
 ///     `(n_omegas, n_ports, n_ports)` complex128 S-parameter tensor.
-///     Phase 4.fem.eig.2 v0 ships **single-port** S-parameters only:
-///     off-diagonal `S_{p,q}` entries for `p ≠ q` are returned as
-///     zero — cross-port S-parameters land in Phase 4.fem.eig.2.0.2 per
-///     spec §13.
+///     With ``multi_port=False`` (default): single-port
+///     S-parameters only; off-diagonal `S_{p,q}` entries for `p ≠ q`
+///     are zero. With ``multi_port=True``: full multi-port S-matrix
+///     per frequency.
 ///
 /// Notes
 /// -----
@@ -602,12 +715,16 @@ fn face_spec_from_pydict(face_dict: &Bound<'_, PyDict>, want_port: bool) -> PyRe
 /// ------
 /// ValueError
 ///     On any malformed cavity extent / subdivision / materials entry
-///     / face descriptor, or if any tagged axis-side plane is not an
-///     actual exterior face of the mesh.
+///     / face descriptor, if any tagged axis-side plane is not an
+///     actual exterior face of the mesh, or if ``abc_order`` is not
+///     one of ``"first"`` / ``"second"``.
 /// RuntimeError
 ///     If any per-frequency sparse LU fails to factor.
 #[pyfunction]
-#[pyo3(signature = (a, b, d, nx, ny, nz, materials, port_faces, abc_faces, omegas_hz))]
+#[pyo3(signature = (
+    a, b, d, nx, ny, nz, materials, port_faces, abc_faces, omegas_hz,
+    coupled_whitney = false, abc_order = "first", multi_port = false
+))]
 #[allow(clippy::too_many_arguments)]
 fn solve_open_cavity<'py>(
     py: Python<'py>,
@@ -621,6 +738,9 @@ fn solve_open_cavity<'py>(
     port_faces: &Bound<'py, PyList>,
     abc_faces: &Bound<'py, PyList>,
     omegas_hz: &Bound<'py, PyList>,
+    coupled_whitney: bool,
+    abc_order: &str,
+    multi_port: bool,
 ) -> PyResult<Bound<'py, PyArray3<Complex64>>> {
     // ---- 1. Build the cavity mesh -----------------------------------
     let mesh =
@@ -652,14 +772,13 @@ fn solve_open_cavity<'py>(
     }
 
     // Wave-port plane list — each entry carries axis/side/port_id and a
-    // modal_e_t. We also collect the unique port_id set and build one
-    // `PortDefinition` per id with that port's modal_e_t (taking the
-    // first face's modal_e_t per id — v0 single-modal-source-per-port
-    // convention).
-    let mut port_planes: Vec<(usize, bool, usize, Vector3<f64>)> =
-        Vec::with_capacity(port_faces.len());
+    // `ModalProfile` (constant tuple or Python callable). We also
+    // collect the unique port_id set and build one `PortDefinition` per
+    // id with that port's modal profile (taking the first face's
+    // profile per id — v0 single-modal-source-per-port convention).
+    let mut port_planes: Vec<(usize, bool, usize)> = Vec::with_capacity(port_faces.len());
     let mut max_port_id: i64 = -1;
-    let mut port_modal_e_t: std::collections::HashMap<usize, Vector3<f64>> =
+    let mut port_modal_e_t: std::collections::HashMap<usize, ModalProfile> =
         std::collections::HashMap::new();
     for (i, item) in port_faces.iter().enumerate() {
         let face_dict = item
@@ -669,14 +788,14 @@ fn solve_open_cavity<'py>(
         let port_id = spec
             .port_id
             .expect("face_spec_from_pydict want_port=true returns Some");
-        let modal_e_t = spec
+        let modal_profile = spec
             .modal_e_t
             .expect("face_spec_from_pydict want_port=true returns Some");
-        port_planes.push((spec.axis, spec.side_high, port_id, modal_e_t));
+        port_planes.push((spec.axis, spec.side_high, port_id));
         if (port_id as i64) > max_port_id {
             max_port_id = port_id as i64;
         }
-        port_modal_e_t.entry(port_id).or_insert(modal_e_t);
+        port_modal_e_t.entry(port_id).or_insert(modal_profile);
     }
     let n_ports = if max_port_id < 0 {
         0
@@ -690,19 +809,25 @@ fn solve_open_cavity<'py>(
     // first cavity extent). Below-cutoff returns 0 — same convention as
     // `yee_validation::run_fem_eig_003_wr90_stub_abc`.
     //
-    // `modal_e_t(x) = e_t_constant` — the v0 constant-profile path; the
-    // closure ignores its argument since the modal field is taken to be
-    // uniform across every face centroid (Phase 4.fem.eig.2.0.1 will
-    // upgrade to per-Gauss-point sampling).
+    // `modal_e_t(x) = profile.evaluate(x)` — Phase 4.fem.eig.3 F7
+    // extends the v0 constant-profile path so the closure dispatches to
+    // either a stored `Vector3<f64>` (constant) or a Python callable
+    // (re-acquires the GIL inside the closure). The
+    // [`ModalProfile::Callable`] path is what enables the WR-90
+    // thru-line gate to carry the analytic TE_{10} profile `ŷ · sin(π
+    // · x / a)`.
     let mut ports: Vec<PortDefinition> = Vec::with_capacity(n_ports);
     let a_for_beta = a;
     for p in 0..n_ports {
-        let e_t = *port_modal_e_t.get(&p).ok_or_else(|| {
-            PyValueError::new_err(format!(
-                "port_faces does not register any face for port_id = {p} \
-                 (port ids must be a contiguous range [0, n_ports))"
-            ))
-        })?;
+        let profile = port_modal_e_t
+            .get(&p)
+            .map(|prof| prof.clone_with(py))
+            .ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "port_faces does not register any face for port_id = {p} \
+                     (port ids must be a contiguous range [0, n_ports))"
+                ))
+            })?;
         ports.push(PortDefinition {
             beta_mode: Box::new(move |omega: f64| -> f64 {
                 let k0_sq = (omega / C0).powi(2);
@@ -710,7 +835,7 @@ fn solve_open_cavity<'py>(
                 let arg = k0_sq - kc_sq;
                 if arg <= 0.0 { 0.0 } else { arg.sqrt() }
             }),
-            modal_e_t: Box::new(move |_p: Vector3<f64>| -> Vector3<f64> { e_t }),
+            modal_e_t: Box::new(move |p: Vector3<f64>| -> Vector3<f64> { profile.evaluate(p) }),
         });
     }
 
@@ -761,7 +886,7 @@ fn solve_open_cavity<'py>(
         // default, but the underlying solver enforces PEC-precedence on
         // shared edges if a wave-port face neighbours a PEC face.
         let mut kind = FaceKind::Pec;
-        for &(axis, side_high, port_id, _) in &port_planes {
+        for &(axis, side_high, port_id) in &port_planes {
             let target = plane_value(axis, side_high);
             if (coord[axis] - target).abs() < plane_tol {
                 kind = FaceKind::WavePort(port_id);
@@ -783,7 +908,7 @@ fn solve_open_cavity<'py>(
     // Sanity check: every tagged plane must intersect at least one
     // exterior face. Empty intersection usually means the caller passed
     // the wrong axis / side string.
-    for &(axis, side_high, _, _) in &port_planes {
+    for &(axis, side_high, _) in &port_planes {
         let target = plane_value(axis, side_high);
         let any = centroids
             .iter()
@@ -810,9 +935,32 @@ fn solve_open_cavity<'py>(
         }
     }
 
-    // ---- 6. Build the real solver + run the sweep -------------------
-    let solver =
-        OpenBoundarySolver::new(&mesh, face_kinds, ports, db).map_err(crate::errors::yee_to_py)?;
+    // ---- 6. Parse the abc_order kwarg → AbcOrder enum ---------------
+    //
+    // Case-insensitive match; any other string surfaces as ValueError
+    // per the public docstring. Mirrors the axis / side parser pattern
+    // above.
+    let abc_order_enum = match abc_order.to_ascii_lowercase().as_str() {
+        "first" => AbcOrder::First,
+        "second" => AbcOrder::Second,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "solve_open_cavity: abc_order must be 'first' or 'second' \
+                 (got '{other}')"
+            )));
+        }
+    };
+
+    // ---- 7. Build the real solver + run the sweep -------------------
+    //
+    // Phase 4.fem.eig.3 F7: `coupled_whitney` and `abc_order` are
+    // applied via the F2 / F4 builder methods on `OpenBoundarySolver`.
+    // Defaults (`false` / `AbcOrder::First`) reproduce the v2 +
+    // CCCCCCCCC behaviour bit-for-bit.
+    let solver = OpenBoundarySolver::new(&mesh, face_kinds, ports, db)
+        .map_err(crate::errors::yee_to_py)?
+        .with_coupled_whitney(coupled_whitney)
+        .with_abc_order(abc_order_enum);
 
     let omegas: Vec<f64> = {
         let mut out: Vec<f64> = Vec::with_capacity(omegas_hz.len());
@@ -836,19 +984,36 @@ fn solve_open_cavity<'py>(
         ));
     }
 
-    let sweep = solver.sweep(&omegas).map_err(crate::errors::yee_to_py)?;
-
-    // ---- 7. Pack into a (n_omegas, n_ports, n_ports) tensor ---------
+    // ---- 8. Pack into a (n_omegas, n_ports, n_ports) tensor ---------
     //
-    // Phase 4.fem.eig.2 v0 ships single-port S-parameters only
-    // (`sweep.s_pp[p][k]` carries `S_{p,p}(omegas[k])`); the off-
-    // diagonal entries default to zero per spec §13.
+    // `multi_port = False` → single-port `sweep` path; only the
+    // diagonal `S_{p,p}` entries are populated and the off-diagonals
+    // default to zero (Phase 4.fem.eig.2 v0 shape contract).
+    //
+    // `multi_port = True` → Phase 4.fem.eig.3 F5 `sweep_matrix` path;
+    // every entry of the per-frequency `n_ports × n_ports` matrix is
+    // computed via per-excited-port column extraction.
     let n_omegas = omegas.len();
     let mut buf: Vec<Complex64> = vec![Complex64::new(0.0, 0.0); n_omegas * n_ports * n_ports];
-    for (p, port_sweep) in sweep.s_pp.iter().enumerate().take(n_ports) {
-        for (k, &s_pp_k) in port_sweep.iter().enumerate().take(n_omegas) {
-            let idx = (k * n_ports + p) * n_ports + p;
-            buf[idx] = s_pp_k;
+    if multi_port {
+        let sweep = solver
+            .sweep_matrix(&omegas)
+            .map_err(crate::errors::yee_to_py)?;
+        for (k, s_k) in sweep.s.iter().enumerate().take(n_omegas) {
+            for q in 0..n_ports {
+                for p in 0..n_ports {
+                    let idx = (k * n_ports + q) * n_ports + p;
+                    buf[idx] = s_k[(q, p)];
+                }
+            }
+        }
+    } else {
+        let sweep = solver.sweep(&omegas).map_err(crate::errors::yee_to_py)?;
+        for (p, port_sweep) in sweep.s_pp.iter().enumerate().take(n_ports) {
+            for (k, &s_pp_k) in port_sweep.iter().enumerate().take(n_omegas) {
+                let idx = (k * n_ports + p) * n_ports + p;
+                buf[idx] = s_pp_k;
+            }
         }
     }
     let arr = numpy::ndarray::Array3::from_shape_vec((n_omegas, n_ports, n_ports), buf)
