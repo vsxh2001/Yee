@@ -189,8 +189,19 @@ fn lossy_lorentz_cavity_newton_converges_complex() {
     // there.
     solver.tol = 1e-7;
 
+    // `sigma_factor = 0.9` places σ ~10 % below the trial `(ω/c)²` so
+    // TE_{101} is the dominant largest-`|1/(λ−σ)|` mode for the
+    // inverse-iteration solver — empirically required for the
+    // post-fix update rule (ω² = c²·λ) to converge from the air
+    // warm-start on the Lorentz fixture. The D4 / pre-fix tests used
+    // `sigma_factor = 2.5` because the buggy ε-double-divide form
+    // happened to collapse ω onto the lower band where 2.5 happened to
+    // bracket the lowest mode; the corrected form needs σ explicitly
+    // below the target eigenvalue. See QQQQQQQQ D6 finding 2 in
+    // `crates/yee-fem/validation/README.md` for the sigma-heuristic
+    // history.
     let result = solver
-        .solve_with_newton(&mesh, omega_0, 2.5)
+        .solve_with_newton(&mesh, omega_0, 0.9)
         .expect("Newton solve_with_newton must converge on Lorentz fixture");
 
     // (a) The converged ω must have non-trivial imaginary part — the
@@ -226,6 +237,113 @@ fn lossy_lorentz_cavity_newton_converges_complex() {
         !result.e_vec.is_empty(),
         "converged eigenvector must have at least one interior DoF",
     );
+
+    // (e) Analytic-compare gate (Track TTTTTTTT regression catch for
+    //     QQQQQQQQ D6 finding 1).
+    //
+    //     The closed-form Pozar §3.1 dispersion relation for the
+    //     TE_{101} mode on a homogeneously-filled PEC cavity is
+    //
+    //         ω² · ε(ω) / c² = (π/a)² + (π/d)²,
+    //
+    //     where `ε(ω)` is the same single-pole Lorentz form used by the
+    //     FEM `M` matrix. Solving it via inner Newton on the continuum
+    //     gives an analytic complex `ω_analytic` against which the
+    //     converged FEM `ω` must agree within ±5 % on Re, ±10 % on Im.
+    //
+    //     Under the pre-fix `ω² = λ / (μ₀ε₀ε(ω))` form, the FEM
+    //     converges to `Re(ω_analytic) / √ε_∞ ≈ Re(ω_analytic) / 2` on
+    //     this fixture (ε_∞ = 4) and this assertion fails. Under the
+    //     post-fix `ω² = c²·λ` form, the FEM tracks the analytic root
+    //     to FEM-discretisation tolerance.
+    let omega_analytic = analytic_lorentz_te101_omega();
+    let re_rel_err = (result.omega.re - omega_analytic.re).abs() / omega_analytic.re.abs();
+    assert!(
+        re_rel_err <= 0.05,
+        "lossy Lorentz Re(ω) = {} ({} GHz) vs analytic Re(ω_analytic) = {} ({} GHz): \
+         relative error = {:.4e} > 5 % tolerance (pre-fix expected ratio ≈ 1/√ε_∞ = 0.5)",
+        result.omega.re,
+        result.omega.re / (2.0 * PI * 1e9),
+        omega_analytic.re,
+        omega_analytic.re / (2.0 * PI * 1e9),
+        re_rel_err,
+    );
+    let im_rel_err = (result.omega.im - omega_analytic.im).abs() / omega_analytic.im.abs();
+    assert!(
+        im_rel_err <= 0.10,
+        "lossy Lorentz Im(ω) = {} (= {} MHz) vs analytic Im(ω_analytic) = {} (= {} MHz): \
+         relative error = {:.4e} > 10 % tolerance",
+        result.omega.im,
+        result.omega.im / (2.0 * PI * 1e6),
+        omega_analytic.im,
+        omega_analytic.im / (2.0 * PI * 1e6),
+        im_rel_err,
+    );
+}
+
+/// Closed-form complex Lorentz permittivity used by the test fixture:
+/// matches `Material::eps_at` evaluated at the same parameters
+/// (`ε_∞ = 4`, `ω_0 = 2π·20 GHz`, `ω_p = 2π·2 GHz`, `γ = 2π·0.5 GHz`),
+/// generalised to complex argument so the analytic Newton root finder
+/// can step into the complex plane.
+///
+/// Lorentz contribution: `+ ω_p² / (ω_0² − ω² − jγω)`. For complex
+/// `ω` the denominator is `ω_0² − ω² − jγω` evaluated with complex
+/// arithmetic; the FEM-side `Material::eps_at(omega: f64)` collapses to
+/// this expression on the real axis.
+fn eps_lorentz_complex(omega: Complex64) -> Complex64 {
+    let eps_inf = Complex64::new(4.0, 0.0);
+    let omega_0 = 2.0 * PI * 20.0e9;
+    let omega_p = 2.0 * PI * 2.0e9;
+    let gamma = 2.0 * PI * 0.5e9;
+    let j = Complex64::new(0.0, 1.0);
+    let denom = Complex64::new(omega_0 * omega_0, 0.0) - omega * omega - j * gamma * omega;
+    eps_inf + Complex64::new(omega_p * omega_p, 0.0) / denom
+}
+
+/// Analytic complex `ω_analytic` for the TE_{101} mode on the WR-90
+/// cavity uniformly filled with the test's Lorentz oscillator,
+/// computed by Newton-iterating the Pozar §3.1 dispersion relation
+///
+/// ```text
+///     F(ω) = ω² · ε(ω) / c² − k_geom²,    k_geom² = (π/a)² + (π/d)².
+/// ```
+///
+/// The Newton derivative is evaluated analytically:
+/// `F'(ω) = (2ω·ε(ω) + ω²·ε'(ω)) / c²`, with `ε'(ω)` the closed-form
+/// derivative of the Lorentz pole. The root finder warm-starts from
+/// the lossless air resonance `ω_air = c · √k_geom²` and converges in
+/// ~10 iterations on this fixture; the result is the gold reference
+/// against which the FEM `solve_with_newton` is compared.
+fn analytic_lorentz_te101_omega() -> Complex64 {
+    let omega_0 = 2.0 * PI * 20.0e9;
+    let omega_p = 2.0 * PI * 2.0e9;
+    let gamma = 2.0 * PI * 0.5e9;
+    let j = Complex64::new(0.0, 1.0);
+
+    // d/dω [ω_p² / (ω_0² − ω² − jγω)]
+    //   = − ω_p² · (−2ω − jγ) / (ω_0² − ω² − jγω)²
+    //   =   ω_p² · (2ω + jγ)  / (ω_0² − ω² − jγω)²
+    let eps_prime = |omega: Complex64| -> Complex64 {
+        let denom = Complex64::new(omega_0 * omega_0, 0.0) - omega * omega - j * gamma * omega;
+        Complex64::new(omega_p * omega_p, 0.0) * (Complex64::new(2.0, 0.0) * omega + j * gamma)
+            / (denom * denom)
+    };
+
+    let k_geom_sq = (PI / CAVITY_A_M).powi(2) + (PI / CAVITY_D_M).powi(2);
+    let mut omega = Complex64::new(C0 * k_geom_sq.sqrt(), 0.0);
+    for _ in 0..50 {
+        let eps = eps_lorentz_complex(omega);
+        let f = omega * omega * eps / Complex64::new(C0 * C0, 0.0) - Complex64::new(k_geom_sq, 0.0);
+        let f_prime = (Complex64::new(2.0, 0.0) * omega * eps + omega * omega * eps_prime(omega))
+            / Complex64::new(C0 * C0, 0.0);
+        let step = f / f_prime;
+        omega -= step;
+        if step.norm() < 1e-9 * omega.norm() {
+            break;
+        }
+    }
+    omega
 }
 
 /// D5 gate test 3: `max_iter = 1` with a tight tol must error out on
