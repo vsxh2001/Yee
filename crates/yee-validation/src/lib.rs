@@ -1392,6 +1392,13 @@ pub fn run_fem_eig_001_rectangular_cavity() -> Result<FemEigValidationResult, ye
     })
 }
 
+// ---------------------------------------------------------------------
+// nl-001: Phase 3.nl.0 production validation gate (10-prompt
+// end-to-end) — Track CCCCCCCC R6.
+// ---------------------------------------------------------------------
+
+pub mod nl_001;
+
 #[cfg(test)]
 mod tests {
     use super::*;

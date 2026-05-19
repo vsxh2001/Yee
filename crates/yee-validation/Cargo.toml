@@ -18,8 +18,16 @@ yee-fem      = { workspace = true }
 yee-mesh     = { workspace = true }
 yee-io       = { workspace = true }
 yee-plotters = { workspace = true }
+# Phase 3.nl.0 R6: the `nl-001` production gate consumes `DesignIntent`,
+# the offline parser and the deterministic emitter from `yee-design`.
+yee-design   = { workspace = true }
 nalgebra     = { workspace = true }
 num-complex  = { workspace = true }
 serde        = { workspace = true, features = ["derive"] }
 serde_json   = { workspace = true }
 thiserror    = { workspace = true }
+# `toml` parser for the canonical-prompts manifest at
+# `crates/yee-design/validation/prompts.toml`. Already in the workspace
+# lock via `yee-design` itself; declared here so the `nl_001` driver
+# does not depend on `yee-design` re-exporting a parser surface.
+toml         = "0.8"
