@@ -289,6 +289,32 @@ pub struct SubgridRegion {
     /// Spec: `docs/superpowers/specs/2026-05-19-phase-2-fdtd-7-x-berenger-huygens-design.md` §3.
     /// ADR:  `docs/src/decisions/0035-berenger-huygens-subgridding.md`.
     fine_e_snapshot: Option<FineESnapshot>,
+    /// Phase 2.fdtd.7.y Option β `E_pre` snapshot — fine `E_t` captured in
+    /// sub-step 2 immediately after [`Self::interpolate_coarse_e_to_fine`]
+    /// at `frac = 0.75` writes the Q3 Dirichlet value and **before** that
+    /// sub-step's [`Self::update_fine_e`] runs. Paired with
+    /// [`Self::fine_e_post_snapshot`] to compute the compensating M source
+    /// `M = -n̂ × (E_post − E_pre)` (consumed by
+    /// [`Self::inject_m_to_coarse_h`] starting in Phase 2.fdtd.7.y Step C2;
+    /// populated-but-unread in C1).
+    ///
+    /// `None` until [`Self::snapshot_fine_e_pre_update`] has been called at
+    /// least once.
+    ///
+    /// Spec: `docs/superpowers/specs/2026-05-19-phase-2-fdtd-7-y-m-coupling-design.md` §3.
+    /// ADR:  `docs/src/decisions/0038-berenger-m-coupling-spec-amendment.md`.
+    fine_e_pre_snapshot: Option<FineESnapshot>,
+    /// Phase 2.fdtd.7.y Option β `E_post` snapshot — fine `E_t` captured
+    /// immediately after sub-step 2's [`Self::update_fine_e`] completes.
+    /// Paired with [`Self::fine_e_pre_snapshot`]; see that field's docs
+    /// for the compensating-source rationale.
+    ///
+    /// `None` until [`Self::snapshot_fine_e_post_update`] has been called
+    /// at least once.
+    ///
+    /// Spec: `docs/superpowers/specs/2026-05-19-phase-2-fdtd-7-y-m-coupling-design.md` §3.
+    /// ADR:  `docs/src/decisions/0038-berenger-m-coupling-spec-amendment.md`.
+    fine_e_post_snapshot: Option<FineESnapshot>,
 }
 
 /// Mid-coarse-step snapshot of the fine `H` field components used by the
@@ -398,6 +424,8 @@ impl SubgridRegion {
             snapshots,
             fine_h_snapshot: None,
             fine_e_snapshot: None,
+            fine_e_pre_snapshot: None,
+            fine_e_post_snapshot: None,
         })
     }
 
@@ -530,6 +558,125 @@ impl SubgridRegion {
             ey: self.fine.ey.clone(),
             ez: self.fine.ez.clone(),
         });
+    }
+
+    /// Snapshot the fine `E_t` field **before** sub-step 2's
+    /// [`Self::update_fine_e`] runs — i.e. immediately after sub-step 2's
+    /// [`Self::interpolate_coarse_e_to_fine`] has written the Q3 Dirichlet
+    /// value onto the outer fine layer. Companion to
+    /// [`Self::snapshot_fine_e_post_update`]; the pair forms the Phase
+    /// 2.fdtd.7.y Option β compensating M source
+    /// `M = -n̂ × (E_post − E_pre)`.
+    ///
+    /// Time-level diagram (sub-step 2 within one coarse step `n`):
+    ///
+    /// ```text
+    ///   coarse E^n                          coarse E^{n+1}
+    ///       │  Q3 Dirichlet                       │
+    ///       └─► interpolate_coarse_e_to_fine(0.75)
+    ///              │
+    ///              ▼   E_pre captured here (post-Q3, pre-update_fine_e)
+    ///       snapshot_fine_e_pre_update   ◄── this method
+    ///              │
+    ///              ▼
+    ///         update_fine_h
+    ///              │
+    ///              ▼
+    ///         update_fine_e   (fine E advances by one fine dt curl-of-H step)
+    ///              │
+    ///              ▼   E_post captured here (post-update_fine_e)
+    ///       snapshot_fine_e_post_update
+    /// ```
+    ///
+    /// By construction `E_pre ≈ time-interpolated coarse E_surface` (the
+    /// Q3 Dirichlet tie); `E_post − E_pre` then isolates the
+    /// Maxwell-evolved correction added by the fine sub-step's
+    /// `update_fine_e`, which is the physically non-zero quantity the
+    /// compensating source draws on.
+    ///
+    /// Phase 2.fdtd.7.y Step C1 — snapshot is captured but not yet
+    /// consumed by [`Self::inject_m_to_coarse_h`] (that wires up in
+    /// Step C2).
+    ///
+    /// Spec: `docs/superpowers/specs/2026-05-19-phase-2-fdtd-7-y-m-coupling-design.md` §3.
+    /// ADR:  `docs/src/decisions/0038-berenger-m-coupling-spec-amendment.md`.
+    pub fn snapshot_fine_e_pre_update(&mut self) {
+        self.fine_e_pre_snapshot = Some(FineESnapshot {
+            ex: self.fine.ex.clone(),
+            ey: self.fine.ey.clone(),
+            ez: self.fine.ez.clone(),
+        });
+    }
+
+    /// Snapshot the fine `E_t` field **after** sub-step 2's
+    /// [`Self::update_fine_e`] completes. Companion to
+    /// [`Self::snapshot_fine_e_pre_update`]; see that method's docstring
+    /// for the time-level diagram.
+    ///
+    /// Time-level diagram (sub-step 2 within one coarse step `n`):
+    ///
+    /// ```text
+    ///         snapshot_fine_e_pre_update          (E_pre = post-Q3 Dirichlet)
+    ///              │
+    ///              ▼
+    ///         update_fine_h
+    ///              │
+    ///              ▼
+    ///         update_fine_e   (fine E advances by one fine dt curl-of-H step)
+    ///              │
+    ///              ▼   E_post captured here
+    ///       snapshot_fine_e_post_update   ◄── this method
+    /// ```
+    ///
+    /// Together with `E_pre`, this pair feeds the Phase 2.fdtd.7.y
+    /// Option β compensating M source
+    /// `M = -n̂ × (E_post − E_pre)`; the difference isolates the
+    /// Maxwell-evolved part of fine E that escapes the Q3 Dirichlet tie
+    /// and discards the Dirichlet-tied part that would otherwise
+    /// nullify against the coarse ghost in Berenger's canonical form
+    /// (see ADR-0038 / OOOOOOO's empirical regression).
+    ///
+    /// Phase 2.fdtd.7.y Step C1 — snapshot is captured but not yet
+    /// consumed by [`Self::inject_m_to_coarse_h`] (that wires up in
+    /// Step C2). Distinct from [`Self::snapshot_fine_e_end_of_step`],
+    /// which targets the deferred B2.1 M source `M = -n̂ × E_fine^{n+1}`
+    /// at the *end* of the coarse step rather than the compensating
+    /// per-sub-step delta.
+    ///
+    /// Spec: `docs/superpowers/specs/2026-05-19-phase-2-fdtd-7-y-m-coupling-design.md` §3.
+    /// ADR:  `docs/src/decisions/0038-berenger-m-coupling-spec-amendment.md`.
+    pub fn snapshot_fine_e_post_update(&mut self) {
+        self.fine_e_post_snapshot = Some(FineESnapshot {
+            ex: self.fine.ex.clone(),
+            ey: self.fine.ey.clone(),
+            ez: self.fine.ez.clone(),
+        });
+    }
+
+    /// Immutable borrow of the Phase 2.fdtd.7.y Option β `E_pre` snapshot
+    /// (`ex`, `ey`, `ez`), populated by
+    /// [`Self::snapshot_fine_e_pre_update`]. Returns `None` if no
+    /// snapshot has been taken yet.
+    ///
+    /// Diagnostic/test accessor for Phase 2.fdtd.7.y Step C1; the
+    /// production consumer ([`Self::inject_m_to_coarse_h`] in Step C2)
+    /// reaches into the field directly.
+    pub fn fine_e_pre_snapshot(&self) -> Option<(&Array3<f64>, &Array3<f64>, &Array3<f64>)> {
+        self.fine_e_pre_snapshot
+            .as_ref()
+            .map(|s| (&s.ex, &s.ey, &s.ez))
+    }
+
+    /// Immutable borrow of the Phase 2.fdtd.7.y Option β `E_post`
+    /// snapshot (`ex`, `ey`, `ez`), populated by
+    /// [`Self::snapshot_fine_e_post_update`]. Returns `None` if no
+    /// snapshot has been taken yet.
+    ///
+    /// Diagnostic/test accessor for Phase 2.fdtd.7.y Step C1.
+    pub fn fine_e_post_snapshot(&self) -> Option<(&Array3<f64>, &Array3<f64>, &Array3<f64>)> {
+        self.fine_e_post_snapshot
+            .as_ref()
+            .map(|s| (&s.ex, &s.ey, &s.ez))
     }
 
     /// Base bounds validation: `lo < hi` per axis, `hi` inside the parent.
@@ -2426,8 +2573,19 @@ impl SubgriddedSolver {
         // 9. Fine sub-step k = 2 (interpolate at t = n + 3/4 between
         //    pre-J E^n and pre-J E^{n+1}).
         region.interpolate_coarse_e_to_fine(0.75);
+        // Phase 2.fdtd.7.y Step C1: capture fine E *after* the Q3
+        // Dirichlet write but *before* update_fine_e. Populates the
+        // `E_pre` slot the compensating M source will consume in Step C2.
+        region.snapshot_fine_e_pre_update();
         region.update_fine_h();
         region.update_fine_e();
+        // Phase 2.fdtd.7.y Step C1: capture fine E *after* update_fine_e
+        // closes the fine sub-step. Together with the `E_pre` snapshot
+        // above, this gives the per-sub-step delta the compensating M
+        // source draws on in Step C2. Distinct from the
+        // `snapshot_fine_e_end_of_step` call below, which feeds the
+        // B2.1 deferred M source kept for one release cycle.
+        region.snapshot_fine_e_post_update();
 
         // 10. J-source injection — applies J^{n+1/2} to coarse E^{n+1}
         //     *after* the Q3 snapshots and both fine sub-steps have
@@ -2525,8 +2683,12 @@ impl SubgriddedSolver {
 
         // 10. Fine sub-step k = 2.
         region.interpolate_coarse_e_to_fine(0.75);
+        // Phase 2.fdtd.7.y Step C1: see [`Self::step`] for the
+        // E_pre / E_post snapshot rationale. Populated-but-unread in C1.
+        region.snapshot_fine_e_pre_update();
         region.update_fine_h();
         region.update_fine_e();
+        region.snapshot_fine_e_post_update();
 
         // 11. J-source injection — applies J^{n+1/2} to coarse E^{n+1}
         //     after both fine sub-steps have read coarse E (so the
