@@ -25,3 +25,7 @@ thiserror  = { workspace = true }
 # directly. `toml` is still used as a *parser* in the round-trip tests.
 toml       = "0.8"
 sha2       = "0.10"
+# `regex` is in the lock already (clap pulls it transitively); promote to a
+# direct dep so the offline parser's frequency regex compiles independently
+# of clap's MSRV / feature surface. R5 brief approves direct dependence.
+regex      = "1"

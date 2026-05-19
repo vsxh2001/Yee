@@ -26,6 +26,7 @@ yee-cuda    = { workspace = true }
 yee-io      = { workspace = true }
 yee-plotters = { workspace = true }
 yee-validation = { path = "../yee-validation", version = "0.0.0" }
+yee-design  = { workspace = true }
 num-complex = { workspace = true }
 clap        = { workspace = true }
 clap_complete = "4"
@@ -37,3 +38,11 @@ tracing-subscriber = { workspace = true }
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
+# `design_offline.rs` integration test re-implements the offline parser's
+# frequency-extraction regex (so the assertion is against the prompt, not
+# against the parser under test) and parses the emitted TOML to read the
+# `[frequency].center_hz` row back out. `serde` is also needed for the
+# `#[derive(Deserialize)]` row structs in that test.
+regex      = "1"
+toml       = "0.8"
+serde      = { workspace = true }
