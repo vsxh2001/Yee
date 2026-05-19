@@ -26,6 +26,7 @@
 - [Waveguide eigenmode from Python](tutorials/04-waveguide-eigenmode-from-python.md)
 - [Natural-language design surface](tutorials/04-nl-design-surface.md)
 - [KiCad PCB import to MoM](tutorials/05-kicad-import.md)
+- [Dispersive FEM cavity eigenmode from Python](tutorials/06-fem-cavity-dispersive.md)
 
 # Decisions
 
