@@ -547,48 +547,137 @@ pub struct PmlRegion {
     pub config: Option<PmlConfig>,
 }
 
+/// One modal-basis element of a [`PortDefinition`]
+/// (Phase 4.fem.eig.3.5.4; ADR-0047).
+///
+/// Each [`PortMode`] is one tangential modal shape `e_t^{p,m}(x)` plus
+/// its propagation constant `β^{p,m}(ω)` and an incident-amplitude
+/// scaling `a_inc`. A [`PortDefinition`] carries an ordered
+/// `Vec<PortMode>` so the wave-port termination spans a finite-
+/// dimensional modal subspace (Jin §10.6 multi-mode wave-port; Pozar
+/// §3.3 TE_{mn} basis).
+///
+/// The **driving mode** is the unique [`PortMode`] whose
+/// [`Self::a_inc`] is non-zero — typically the dominant TE_{10} basis
+/// vector on the port face. Higher-order modes carry `a_inc = 0` and
+/// participate only as projection directions for the outgoing
+/// scattered field. The Phase 4.fem.eig.3.5.4 M2 post-solve
+/// `S_{p,m₀}` extraction picks the driving mode `m₀` and projects the
+/// FEM solution onto `e_t^{p,m₀}`; non-driving modes contribute their
+/// stiffness blocks `+ j β^{p,m} B_port^{p,m}` to the global matrix so
+/// the modal orthogonal complement of `e_t^{p,m₀}` is absorbed at the
+/// port (Jin §10.6 eq. 10.79).
+///
+/// ## Sign / amplitude convention
+///
+/// [`Self::modal_e_t`] returns the **un-scaled** tangential modal
+/// shape `e_t^{p,m}(x)`; the incident amplitude `a_inc` is **not**
+/// folded into the closure return value. The Phase 4.fem.eig.3.5.4 M2
+/// assembly path multiplies the modal RHS contribution by `a_inc` at
+/// scatter time (`b_port^{p,m} += a_inc · 2 j β · ∫ N_i · e_t^{p,m}
+/// dS`); the stiffness block is amplitude-independent.
+///
+/// Callers using the [`PortDefinition::single_mode`] constructor
+/// preserve the v3.5.3 numerics bit-for-bit because the constructor
+/// sets `a_inc = Complex64::ONE`, collapsing the multiplication to
+/// identity.
+pub struct PortMode {
+    /// Modal propagation constant `β^{p,m}(ω)` at angular frequency
+    /// `ω` (rad/s). Returns `β` in rad/m. Real-valued; the caller is
+    /// responsible for clipping below-cutoff (`β = 0`) if applicable.
+    pub beta_mode: Box<dyn Fn(f64) -> f64 + Send + Sync>,
+    /// Tangential modal `e_t^{p,m}(x)` evaluated at a world-space
+    /// point on the port face. Returns the tangential incident-mode
+    /// E-field shape; components normal to the face are dropped by the
+    /// dot product inside the element-layer RHS helper.
+    pub modal_e_t: Box<dyn Fn(Vector3<f64>) -> Vector3<f64> + Send + Sync>,
+    /// Incident amplitude scaling for this mode. The driving mode
+    /// carries `Complex64::ONE`; higher-order modes carry
+    /// `Complex64::ZERO`. The Phase 4.fem.eig.3.5.4 M2 assembly path
+    /// multiplies the modal RHS contribution by `a_inc` at scatter
+    /// time; the stiffness block is amplitude-independent (see
+    /// [`Self::modal_e_t`] doc-comment).
+    pub a_inc: Complex64,
+}
+
+impl std::fmt::Debug for PortMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PortMode")
+            .field("beta_mode", &"<fn(f64) -> f64>")
+            .field("modal_e_t", &"<fn(Vector3<f64>) -> Vector3<f64>>")
+            .field("a_inc", &self.a_inc)
+            .finish()
+    }
+}
+
 /// Caller-supplied wave-port descriptor.
 ///
-/// One [`PortDefinition`] per physical port. The two closures together
-/// specify the port's modal behaviour:
-///
-/// - [`Self::beta_mode`] returns the modal propagation constant `β(ω)`
-///   at angular frequency `ω`. For a TE_{10} mode on rectangular
-///   waveguide of broad-wall `a`, this is
-///   `β(ω) = sqrt((ω/c)² − (π/a)²)`. The caller is responsible for
-///   handling the below-cutoff regime (returning `0` or a small real
-///   value); the assembly path passes the returned value through
-///   verbatim to [`crate::element::assemble_port_face_block`] and
-///   [`crate::element::assemble_port_modal_rhs`].
-/// - [`Self::modal_e_t`] returns the tangential incident-mode E-field
-///   at a world-space point on the port face, already scaled by the
-///   caller's incident amplitude `a_inc`. Phase 4.fem.eig.2 v0 samples
-///   this at the face centroid; per-Gauss-point sampling is a
-///   Phase 4.fem.eig.2.0.1 refinement.
+/// Phase 4.fem.eig.3.5.4 (ADR-0047) extends the v3.5.3 single-closure
+/// pair into an ordered `Vec<PortMode>` modal-basis container. Each
+/// [`PortMode`] carries its own `β(ω)` propagation constant, its
+/// tangential modal shape `e_t^{p,m}(x)`, and an incident-amplitude
+/// scaling `a_inc`. The v3.5.3 single-mode call site collapses to
+/// `PortDefinition::single_mode(beta, e_t)`.
 ///
 /// The wave-port face is identified by the face-classification list
 /// [`OpenBoundarySolver::face_kinds`] — every face tagged
 /// `FaceKind::WavePort(p)` for the same `p` contributes to port `p`'s
 /// stiffness + RHS scatter.
+///
+/// ## v3.5.4 M1 vs M2
+///
+/// The M1 increment lands the `Vec<PortMode>` API surface plus the
+/// [`Self::single_mode`] constructor. The internal assembly path
+/// (`OpenBoundarySolver::scatter_port_face`, `extract_s11`) still
+/// consumes only `port.modes[0]`, so the new surface is **opt-in** at
+/// the call-site level: single-mode callers using
+/// [`Self::single_mode`] preserve v3.5.3 numerics bit-for-bit;
+/// multi-mode callers can construct `PortDefinition { modes:
+/// vec![...] }` but higher-order modes' contributions land in M2.
 pub struct PortDefinition {
-    /// Modal propagation constant at angular frequency `ω` (rad/s).
-    /// Returns `β(ω)` in rad/m. Real-valued; the caller is responsible
-    /// for clipping below-cutoff (`β = 0`) if applicable.
-    pub beta_mode: Box<dyn Fn(f64) -> f64 + Send + Sync>,
-    /// Tangential modal `E_t(x)` already scaled by the incident
-    /// amplitude `a_inc`. The argument is a world-space point on the
-    /// port face (typically the face centroid); the function should
-    /// return the **tangential** incident-mode E-field at that point.
-    /// Components normal to the face are dropped by the dot product
-    /// inside [`crate::element::assemble_port_modal_rhs`].
-    pub modal_e_t: Box<dyn Fn(Vector3<f64>) -> Vector3<f64> + Send + Sync>,
+    /// Ordered modal basis spanned by this wave-port. Length ≥ 1; the
+    /// single-mode case (collapsed via [`Self::single_mode`])
+    /// reproduces the v3.5.3 numerics bit-for-bit.
+    pub modes: Vec<PortMode>,
+}
+
+impl PortDefinition {
+    /// Single-mode constructor — collapse a `(β(ω), e_t(x))` closure
+    /// pair into the v3.5.3-equivalent one-element `Vec<PortMode>`
+    /// with `a_inc = Complex64::ONE`.
+    ///
+    /// This is the source-compatible bridge for every v3.5.3 call
+    /// site: fem-eig-003, fem-eig-004, fem-eig-005, the v3.5.3
+    /// fem-eig-006 driver, and any test fixture that previously used
+    /// the struct-literal `PortDefinition { beta_mode, modal_e_t }`
+    /// shape now reads `PortDefinition::single_mode(beta, e_t)`
+    /// instead. The driving mode (`a_inc = Complex64::ONE`) is the
+    /// only mode in the basis, so the post-solve extraction picks it
+    /// unambiguously and the resulting `S_{p,p}` matches the v3.5.3
+    /// measurement bit-for-bit.
+    ///
+    /// Multi-mode call sites construct `PortDefinition { modes:
+    /// vec![PortMode { ... }, ...] }` explicitly with per-mode
+    /// `a_inc` (typically `Complex64::ONE` for the driving mode and
+    /// `Complex64::ZERO` for higher-order projection directions).
+    pub fn single_mode(
+        beta_mode: Box<dyn Fn(f64) -> f64 + Send + Sync>,
+        modal_e_t: Box<dyn Fn(Vector3<f64>) -> Vector3<f64> + Send + Sync>,
+    ) -> Self {
+        Self {
+            modes: vec![PortMode {
+                beta_mode,
+                modal_e_t,
+                a_inc: Complex64::ONE,
+            }],
+        }
+    }
 }
 
 impl std::fmt::Debug for PortDefinition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PortDefinition")
-            .field("beta_mode", &"<fn(f64) -> f64>")
-            .field("modal_e_t", &"<fn(Vector3<f64>) -> Vector3<f64>>")
+            .field("modes", &self.modes)
             .finish()
     }
 }
@@ -1159,7 +1248,7 @@ impl<'m> OpenBoundarySolver<'m> {
                 }
                 FaceKind::WavePort(p) => {
                     let port = &self.ports[p];
-                    let beta = (port.beta_mode)(omega);
+                    let beta = (port.modes[0].beta_mode)(omega);
                     if self.coupled_whitney {
                         // Phase 4.fem.eig.3 F1+F2 path: sample the
                         // modal profile at the three Gauss points on
@@ -1171,7 +1260,7 @@ impl<'m> OpenBoundarySolver<'m> {
                             let p_g = bary[0] * face_vertices[0]
                                 + bary[1] * face_vertices[1]
                                 + bary[2] * face_vertices[2];
-                            e_t_gauss[g] = (port.modal_e_t)(p_g);
+                            e_t_gauss[g] = (port.modes[0].modal_e_t)(p_g);
                         }
                         self.scatter_port_face_gauss(
                             face,
@@ -1183,7 +1272,7 @@ impl<'m> OpenBoundarySolver<'m> {
                         );
                     } else {
                         let centroid = face.centroid(self.mesh);
-                        let e_t = (port.modal_e_t)(centroid);
+                        let e_t = (port.modes[0].modal_e_t)(centroid);
                         self.scatter_port_face(
                             face,
                             beta,
@@ -1517,7 +1606,7 @@ impl<'m> OpenBoundarySolver<'m> {
             {
                 let face = &self.exterior_faces.faces[i];
                 let port = &self.ports[p];
-                let beta = (port.beta_mode)(omega);
+                let beta = (port.modes[0].beta_mode)(omega);
                 if self.coupled_whitney {
                     let face_vertices = face.world_vertices(self.mesh);
                     let mut e_t_gauss = [Vector3::<f64>::zeros(); 3];
@@ -1525,7 +1614,7 @@ impl<'m> OpenBoundarySolver<'m> {
                         let p_g = bary[0] * face_vertices[0]
                             + bary[1] * face_vertices[1]
                             + bary[2] * face_vertices[2];
-                        e_t_gauss[g] = (port.modal_e_t)(p_g);
+                        e_t_gauss[g] = (port.modes[0].modal_e_t)(p_g);
                     }
                     self.scatter_port_face_gauss(
                         face,
@@ -1537,7 +1626,7 @@ impl<'m> OpenBoundarySolver<'m> {
                     );
                 } else {
                     let centroid = face.centroid(self.mesh);
-                    let e_t = (port.modal_e_t)(centroid);
+                    let e_t = (port.modes[0].modal_e_t)(centroid);
                     self.scatter_port_face(
                         face,
                         beta,
@@ -1629,7 +1718,7 @@ impl<'m> OpenBoundarySolver<'m> {
                         let p_g = bary[0] * face_vertices[0]
                             + bary[1] * face_vertices[1]
                             + bary[2] * face_vertices[2];
-                        let e_mode_g = (port.modal_e_t)(p_g);
+                        let e_mode_g = (port.modes[0].modal_e_t)(p_g);
                         let e_fem = e_fem_g[g];
                         let dot_g = e_fem.x * Complex64::new(e_mode_g.x, 0.0)
                             + e_fem.y * Complex64::new(e_mode_g.y, 0.0)
@@ -1639,7 +1728,7 @@ impl<'m> OpenBoundarySolver<'m> {
                     }
                 } else {
                     let centroid = face.centroid(self.mesh);
-                    let e_mode = (port.modal_e_t)(centroid);
+                    let e_mode = (port.modes[0].modal_e_t)(centroid);
                     let e_fem =
                         self.e_t_at_face_centroid(face, e_interior, &system.interior_dof_of_edge);
                     let face_dot = e_fem.x * Complex64::new(e_mode.x, 0.0)
@@ -1766,7 +1855,7 @@ impl<'m> OpenBoundarySolver<'m> {
                         let p_g = bary[0] * face_vertices[0]
                             + bary[1] * face_vertices[1]
                             + bary[2] * face_vertices[2];
-                        let e_mode_g = (port.modal_e_t)(p_g);
+                        let e_mode_g = (port.modes[0].modal_e_t)(p_g);
                         let e_fem = e_fem_g[g];
                         let dot_g = e_fem.x * Complex64::new(e_mode_g.x, 0.0)
                             + e_fem.y * Complex64::new(e_mode_g.y, 0.0)
@@ -1779,7 +1868,7 @@ impl<'m> OpenBoundarySolver<'m> {
                     // unchanged from the Phase 4.fem.eig.2 shipped
                     // behaviour.
                     let centroid = face.centroid(self.mesh);
-                    let e_mode = (port.modal_e_t)(centroid);
+                    let e_mode = (port.modes[0].modal_e_t)(centroid);
 
                     let e_fem =
                         self.e_t_at_face_centroid(face, e_interior, &system.interior_dof_of_edge);
@@ -2276,7 +2365,7 @@ impl<'m> OpenBoundarySolver<'m> {
                 }
                 FaceKind::WavePort(p) => {
                     let port = &self.ports[p];
-                    let beta = (port.beta_mode)(omega);
+                    let beta = (port.modes[0].beta_mode)(omega);
                     if self.coupled_whitney {
                         let face_vertices = face.world_vertices(self.mesh);
                         let mut e_t_gauss = [Vector3::<f64>::zeros(); 3];
@@ -2284,7 +2373,7 @@ impl<'m> OpenBoundarySolver<'m> {
                             let p_g = bary[0] * face_vertices[0]
                                 + bary[1] * face_vertices[1]
                                 + bary[2] * face_vertices[2];
-                            e_t_gauss[g] = (port.modal_e_t)(p_g);
+                            e_t_gauss[g] = (port.modes[0].modal_e_t)(p_g);
                         }
                         self.scatter_port_face_gauss(
                             face,
@@ -2296,7 +2385,7 @@ impl<'m> OpenBoundarySolver<'m> {
                         );
                     } else {
                         let centroid = face.centroid(self.mesh);
-                        let e_t = (port.modal_e_t)(centroid);
+                        let e_t = (port.modes[0].modal_e_t)(centroid);
                         self.scatter_port_face(
                             face,
                             beta,

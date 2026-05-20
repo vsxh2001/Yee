@@ -133,10 +133,11 @@ fn pec_precedence_over_waveport_at_shared_edges() {
     ];
 
     // Synthetic wave-port: β = 100 rad/m, modal E_t = ŷ (uniform).
-    let ports = vec![PortDefinition {
-        beta_mode: Box::new(|_omega: f64| 100.0_f64),
-        modal_e_t: Box::new(|_p: Vector3<f64>| Vector3::new(0.0, 1.0, 0.0)),
-    }];
+    // Phase 4.fem.eig.3.5.4 M1: single-mode constructor (a_inc = ONE).
+    let ports = vec![PortDefinition::single_mode(
+        Box::new(|_omega: f64| 100.0_f64),
+        Box::new(|_p: Vector3<f64>| Vector3::new(0.0, 1.0, 0.0)),
+    )];
 
     let solver =
         OpenBoundarySolver::new(&mesh, face_kinds, ports, MaterialDatabase::new()).unwrap();
@@ -403,10 +404,11 @@ fn single_wave_port_modal_rhs_nonzero() {
     // (uniform ŷ-direction would happen to be perpendicular to some
     // edge tangents on this fixture; x̂ projects non-trivially onto at
     // least one edge of every face).
-    let ports = vec![PortDefinition {
-        beta_mode: Box::new(|_omega: f64| 100.0_f64),
-        modal_e_t: Box::new(|_p: Vector3<f64>| Vector3::new(1.0, 0.0, 0.0)),
-    }];
+    // Phase 4.fem.eig.3.5.4 M1: single-mode constructor (a_inc = ONE).
+    let ports = vec![PortDefinition::single_mode(
+        Box::new(|_omega: f64| 100.0_f64),
+        Box::new(|_p: Vector3<f64>| Vector3::new(1.0, 0.0, 0.0)),
+    )];
 
     let solver =
         OpenBoundarySolver::new(&mesh, face_kinds, ports, MaterialDatabase::new()).unwrap();

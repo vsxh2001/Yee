@@ -2964,10 +2964,12 @@ pub fn run_fem_eig_003_wr90_stub_abc_with_config(
     }
     drop(placeholder);
 
-    let port = PortDefinition {
-        beta_mode: Box::new(fem_eig_003_beta_te10),
-        modal_e_t: Box::new(fem_eig_003_modal_e_t_te10),
-    };
+    // Phase 4.fem.eig.3.5.4 M1: single-mode constructor preserves
+    // v3.5.3 numerics bit-for-bit (a_inc = Complex64::ONE).
+    let port = PortDefinition::single_mode(
+        Box::new(fem_eig_003_beta_te10),
+        Box::new(fem_eig_003_modal_e_t_te10),
+    );
 
     // ---- 4. Build the CFS-PML solver. Coupled exact-Whitney-1 modal
     // RHS / projection stays on (Phase 4.fem.eig.3 F1+F2 still load-
@@ -3277,14 +3279,16 @@ pub fn run_fem_eig_004_wr90_thruline() -> Result<FemEig004ValidationResult, yee_
     // ---- 4. Two-port definitions — both ports carry the same WR-90
     // TE_{10} modal profile (the two end faces are geometrically
     // identical modulo translation).
-    let port_0 = PortDefinition {
-        beta_mode: Box::new(fem_eig_004_beta_te10),
-        modal_e_t: Box::new(fem_eig_004_modal_e_t_te10),
-    };
-    let port_1 = PortDefinition {
-        beta_mode: Box::new(fem_eig_004_beta_te10),
-        modal_e_t: Box::new(fem_eig_004_modal_e_t_te10),
-    };
+    // Phase 4.fem.eig.3.5.4 M1: single-mode constructor preserves
+    // v3.5.3 numerics bit-for-bit (a_inc = Complex64::ONE).
+    let port_0 = PortDefinition::single_mode(
+        Box::new(fem_eig_004_beta_te10),
+        Box::new(fem_eig_004_modal_e_t_te10),
+    );
+    let port_1 = PortDefinition::single_mode(
+        Box::new(fem_eig_004_beta_te10),
+        Box::new(fem_eig_004_modal_e_t_te10),
+    );
 
     let solver = OpenBoundarySolver::new(
         &mesh,
@@ -3565,18 +3569,20 @@ pub fn run_fem_eig_005_t_junction() -> Result<FemEig005ValidationResult, yee_cor
     }
 
     // ---- 4. Three-port modal definitions ----------------------------
-    let port_0 = PortDefinition {
-        beta_mode: Box::new(fem_eig_005_beta),
-        modal_e_t: Box::new(fem_eig_005_modal_e_t_z_face),
-    };
-    let port_1 = PortDefinition {
-        beta_mode: Box::new(fem_eig_005_beta),
-        modal_e_t: Box::new(fem_eig_005_modal_e_t_z_face),
-    };
-    let port_2 = PortDefinition {
-        beta_mode: Box::new(fem_eig_005_beta),
-        modal_e_t: Box::new(fem_eig_005_modal_e_t_x_face),
-    };
+    // Phase 4.fem.eig.3.5.4 M1: single-mode constructor preserves
+    // v3.5.3 numerics bit-for-bit (a_inc = Complex64::ONE).
+    let port_0 = PortDefinition::single_mode(
+        Box::new(fem_eig_005_beta),
+        Box::new(fem_eig_005_modal_e_t_z_face),
+    );
+    let port_1 = PortDefinition::single_mode(
+        Box::new(fem_eig_005_beta),
+        Box::new(fem_eig_005_modal_e_t_z_face),
+    );
+    let port_2 = PortDefinition::single_mode(
+        Box::new(fem_eig_005_beta),
+        Box::new(fem_eig_005_modal_e_t_x_face),
+    );
 
     let solver = OpenBoundarySolver::new(
         &mesh,
@@ -3852,14 +3858,18 @@ pub fn run_fem_eig_006_high_aspect_pml_with_config(
     // Phase 4.fem.eig.3.5.3 W1: +x port shares TE_{10} modal basis
     // with the -x driving port (geometric translation along x
     // preserves the modal shape).
-    let port_0 = PortDefinition {
-        beta_mode: Box::new(fem_eig_006_beta_te10),
-        modal_e_t: Box::new(fem_eig_006_modal_e_t_te10),
-    };
-    let port_1 = PortDefinition {
-        beta_mode: Box::new(fem_eig_006_beta_te10),
-        modal_e_t: Box::new(fem_eig_006_modal_e_t_te10),
-    };
+    // Phase 4.fem.eig.3.5.4 M1: single-mode constructor preserves
+    // v3.5.3 numerics bit-for-bit (a_inc = Complex64::ONE). M3 will
+    // swap the +x port (port_1) to a multi-mode {TE_{10}, TE_{20},
+    // TE_{01}} basis termination.
+    let port_0 = PortDefinition::single_mode(
+        Box::new(fem_eig_006_beta_te10),
+        Box::new(fem_eig_006_modal_e_t_te10),
+    );
+    let port_1 = PortDefinition::single_mode(
+        Box::new(fem_eig_006_beta_te10),
+        Box::new(fem_eig_006_modal_e_t_te10),
+    );
 
     let solver = OpenBoundarySolver::new(
         &mesh,

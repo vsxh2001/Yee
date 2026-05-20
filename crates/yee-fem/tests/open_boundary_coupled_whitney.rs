@@ -110,10 +110,8 @@ fn build_solver(
             .unwrap();
     let centroids = placeholder.exterior_face_centroids();
     let kinds = classify_faces(&centroids, back_kind, FaceKind::WavePort(0));
-    let port = PortDefinition {
-        beta_mode: Box::new(beta_te10),
-        modal_e_t: Box::new(modal_e_t_te10),
-    };
+    // Phase 4.fem.eig.3.5.4 M1: single-mode constructor (a_inc = ONE).
+    let port = PortDefinition::single_mode(Box::new(beta_te10), Box::new(modal_e_t_te10));
     let solver = OpenBoundarySolver::new(mesh, kinds, vec![port], MaterialDatabase::new()).unwrap();
     if coupled_whitney {
         solver.with_coupled_whitney(true)
