@@ -188,6 +188,74 @@ The row in `crates/yee-fem/validation/README.md` carries the
 spec-scale mesh, the per-gate tolerance breakdown, and the
 finding-history pointers.
 
+## CFS-PML mode (Phase 4.fem.eig.3.5)
+
+Phase 4.fem.eig.3.5 ships **CFS-PML** (Complex Frequency Shifted
+Perfectly Matched Layer, Roden-Gedney 2000) as an alternative
+truncation kernel to the Engquist-Majda surface integral. CFS-PML
+is a thin (default 6-cell) volumetric buffer of additional tetrahedra
+outside the original cavity, in which the constitutive tensor becomes
+the stretched-coordinate form `ε(ω) · Λ(ω)`. Unlike the local
+surface-integral ABC, the volumetric PML absorbs **off-normal** and
+**evanescent** modal content uniformly — exactly the regime where
+the 2nd-order Engquist-Majda operator's intrinsic floor exposes
+itself on the WR-90 stub (`|S_{11}|` saturates near `-2e-2 dB` at the
+`(24, 12, 36)` mesh tier; see the fem-eig-003 strict-gate test
+docstring for the ADR-0042 §risks deferral path).
+
+To engage CFS-PML from the Python binding, pass a `pml_config` dict
+to `yee.fem.solve_open_cavity`:
+
+```python
+import yee.fem
+
+a, b, d = 0.02286, 0.01016, 0.030  # WR-90 stub
+nx, ny, nz = 24, 12, 36
+
+s = yee.fem.solve_open_cavity(
+    a, b, d, nx, ny, nz,
+    materials=[],
+    port_faces=[{
+        "axis": "z",
+        "side": "high",
+        "port_id": 0,
+        "modal_e_t": (0.0, 1.0, 0.0),
+    }],
+    abc_faces=[{"axis": "z", "side": "low"}],
+    omegas_hz=[10.0e9],
+    coupled_whitney=True,
+    pml_config={
+        "thickness_cells": 6,   # default; 6 to 10 per Roden-Gedney 2000 §III
+        "kappa_max": 5.0,       # coordinate stretching at outer surface
+        "m": 3,                 # polynomial grading order
+        # sigma_max and alpha_max default to 0.0 → auto-resolved
+    },
+)
+```
+
+The `pml_config` keys mirror `yee_fem::PmlConfig`. When supplied,
+`pml_config` supersedes `abc_order` — the volumetric PML absorbs in
+the bulk and the surface-integral kernel is suppressed on every
+`abc_faces` entry. Cartesian-aligned PML only in v3.5 (ADR-0043 §4);
+multi-axis edge / corner wedges land in Phase 4.fem.eig.3.5.1.
+
+### Current grading-parameter status
+
+The default grading (`thickness_cells = 6`, `m = 3`, `kappa_max = 5`,
+`sigma_max` auto-resolved) produces `|S_{11}|` band `[0.281, 0.423]`
+on the fem-eig-003 WR-90 stub — a ~10 dB improvement in dB over the
+2nd-order Engquist-Majda baseline but still ~30 dB above the spec §6
+`[-60, -40] dB` target window. The fem-eig-003 strict absorption-
+floor gate remains `#[ignore]`'d under the OOOOOOOOO P5 escape hatch
+("strict gate >5 dB above band → do NOT weaken bounds; queue Phase
+4.fem.eig.3.5.1 grading retune"); the gate test docstring records the
+measurement and three candidate failure modes.
+
+Phase 4.fem.eig.3.5.1 will sweep `(thickness_cells, m, kappa_max,
+alpha_max)` to retune; the v3.5 CFS-PML wire-in itself is correct
+(both the DC causality canary and the v3 backward-compatibility canary
+pass), only the default parameters need ablation.
+
 ## Known limitations
 
 - **`|S_{11}(f)| = 1.0` saturation at v0 mesh resolution.** Track

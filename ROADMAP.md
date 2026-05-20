@@ -111,6 +111,10 @@ Conventions used below:
   - KKKKKKKKK F7 yee.fem.solve_open_cavity multi-port + coupled_whitney/abc_order kwargs + callable modal_e_t (4 pytest; merge `f0f6d7d`)
   - MMMMMMMMM F8 08-fem-multi-port tutorial (merge `6430ed9`)
   - LLLLLLLLL sigma_factor 2.5→0.9 fix for lossy Drude (test_lossy_drude passes; pre-existing failure retired; merge `7818133`)
+  - NNNNNNNNN fem-eig-003 mesh refinement (24, 12, 36) — band [-2.22e-2, -2.86e-5] dB ~2× better in dB than (16,8,24); still ~35 dB above [-45,-35] dB; strict gates ignored; queues v3.5 PML
+- Phase 4.fem.eig.3.5 CFS-PML volumetric truncation (Roden-Gedney 2000):
+  - PPPPPPPPP design spec + plan + ADR-0043 (CFS-PML replaces Engquist-Majda surface integral; Cartesian-aligned only; merge `4889663`)
+  - OOOOOOOOO P1-P7 end-to-end CFS-PML wire-in: AbcOrder::CfsPml + PmlConfig (P1), extend_mesh_with_pml + Kuhn-6 shell (P2), assemble_tet_element_complex_anisotropic (P3), with_cfs_pml + volumetric anisotropic-ε assembly (P4), fem-eig-003 CFS-PML + new fem-eig-006 high-aspect stress (P5), yee.fem.solve_open_cavity pml_config kwarg (P6), 07-fem-open-cavity tutorial + ROADMAP refresh (P7); fem-eig-003 |S_11| band [0.281, 0.423] = [-11.0, -7.48] dB — ~10 dB improvement in dB over v3 2nd-order ABC baseline but ~30 dB above spec §6 [-60, -40] dB window; strict gates remain ignored per OOOOOOOOO P5 escape hatch, grading-parameter ablation queued for v3.5.1
 - mom-002 root-cause chain end-to-end (10 forensic tracks + 3 kernel fixes + 3 ADRs):
   - EEEEEE prefactor / JJJJJJ extent / PPPPPP GPOF / SSSSSS contour / TTTTTT residue sign / XXXXXX ψ_p / YYYYYY MPIE / CCCCCCC port-mesh / MMMMMMM ε_eff / NNNNNNN R1 retract / DDDDDDD DCIM-TM / TTTTTTT port spatial / QQQQQQQ β eigen (kernel exonerated at 1.83% from HJ)
   - ADR-0036 mom-002 validation reframe (sub-wavelength strip)
