@@ -243,13 +243,14 @@ fn fem_eig_003_passive_structure_no_amplification() {
 ///   Whitney-1 identity at 3-point Gauss quadrature and switching to
 ///   2nd-order Engquist-Majda ABC — measured band on `(16, 8, 24)`:
 ///   `[0.9945, 0.99999]` (`s11_db [-5.0e-2, -8.1e-5] dB`).
-/// * Track NNNNNNNNN (this PR) refined the mesh to `(24, 12, 36)`,
+/// * Track NNNNNNNNN refined the mesh to `(24, 12, 36)`,
 ///   roughly halving the residual in dB (`[-2.22e-2, -2.86e-5] dB`)
 ///   but still nowhere near `[-45, -35] dB`; remaining reflection is
 ///   dominated by the 2nd-order ABC's intrinsic floor.
+///
 /// Phase 4.fem.eig.3.5.2 retune un-ignores both strict gates: with the
 /// new PmlConfig::default() = (κ=2, m=3, t=16, α_order=1), |S_11| band
-/// runs at [s11_db -71.53, -55.58] dB — well below 1.0 magnitude.
+/// runs at `[s11_db -71.53, -55.58] dB` — well below 1.0 magnitude.
 #[test]
 fn fem_eig_003_strict_passive_bound_continuum_limit() {
     let result = run_fem_eig_003_wr90_stub_abc().expect("fem-eig-003 driver");
