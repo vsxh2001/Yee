@@ -14,10 +14,10 @@
 //! measures `|S_{11}(f)|` band `[0.281, 0.423]` → `s11_db ∈
 //! [-11.0, -7.48] dB` across the 8-12 GHz sweep.
 //!
-//! This is **>30 dB above the new spec §6 `[-60, -40] dB` window**
-//! and triggers the OOOOOOOOO brief escape hatch ("P5 strict gate
-//! >5 dB above [-60, -40] dB band → do NOT weaken bounds; re-
-//! `#[ignore]` with measurement-recorded docstring; queue Phase
+//! This is roughly 30 dB above the new spec §6 `[-60, -40] dB`
+//! window and triggers the OOOOOOOOO brief escape hatch ("P5 strict
+//! gate above the [-60, -40] dB band → do NOT weaken bounds;
+//! re-`#[ignore]` with measurement-recorded docstring; queue Phase
 //! 4.fem.eig.3.5.1 grading retune"). Both strict gates remain
 //! `#[ignore]`'d. The CFS-PML wire-in (P1-P4) is correct (the
 //! `pml_assembly_finite_at_dc` causality canary and the
@@ -26,17 +26,17 @@
 //! over-reflects rather than over-absorbs — the conjectured root
 //! cause is one of:
 //!
-//! (a) the analytic `h_cell` back-inference from `σ_max` mis-predicts
-//!     the true mesh spacing for the WR-90 aspect ratio (broad-wall
-//!     0.952 mm cells vs axial 0.833 mm cells — the heuristic uses a
-//!     single h_cell estimate);
-//! (b) the `kappa_max = 5` Roden-Gedney 2000 Table-I value for
-//!     "microwave waveguide discontinuity" benchmarks is calibrated
-//!     for FDTD time-domain — frequency-domain FEM may want a smaller
-//!     `kappa_max` ~ 1.5-3;
-//! (c) the polynomial order `m = 3` ramps σ too steeply for the
-//!     thin (6-layer) shell — `m = 2` may improve the inner-boundary
-//!     reflection floor.
+//! * the analytic `h_cell` back-inference from `σ_max` mis-predicts
+//!   the true mesh spacing for the WR-90 aspect ratio (broad-wall
+//!   0.952 mm cells vs axial 0.833 mm cells — the heuristic uses a
+//!   single h_cell estimate);
+//! * the `kappa_max = 5` Roden-Gedney 2000 Table-I value for
+//!   "microwave waveguide discontinuity" benchmarks is calibrated
+//!   for FDTD time-domain — frequency-domain FEM may want a smaller
+//!   `kappa_max` ~ 1.5-3;
+//! * the polynomial order `m = 3` ramps σ too steeply for the
+//!   thin (6-layer) shell — `m = 2` may improve the inner-boundary
+//!   reflection floor.
 //!
 //! Phase 4.fem.eig.3.5.1 will sweep `(thickness_cells, m, kappa_max,
 //! alpha_max)` to retune; this PR ships the CFS-PML kernel correct in
