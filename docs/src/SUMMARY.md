@@ -77,3 +77,4 @@
 - [ADR-0043: Phase 4.fem.eig.3.5 scope — CFS-PML retires fem-eig-003 strict gate](decisions/0043-phase-4-fem-eig-3-5-cfs-pml-scope.md)
 - [ADR-0044: Phase 4.fem.eig.3.5.1 CFS-PML grading retune](decisions/0044-phase-4-fem-eig-3-5-1-grading-retune.md)
 - [ADR-0045: Phase 4.fem.eig.3.5.2 alpha grading + extended H3 thickness](decisions/0045-phase-4-fem-eig-3-5-2-alpha-grading.md)
+- [ADR-0046: Phase 4.fem.eig.3.5.3 fem-eig-006 retire via wave-port termination](decisions/0046-phase-4-fem-eig-3-5-3-fem-eig-006-retire.md)
