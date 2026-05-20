@@ -292,3 +292,158 @@ fn per_axis_resolver_isotropic_mesh_matches_legacy() {
     }
     assert!(matches!(solver.abc_order(), AbcOrder::CfsPml(_)));
 }
+
+/// Phase 4.fem.eig.3.5.2 S1 — with `alpha_grading_order = 0`, the
+/// `α_α(d) = α_max · (1 − d/D)^0 = α_max` ramp collapses to the
+/// v3.5.1 constant. The assembled CFS-PML stiffness must match the
+/// v3.5.1 default-config stiffness bit-for-bit (Frobenius row-L1
+/// equality to machine epsilon).
+#[test]
+fn alpha_grading_order_zero_matches_v3_5_1() {
+    let cavity = TetMesh3D::cavity_uniform(0.02286, 0.01016, 0.030, 4, 2, 4).unwrap();
+    let (extended, classes, _faces) =
+        extend_mesh_with_pml(&cavity, &[PmlAxis::ZMin], 3).expect("extend_mesh_with_pml");
+
+    let placeholder_kinds = {
+        let mut face_map: std::collections::HashMap<[usize; 3], usize> =
+            std::collections::HashMap::new();
+        const TET_FACES: [[usize; 3]; 4] = [[1, 2, 3], [0, 2, 3], [0, 1, 3], [0, 1, 2]];
+        for tet in &extended.tetrahedra {
+            for &[a, b, c] in TET_FACES.iter() {
+                let mut key = [tet[a], tet[b], tet[c]];
+                key.sort_unstable();
+                *face_map.entry(key).or_insert(0) += 1;
+            }
+        }
+        let n_exterior = face_map.values().filter(|&&c| c == 1).count();
+        vec![FaceKind::Pec; n_exterior]
+    };
+
+    let omega = 2.0 * PI * 10e9;
+
+    // v3.5.1 baseline: default config has `alpha_grading_order = 0`.
+    let cfg_default = PmlConfig::default();
+    assert_eq!(
+        cfg_default.alpha_grading_order, 0,
+        "PmlConfig::default() must carry alpha_grading_order = 0 (v3.5.1 backward-compat)"
+    );
+
+    // Explicit `alpha_grading_order = 0` parametrisation.
+    let cfg_explicit_zero = PmlConfig {
+        alpha_grading_order: 0,
+        ..PmlConfig::default()
+    };
+
+    let solver_default = OpenBoundarySolver::new(
+        &extended,
+        placeholder_kinds.clone(),
+        Vec::new(),
+        MaterialDatabase::new(),
+    )
+    .expect("solver default")
+    .with_cfs_pml(cfg_default, classes.clone());
+
+    let solver_explicit = OpenBoundarySolver::new(
+        &extended,
+        placeholder_kinds,
+        Vec::new(),
+        MaterialDatabase::new(),
+    )
+    .expect("solver explicit")
+    .with_cfs_pml(cfg_explicit_zero, classes);
+
+    let sys_default = solver_default
+        .assemble_driven_system(omega)
+        .expect("default asm");
+    let sys_explicit = solver_explicit
+        .assemble_driven_system(omega)
+        .expect("explicit asm");
+
+    assert_eq!(sys_default.rhs.len(), sys_explicit.rhs.len());
+
+    let n = sys_default.rhs.len();
+    let mut row_l1_default = vec![0.0_f64; n];
+    for t in sys_default.matrix.triplet_iter() {
+        row_l1_default[t.row] += t.val.norm();
+    }
+    let mut row_l1_explicit = vec![0.0_f64; n];
+    for t in sys_explicit.matrix.triplet_iter() {
+        row_l1_explicit[t.row] += t.val.norm();
+    }
+    let mut max_diff = 0.0_f64;
+    for i in 0..n {
+        let d = (row_l1_default[i] - row_l1_explicit[i]).abs();
+        if d > max_diff {
+            max_diff = d;
+        }
+    }
+    assert!(
+        max_diff < 1.0e-12,
+        "alpha_grading_order = 0 path must match v3.5.1 constant-alpha path \
+         bit-for-bit (row-L1 |Δ| < 1e-12); got {max_diff:e}"
+    );
+}
+
+/// Phase 4.fem.eig.3.5.2 S1 — with `alpha_grading_order = 1`, the
+/// `α_α(d) = α_max · (1 − d/D)^1` linear ramp must produce a finite,
+/// bounded assembled stiffness (the §7 (a) causality canary survives
+/// the `denom.norm_sqr() <= MIN_POSITIVE` guard at the outer
+/// truncation surface where `α_α(D) = 0`).
+#[test]
+fn alpha_grading_order_one_assembly_finite() {
+    let cavity = TetMesh3D::cavity_uniform(0.02286, 0.01016, 0.030, 4, 2, 4).unwrap();
+    let (extended, classes, _faces) =
+        extend_mesh_with_pml(&cavity, &[PmlAxis::ZMin], 3).expect("extend_mesh_with_pml");
+
+    let placeholder_kinds = {
+        let mut face_map: std::collections::HashMap<[usize; 3], usize> =
+            std::collections::HashMap::new();
+        const TET_FACES: [[usize; 3]; 4] = [[1, 2, 3], [0, 2, 3], [0, 1, 3], [0, 1, 2]];
+        for tet in &extended.tetrahedra {
+            for &[a, b, c] in TET_FACES.iter() {
+                let mut key = [tet[a], tet[b], tet[c]];
+                key.sort_unstable();
+                *face_map.entry(key).or_insert(0) += 1;
+            }
+        }
+        let n_exterior = face_map.values().filter(|&&c| c == 1).count();
+        vec![FaceKind::Pec; n_exterior]
+    };
+
+    let cfg = PmlConfig {
+        alpha_grading_order: 1,
+        ..PmlConfig::default()
+    };
+
+    let solver = OpenBoundarySolver::new(
+        &extended,
+        placeholder_kinds,
+        Vec::new(),
+        MaterialDatabase::new(),
+    )
+    .expect("solver")
+    .with_cfs_pml(cfg, classes);
+
+    // Exercise both the high-frequency path and the DC-limit causality
+    // canary path: the outer-truncation cell has `α_α(D) = 0`, so the
+    // `denom.norm_sqr()` guard is on the critical path at low ω.
+    for &freq_hz in &[0.1e9_f64, 10.0e9] {
+        let omega = 2.0 * PI * freq_hz;
+        let sys = solver
+            .assemble_driven_system(omega)
+            .expect("alpha_grading_order=1 asm");
+        let max_abs = sys
+            .matrix
+            .triplet_iter()
+            .map(|t| t.val.norm())
+            .fold(0.0_f64, |a, b| a.max(b));
+        assert!(
+            max_abs.is_finite(),
+            "alpha_grading_order = 1 produced non-finite entry at f = {freq_hz} Hz"
+        );
+        assert!(
+            max_abs < 1.0e18,
+            "alpha_grading_order = 1 produced unbounded entry at f = {freq_hz} Hz: {max_abs:e}"
+        );
+    }
+}

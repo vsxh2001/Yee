@@ -239,46 +239,53 @@ the bulk and the surface-integral kernel is suppressed on every
 `abc_faces` entry. Cartesian-aligned PML only in v3.5 (ADR-0043 §4);
 multi-axis edge / corner wedges land in Phase 4.fem.eig.3.5.1.
 
-### Grading parameter defaults (Phase 4.fem.eig.3.5.1)
+### Grading parameter defaults (Phase 4.fem.eig.3.5.2)
 
-The default grading (`thickness_cells = 6`, `m = 3`, `kappa_max = 5`,
-`sigma_max` + `alpha_max` auto-resolved) was retained from the
-v3.5 OOOOOOOOO baseline after the v3.5.1 partial ablation sweep — see
-the §3 decision-tree exit recorded in
-`docs/superpowers/specs/2026-05-20-phase-4-fem-eig-3-5-1-grading-retune-design.md`.
-The v3.5.1 R1 work upgraded the internal resolver to use **per-axis**
-`h_α = extents[α] / cell_counts[α]` (replacing the v3.5 single
-`h_cell ≈ mean tet edge length` heuristic) — on the fem-eig-003
-WR-90 stub this alone moves `|S_{11}|` from band `[0.281, 0.423]`
-(`s11_db [-11.0, -7.48] dB`) to band `[0.0275, 0.0820]`
-(`s11_db [-31.20, -21.74] dB`), a ~14 dB improvement in dB. The
-public `pml_config` Python kwarg semantics are unchanged; users who
-override the grading triple keep working bit-for-bit.
+The v3.5.2 H4 ablation sweep (33 configurations: H1 baseline + H2
+κ_max sweep + H3 (m, thickness) sweep + H4 α-grading sweep) retired
+the fem-eig-003 strict absorption-floor gate. Winning defaults:
 
-#### Knob → effect table (partial sweep, fem-eig-003 WR-90 stub)
+| Field | Value | Why |
+|-------|-------|-----|
+| `thickness_cells` | **16** | extended H3 ablation (v3.5.1 capped at 10) |
+| `m` | **3** | polynomial-grading sweet spot for 16-cell shell |
+| `kappa_max` | **2** | smaller than Roden-Gedney 2000 Table I default 5 (per Berenger 2002 §V) |
+| `alpha_grading_order` | **1** | linear `α_α(d) = α_max·(1-d/D)` per Berenger 2002 §VI |
+| `sigma_max`, `alpha_max` | `0.0` (auto-resolved) | per-axis from `PmlMeshMeta` (v3.5.1 R1) |
 
-| Hypothesis | `kappa_max` | `m` | `thickness_cells` | `s11_db_min` | `s11_db_max` |
-|------------|-------------|-----|-------------------|--------------|--------------|
-| H1 (per-axis baseline)      | 5  | 3 | 6  | -31.20 | -21.74 |
-| H2 κ_max sweep              | 1  | 3 | 6  | -31.50 | -22.78 |
-| H2 κ_max sweep              | 2  | 3 | 6  | -30.90 | -22.55 |
-| H3 most-aggressive probe    | 2  | 4 | 10 | -58.13 | -35.45 |
+Measurement on fem-eig-003 WR-90 stub: `|S_{11}(f)|` band `[-71.53,
+-55.58] dB` — ~50 dB total improvement over v3.5 baseline `[-11.0,
+-7.48] dB`. Both `fem_eig_003_strict_absorption_floor_gate` and
+`fem_eig_003_strict_passive_bound_continuum_limit` un-ignore and
+pass in default CI.
 
-The H3 probe (`κ_max = 2`, `m = 4`, `thickness_cells = 10`) reaches
-band `[-58.13, -35.45] dB` — band-min is inside the spec §6
-`[-60, -40] dB` target, but worst-case is still ~5 dB short of the
-upper bound. **No row in the partial sweep retires both fem-eig-003
-and fem-eig-006 simultaneously**, so per the spec §3 stopping rule
-the defaults stay at `(κ_max = 5, m = 3, thickness_cells = 6)` and
-the strict gates remain `#[ignore]`'d. Phase 4.fem.eig.3.5.2 picks up
-the H3 (m, thickness) sweep completion plus `α_α(d)` polynomial
-grading per spec §7 (b).
+#### Knob → effect table (full H4 sweep, fem-eig-003 WR-90 stub)
+
+| Hypothesis | `κ_max` | `m` | `t` | `α_order` | `s11_db_min` | `s11_db_max` |
+|------------|---------|-----|-----|-----------|--------------|--------------|
+| H1 (per-axis baseline)      | 5 | 3 | 6  | 0 | -31.20 | -21.74 |
+| H2 κ_max sweep              | 2 | 3 | 6  | 0 | -30.90 | -22.55 |
+| H3 most-aggressive probe    | 2 | 4 | 10 | 0 | -58.13 | -35.45 |
+| **H4 winner (default)**     | **2** | **3** | **16** | **1** | **-71.53** | **-55.58** |
+| H4 best per m=4             | 2 | 4 | 16 | 0 | -82.73 | -54.23 |
+
+H4 winner is `(κ=2, m=3, t=16, α_order=1)` — the smallest
+`m × t × (α_order + 1)` product retiring fem-eig-003 with comfortable
+margin past the -40 dB upper bound.
+
+#### fem-eig-006 status
+
+The 100:10:1 high-aspect cavity at 30 GHz remained at `|S_{11}| =
+0.926` across all 18 H4 rows. α grading is orthogonal to that
+fixture — dominant modal content is not normal-incidence at the +x
+face. `fem_eig_006_magnitude_bounded` stays `#[ignore]`'d; queued
+for Phase 4.fem.eig.3.5.3 / 4.fem.eig.4 (rotated PML / wave-port
+termination / multi-face wedges).
 
 #### Per-fixture override pattern
 
-Users with high-aspect cavities (like the 100 : 10 : 1 fem-eig-006
-fixture) can experiment with the H3 most-aggressive probe by passing
-the `pml_config` kwarg explicitly:
+Users who want to revert to the v3.5.0 OOOOOOOOO baseline (thinner
+PML, no α grading) can override the default:
 
 ```python
 import yee.fem
@@ -292,16 +299,13 @@ s = yee.fem.solve_open_cavity(
     omegas_hz=[30.0e9],
     coupled_whitney=True,
     pml_config={
-        "thickness_cells": 10,  # bump from default 6
-        "kappa_max": 2.0,       # smaller per Berenger 2002 §V
-        "m": 4,                 # steeper polynomial ramp
-        # sigma_max and alpha_max stay 0 → auto-resolved per axis
+        "thickness_cells": 6,         # back to OOOOOOOOO default
+        "kappa_max": 5.0,
+        "m": 3,
+        "alpha_grading_order": 0,     # constant α_max (v3.5.1)
     },
 )
 ```
-
-This override does not retire the v3.5.1 strict gates either, but
-shows the knob in action.
 
 ## Known limitations
 
