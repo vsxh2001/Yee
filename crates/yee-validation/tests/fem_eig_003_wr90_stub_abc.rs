@@ -248,10 +248,12 @@ fn fem_eig_003_passive_structure_no_amplification() {
 ///   but still nowhere near `[-45, -35] dB`; remaining reflection is
 ///   dominated by the 2nd-order ABC's intrinsic floor.
 #[test]
-#[ignore = "fem-eig-003 strict passive bound (Phase 4.fem.eig.3.5): CFS-PML measures |S_11| band \
-            [0.281, 0.423] which is comfortably strictly < 1 (gate would pass); kept #[ignore]'d \
-            coupled with the still-failing absorption-floor gate per Phase 4.fem.eig.3.5.1 \
-            grading retune queue (OOOOOOOOO measurement)"]
+#[ignore = "fem-eig-003 strict passive bound (Phase 4.fem.eig.3.5.1 R4 escape-hatch): per-axis \
+            h_alpha resolver (R1) moves |S_11| band from OOOOOOOOO baseline [0.281, 0.423] to \
+            [0.0275, 0.0820] (s11_db [-31.20, -21.74] dB) — comfortably strictly < 1 (gate \
+            would pass numerically). Kept #[ignore]'d coupled with the still-failing \
+            absorption-floor gate per spec §3 + R3 decision-tree exit; queued for Phase \
+            4.fem.eig.3.5.2 alpha_alpha(d) grading"]
 fn fem_eig_003_strict_passive_bound_continuum_limit() {
     let result = run_fem_eig_003_wr90_stub_abc().expect("fem-eig-003 driver");
     let strict_passive_ok = result.s11_magnitude.iter().all(|&m| m < 1.0);
@@ -294,11 +296,13 @@ fn fem_eig_003_sweep_smoothness_no_spurious_resonance() {
 /// (mesh-aspect-ratio h_cell heuristic, kappa_max choice for FD-FEM,
 /// polynomial-order m vs shell-thickness trade-off).
 #[test]
-#[ignore = "fem-eig-003 strict absorption floor (Phase 4.fem.eig.3.5): CFS-PML default-grading \
-            measures |S_11| band [0.281, 0.423] (s11_db [-11.0, -7.48] dB) — ~10 dB \
-            improvement in dB over the 2nd-order Engquist-Majda baseline but still ~30 dB above \
-            the spec §6 [-60, -40] dB window. Queued for Phase 4.fem.eig.3.5.1 grading-parameter \
-            ablation per OOOOOOOOO brief escape hatch (P5 strict gate >5 dB above band)"]
+#[ignore = "fem-eig-003 strict absorption floor (Phase 4.fem.eig.3.5.1): per-axis h_alpha \
+            resolver (R1) moves the band from OOOOOOOOO baseline [-11.0, -7.48] dB to \
+            [-31.20, -21.74] dB. H3 most-aggressive probe (kappa=2, m=4, thickness=10) \
+            reaches [-58.13, -35.45] dB — ~28 dB total improvement, band min inside target, \
+            but worst-case still ~5 dB short of -40 dB retire threshold. H2 kappa_max sweep \
+            <1 dB. Queued for Phase 4.fem.eig.3.5.2 alpha_alpha(d) grading + extended H3 \
+            thickness ablation per spec §7 risk (a) + (b)"]
 fn fem_eig_003_strict_absorption_floor_gate() {
     let result = run_fem_eig_003_wr90_stub_abc().expect("fem-eig-003 driver");
     assert!(
