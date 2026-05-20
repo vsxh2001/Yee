@@ -3735,27 +3735,27 @@ fn fem_eig_006_modal_e_t_te10(p: nalgebra::Vector3<f64>) -> nalgebra::Vector3<f6
     nalgebra::Vector3::new(0.0, 0.0, amp)
 }
 
-/// `fem-eig-006`: high-aspect-ratio CFS-PML stability stress test
-/// (Phase 4.fem.eig.3.5 P5; spec §6).
+/// `fem-eig-006`: high-aspect-ratio cavity wave-port termination
+/// (Phase 4.fem.eig.3.5.3 W1; spec §4.2).
 ///
 /// Builds a `100 mm × 10 mm × 1 mm` rectangular cavity meshed with
-/// `(16, 3, 2)` Kuhn 6-tet bricks (~580 tets), extends with a 6-cell
-/// CFS-PML shell on the `+x = 100 mm` face, drives a TE_{10}
-/// wave-port on the `-x = 0` face at 30 GHz, and reports
-/// `S_{11}(30 GHz)` plus the per-gate booleans.
+/// `(16, 3, 2)` Kuhn 6-tet bricks (~96 native tets), drives a TE_{10}
+/// wave-port on the `-x = 0` face at 30 GHz, and terminates the
+/// `+x = 100 mm` face with a second TE_{10} wave-port (Jin §10.6
+/// closed-cavity modal termination). Reports `S_{11}(30 GHz)` plus
+/// the per-gate booleans.
 ///
 /// Per spec §6 the strict gates are:
 ///
-/// * **(A)** `|S_{11}(30 GHz)| < 0.1` — the PML must absorb the
-///   off-normal modal content the 2nd-order ABC saturates on at
-///   `~ 0.95`.
-/// * **(B)** `S_{11}` finite — PML stability canary (the CFS
-///   `α_α > 0` modification rescues this from the Berenger 1994 PML's
-///   evanescent-mode divergence).
+/// * **(A)** `|S_{11}(30 GHz)| < 0.1` — the +x wave-port absorbs the
+///   forward TE_{10} mode that the v3.5.2 CFS-PML froze at
+///   `|S_{11}| = 0.926` (SSSSSSSSS H4 ablation; ADR-0046).
+/// * **(B)** `S_{11}` finite — numerical-stability canary on the
+///   wave-port modal projection.
 ///
 /// # Errors
 ///
-/// Propagates errors from the mesh extension and the per-frequency
+/// Propagates errors from the cavity mesh build and the per-frequency
 /// driven solve.
 /// Drives the [`run_fem_eig_006_high_aspect_pml_with_config`] entry
 /// point with [`yee_fem::PmlConfig::default`] — the default CI
@@ -3768,18 +3768,37 @@ pub fn run_fem_eig_006_high_aspect_pml() -> Result<FemEig006ValidationResult, ye
 /// fem-eig-006 driver with a caller-supplied [`yee_fem::PmlConfig`]
 /// override. Equivalent to [`run_fem_eig_006_high_aspect_pml`] when
 /// `config = PmlConfig::default()`.
+///
+/// # Phase 4.fem.eig.3.5.3 W1 (ADR-0046)
+///
+/// The `pml_config` parameter is **vestigial** after the v3.5.3
+/// wave-port-termination switch: the driver no longer extends the
+/// cavity with a CFS-PML shell and no longer wires `pml_config` into
+/// `OpenBoundarySolver::with_cfs_pml`. The parameter is retained for
+/// source-compatibility with the v3.5.2 ablation binary
+/// (`crates/yee-validation/examples/cfs_pml_grading_sweep.rs`); the
+/// fem-eig-006 rows of that sweep CSV now produce constant
+/// `|S_{11}|` across `(m, thickness, alpha_grading_order)` because
+/// the wave-port floor dominates. Removal is queued for Phase
+/// 4.fem.eig.4 cleanup.
 pub fn run_fem_eig_006_high_aspect_pml_with_config(
     pml_config: yee_fem::PmlConfig,
 ) -> Result<FemEig006ValidationResult, yee_core::Error> {
-    use yee_fem::{
-        FaceKind, MaterialDatabase, OpenBoundarySolver, PmlAxis, PortDefinition,
-        extend_mesh_with_pml,
-    };
+    use yee_fem::{FaceKind, MaterialDatabase, OpenBoundarySolver, PortDefinition};
     use yee_mesh::TetMesh3D;
+
+    // Phase 4.fem.eig.3.5.3 W1: pml_config is no longer consumed by
+    // this driver (see fn-level doc-comment). Suppress unused-variable
+    // lint without breaking the source signature.
+    let _ = pml_config;
 
     let t0 = Instant::now();
 
-    let cavity = TetMesh3D::cavity_uniform(
+    // Phase 4.fem.eig.3.5.3 W1: cavity is its native (16, 3, 2) shape
+    // (~96 Kuhn-6 tets), no PML extension. The +x face becomes a
+    // second wave-port terminating the TE_{10} mode (Jin §10.6); the
+    // v3.5.2 CFS-PML path is retired here per ADR-0046.
+    let mesh = TetMesh3D::cavity_uniform(
         FEM_EIG_006_A_M,
         FEM_EIG_006_B_M,
         FEM_EIG_006_D_M,
@@ -3789,11 +3808,7 @@ pub fn run_fem_eig_006_high_aspect_pml_with_config(
     )
     .map_err(|e| yee_core::Error::Invalid(format!("fem-eig-006 cavity_uniform: {e}")))?;
 
-    // Phase 4.fem.eig.3.5.1 R2: pml_config now comes from the caller.
-    let (mesh, pml_classes, _faces) =
-        extend_mesh_with_pml(&cavity, &[PmlAxis::XMax], pml_config.thickness_cells)?;
-
-    // Resolve extended-mesh exterior face centroids.
+    // Resolve native-cavity exterior face centroids.
     let placeholder_kinds = {
         let mut face_map: std::collections::HashMap<[usize; 3], usize> =
             std::collections::HashMap::new();
@@ -3817,29 +3832,42 @@ pub fn run_fem_eig_006_high_aspect_pml_with_config(
     let centroids = placeholder.exterior_face_centroids();
     drop(placeholder);
 
-    // Classify faces: x ≈ 0 → WavePort(0), everything else → Pec.
-    // The PML inner interface at x = FEM_EIG_006_A_M is internal to
-    // the extended mesh; the outer PML truncation surface at
-    // x = FEM_EIG_006_A_M + t·dx is PEC.
+    // Phase 4.fem.eig.3.5.3 W1 face classification:
+    //   x ≈ 0              → WavePort(0)  (driving port, unchanged)
+    //   x ≈ FEM_EIG_006_A_M → WavePort(1)  (NEW: TE_{10} termination)
+    //   everything else    → Pec
     let mut face_kinds: Vec<FaceKind> = Vec::with_capacity(centroids.len());
     let tol = 1e-9;
     for c in &centroids {
         let kind = if c.x.abs() < tol {
             FaceKind::WavePort(0)
+        } else if (c.x - FEM_EIG_006_A_M).abs() < tol {
+            FaceKind::WavePort(1)
         } else {
             FaceKind::Pec
         };
         face_kinds.push(kind);
     }
 
-    let port = PortDefinition {
+    // Phase 4.fem.eig.3.5.3 W1: +x port shares TE_{10} modal basis
+    // with the -x driving port (geometric translation along x
+    // preserves the modal shape).
+    let port_0 = PortDefinition {
+        beta_mode: Box::new(fem_eig_006_beta_te10),
+        modal_e_t: Box::new(fem_eig_006_modal_e_t_te10),
+    };
+    let port_1 = PortDefinition {
         beta_mode: Box::new(fem_eig_006_beta_te10),
         modal_e_t: Box::new(fem_eig_006_modal_e_t_te10),
     };
 
-    let solver = OpenBoundarySolver::new(&mesh, face_kinds, vec![port], MaterialDatabase::new())?
-        .with_coupled_whitney(true)
-        .with_cfs_pml(pml_config, pml_classes);
+    let solver = OpenBoundarySolver::new(
+        &mesh,
+        face_kinds,
+        vec![port_0, port_1],
+        MaterialDatabase::new(),
+    )?
+    .with_coupled_whitney(true);
 
     let omega = 2.0 * std::f64::consts::PI * FEM_EIG_006_F_HZ;
     let sweep = solver.sweep(&[omega])?;
@@ -3864,10 +3892,10 @@ pub fn run_fem_eig_006_high_aspect_pml_with_config(
 
     let elapsed = t0.elapsed().as_secs_f64();
     let notes = format!(
-        "fem-eig-006 high-aspect CFS-PML stress ({nx}×{ny}×{nz} cavity, \
-         {tets} extended tets); f = {f_ghz:.1} GHz; |S_11| = {mag:.6} \
-         ({db:.2} dB); gate(A) |S_11|<0.1 = {a}; gate(B) finite = {b}; \
-         wall = {wall:.2}s",
+        "fem-eig-006 high-aspect wave-port termination ({nx}×{ny}×{nz} \
+         cavity, {tets} tets, +x = WavePort(1) per Phase 4.fem.eig.3.5.3 W1); \
+         f = {f_ghz:.1} GHz; |S_11| = {mag:.6} ({db:.2} dB); gate(A) \
+         |S_11|<0.1 = {a}; gate(B) finite = {b}; wall = {wall:.2}s",
         nx = FEM_EIG_006_NX,
         ny = FEM_EIG_006_NY,
         nz = FEM_EIG_006_NZ,
