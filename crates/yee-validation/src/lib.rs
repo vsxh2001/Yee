@@ -2873,10 +2873,26 @@ fn fem_eig_003_modal_e_t_te10(p: nalgebra::Vector3<f64>) -> nalgebra::Vector3<f6
 /// strict gate (A) check and document the measured floor in the test
 /// docstring. The driver itself always returns the full result struct;
 /// the disposition decision lives in the test layer.
+/// Drives the [`run_fem_eig_003_wr90_stub_abc_with_config`] entry
+/// point with [`yee_fem::PmlConfig::default`] — the default CI
+/// invocation path for the fem-eig-003 gate.
 pub fn run_fem_eig_003_wr90_stub_abc() -> Result<FemEig003ValidationResult, yee_core::Error> {
+    run_fem_eig_003_wr90_stub_abc_with_config(yee_fem::PmlConfig::default())
+}
+
+/// Phase 4.fem.eig.3.5.1 R2 ablation entry point — calls the
+/// fem-eig-003 driver with a caller-supplied [`yee_fem::PmlConfig`]
+/// override. Equivalent to [`run_fem_eig_003_wr90_stub_abc`] when
+/// `config = PmlConfig::default()`.
+///
+/// Used by the `cfs_pml_grading_sweep` example binary to sweep
+/// `(κ_max, m, thickness_cells)` triples across the §4 ablation grid.
+pub fn run_fem_eig_003_wr90_stub_abc_with_config(
+    pml_config: yee_fem::PmlConfig,
+) -> Result<FemEig003ValidationResult, yee_core::Error> {
     use yee_fem::{
-        FaceKind, MaterialDatabase, OpenBoundarySolver, PmlAxis, PmlConfig, PortDefinition,
-        SParameters, extend_mesh_with_pml,
+        FaceKind, MaterialDatabase, OpenBoundarySolver, PmlAxis, PortDefinition, SParameters,
+        extend_mesh_with_pml,
     };
     use yee_mesh::TetMesh3D;
 
@@ -2896,7 +2912,7 @@ pub fn run_fem_eig_003_wr90_stub_abc() -> Result<FemEig003ValidationResult, yee_
     // ---- 1b. Phase 4.fem.eig.3.5 — extend the mesh with a CFS-PML
     // shell on the z = 0 face (the original ABC face). 6 brick layers
     // per Roden-Gedney 2000 §III default.
-    let pml_config = PmlConfig::default();
+    // Phase 4.fem.eig.3.5.1 R2: pml_config now comes from the caller.
     let (mesh, pml_classes, _faces) =
         extend_mesh_with_pml(&cavity, &[PmlAxis::ZMin], pml_config.thickness_cells)?;
 
@@ -3738,9 +3754,22 @@ fn fem_eig_006_modal_e_t_te10(p: nalgebra::Vector3<f64>) -> nalgebra::Vector3<f6
 ///
 /// Propagates errors from the mesh extension and the per-frequency
 /// driven solve.
+/// Drives the [`run_fem_eig_006_high_aspect_pml_with_config`] entry
+/// point with [`yee_fem::PmlConfig::default`] — the default CI
+/// invocation path for the fem-eig-006 gate.
 pub fn run_fem_eig_006_high_aspect_pml() -> Result<FemEig006ValidationResult, yee_core::Error> {
+    run_fem_eig_006_high_aspect_pml_with_config(yee_fem::PmlConfig::default())
+}
+
+/// Phase 4.fem.eig.3.5.1 R2 ablation entry point — calls the
+/// fem-eig-006 driver with a caller-supplied [`yee_fem::PmlConfig`]
+/// override. Equivalent to [`run_fem_eig_006_high_aspect_pml`] when
+/// `config = PmlConfig::default()`.
+pub fn run_fem_eig_006_high_aspect_pml_with_config(
+    pml_config: yee_fem::PmlConfig,
+) -> Result<FemEig006ValidationResult, yee_core::Error> {
     use yee_fem::{
-        FaceKind, MaterialDatabase, OpenBoundarySolver, PmlAxis, PmlConfig, PortDefinition,
+        FaceKind, MaterialDatabase, OpenBoundarySolver, PmlAxis, PortDefinition,
         extend_mesh_with_pml,
     };
     use yee_mesh::TetMesh3D;
@@ -3757,7 +3786,7 @@ pub fn run_fem_eig_006_high_aspect_pml() -> Result<FemEig006ValidationResult, ye
     )
     .map_err(|e| yee_core::Error::Invalid(format!("fem-eig-006 cavity_uniform: {e}")))?;
 
-    let pml_config = PmlConfig::default();
+    // Phase 4.fem.eig.3.5.1 R2: pml_config now comes from the caller.
     let (mesh, pml_classes, _faces) =
         extend_mesh_with_pml(&cavity, &[PmlAxis::XMax], pml_config.thickness_cells)?;
 

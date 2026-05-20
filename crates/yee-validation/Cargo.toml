@@ -36,3 +36,11 @@ thiserror    = { workspace = true }
 # lock via `yee-design` itself; declared here so the `nl_001` driver
 # does not depend on `yee-design` re-exporting a parser surface.
 toml         = "0.8"
+
+# Phase 4.fem.eig.3.5.1 R2 — CFS-PML grading-parameter ablation sweep
+# binary. Runs locally (75 min worst-case in --release on the
+# §4 ablation grid). Not a CI gate; the winning row's parameters land
+# in `yee-fem::PmlConfig::default` via the R3 analysis.
+[[example]]
+name = "cfs_pml_grading_sweep"
+path = "examples/cfs_pml_grading_sweep.rs"
