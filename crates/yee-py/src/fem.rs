@@ -35,7 +35,8 @@ use std::f64::consts::PI;
 use yee_core::units::C0;
 use yee_fem::{
     AbcOrder, DispersiveError, DispersiveSolver, FaceKind, FemEigenAssembly, InverseIterEigen,
-    Material, MaterialDatabase, MaterialPole, OpenBoundarySolver, PortDefinition, SparseEigen,
+    Material, MaterialDatabase, MaterialPole, OpenBoundarySolver, PmlAxis, PmlConfig,
+    PortDefinition, SparseEigen, extend_mesh_with_pml,
 };
 use yee_mesh::{MaterialTag, TetMesh3D};
 
@@ -580,6 +581,42 @@ struct FaceSpec {
 /// first (cheap, no GIL re-acquisition at call time); on failure it
 /// falls back to storing a `Py<PyAny>` that the closure re-binds via
 /// [`Python::with_gil`].
+/// Parse a `pml_config` Python dict into a [`PmlConfig`].
+///
+/// Recognised keys (all optional; defaults apply if absent):
+/// `thickness_cells`, `sigma_max`, `alpha_max`, `kappa_max`, `m`. Any
+/// unknown key is silently ignored (forward-compatible). Wrong types
+/// raise `ValueError`.
+fn parse_pml_config_dict(cfg_dict: &Bound<'_, PyDict>) -> PyResult<PmlConfig> {
+    let mut cfg = PmlConfig::default();
+    if let Some(v) = cfg_dict.get_item("thickness_cells")? {
+        cfg.thickness_cells = v.extract().map_err(|e| {
+            PyValueError::new_err(format!("pml_config['thickness_cells'] must be int: {e}"))
+        })?;
+    }
+    if let Some(v) = cfg_dict.get_item("sigma_max")? {
+        cfg.sigma_max = v.extract().map_err(|e| {
+            PyValueError::new_err(format!("pml_config['sigma_max'] must be float: {e}"))
+        })?;
+    }
+    if let Some(v) = cfg_dict.get_item("alpha_max")? {
+        cfg.alpha_max = v.extract().map_err(|e| {
+            PyValueError::new_err(format!("pml_config['alpha_max'] must be float: {e}"))
+        })?;
+    }
+    if let Some(v) = cfg_dict.get_item("kappa_max")? {
+        cfg.kappa_max = v.extract().map_err(|e| {
+            PyValueError::new_err(format!("pml_config['kappa_max'] must be float: {e}"))
+        })?;
+    }
+    if let Some(v) = cfg_dict.get_item("m")? {
+        cfg.m = v
+            .extract()
+            .map_err(|e| PyValueError::new_err(format!("pml_config['m'] must be int: {e}")))?;
+    }
+    Ok(cfg)
+}
+
 fn face_spec_from_pydict(face_dict: &Bound<'_, PyDict>, want_port: bool) -> PyResult<FaceSpec> {
     let axis_str: String = face_dict
         .get_item("axis")?
@@ -695,7 +732,26 @@ fn face_spec_from_pydict(face_dict: &Bound<'_, PyDict>, want_port: bool) -> PyRe
 ///     correction, lowering the normal-incidence reflection floor from
 ///     ~-40 dB to ~-60 dB). Forwards to
 ///     [`yee_fem::OpenBoundarySolver::with_abc_order`]; any other
-///     string raises ``ValueError``.
+///     string raises ``ValueError``. Ignored when ``pml_config`` is
+///     set (CFS-PML supersedes surface-integral ABC).
+/// pml_config : dict, optional
+///     If supplied, switches the open-boundary truncation kernel from
+///     surface-integral Engquist-Majda ABC to volumetric Roden-Gedney
+///     2000 CFS-PML (Phase 4.fem.eig.3.5). Recognised keys (all
+///     optional; sensible defaults apply if missing):
+///
+///     * ``"thickness_cells"`` (int, default 6) — PML shell thickness
+///       in tet brick layers.
+///     * ``"sigma_max"`` (float, default 0.0 → auto-resolved against
+///       band-centre frequency + mean h_cell).
+///     * ``"alpha_max"`` (float, default 0.0 → auto-resolved to
+///       ω₀ ε_0).
+///     * ``"kappa_max"`` (float, default 5.0).
+///     * ``"m"`` (int, default 3) — polynomial grading order.
+///
+///     The CFS-PML shell is grown on every ``abc_faces`` entry's
+///     face. Cartesian-aligned PML only (ADR-0043 §4); the rotated /
+///     non-axis-aligned case raises ``ValueError`` at construction.
 /// multi_port : bool, optional
 ///     If ``True``, the binding calls
 ///     [`yee_fem::OpenBoundarySolver::sweep_matrix`] (Phase 4.fem.eig.3
@@ -740,7 +796,8 @@ fn face_spec_from_pydict(face_dict: &Bound<'_, PyDict>, want_port: bool) -> PyRe
 #[pyfunction]
 #[pyo3(signature = (
     a, b, d, nx, ny, nz, materials, port_faces, abc_faces, omegas_hz,
-    coupled_whitney = false, abc_order = "first", multi_port = false
+    coupled_whitney = false, abc_order = "first", multi_port = false,
+    pml_config = None,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn solve_open_cavity<'py>(
@@ -758,10 +815,56 @@ fn solve_open_cavity<'py>(
     coupled_whitney: bool,
     abc_order: &str,
     multi_port: bool,
+    pml_config: Option<&Bound<'py, PyDict>>,
 ) -> PyResult<Bound<'py, PyArray3<Complex64>>> {
     // ---- 1. Build the cavity mesh -----------------------------------
-    let mesh =
+    let cavity_mesh =
         TetMesh3D::cavity_uniform(a, b, d, nx, ny, nz).map_err(crate::errors::yee_mesh_to_py)?;
+
+    // ---- 1b. Parse pml_config (Phase 4.fem.eig.3.5 P6) --------------
+    let parsed_pml_config: Option<PmlConfig> = match pml_config {
+        None => None,
+        Some(cfg_dict) => Some(parse_pml_config_dict(cfg_dict)?),
+    };
+
+    // ---- 1c. Extend the mesh if CFS-PML was requested ---------------
+    //
+    // The pml_config path: convert each `abc_faces` entry to a
+    // [`PmlAxis`] and extend the cavity mesh with a shell. The
+    // original ABC face becomes interior; the outer truncation
+    // surface becomes Pec. The face_kinds resolution below (step 5)
+    // sees the extended mesh's exterior faces and tags everything not
+    // a wave-port as Pec (since the abc_planes coordinates won't
+    // match any extended-mesh exterior face — they are now interior).
+    let (mesh, pml_data): (TetMesh3D, Option<Vec<yee_fem::PmlClass>>) =
+        if let Some(cfg) = parsed_pml_config {
+            // Parse abc_faces a second time here to extract per-axis info
+            // for the mesh extension. We rebuild the abc_planes list inside
+            // the existing flow further down.
+            let mut pml_axes: Vec<PmlAxis> = Vec::with_capacity(abc_faces.len());
+            for (i, item) in abc_faces.iter().enumerate() {
+                let face_dict = item.cast::<PyDict>().map_err(|e| {
+                    PyValueError::new_err(format!("abc_faces[{i}] must be a dict: {e}"))
+                })?;
+                let spec = face_spec_from_pydict(face_dict, false)?;
+                let axis = match (spec.axis, spec.side_high) {
+                    (0, true) => PmlAxis::XMax,
+                    (0, false) => PmlAxis::XMin,
+                    (1, true) => PmlAxis::YMax,
+                    (1, false) => PmlAxis::YMin,
+                    (2, true) => PmlAxis::ZMax,
+                    (2, false) => PmlAxis::ZMin,
+                    _ => unreachable!("axis must be in [0, 3) — face_spec_from_pydict guards this"),
+                };
+                pml_axes.push(axis);
+            }
+            let (ext, classes, _faces) =
+                extend_mesh_with_pml(&cavity_mesh, &pml_axes, cfg.thickness_cells)
+                    .map_err(crate::errors::yee_to_py)?;
+            (ext, Some(classes))
+        } else {
+            (cavity_mesh, None)
+        };
 
     // ---- 2. Parse materials → MaterialDatabase ----------------------
     let mut db = MaterialDatabase::new();
@@ -938,17 +1041,22 @@ fn solve_open_cavity<'py>(
             )));
         }
     }
-    for &(axis, side_high) in &abc_planes {
-        let target = plane_value(axis, side_high);
-        let any = centroids
-            .iter()
-            .any(|c| (([c.x, c.y, c.z])[axis] - target).abs() < plane_tol);
-        if !any {
-            return Err(PyValueError::new_err(format!(
-                "solve_open_cavity: no exterior face on abc plane axis={axis} side={} \
-                 (target coord = {target})",
-                if side_high { "high" } else { "low" }
-            )));
+    // With pml_config set, the original abc-plane faces are interior
+    // to the extended mesh (Phase 4.fem.eig.3.5 P6); skip the
+    // "exterior face exists at this plane" sanity check in that case.
+    if parsed_pml_config.is_none() {
+        for &(axis, side_high) in &abc_planes {
+            let target = plane_value(axis, side_high);
+            let any = centroids
+                .iter()
+                .any(|c| (([c.x, c.y, c.z])[axis] - target).abs() < plane_tol);
+            if !any {
+                return Err(PyValueError::new_err(format!(
+                    "solve_open_cavity: no exterior face on abc plane axis={axis} side={} \
+                     (target coord = {target})",
+                    if side_high { "high" } else { "low" }
+                )));
+            }
         }
     }
 
@@ -974,10 +1082,18 @@ fn solve_open_cavity<'py>(
     // applied via the F2 / F4 builder methods on `OpenBoundarySolver`.
     // Defaults (`false` / `AbcOrder::First`) reproduce the v2 +
     // CCCCCCCCC behaviour bit-for-bit.
-    let solver = OpenBoundarySolver::new(&mesh, face_kinds, ports, db)
+    //
+    // Phase 4.fem.eig.3.5 P6: if `pml_config` was supplied, the mesh
+    // has already been extended (step 1c) and we call `with_cfs_pml`
+    // here in place of `with_abc_order` — CFS-PML supersedes the
+    // surface-integral kernel.
+    let solver_base = OpenBoundarySolver::new(&mesh, face_kinds, ports, db)
         .map_err(crate::errors::yee_to_py)?
-        .with_coupled_whitney(coupled_whitney)
-        .with_abc_order(abc_order_enum);
+        .with_coupled_whitney(coupled_whitney);
+    let solver = match (parsed_pml_config, pml_data) {
+        (Some(cfg), Some(classes)) => solver_base.with_cfs_pml(cfg, classes),
+        _ => solver_base.with_abc_order(abc_order_enum),
+    };
 
     let omegas: Vec<f64> = {
         let mut out: Vec<f64> = Vec::with_capacity(omegas_hz.len());
