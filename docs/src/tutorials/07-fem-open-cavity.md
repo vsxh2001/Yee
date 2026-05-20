@@ -239,22 +239,69 @@ the bulk and the surface-integral kernel is suppressed on every
 `abc_faces` entry. Cartesian-aligned PML only in v3.5 (ADR-0043 §4);
 multi-axis edge / corner wedges land in Phase 4.fem.eig.3.5.1.
 
-### Current grading-parameter status
+### Grading parameter defaults (Phase 4.fem.eig.3.5.1)
 
 The default grading (`thickness_cells = 6`, `m = 3`, `kappa_max = 5`,
-`sigma_max` auto-resolved) produces `|S_{11}|` band `[0.281, 0.423]`
-on the fem-eig-003 WR-90 stub — a ~10 dB improvement in dB over the
-2nd-order Engquist-Majda baseline but still ~30 dB above the spec §6
-`[-60, -40] dB` target window. The fem-eig-003 strict absorption-
-floor gate remains `#[ignore]`'d under the OOOOOOOOO P5 escape hatch
-("strict gate >5 dB above band → do NOT weaken bounds; queue Phase
-4.fem.eig.3.5.1 grading retune"); the gate test docstring records the
-measurement and three candidate failure modes.
+`sigma_max` + `alpha_max` auto-resolved) was retained from the
+v3.5 OOOOOOOOO baseline after the v3.5.1 partial ablation sweep — see
+the §3 decision-tree exit recorded in
+`docs/superpowers/specs/2026-05-20-phase-4-fem-eig-3-5-1-grading-retune-design.md`.
+The v3.5.1 R1 work upgraded the internal resolver to use **per-axis**
+`h_α = extents[α] / cell_counts[α]` (replacing the v3.5 single
+`h_cell ≈ mean tet edge length` heuristic) — on the fem-eig-003
+WR-90 stub this alone moves `|S_{11}|` from band `[0.281, 0.423]`
+(`s11_db [-11.0, -7.48] dB`) to band `[0.0275, 0.0820]`
+(`s11_db [-31.20, -21.74] dB`), a ~14 dB improvement in dB. The
+public `pml_config` Python kwarg semantics are unchanged; users who
+override the grading triple keep working bit-for-bit.
 
-Phase 4.fem.eig.3.5.1 will sweep `(thickness_cells, m, kappa_max,
-alpha_max)` to retune; the v3.5 CFS-PML wire-in itself is correct
-(both the DC causality canary and the v3 backward-compatibility canary
-pass), only the default parameters need ablation.
+#### Knob → effect table (partial sweep, fem-eig-003 WR-90 stub)
+
+| Hypothesis | `kappa_max` | `m` | `thickness_cells` | `s11_db_min` | `s11_db_max` |
+|------------|-------------|-----|-------------------|--------------|--------------|
+| H1 (per-axis baseline)      | 5  | 3 | 6  | -31.20 | -21.74 |
+| H2 κ_max sweep              | 1  | 3 | 6  | -31.50 | -22.78 |
+| H2 κ_max sweep              | 2  | 3 | 6  | -30.90 | -22.55 |
+| H3 most-aggressive probe    | 2  | 4 | 10 | -58.13 | -35.45 |
+
+The H3 probe (`κ_max = 2`, `m = 4`, `thickness_cells = 10`) reaches
+band `[-58.13, -35.45] dB` — band-min is inside the spec §6
+`[-60, -40] dB` target, but worst-case is still ~5 dB short of the
+upper bound. **No row in the partial sweep retires both fem-eig-003
+and fem-eig-006 simultaneously**, so per the spec §3 stopping rule
+the defaults stay at `(κ_max = 5, m = 3, thickness_cells = 6)` and
+the strict gates remain `#[ignore]`'d. Phase 4.fem.eig.3.5.2 picks up
+the H3 (m, thickness) sweep completion plus `α_α(d)` polynomial
+grading per spec §7 (b).
+
+#### Per-fixture override pattern
+
+Users with high-aspect cavities (like the 100 : 10 : 1 fem-eig-006
+fixture) can experiment with the H3 most-aggressive probe by passing
+the `pml_config` kwarg explicitly:
+
+```python
+import yee.fem
+
+s = yee.fem.solve_open_cavity(
+    a, b, d, nx, ny, nz,
+    materials=[],
+    port_faces=[{"axis": "x", "side": "high", "port_id": 0,
+                 "modal_e_t": (0.0, 1.0, 0.0)}],
+    abc_faces=[{"axis": "x", "side": "low"}],
+    omegas_hz=[30.0e9],
+    coupled_whitney=True,
+    pml_config={
+        "thickness_cells": 10,  # bump from default 6
+        "kappa_max": 2.0,       # smaller per Berenger 2002 §V
+        "m": 4,                 # steeper polynomial ramp
+        # sigma_max and alpha_max stay 0 → auto-resolved per axis
+    },
+)
+```
+
+This override does not retire the v3.5.1 strict gates either, but
+shows the knob in action.
 
 ## Known limitations
 
