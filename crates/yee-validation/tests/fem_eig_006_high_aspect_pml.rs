@@ -50,13 +50,14 @@ fn fem_eig_006_no_nan_inf() {
 }
 
 #[test]
-#[ignore = "fem-eig-006 strict magnitude bound (Phase 4.fem.eig.3.5.1): per-axis h_alpha \
-            resolver (R1) ships; OOOOOOOOO baseline |S_11|(30 GHz) = 0.926 (gate B finite \
-            pass). R2 ablation grid + H3 most-aggressive probe (kappa=2, m=4, thickness=10) \
-            never reached fem-eig-006 stopping rule (fem-eig-003 worst-case did not retire \
-            -40 dB; best partial result -35.45 dB on H3 probe). kappa_max <1 dB; H3 \
-            thickness>10 + alpha_alpha(d) grading untested. Queued for Phase 4.fem.eig.3.5.2 \
-            per spec §7 risk (a) + (b)"]
+#[ignore = "fem-eig-006 strict magnitude bound (Phase 4.fem.eig.3.5.2): H4 ablation grid ran \
+            fem-eig-006 across all 18 H4 rows (m∈{3,4} × thickness∈{12,14,16} × \
+            alpha_grading_order∈{0,1,2}); |S_11|(30 GHz) frozen at 0.926 in all rows. \
+            alpha-grading is orthogonal to the 100:10:1 fixture — dominant modal content is \
+            not normal-incidence at the +x face. fem-eig-003 absorption retires at the same \
+            v3.5.2 defaults (band [-71.53, -55.58] dB). Queued for Phase 4.fem.eig.3.5.3 / \
+            4.fem.eig.4: rotated PML / multi-face wedges / wave-port termination for the \
+            high-aspect-ratio cavity"]
 fn fem_eig_006_magnitude_bounded() {
     let result = run_fem_eig_006_high_aspect_pml().expect("fem-eig-006 driver");
     assert!(
