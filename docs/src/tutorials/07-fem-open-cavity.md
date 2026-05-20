@@ -282,6 +282,42 @@ face. `fem_eig_006_magnitude_bounded` stays `#[ignore]`'d; queued
 for Phase 4.fem.eig.3.5.3 / 4.fem.eig.4 (rotated PML / wave-port
 termination / multi-face wedges).
 
+### Phase 4.fem.eig.3.5.3 — fem-eig-006 wave-port retirement attempt (W1)
+
+ADR-0046 (`docs/src/decisions/0046-phase-4-fem-eig-3-5-3-fem-eig-006-retire.md`)
+chose **W1**: replace the +x CFS-PML shell with a TE_{10}
+`FaceKind::WavePort(1)` termination per Jin §10.6. Berenger 1996
+§IV-A predicted Cartesian-aligned CFS-PML cannot absorb guide-modes
+at the +x face — the 18-row H4 sweep (frozen at `|S_{11}| = 0.926`)
+confirmed it.
+
+The W1 swap is a ~10-line driver edit
+(`run_fem_eig_006_high_aspect_pml` in `crates/yee-validation/src/lib.rs`)
+that drops `extend_mesh_with_pml` and the CFS-PML rim altogether,
+running the native `(16, 3, 2)` Kuhn-6 cavity (576 tets vs the
+v3.5.2 ~580 extended tets).
+
+**Measurement on W1**:
+
+| Configuration                | `|S_{11}|(30 GHz)` | dB     |
+|------------------------------|--------------------|--------|
+| v3.5.2 CFS-PML (best H4 row) | 0.926              | -0.67  |
+| v3.5.3 W1 TE_{10} wave-port  | 0.925644           | -0.67  |
+
+The W1 termination matches the PML measurement within numerical
+noise. Per ADR-0046 §Decision (5) and spec §7 (a): the broad-wall
+`b = 10 mm` puts the **TE_{20} cutoff at exactly 30 GHz**, so a
+TE_{10}-only port cannot project out the dominant higher-order
+modal content driving reflection.
+
+`fem_eig_006_magnitude_bounded` therefore stays `#[ignore]`'d;
+tolerance `< 0.1` is **not** weakened. Multi-mode wave-port
+extension (add `TE_{20}` and `TE_{01}` mode shapes to the +x
+`PortDefinition`) is queued for **Phase 4.fem.eig.3.5.4**.
+fem-eig-003 (CFS-PML absorption floor on the cubic cavity) remains
+retired at the v3.5.2 strict band `[-71.53, -55.58] dB` — that
+driver is untouched.
+
 #### Per-fixture override pattern
 
 Users who want to revert to the v3.5.0 OOOOOOOOO baseline (thinner
