@@ -80,3 +80,4 @@ tmp/
 .direnv/
 *.local.toml
 worktrees/
+docs/superpowers/specs/*.csv
