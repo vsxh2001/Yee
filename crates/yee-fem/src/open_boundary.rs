@@ -624,16 +624,31 @@ impl std::fmt::Debug for PortMode {
 /// `FaceKind::WavePort(p)` for the same `p` contributes to port `p`'s
 /// stiffness + RHS scatter.
 ///
-/// ## v3.5.4 M1 vs M2
+/// ## Modal-basis assembly (Phase 4.fem.eig.3.5.4 M2)
 ///
-/// The M1 increment lands the `Vec<PortMode>` API surface plus the
-/// [`Self::single_mode`] constructor. The internal assembly path
-/// (`OpenBoundarySolver::scatter_port_face`, `extract_s11`) still
-/// consumes only `port.modes[0]`, so the new surface is **opt-in** at
-/// the call-site level: single-mode callers using
-/// [`Self::single_mode`] preserve v3.5.3 numerics bit-for-bit;
-/// multi-mode callers can construct `PortDefinition { modes:
-/// vec![...] }` but higher-order modes' contributions land in M2.
+/// Per Jin §10.6, the per-face stiffness block and modal RHS sum
+/// over the modal basis:
+///
+/// ```text
+///     K_port^p = Σ_m         K_port^{p, m}    (stiffness, β-dependent per mode)
+///     b_port^p = Σ_m  a_inc_m · b_port^{p, m} (RHS, amplitude-scaled per mode)
+/// ```
+///
+/// The post-solve `S_{p,p}` extraction selects the unique driving
+/// mode `m₀ = argmax_m |a_inc_m|` and projects the FEM solution onto
+/// that mode's shape:
+///
+/// ```text
+///     S_{p, m₀}(ω) = ⟨E_h, e_t^{p, m₀}⟩ / ⟨e_t^{p, m₀}, e_t^{p, m₀}⟩.
+/// ```
+///
+/// If more than one mode carries `a_inc != 0`, the post-solve path
+/// returns an [`Error::Invalid`] tagged `"MultipleDrivingModes:"` —
+/// that case is reserved for Phase 4.fem.eig.5 dual-feed excitation.
+///
+/// Single-mode call sites built via [`Self::single_mode`] reduce to
+/// one iteration with unit `a_inc`, recovering the v3.5.3 numerics
+/// bit-for-bit.
 pub struct PortDefinition {
     /// Ordered modal basis spanned by this wave-port. Length ≥ 1; the
     /// single-mode case (collapsed via [`Self::single_mode`])
@@ -851,6 +866,53 @@ pub struct OpenBoundarySolver<'m> {
     /// scalar [`crate::assemble_tet_element_complex`] bit-for-bit
     /// identical to the v3 path.
     pml_classes: Option<Vec<crate::PmlClass>>,
+}
+
+/// Pick the unique driving [`PortMode`] of `port` (the mode with
+/// non-zero `a_inc`) for `S_{p,p}` extraction (Phase 4.fem.eig.3.5.4
+/// M2).
+///
+/// Returns the only [`PortMode`] in `port.modes` whose `a_inc` is
+/// numerically non-zero. If more than one mode carries `a_inc != 0`,
+/// returns [`Error::Invalid`] with the sentinel tag
+/// `"MultipleDrivingModes:"`; that case is reserved for Phase
+/// 4.fem.eig.5 dual-feed excitation and is not handled by the
+/// single-driving-mode projection used by
+/// [`OpenBoundarySolver::extract_s11`] and
+/// [`OpenBoundarySolver::extract_s_qp`].
+///
+/// If `port.modes` is empty or every mode carries `a_inc = 0`,
+/// returns [`Error::Invalid`] with a `"NoDrivingMode:"` sentinel.
+///
+/// **Lane note (Phase 4.fem.eig.3.5.4):** the implementation surfaces
+/// "MultipleDrivingModes" via `Error::Invalid` rather than a typed
+/// `Error::MultipleDrivingModes` enum variant because the
+/// [`yee_core::Error`] enum is in a sibling crate (out of lane for
+/// this phase). The sentinel-prefixed message keeps the case
+/// machine-distinguishable for callers. A typed variant migration is
+/// queued for v3.5.4.1.
+fn select_driving_mode(port: &PortDefinition, port_id: PortId) -> Result<&PortMode, Error> {
+    let mut driving: Option<&PortMode> = None;
+    for mode in &port.modes {
+        if mode.a_inc != Complex64::ZERO {
+            if driving.is_some() {
+                return Err(Error::Invalid(format!(
+                    "MultipleDrivingModes: port {port_id} carries more than one mode \
+                     with a_inc != 0; multi-driving-mode excitation is reserved for \
+                     Phase 4.fem.eig.5 dual-feed and is not supported by the \
+                     single-driving-mode S_{{p,p}} extraction path"
+                )));
+            }
+            driving = Some(mode);
+        }
+    }
+    driving.ok_or_else(|| {
+        Error::Invalid(format!(
+            "NoDrivingMode: port {port_id} carries zero modes with a_inc != 0; \
+             at least one mode must be a driving mode (a_inc = Complex64::ONE) \
+             for S_{{p,p}} extraction to have a defined projection direction"
+        ))
+    })
 }
 
 impl<'m> OpenBoundarySolver<'m> {
@@ -1248,35 +1310,23 @@ impl<'m> OpenBoundarySolver<'m> {
                 }
                 FaceKind::WavePort(p) => {
                     let port = &self.ports[p];
-                    let beta = (port.modes[0].beta_mode)(omega);
+                    // Phase 4.fem.eig.3.5.4 M2: multi-mode summation
+                    // over `port.modes` happens inside the scatter
+                    // helper.
                     if self.coupled_whitney {
-                        // Phase 4.fem.eig.3 F1+F2 path: sample the
-                        // modal profile at the three Gauss points on
-                        // the reference triangle and call the exact-
-                        // Whitney face-block + RHS helpers.
-                        let face_vertices = face.world_vertices(self.mesh);
-                        let mut e_t_gauss = [Vector3::<f64>::zeros(); 3];
-                        for (g, bary) in TRI_GAUSS_3PT_BARY.iter().enumerate() {
-                            let p_g = bary[0] * face_vertices[0]
-                                + bary[1] * face_vertices[1]
-                                + bary[2] * face_vertices[2];
-                            e_t_gauss[g] = (port.modes[0].modal_e_t)(p_g);
-                        }
                         self.scatter_port_face_gauss(
                             face,
-                            beta,
-                            e_t_gauss,
+                            port,
+                            omega,
                             &interior_dof_of_edge,
                             &mut triplets,
                             &mut rhs,
                         );
                     } else {
-                        let centroid = face.centroid(self.mesh);
-                        let e_t = (port.modes[0].modal_e_t)(centroid);
                         self.scatter_port_face(
                             face,
-                            beta,
-                            e_t,
+                            port,
+                            omega,
                             &interior_dof_of_edge,
                             &mut triplets,
                             &mut rhs,
@@ -1606,31 +1656,22 @@ impl<'m> OpenBoundarySolver<'m> {
             {
                 let face = &self.exterior_faces.faces[i];
                 let port = &self.ports[p];
-                let beta = (port.modes[0].beta_mode)(omega);
+                // Phase 4.fem.eig.3.5.4 M2: scatter sums over
+                // `port.modes` internally.
                 if self.coupled_whitney {
-                    let face_vertices = face.world_vertices(self.mesh);
-                    let mut e_t_gauss = [Vector3::<f64>::zeros(); 3];
-                    for (g, bary) in TRI_GAUSS_3PT_BARY.iter().enumerate() {
-                        let p_g = bary[0] * face_vertices[0]
-                            + bary[1] * face_vertices[1]
-                            + bary[2] * face_vertices[2];
-                        e_t_gauss[g] = (port.modes[0].modal_e_t)(p_g);
-                    }
                     self.scatter_port_face_gauss(
                         face,
-                        beta,
-                        e_t_gauss,
+                        port,
+                        omega,
                         interior_dof_of_edge,
                         &mut sink,
                         &mut rhs,
                     );
                 } else {
-                    let centroid = face.centroid(self.mesh);
-                    let e_t = (port.modes[0].modal_e_t)(centroid);
                     self.scatter_port_face(
                         face,
-                        beta,
-                        e_t,
+                        port,
+                        omega,
                         interior_dof_of_edge,
                         &mut sink,
                         &mut rhs,
@@ -1696,6 +1737,12 @@ impl<'m> OpenBoundarySolver<'m> {
         }
 
         let port = &self.ports[port_id];
+        // Phase 4.fem.eig.3.5.4 M2: pick the unique driving mode
+        // (`a_inc != 0`) and project the FEM solution onto its
+        // tangential shape. Single-mode `single_mode` callers see the
+        // unique mode with `a_inc = Complex64::ONE`, recovering the
+        // v3.5.3 behaviour bit-for-bit.
+        let driving_mode = select_driving_mode(port, port_id)?;
         let mut inner_product = Complex64::new(0.0, 0.0);
         let mut mode_self_inner = 0.0_f64;
 
@@ -1718,7 +1765,7 @@ impl<'m> OpenBoundarySolver<'m> {
                         let p_g = bary[0] * face_vertices[0]
                             + bary[1] * face_vertices[1]
                             + bary[2] * face_vertices[2];
-                        let e_mode_g = (port.modes[0].modal_e_t)(p_g);
+                        let e_mode_g = (driving_mode.modal_e_t)(p_g);
                         let e_fem = e_fem_g[g];
                         let dot_g = e_fem.x * Complex64::new(e_mode_g.x, 0.0)
                             + e_fem.y * Complex64::new(e_mode_g.y, 0.0)
@@ -1728,7 +1775,7 @@ impl<'m> OpenBoundarySolver<'m> {
                     }
                 } else {
                     let centroid = face.centroid(self.mesh);
-                    let e_mode = (port.modes[0].modal_e_t)(centroid);
+                    let e_mode = (driving_mode.modal_e_t)(centroid);
                     let e_fem =
                         self.e_t_at_face_centroid(face, e_interior, &system.interior_dof_of_edge);
                     let face_dot = e_fem.x * Complex64::new(e_mode.x, 0.0)
@@ -1826,6 +1873,16 @@ impl<'m> OpenBoundarySolver<'m> {
         }
 
         let port = &self.ports[port_id];
+        // Phase 4.fem.eig.3.5.4 M2: pick the unique driving mode
+        // (`a_inc != 0`) and project the FEM solution onto its
+        // tangential shape. The single-mode `single_mode` shape
+        // collapses to `port.modes[0]` (the only mode in the basis,
+        // carrying `a_inc = Complex64::ONE`), recovering the v3.5.3
+        // numerics bit-for-bit. The multi-mode shape introduced in
+        // v3.5.4 M3 uses the same projection direction
+        // (the driving TE_{10} mode) while higher-order modes
+        // contribute only stiffness blocks to the global matrix.
+        let driving_mode = select_driving_mode(port, port_id)?;
         let mut inner_product = Complex64::new(0.0, 0.0);
         let mut mode_self_inner = 0.0_f64;
 
@@ -1855,7 +1912,7 @@ impl<'m> OpenBoundarySolver<'m> {
                         let p_g = bary[0] * face_vertices[0]
                             + bary[1] * face_vertices[1]
                             + bary[2] * face_vertices[2];
-                        let e_mode_g = (port.modes[0].modal_e_t)(p_g);
+                        let e_mode_g = (driving_mode.modal_e_t)(p_g);
                         let e_fem = e_fem_g[g];
                         let dot_g = e_fem.x * Complex64::new(e_mode_g.x, 0.0)
                             + e_fem.y * Complex64::new(e_mode_g.y, 0.0)
@@ -1866,9 +1923,9 @@ impl<'m> OpenBoundarySolver<'m> {
                 } else {
                     // v2 + CCCCCCCCC lumped-centroid path. Bit-for-bit
                     // unchanged from the Phase 4.fem.eig.2 shipped
-                    // behaviour.
+                    // behaviour for the single-mode call site.
                     let centroid = face.centroid(self.mesh);
-                    let e_mode = (port.modes[0].modal_e_t)(centroid);
+                    let e_mode = (driving_mode.modal_e_t)(centroid);
 
                     let e_fem =
                         self.e_t_at_face_centroid(face, e_interior, &system.interior_dof_of_edge);
@@ -2020,121 +2077,163 @@ impl<'m> OpenBoundarySolver<'m> {
 
     /// Scatter the per-face wave-port `+ j β B_port` stiffness block
     /// and `+ 2 j β · ∫ N_i · e_t dS` RHS contribution into the driven
-    /// triplet list and RHS vector. PEC edges on the face are silently
-    /// skipped (the PEC-precedence rule from spec §10 risk #5).
+    /// triplet list and RHS vector — summed over the port's modal
+    /// basis (Phase 4.fem.eig.3.5.4 M2).
+    ///
+    /// For each [`PortMode`] in `port.modes`:
+    ///
+    /// * The stiffness block is `+ j β^{p,m} B_port^{p,m}` computed
+    ///   from the per-mode `β(ω)` and the face geometry. The
+    ///   stiffness block is amplitude-independent (mode shape
+    ///   appears only through the face normal Gram, not the closure
+    ///   return value).
+    /// * The RHS block is `+ a_inc^{p,m} · 2 j β^{p,m} · ∫ N_i ·
+    ///   e_t^{p,m} dS` — amplitude-scaled per mode. The driving mode
+    ///   carries `a_inc = 1`; projection-only modes carry `a_inc = 0`.
+    ///
+    /// PEC edges on the face are silently skipped (the PEC-precedence
+    /// rule from spec §10 risk #5). The single-mode call shape
+    /// (`port.modes.len() == 1, a_inc = ONE`) reproduces the v3.5.3
+    /// numerics bit-for-bit because the loop reduces to one
+    /// iteration with unit `a_inc` scaling.
     fn scatter_port_face(
         &self,
         face: &ExteriorFace,
-        beta: f64,
-        e_t: Vector3<f64>,
+        port: &PortDefinition,
+        omega: f64,
         interior_dof_of_edge: &[Option<usize>],
         triplets: &mut Vec<Triplet<usize, usize, Complex64>>,
         rhs: &mut [Complex64],
     ) {
         let face_vertices = face.world_vertices(self.mesh);
 
-        // Stiffness contribution: + j β B_port^{face}.
-        let block = assemble_port_face_block(face_vertices, face.normal, beta, 1.0);
-        for i in 0..3 {
-            let gi = face.global_edges[i];
-            // PEC precedence: skip edges that lie on a PEC face even if
-            // they also lie on this wave-port face. Without this guard
-            // the modal source would conflict with the PEC tangential-
-            // zero condition (spec §10 risk #5).
-            if self.pec_global_edges.contains(&gi) {
-                continue;
-            }
-            let Some(ii) = interior_dof_of_edge[gi] else {
-                continue;
-            };
-            let si = face.signs[i];
-            for j in 0..3 {
-                let gj = face.global_edges[j];
-                if self.pec_global_edges.contains(&gj) {
+        for mode in &port.modes {
+            let beta = (mode.beta_mode)(omega);
+            let centroid = face.centroid(self.mesh);
+            let e_t = (mode.modal_e_t)(centroid);
+
+            // Stiffness contribution: + j β^{p,m} B_port^{p,m}.
+            let block = assemble_port_face_block(face_vertices, face.normal, beta, 1.0);
+            for i in 0..3 {
+                let gi = face.global_edges[i];
+                // PEC precedence: skip edges that lie on a PEC face
+                // even if they also lie on this wave-port face.
+                // Without this guard the modal source would conflict
+                // with the PEC tangential-zero condition (spec §10
+                // risk #5).
+                if self.pec_global_edges.contains(&gi) {
                     continue;
                 }
-                let Some(jj) = interior_dof_of_edge[gj] else {
+                let Some(ii) = interior_dof_of_edge[gi] else {
                     continue;
                 };
-                let sj = face.signs[j];
-                let sign = Complex64::new(si * sj, 0.0);
-                triplets.push(Triplet::new(ii, jj, sign * block[(i, j)]));
+                let si = face.signs[i];
+                for j in 0..3 {
+                    let gj = face.global_edges[j];
+                    if self.pec_global_edges.contains(&gj) {
+                        continue;
+                    }
+                    let Some(jj) = interior_dof_of_edge[gj] else {
+                        continue;
+                    };
+                    let sj = face.signs[j];
+                    let sign = Complex64::new(si * sj, 0.0);
+                    triplets.push(Triplet::new(ii, jj, sign * block[(i, j)]));
+                }
             }
-        }
 
-        // RHS contribution: + 2 j β · ∫ N_i · e_t dS (face-centroid
-        // quadrature; per element-layer docs).
-        let rhs_block = assemble_port_modal_rhs(face_vertices, face.normal, beta, e_t);
-        for i in 0..3 {
-            let gi = face.global_edges[i];
-            if self.pec_global_edges.contains(&gi) {
-                continue;
+            // RHS contribution: + a_inc · 2 j β · ∫ N_i · e_t dS
+            // (face-centroid quadrature; per element-layer docs).
+            let rhs_block = assemble_port_modal_rhs(face_vertices, face.normal, beta, e_t);
+            for i in 0..3 {
+                let gi = face.global_edges[i];
+                if self.pec_global_edges.contains(&gi) {
+                    continue;
+                }
+                let Some(ii) = interior_dof_of_edge[gi] else {
+                    continue;
+                };
+                let si = face.signs[i];
+                let sign = Complex64::new(si, 0.0);
+                rhs[ii] += mode.a_inc * sign * rhs_block[i];
             }
-            let Some(ii) = interior_dof_of_edge[gi] else {
-                continue;
-            };
-            let si = face.signs[i];
-            let sign = Complex64::new(si, 0.0);
-            rhs[ii] += sign * rhs_block[i];
         }
     }
 
     /// Coupled-Whitney variant of [`Self::scatter_port_face`]
-    /// (Phase 4.fem.eig.3 F1+F2). Scatters the wave-port face block +
-    /// RHS computed via the exact Whitney-1 basis at three Gauss
-    /// points on the reference triangle. PEC-precedence and per-edge
-    /// orientation-sign handling are identical to v2.
+    /// (Phase 4.fem.eig.3 F1+F2; multi-mode summation per Phase
+    /// 4.fem.eig.3.5.4 M2). Scatters the wave-port face block + RHS
+    /// computed via the exact Whitney-1 basis at three Gauss points
+    /// on the reference triangle — summed over `port.modes`.
+    ///
+    /// Per-mode contributions follow the same modal-basis recipe as
+    /// [`Self::scatter_port_face`]: stiffness block uses `β^{p,m}(ω)`,
+    /// RHS is amplitude-scaled by `mode.a_inc`. PEC-precedence and
+    /// per-edge orientation-sign handling are identical to v2.
     fn scatter_port_face_gauss(
         &self,
         face: &ExteriorFace,
-        beta: f64,
-        e_t_gauss: [Vector3<f64>; 3],
+        port: &PortDefinition,
+        omega: f64,
         interior_dof_of_edge: &[Option<usize>],
         triplets: &mut Vec<Triplet<usize, usize, Complex64>>,
         rhs: &mut [Complex64],
     ) {
         let face_vertices = face.world_vertices(self.mesh);
-        let beta_c = Complex64::new(beta, 0.0);
 
-        // Stiffness contribution via the exact-Whitney Gauss-pt block.
-        let block = assemble_port_face_block_gauss_pts(face_vertices, face.normal, beta_c, 1.0);
-        for i in 0..3 {
-            let gi = face.global_edges[i];
-            if self.pec_global_edges.contains(&gi) {
-                continue;
+        for mode in &port.modes {
+            let beta = (mode.beta_mode)(omega);
+            let beta_c = Complex64::new(beta, 0.0);
+            let mut e_t_gauss = [Vector3::<f64>::zeros(); 3];
+            for (g, bary) in TRI_GAUSS_3PT_BARY.iter().enumerate() {
+                let p_g = bary[0] * face_vertices[0]
+                    + bary[1] * face_vertices[1]
+                    + bary[2] * face_vertices[2];
+                e_t_gauss[g] = (mode.modal_e_t)(p_g);
             }
-            let Some(ii) = interior_dof_of_edge[gi] else {
-                continue;
-            };
-            let si = face.signs[i];
-            for j in 0..3 {
-                let gj = face.global_edges[j];
-                if self.pec_global_edges.contains(&gj) {
+
+            // Stiffness contribution via the exact-Whitney Gauss-pt
+            // block.
+            let block = assemble_port_face_block_gauss_pts(face_vertices, face.normal, beta_c, 1.0);
+            for i in 0..3 {
+                let gi = face.global_edges[i];
+                if self.pec_global_edges.contains(&gi) {
                     continue;
                 }
-                let Some(jj) = interior_dof_of_edge[gj] else {
+                let Some(ii) = interior_dof_of_edge[gi] else {
                     continue;
                 };
-                let sj = face.signs[j];
-                let sign = Complex64::new(si * sj, 0.0);
-                triplets.push(Triplet::new(ii, jj, sign * block[(i, j)]));
+                let si = face.signs[i];
+                for j in 0..3 {
+                    let gj = face.global_edges[j];
+                    if self.pec_global_edges.contains(&gj) {
+                        continue;
+                    }
+                    let Some(jj) = interior_dof_of_edge[gj] else {
+                        continue;
+                    };
+                    let sj = face.signs[j];
+                    let sign = Complex64::new(si * sj, 0.0);
+                    triplets.push(Triplet::new(ii, jj, sign * block[(i, j)]));
+                }
             }
-        }
 
-        // RHS contribution via the exact-Whitney Gauss-pt RHS helper.
-        let rhs_block =
-            assemble_port_face_rhs_gauss_pts(face_vertices, face.normal, beta_c, e_t_gauss);
-        for i in 0..3 {
-            let gi = face.global_edges[i];
-            if self.pec_global_edges.contains(&gi) {
-                continue;
+            // RHS contribution via the exact-Whitney Gauss-pt RHS
+            // helper, amplitude-scaled by `mode.a_inc`.
+            let rhs_block =
+                assemble_port_face_rhs_gauss_pts(face_vertices, face.normal, beta_c, e_t_gauss);
+            for i in 0..3 {
+                let gi = face.global_edges[i];
+                if self.pec_global_edges.contains(&gi) {
+                    continue;
+                }
+                let Some(ii) = interior_dof_of_edge[gi] else {
+                    continue;
+                };
+                let si = face.signs[i];
+                let sign = Complex64::new(si, 0.0);
+                rhs[ii] += mode.a_inc * sign * rhs_block[i];
             }
-            let Some(ii) = interior_dof_of_edge[gi] else {
-                continue;
-            };
-            let si = face.signs[i];
-            let sign = Complex64::new(si, 0.0);
-            rhs[ii] += sign * rhs_block[i];
         }
     }
 
@@ -2365,31 +2464,23 @@ impl<'m> OpenBoundarySolver<'m> {
                 }
                 FaceKind::WavePort(p) => {
                     let port = &self.ports[p];
-                    let beta = (port.modes[0].beta_mode)(omega);
+                    // Phase 4.fem.eig.3.5.4 M2: multi-mode summation
+                    // over `port.modes` happens inside the scatter
+                    // helper.
                     if self.coupled_whitney {
-                        let face_vertices = face.world_vertices(self.mesh);
-                        let mut e_t_gauss = [Vector3::<f64>::zeros(); 3];
-                        for (g, bary) in TRI_GAUSS_3PT_BARY.iter().enumerate() {
-                            let p_g = bary[0] * face_vertices[0]
-                                + bary[1] * face_vertices[1]
-                                + bary[2] * face_vertices[2];
-                            e_t_gauss[g] = (port.modes[0].modal_e_t)(p_g);
-                        }
                         self.scatter_port_face_gauss(
                             face,
-                            beta,
-                            e_t_gauss,
+                            port,
+                            omega,
                             &interior_dof_of_edge,
                             &mut triplets,
                             &mut rhs,
                         );
                     } else {
-                        let centroid = face.centroid(self.mesh);
-                        let e_t = (port.modes[0].modal_e_t)(centroid);
                         self.scatter_port_face(
                             face,
-                            beta,
-                            e_t,
+                            port,
+                            omega,
                             &interior_dof_of_edge,
                             &mut triplets,
                             &mut rhs,
