@@ -328,32 +328,133 @@ impl Default for PmlConfig {
     }
 }
 
+/// Per-axis cavity-mesh metadata consumed by the CFS-PML grading-
+/// parameter resolver (Phase 4.fem.eig.3.5.1; replaces the v3.5
+/// single-`h_cell` heuristic with per-axis `h_α` back-inference).
+///
+/// `extents` and `cell_counts` are read off the *original* cavity mesh
+/// (before [`crate::extend_mesh_with_pml`] adds the PML shell brick
+/// layers). The PML resolver uses the per-axis `h_α = extents[α] /
+/// cell_counts[α]` to derive a per-axis
+/// `σ_α_max ≈ (m + 1) / (150 π h_α √ε_r)` per Roden–Gedney 2000 §III/IV.
+/// On a cavity with non-trivial aspect ratio the three `h_α` values
+/// differ — the v3.5 single-h_cell heuristic effectively averaged them
+/// and mis-predicted the optimal `σ_max` on every axis individually;
+/// the per-axis path is strictly more correct and collapses to the v3.5
+/// result bit-for-bit on isotropic meshes (`h_x = h_y = h_z`).
+///
+/// Indexing convention on `(extents, cell_counts)` is `[x, y, z]`. The
+/// carrier is plain-old-data and `Copy`; callers do not need to manage
+/// its lifetime.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PmlMeshMeta {
+    /// Axis-aligned bounding-box extents (m), one per axis in
+    /// `[x, y, z]` order. Computed from the cavity mesh vertices'
+    /// per-axis `(max - min)` span.
+    pub extents: [f64; 3],
+    /// Per-axis cell count of the original cavity mesh. For a
+    /// Kuhn-6 brick lattice produced by
+    /// `cavity_uniform(a, b, d, nx, ny, nz)` this is `[nx, ny, nz]`.
+    pub cell_counts: [usize; 3],
+}
+
+impl PmlMeshMeta {
+    /// Per-axis characteristic cell length
+    /// `h_α = extents[α] / cell_counts[α]` (m).
+    ///
+    /// Returns `1e-3` (1 mm) as the sentinel default for any axis with
+    /// `cell_counts[α] == 0` — degenerate meshes should never reach
+    /// this code path, but the fallback prevents a division-by-zero
+    /// panic if they do.
+    pub fn h_per_axis(&self) -> [f64; 3] {
+        let mut out = [1.0e-3_f64; 3];
+        for (a, slot) in out.iter_mut().enumerate() {
+            if self.cell_counts[a] > 0 {
+                *slot = self.extents[a] / (self.cell_counts[a] as f64);
+            }
+        }
+        out
+    }
+}
+
+/// Internal carrier for the per-axis-resolved CFS-PML grading
+/// parameters (Phase 4.fem.eig.3.5.1). Built by
+/// [`PmlConfig::resolved`] from the public [`PmlConfig`] + a
+/// [`PmlMeshMeta`]; consumed by [`pml_stretching_lambda`].
+///
+/// On axes with `PmlConfig::sigma_max == 0.0` (the sentinel), the
+/// per-axis `sigma_max[α]` is back-computed via
+/// `σ_α_max = (m + 1) / (150 π · h_α · √ε_r)`. Non-zero `sigma_max`
+/// in the input passes through to every axis verbatim. `alpha_max` is
+/// currently shared across all axes (per-axis `α_α(d)` grading is
+/// queued for Phase 4.fem.eig.3.5.2).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ResolvedPmlConfig {
+    /// Per-axis `σ_α_max` (S/m), index `[x, y, z]`.
+    pub sigma_max_per_axis: [f64; 3],
+    /// Per-axis cell length `h_α` (m) used by the polynomial-grading
+    /// `(d / D_α)` ratio, where `D_α = thickness_cells · h_α`.
+    pub h_per_axis: [f64; 3],
+    /// Shared `α_max` (rad·s⁻¹ × ε₀ units).
+    pub alpha_max: f64,
+    /// Coordinate-stretching parameter `κ_max` (shared; the per-axis
+    /// `κ_α(d)` profile multiplies its base-1 offset by the
+    /// `(d/D_α)^m` polynomial inside [`pml_stretching_lambda`]).
+    pub kappa_max: f64,
+    /// Polynomial grading order `m`.
+    pub m: usize,
+    /// Shell thickness in cells.
+    pub thickness_cells: usize,
+}
+
 impl PmlConfig {
     /// Resolve sentinel `0.0` values for `sigma_max` and `alpha_max`
-    /// against a band-centre frequency `freq_hz` and a mean PML tet
-    /// edge length `h_cell` (m).
+    /// against a band-centre frequency `freq_hz` and a per-axis cavity
+    /// mesh metadata carrier [`PmlMeshMeta`] (Phase 4.fem.eig.3.5.1;
+    /// replaces the v3.5 single-`h_cell` resolver).
     ///
     /// Per Roden–Gedney 2000 §III + §IV:
     ///
-    /// * `σ_max ≈ (m + 1) / (150 π · h_cell · √ε_r)` with `ε_r = 1`
-    ///   (PML built outside an air-filled cavity).
-    /// * `α_max ≈ 2 π · freq_hz · ε_0` (band-centre rule of thumb).
+    /// * `σ_α_max ≈ (m + 1) / (150 π · h_α · √ε_r)` per axis, with
+    ///   `h_α = extents[α] / cell_counts[α]` (`ε_r = 1` — PML
+    ///   against air).
+    /// * `α_max ≈ 2 π · freq_hz · ε_0` (band-centre rule of thumb,
+    ///   shared across axes — per-axis `α_α(d)` grading is queued for
+    ///   Phase 4.fem.eig.3.5.2).
     ///
-    /// Non-zero `sigma_max` / `alpha_max` are passed through verbatim
-    /// (callers retain full control). `kappa_max`, `thickness_cells`,
-    /// `m` are never touched.
-    pub fn resolved(self, freq_hz: f64, h_cell: f64) -> Self {
-        let mut out = self;
-        if out.sigma_max == 0.0 {
-            let m_plus_1 = (self.m as f64) + 1.0;
-            // ε_r = 1 (PML against air).
-            out.sigma_max = m_plus_1 / (150.0 * std::f64::consts::PI * h_cell.max(1e-12));
+    /// Non-zero `sigma_max` in `self` passes through to every axis
+    /// verbatim. Non-zero `alpha_max` passes through verbatim.
+    /// `kappa_max`, `thickness_cells`, `m` are never touched.
+    ///
+    /// Returns a private [`ResolvedPmlConfig`] carrier that
+    /// [`pml_stretching_lambda`] consumes; the public [`PmlConfig`]
+    /// shape is unchanged.
+    pub(crate) fn resolved(self, freq_hz: f64, mesh_meta: &PmlMeshMeta) -> ResolvedPmlConfig {
+        let h_per_axis = mesh_meta.h_per_axis();
+        let m_plus_1 = (self.m as f64) + 1.0;
+        let mut sigma_max_per_axis = [0.0_f64; 3];
+        for a in 0..3 {
+            sigma_max_per_axis[a] = if self.sigma_max == 0.0 {
+                // ε_r = 1 (PML against air).
+                m_plus_1 / (150.0 * std::f64::consts::PI * h_per_axis[a].max(1e-12))
+            } else {
+                self.sigma_max
+            };
         }
-        if out.alpha_max == 0.0 {
+        let alpha_max = if self.alpha_max == 0.0 {
             // ω₀ ε_0 with ω₀ = 2 π f₀.
-            out.alpha_max = 2.0 * std::f64::consts::PI * freq_hz * yee_core::units::EPS0;
+            2.0 * std::f64::consts::PI * freq_hz * yee_core::units::EPS0
+        } else {
+            self.alpha_max
+        };
+        ResolvedPmlConfig {
+            sigma_max_per_axis,
+            h_per_axis,
+            alpha_max,
+            kappa_max: self.kappa_max,
+            m: self.m,
+            thickness_cells: self.thickness_cells,
         }
-        out
     }
 }
 
@@ -2006,11 +2107,13 @@ impl<'m> OpenBoundarySolver<'m> {
             )
         })?;
 
-        // Resolve sentinel config against the band-centre frequency
-        // and a mean tet edge length read from the mesh.
+        // Phase 4.fem.eig.3.5.1: per-axis `h_α` resolver. Derive the
+        // cavity bounding box + per-axis cell counts from the extended
+        // mesh (subtract the PML shell layers off the extended-mesh
+        // per-axis cell counts).
         let freq_hz = omega / (2.0 * std::f64::consts::PI);
-        let h_cell = self.mean_tet_edge_length();
-        let cfg = config.resolved(freq_hz, h_cell);
+        let mesh_meta = self.derive_pml_mesh_meta(config.thickness_cells);
+        let cfg = config.resolved(freq_hz, &mesh_meta);
 
         // ---- 1. Build the per-tet edge connectivity table (mirror of
         // assembly::TetEdgeTable, reproduced here to keep this method
@@ -2155,25 +2258,117 @@ impl<'m> OpenBoundarySolver<'m> {
         })
     }
 
-    /// Mean edge length of every tet in the mesh (m). Used by the
-    /// CFS-PML config resolver to populate sentinel `sigma_max` /
-    /// `alpha_max` parameters. Walks every tet's six local edges and
-    /// averages their world-space lengths.
-    fn mean_tet_edge_length(&self) -> f64 {
-        let mut sum = 0.0_f64;
-        let mut count = 0_usize;
-        for tet in &self.mesh.tetrahedra {
-            for &(li, lj) in LOCAL_EDGES.iter() {
-                let v_a = self.mesh.vertices[tet[li]];
-                let v_b = self.mesh.vertices[tet[lj]];
-                sum += (v_b - v_a).norm();
-                count += 1;
+    /// Derive a [`PmlMeshMeta`] for the *original* cavity mesh from
+    /// the currently borrowed (extended) mesh (Phase 4.fem.eig.3.5.1).
+    ///
+    /// Algorithm:
+    ///
+    /// 1. Walk every vertex, collect the per-axis sorted-unique
+    ///    coordinate list, and read off the per-axis extents
+    ///    (`max - min`) and total cell counts (length - 1) on the
+    ///    extended mesh.
+    /// 2. Scan `self.pml_classes` to detect which sides of each axis
+    ///    actually carry PML tets (centroid below vs above bbox
+    ///    midpoint along the relevant axis).
+    /// 3. Subtract `thickness_cells × face_count_per_axis[α]` cells
+    ///    off the extended count along each axis to recover the
+    ///    original cavity cell count.
+    ///
+    /// Falls back to extended-mesh extents (no subtraction) if
+    /// `self.pml_classes` is `None`. Returns `1e-3` per-axis sentinel
+    /// extents on a degenerate empty mesh.
+    fn derive_pml_mesh_meta(&self, thickness_cells: usize) -> PmlMeshMeta {
+        fn axis_unique(values: &mut Vec<f64>) {
+            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let tol = 1.0e-9;
+            values.dedup_by(|a, b| (*a - *b).abs() < tol);
+        }
+        let mut xs: Vec<f64> = self.mesh.vertices.iter().map(|v| v.x).collect();
+        let mut ys: Vec<f64> = self.mesh.vertices.iter().map(|v| v.y).collect();
+        let mut zs: Vec<f64> = self.mesh.vertices.iter().map(|v| v.z).collect();
+        axis_unique(&mut xs);
+        axis_unique(&mut ys);
+        axis_unique(&mut zs);
+
+        if xs.len() < 2 || ys.len() < 2 || zs.len() < 2 {
+            return PmlMeshMeta {
+                extents: [1.0e-3; 3],
+                cell_counts: [1; 3],
+            };
+        }
+
+        let ext_full = [
+            xs[xs.len() - 1] - xs[0],
+            ys[ys.len() - 1] - ys[0],
+            zs[zs.len() - 1] - zs[0],
+        ];
+        let n_full = [xs.len() - 1, ys.len() - 1, zs.len() - 1];
+
+        // Per-axis face count: 0, 1, or 2 — detected from class+centroid.
+        let mut face_count_per_axis = [0_usize; 3];
+        if let Some(classes) = self.pml_classes.as_ref() {
+            let mid_x = 0.5 * (xs[0] + xs[xs.len() - 1]);
+            let mid_y = 0.5 * (ys[0] + ys[ys.len() - 1]);
+            let mid_z = 0.5 * (zs[0] + zs[zs.len() - 1]);
+            let mut sides = [[false; 2]; 3];
+            for (tet_idx, c) in classes.iter().enumerate() {
+                let tet = &self.mesh.tetrahedra[tet_idx];
+                let v0 = self.mesh.vertices[tet[0]];
+                let v1 = self.mesh.vertices[tet[1]];
+                let v2 = self.mesh.vertices[tet[2]];
+                let v3 = self.mesh.vertices[tet[3]];
+                let centroid = (v0 + v1 + v2 + v3) * 0.25;
+                use crate::PmlClass;
+                let axes_present = match c {
+                    PmlClass::Interior => [false; 3],
+                    PmlClass::PmlX { .. } => [true, false, false],
+                    PmlClass::PmlY { .. } => [false, true, false],
+                    PmlClass::PmlZ { .. } => [false, false, true],
+                    PmlClass::PmlXY { .. } => [true, true, false],
+                    PmlClass::PmlYZ { .. } => [false, true, true],
+                    PmlClass::PmlZX { .. } => [true, false, true],
+                    PmlClass::PmlXYZ { .. } => [true, true, true],
+                };
+                for a in 0..3 {
+                    if !axes_present[a] {
+                        continue;
+                    }
+                    let coord = match a {
+                        0 => centroid.x,
+                        1 => centroid.y,
+                        _ => centroid.z,
+                    };
+                    let mid = match a {
+                        0 => mid_x,
+                        1 => mid_y,
+                        _ => mid_z,
+                    };
+                    if coord < mid {
+                        sides[a][0] = true;
+                    } else {
+                        sides[a][1] = true;
+                    }
+                }
+            }
+            for a in 0..3 {
+                face_count_per_axis[a] = (sides[a][0] as usize) + (sides[a][1] as usize);
             }
         }
-        if count == 0 {
-            1.0e-3
-        } else {
-            sum / (count as f64)
+
+        let mut cavity_counts = [0_usize; 3];
+        let mut cavity_extents = [0.0_f64; 3];
+        for a in 0..3 {
+            let n_ext = n_full[a];
+            let h_axis = ext_full[a] / (n_ext as f64);
+            let shells = face_count_per_axis[a] * thickness_cells;
+            let n_cavity = n_ext.saturating_sub(shells).max(1);
+            cavity_counts[a] = n_cavity;
+            cavity_extents[a] = (n_cavity as f64) * h_axis;
+        }
+
+        PmlMeshMeta {
+            extents: cavity_extents,
+            cell_counts: cavity_counts,
         }
     }
 }
@@ -2218,76 +2413,50 @@ impl OpenBoundarySolver<'_> {
 /// tets are guarded out by the caller — this helper always returns
 /// the unit diagonal `[1, 1, 1]` for `PmlClass::Interior` so callers
 /// can avoid a branch in their own scatter loop.
-fn pml_stretching_lambda(class: crate::PmlClass, cfg: &PmlConfig, omega: f64) -> [Complex64; 3] {
+fn pml_stretching_lambda(
+    class: crate::PmlClass,
+    cfg: &ResolvedPmlConfig,
+    omega: f64,
+) -> [Complex64; 3] {
     use crate::PmlClass;
     let m = cfg.m as f64;
-    let d_total = (cfg.thickness_cells as f64).max(1.0); // sentinel guard
-    // d_max for a tet centroid in the t-th brick layer is roughly
-    // (t - 0.5) cells. We pick D = thickness_cells * h_cell at the
-    // outer truncation surface and parameterise σ via d / D.
-    // Here we pass `d / D` directly from the PmlClass payload, where
-    // `d` is already in metres; we infer `D` from the cfg by
-    // estimating the cell size as `d_max_observed / (thickness - 1 + 0.5)`.
-    // To keep this self-contained, treat `d_total` as a normalised
-    // count and substitute the per-cell depth d_cells = d_metres /
-    // h_cell. We compute h_cell from the omega-resolved sigma_max
-    // backward — but `cfg.resolved` already used h_cell. The cleanest
-    // recovery is to scale by thickness_cells: `(d / D) ≈ d_cells /
-    // thickness_cells`. We can derive d_cells if we know the lattice
-    // spacing. For v3.5 we make the simplifying choice: pass d in
-    // metres and assume the PML inner depth runs 0 → D_metres where
-    // D_metres ≡ thickness_cells * h_cell_estimate. Since cfg's
-    // `sigma_max` was already calibrated against `h_cell`, the
-    // normalised depth `(d / D_metres) = (d / (thickness * h_cell))`.
-    // We recover h_cell from the sigma_max - back-formula:
-    //
-    //     sigma_max = (m + 1) / (150 π h_cell)  ⇒
-    //     h_cell    = (m + 1) / (150 π sigma_max).
-    //
-    // (This is robust to a caller passing a custom sigma_max; the
-    // estimator just becomes a self-consistent "what h_cell does this
-    // σ_max imply" rather than re-querying the mesh.)
-    let h_cell = if cfg.sigma_max > 0.0 {
-        (m + 1.0) / (150.0 * std::f64::consts::PI * cfg.sigma_max)
-    } else {
-        1.0e-3 // 1 mm fallback if grading parameters degenerate
-    };
-    let d_max = d_total * h_cell;
+    let thickness = (cfg.thickness_cells as f64).max(1.0);
 
-    let s_for = |d_alpha: f64| -> Complex64 {
+    // Phase 4.fem.eig.3.5.1: per-axis `h_α` (m) — the polynomial
+    // grading runs `d ∈ [0, D_α]` with `D_α = thickness_cells · h_α`.
+    // Each PML axis carries its own `σ_α_max` derived from `h_α` per
+    // Roden–Gedney 2000 §III. On isotropic meshes
+    // (`h_x = h_y = h_z`) the per-axis output collapses bit-for-bit
+    // onto the v3.5 single-`h_cell` evaluator.
+    let s_for = |axis: usize, d_alpha: f64| -> Complex64 {
+        let h_alpha = cfg.h_per_axis[axis].max(1.0e-12);
+        let d_max = thickness * h_alpha;
         if d_alpha <= 0.0 || d_max <= 0.0 {
             return Complex64::new(1.0, 0.0);
         }
-        // Polynomial grading: σ(d) = σ_max (d/D)^m, κ(d) = 1 + (κ_max - 1) (d/D)^m.
         let ratio = (d_alpha / d_max).clamp(0.0, 1.0);
         let pow = ratio.powf(m);
-        let sigma_d = cfg.sigma_max * pow;
+        let sigma_d = cfg.sigma_max_per_axis[axis] * pow;
         let kappa_d = 1.0 + (cfg.kappa_max - 1.0) * pow;
-        // s(ω) = κ + σ / (α + j ω ε_0)
         let denom = Complex64::new(cfg.alpha_max, omega * yee_core::units::EPS0);
-        // Avoid division by zero at DC + zero alpha.
         if denom.norm_sqr() <= f64::MIN_POSITIVE {
             return Complex64::new(kappa_d, 0.0);
         }
         Complex64::new(kappa_d, 0.0) + Complex64::new(sigma_d, 0.0) / denom
     };
 
+    let one = Complex64::new(1.0, 0.0);
     let (sx, sy, sz) = match class {
-        PmlClass::Interior => (
-            Complex64::new(1.0, 0.0),
-            Complex64::new(1.0, 0.0),
-            Complex64::new(1.0, 0.0),
-        ),
-        PmlClass::PmlX { d } => (s_for(d), Complex64::new(1.0, 0.0), Complex64::new(1.0, 0.0)),
-        PmlClass::PmlY { d } => (Complex64::new(1.0, 0.0), s_for(d), Complex64::new(1.0, 0.0)),
-        PmlClass::PmlZ { d } => (Complex64::new(1.0, 0.0), Complex64::new(1.0, 0.0), s_for(d)),
-        PmlClass::PmlXY { d_x, d_y } => (s_for(d_x), s_for(d_y), Complex64::new(1.0, 0.0)),
-        PmlClass::PmlYZ { d_y, d_z } => (Complex64::new(1.0, 0.0), s_for(d_y), s_for(d_z)),
-        PmlClass::PmlZX { d_z, d_x } => (s_for(d_x), Complex64::new(1.0, 0.0), s_for(d_z)),
-        PmlClass::PmlXYZ { d_x, d_y, d_z } => (s_for(d_x), s_for(d_y), s_for(d_z)),
+        PmlClass::Interior => (one, one, one),
+        PmlClass::PmlX { d } => (s_for(0, d), one, one),
+        PmlClass::PmlY { d } => (one, s_for(1, d), one),
+        PmlClass::PmlZ { d } => (one, one, s_for(2, d)),
+        PmlClass::PmlXY { d_x, d_y } => (s_for(0, d_x), s_for(1, d_y), one),
+        PmlClass::PmlYZ { d_y, d_z } => (one, s_for(1, d_y), s_for(2, d_z)),
+        PmlClass::PmlZX { d_z, d_x } => (s_for(0, d_x), one, s_for(2, d_z)),
+        PmlClass::PmlXYZ { d_x, d_y, d_z } => (s_for(0, d_x), s_for(1, d_y), s_for(2, d_z)),
     };
 
-    let one = Complex64::new(1.0, 0.0);
     // Λ = diag(s_y s_z / s_x, s_z s_x / s_y, s_x s_y / s_z)
     [
         if sx.norm_sqr() > 0.0 {

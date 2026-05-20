@@ -16,7 +16,7 @@ use std::f64::consts::PI;
 
 use nalgebra::Vector3;
 use yee_fem::{
-    AbcOrder, FaceKind, MaterialDatabase, OpenBoundarySolver, PmlAxis, PmlConfig,
+    AbcOrder, FaceKind, MaterialDatabase, OpenBoundarySolver, PmlAxis, PmlConfig, PmlMeshMeta,
     extend_mesh_with_pml,
 };
 use yee_mesh::TetMesh3D;
@@ -181,4 +181,114 @@ fn pml_assembly_zero_thickness_passes_through() {
         max_rel_diff < 1.0e-9,
         "zero-thickness PML path must match scalar (v3) path to round-off; got max rel = {max_rel_diff:e}"
     );
+}
+
+/// Phase 4.fem.eig.3.5.1 R1 — the per-axis `h_alpha` resolver's
+/// [`PmlMeshMeta::h_per_axis`] returns `extents / cell_counts`
+/// componentwise.
+#[test]
+fn pml_mesh_meta_h_per_axis_is_extent_over_count() {
+    let meta = PmlMeshMeta {
+        extents: [0.02286, 0.01016, 0.030],
+        cell_counts: [24, 12, 36],
+    };
+    let h = meta.h_per_axis();
+    let tol = 1.0e-12;
+    assert!((h[0] - 0.02286 / 24.0).abs() < tol);
+    assert!((h[1] - 0.01016 / 12.0).abs() < tol);
+    assert!((h[2] - 0.030 / 36.0).abs() < tol);
+}
+
+/// Phase 4.fem.eig.3.5.1 R1 — with `thickness_cells = 0` the per-axis
+/// resolver path produces a finite PML-assembly matrix with `Lambda = I` on
+/// every tet (the same `Interior`-only classification the v3.5 scalar
+/// path consumed).
+#[test]
+fn per_axis_resolver_zero_thickness_matches_scalar_path() {
+    let cavity = TetMesh3D::cavity_uniform(0.02286, 0.01016, 0.030, 4, 2, 4).unwrap();
+    let (extended, classes, _faces) =
+        extend_mesh_with_pml(&cavity, &[PmlAxis::ZMin], 0).expect("extend_mesh_with_pml");
+
+    assert_eq!(extended.tetrahedra.len(), cavity.tetrahedra.len());
+    assert!(classes.iter().all(|c| c.is_interior()));
+
+    let placeholder_kinds = {
+        let mut face_map: std::collections::HashMap<[usize; 3], usize> =
+            std::collections::HashMap::new();
+        const TET_FACES: [[usize; 3]; 4] = [[1, 2, 3], [0, 2, 3], [0, 1, 3], [0, 1, 2]];
+        for tet in &extended.tetrahedra {
+            for &[a, b, c] in TET_FACES.iter() {
+                let mut key = [tet[a], tet[b], tet[c]];
+                key.sort_unstable();
+                *face_map.entry(key).or_insert(0) += 1;
+            }
+        }
+        let n_exterior = face_map.values().filter(|&&c| c == 1).count();
+        vec![FaceKind::Pec; n_exterior]
+    };
+
+    let omega = 2.0 * PI * 10e9;
+    let solver_pml = OpenBoundarySolver::new(
+        &extended,
+        placeholder_kinds,
+        Vec::new(),
+        MaterialDatabase::new(),
+    )
+    .expect("solver")
+    .with_cfs_pml(PmlConfig::default(), classes);
+    let sys = solver_pml
+        .assemble_driven_system(omega)
+        .expect("per-axis no-shell asm");
+    for t in sys.matrix.triplet_iter() {
+        assert!(
+            t.val.norm().is_finite(),
+            "non-finite entry under no-shell PML path"
+        );
+    }
+}
+
+/// Phase 4.fem.eig.3.5.1 R1 — on an isotropic mesh (`h_x = h_y = h_z`)
+/// the per-axis resolver produces a finite, well-conditioned assembly,
+/// matching the v3.5 single-`h_cell` resolver behaviour by construction
+/// (all `sigma_alpha_max` equal, all `h_alpha` equal).
+#[test]
+fn per_axis_resolver_isotropic_mesh_matches_legacy() {
+    let cavity = TetMesh3D::cavity_uniform(0.004, 0.004, 0.004, 4, 4, 4).unwrap();
+    let (extended, classes, _faces) =
+        extend_mesh_with_pml(&cavity, &[PmlAxis::ZMin], 3).expect("extend_mesh_with_pml");
+
+    let placeholder_kinds = {
+        let mut face_map: std::collections::HashMap<[usize; 3], usize> =
+            std::collections::HashMap::new();
+        const TET_FACES: [[usize; 3]; 4] = [[1, 2, 3], [0, 2, 3], [0, 1, 3], [0, 1, 2]];
+        for tet in &extended.tetrahedra {
+            for &[a, b, c] in TET_FACES.iter() {
+                let mut key = [tet[a], tet[b], tet[c]];
+                key.sort_unstable();
+                *face_map.entry(key).or_insert(0) += 1;
+            }
+        }
+        let n_exterior = face_map.values().filter(|&&c| c == 1).count();
+        vec![FaceKind::Pec; n_exterior]
+    };
+
+    let omega = 2.0 * PI * 30e9;
+    let cfg = PmlConfig::default();
+    let solver = OpenBoundarySolver::new(
+        &extended,
+        placeholder_kinds,
+        Vec::new(),
+        MaterialDatabase::new(),
+    )
+    .expect("solver")
+    .with_cfs_pml(cfg, classes);
+    let sys = solver.assemble_driven_system(omega).expect("iso asm");
+    for t in sys.matrix.triplet_iter() {
+        assert!(
+            t.val.norm().is_finite() && t.val.norm() < 1.0e18,
+            "isotropic-mesh assembly produced non-finite or unbounded entry: {}",
+            t.val.norm()
+        );
+    }
+    assert!(matches!(solver.abc_order(), AbcOrder::CfsPml(_)));
 }

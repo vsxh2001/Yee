@@ -50,8 +50,8 @@ pub use element::{
 };
 pub use material::{Material, MaterialDatabase, MaterialPole};
 pub use open_boundary::{
-    AbcOrder, DrivenSystem, FaceKind, OpenBoundarySolver, PmlConfig, PmlRegion, PortDefinition,
-    PortId, SParameters, SParametersMatrix,
+    AbcOrder, DrivenSystem, FaceKind, OpenBoundarySolver, PmlConfig, PmlMeshMeta, PmlRegion,
+    PortDefinition, PortId, SParameters, SParametersMatrix,
 };
 pub use pml_mesh::{FaceIndexMap, PmlAxis, PmlClass, extend_mesh_with_pml};
 pub use solve::{
