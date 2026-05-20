@@ -318,6 +318,51 @@ fem-eig-003 (CFS-PML absorption floor on the cubic cavity) remains
 retired at the v3.5.2 strict band `[-71.53, -55.58] dB` — that
 driver is untouched.
 
+### Phase 4.fem.eig.3.5.4 — multi-mode wave-port attempt + cutoff-degeneracy finding
+
+ADR-0047 (`docs/src/decisions/0047-phase-4-fem-eig-3-5-4-multi-mode-wave-port.md`)
+extended `PortDefinition` from a single
+`(beta_mode, modal_e_t)` closure pair to a modal basis
+`{ modes: Vec<PortMode> }`, with the `single_mode` constructor
+preserving v3.5.3 call shape. The v3.5.4 driver populates the +x
+face with three modes (`TE_{10}` driving, `TE_{20}` and `TE_{01}`
+outgoing-only):
+
+| Configuration                                  | `|S_{11}|`  | dB     |
+|------------------------------------------------|-------------|--------|
+| v3.5.2 CFS-PML (best H4 row)                   | 0.926       | -0.67  |
+| v3.5.3 W1 single-mode TE_{10}                  | 0.925644    | -0.67  |
+| v3.5.4 multi-mode (TE_{10}, TE_{20}, TE_{01})  | 0.925637    | -0.67  |
+
+The multi-mode basis collapses to single-mode at 30 GHz exactly
+because **`TE_{20}` cutoff sits at the test frequency**:
+
+* Port-face broad wall is `B = 10 mm` (the cavity's 10 : 1 : 1
+  narrow direction at the port face, not the propagation length
+  `A = 100 mm` — the v3.5.4 design spec §2.2 mis-derived this).
+* `TE_{20}` cutoff `f_c = c / B = c / 0.010 m = 30.0 GHz` exactly.
+  At cutoff `β = 0`, the per-mode stiffness block contribution
+  vanishes identically.
+* `TE_{01}` cutoff `f_c = c / (2 D) = c / 0.002 m = 150.0 GHz` —
+  evanescent at 30 GHz; carries no propagating modal content.
+
+The multi-mode infrastructure (`PortMode`, `Vec<PortMode>`,
+multi-mode summation in `scatter_port_face`, driving-mode
+selection in S-parameter extraction) lands cleanly and will earn
+its keep at any non-degenerate test frequency. The
+`fem_eig_006_magnitude_bounded` gate stays `#[ignore]`'d and
+tolerance `< 0.1` is **not** weakened. ADR-0048 (Phase
+4.fem.eig.3.5.5) queues two candidate dispositions:
+
+(a) **Retune `FEM_EIG_006_F_HZ`** to a frequency well above the
+    `TE_{20}` cutoff (e.g. 40 GHz) so the multi-mode basis carries
+    real propagating modal content and the projection step has
+    something non-trivial to do.
+
+(b) **Land an absorbing-mode wave-port** (Lee-Mittra 1997) that
+    handles arbitrary modal content via evanescent absorption
+    rather than modal projection.
+
 #### Per-fixture override pattern
 
 Users who want to revert to the v3.5.0 OOOOOOOOO baseline (thinner
