@@ -2723,12 +2723,17 @@ pub const FEM_EIG_003_F_MAX_HZ: f64 = 12.0e9;
 /// Number of uniform sweep points across `[FEM_EIG_003_F_MIN_HZ,
 /// FEM_EIG_003_F_MAX_HZ]`. 50 points = 80 MHz spacing per spec §8.
 pub const FEM_EIG_003_N_FREQ: usize = 50;
-/// Strict lower bound on `20·log10(|S_{11}(f)|)` (dB) per spec §8 — the
-/// 1st-order Engquist-Majda reflection floor is `~ -40 dB ± 5 dB` so
-/// the gate window is `[-45, -35] dB`.
-pub const FEM_EIG_003_S11_DB_MIN: f64 = -45.0;
-/// Strict upper bound on `20·log10(|S_{11}(f)|)` (dB) per spec §8.
-pub const FEM_EIG_003_S11_DB_MAX: f64 = -35.0;
+/// Strict lower bound on `20·log10(|S_{11}(f)|)` (dB). Phase
+/// 4.fem.eig.3.5 widens the original spec §8 `-45 dB` floor to
+/// `-60 dB` to accept the CFS-PML over-absorption regime
+/// (Roden-Gedney 2000 §III default grading runs ~ `exp(-12) ≈ -105
+/// dB` round-trip in the limit; in practice the discretised PML
+/// floors out near `-60 dB`). The upper bound `-40 dB` is the
+/// meaningful "PML works" assertion (spec §6).
+pub const FEM_EIG_003_S11_DB_MIN: f64 = -60.0;
+/// Strict upper bound on `20·log10(|S_{11}(f)|)` (dB) per Phase
+/// 4.fem.eig.3.5 spec §6.
+pub const FEM_EIG_003_S11_DB_MAX: f64 = -40.0;
 
 /// Public driver result for the `fem-eig-003` validation gate.
 ///
@@ -2870,14 +2875,15 @@ fn fem_eig_003_modal_e_t_te10(p: nalgebra::Vector3<f64>) -> nalgebra::Vector3<f6
 /// the disposition decision lives in the test layer.
 pub fn run_fem_eig_003_wr90_stub_abc() -> Result<FemEig003ValidationResult, yee_core::Error> {
     use yee_fem::{
-        AbcOrder, FaceKind, MaterialDatabase, OpenBoundarySolver, PortDefinition, SParameters,
+        FaceKind, MaterialDatabase, OpenBoundarySolver, PmlAxis, PmlConfig, PortDefinition,
+        SParameters, extend_mesh_with_pml,
     };
     use yee_mesh::TetMesh3D;
 
     let t0 = Instant::now();
 
-    // ---- 1. Build the WR-90 stub mesh -------------------------------
-    let mesh = TetMesh3D::cavity_uniform(
+    // ---- 1. Build the WR-90 stub cavity mesh ------------------------
+    let cavity = TetMesh3D::cavity_uniform(
         FEM_EIG_003_A_M,
         FEM_EIG_003_B_M,
         FEM_EIG_003_D_M,
@@ -2887,18 +2893,18 @@ pub fn run_fem_eig_003_wr90_stub_abc() -> Result<FemEig003ValidationResult, yee_
     )
     .map_err(|e| yee_core::Error::Invalid(format!("fem-eig-003 cavity_uniform: {e}")))?;
 
-    // ---- 2. Resolve the exterior-face centroids via a placeholder
-    // solver. The face_kinds vector must match the exterior-face count
-    // exactly — easiest way to get the canonical face ordering is to
-    // build a temporary all-PEC solver and read back its centroids
-    // (see crates/yee-fem/tests/open_boundary_sweep.rs for the same
-    // pattern). The temporary solver is discarded before the real one
-    // is constructed.
+    // ---- 1b. Phase 4.fem.eig.3.5 — extend the mesh with a CFS-PML
+    // shell on the z = 0 face (the original ABC face). 6 brick layers
+    // per Roden-Gedney 2000 §III default.
+    let pml_config = PmlConfig::default();
+    let (mesh, pml_classes, _faces) =
+        extend_mesh_with_pml(&cavity, &[PmlAxis::ZMin], pml_config.thickness_cells)?;
+
+    // ---- 2. Resolve the extended-mesh exterior-face centroids via
+    // a placeholder solver. With the PML extension the original
+    // z = 0 face is now interior and the truncation surface lives at
+    // z = - thickness_cells · dz.
     let placeholder_kinds = {
-        // Count exterior faces by walking the tet face-incidence map
-        // (one tet face per [face_opposite_local_vertex] entry; faces
-        // with multiplicity 1 are exterior). This mirrors the helper
-        // in the yee-fem integration test.
         let mut face_map: std::collections::HashMap<[usize; 3], usize> =
             std::collections::HashMap::new();
         const TET_FACES: [[usize; 3]; 4] = [[1, 2, 3], [0, 2, 3], [0, 1, 3], [0, 1, 2]];
@@ -2920,49 +2926,38 @@ pub fn run_fem_eig_003_wr90_stub_abc() -> Result<FemEig003ValidationResult, yee_
     )?;
     let centroids = placeholder.exterior_face_centroids();
 
-    // ---- 3. Classify faces by centroid position:
-    //   z ≈ 0       → Abc       (1st-order Engquist-Majda)
-    //   z ≈ d       → WavePort  (TE_{10} drive)
-    //   otherwise   → Pec       (four longitudinal sidewalls)
+    // ---- 3. Classify extended-mesh faces:
+    //   z ≈ -t·dz  → Pec       (outer PML truncation surface)
+    //   z ≈ d      → WavePort  (TE_{10} drive)
+    //   otherwise  → Pec       (sidewalls of both cavity and PML)
     let mut face_kinds: Vec<FaceKind> = Vec::with_capacity(centroids.len());
     let tol = 1e-9;
     for c in &centroids {
-        let kind = if c.z < tol {
-            FaceKind::Abc
-        } else if (c.z - FEM_EIG_003_D_M).abs() < tol {
+        let kind = if (c.z - FEM_EIG_003_D_M).abs() < tol {
             FaceKind::WavePort(0)
         } else {
+            // Outer truncation + sidewalls all PEC. The original
+            // z = 0 cavity/PML interface is interior to the extended
+            // mesh and not part of `centroids`.
             FaceKind::Pec
         };
         face_kinds.push(kind);
     }
+    drop(placeholder);
 
-    // ---- 4. Wave-port descriptor: TE_{10} on WR-90 with the
-    // orthonormalised analytic modal profile. Per spec §4.3 the modal
-    // source uses `e_mode = ŷ · sqrt(2/(a·b)) · sin(π x/a)` and
-    // `β(ω) = sqrt((ω/c)² − (π/a)²)`. ADR-0040 records the analytic-
-    // profile path as the v0 modal source (Phase 4.fem.eig.2.0.1 will
-    // upgrade to the `NumericalCrossSection`-sourced profile).
     let port = PortDefinition {
         beta_mode: Box::new(fem_eig_003_beta_te10),
         modal_e_t: Box::new(fem_eig_003_modal_e_t_te10),
     };
 
-    // ---- 4b. Phase 4.fem.eig.3 F2 + F4 — enable the coupled exact-
-    // Whitney-1 modal RHS / projection (`with_coupled_whitney(true)`)
-    // and the 2nd-order Engquist–Majda ABC bilinear form
-    // (`with_abc_order(AbcOrder::Second)`). The F2 + F4 wiring retires
-    // the BBBBBBBBB walking-skeleton `|S_{11}| ≈ 1.0` saturation by
-    // (a) lifting the lumped `N_i(centroid) ≈ t_i / 3` edge-tangent
-    // proxy to the exact Whitney-1 identity evaluated at 3-point Gauss
-    // quadrature (spec §4.1) and (b) lowering the ABC reflection floor
-    // from `~ −40 dB` (1st-order Mur) to `~ −60 dB` at normal incidence
-    // (spec §4.2 / Engquist–Majda 1979 eq. 9). Both flags are *off* in
-    // the v2 default; the Phase 4.fem.eig.3 plan F6 step turns them on
-    // for the fem-eig-003 strict re-gate.
+    // ---- 4. Build the CFS-PML solver. Coupled exact-Whitney-1 modal
+    // RHS / projection stays on (Phase 4.fem.eig.3 F1+F2 still load-
+    // bearing for the wave-port modal source). `with_cfs_pml`
+    // switches the truncation kernel to volumetric Roden-Gedney 2000
+    // CFS-PML.
     let solver = OpenBoundarySolver::new(&mesh, face_kinds, vec![port], MaterialDatabase::new())?
         .with_coupled_whitney(true)
-        .with_abc_order(AbcOrder::Second);
+        .with_cfs_pml(pml_config, pml_classes);
 
     // ---- 5. Build the uniform-frequency sweep and execute the driven
     // solve. 50 points across [8.0, 12.0] GHz at 80 MHz spacing per
@@ -3642,6 +3637,227 @@ pub fn run_fem_eig_005_t_junction() -> Result<FemEig005ValidationResult, yee_cor
         gate_b_reciprocity_ok,
         status,
         notes,
+        wall_time_seconds: elapsed,
+    })
+}
+
+// ---------------------------------------------------------------------
+// fem-eig-006: Phase 4.fem.eig.3.5 P5 — high-aspect-ratio CFS-PML
+// stability stress test (100 : 10 : 1 cavity at 30 GHz). Spec §6.
+// ---------------------------------------------------------------------
+
+/// High-aspect cavity broad-wall extent (m) for fem-eig-006.
+pub const FEM_EIG_006_A_M: f64 = 0.100;
+/// High-aspect cavity narrow-wall extent (m).
+pub const FEM_EIG_006_B_M: f64 = 0.010;
+/// High-aspect cavity axial thickness (m). The 100 : 10 : 1 aspect
+/// stresses CFS-PML on highly off-normal modal content at the
+/// truncation surface (spec §6).
+pub const FEM_EIG_006_D_M: f64 = 0.001;
+/// Mesh subdivisions along the broad-wall axis.
+pub const FEM_EIG_006_NX: usize = 16;
+/// Mesh subdivisions along the narrow-wall axis.
+pub const FEM_EIG_006_NY: usize = 3;
+/// Mesh subdivisions along the axial direction (thin film axis).
+pub const FEM_EIG_006_NZ: usize = 2;
+/// Single-frequency operating point (Hz) — 30 GHz is well above the
+/// TE_{10} cutoff (~1.5 GHz for `a = 100 mm`) and forces the WR-90
+/// modal scattering pattern's off-normal content onto the PML inner
+/// boundary.
+pub const FEM_EIG_006_F_HZ: f64 = 30.0e9;
+
+/// Public driver result for the `fem-eig-006` validation gate.
+#[derive(Debug, Clone)]
+pub struct FemEig006ValidationResult {
+    /// Stable case identifier (`"fem-eig-006"`).
+    pub id: String,
+    /// Operating frequency (Hz).
+    pub frequency_hz: f64,
+    /// Complex `S_{11}(f)` at the single operating frequency.
+    pub s11: Complex64,
+    /// `|S_{11}(f)|` linear magnitude.
+    pub s11_magnitude: f64,
+    /// `20·log10(|S_{11}|)` (dB).
+    pub s11_db: f64,
+    /// Gate (A) — `|S_{11}(f)| < 0.1` per spec §6.
+    pub gate_a_magnitude_ok: bool,
+    /// Gate (B) — `S_{11}` is finite (no NaN/Inf from PML stability
+    /// failure).
+    pub gate_b_finite_ok: bool,
+    /// Notes string for the aggregator.
+    pub notes: String,
+    /// Overall pass/fail status.
+    pub status: CaseStatus,
+    /// Wall time (s).
+    pub wall_time_seconds: f64,
+}
+
+/// TE_{10} `β(ω) = sqrt((ω/c)² − (π/b)²)` for the high-aspect cavity
+/// with wave propagation along x. The broad wall of the (y, z)
+/// cross-section is the y-extent (`FEM_EIG_006_B_M = 10 mm`); the
+/// axial dimension (`FEM_EIG_006_D_M = 1 mm`) is the narrow wall.
+/// Cutoff frequency `f_c = c / (2 b) ≈ 15 GHz`, well below the
+/// 30 GHz operating point.
+fn fem_eig_006_beta_te10(omega: f64) -> f64 {
+    let c0 = yee_core::units::C0;
+    let k0_sq = (omega / c0).powi(2);
+    let kc_sq = (std::f64::consts::PI / FEM_EIG_006_B_M).powi(2);
+    let arg = k0_sq - kc_sq;
+    if arg <= 0.0 { 0.0 } else { arg.sqrt() }
+}
+
+/// Orthonormalised TE_{10} modal profile on the high-aspect cavity's
+/// short-face wave-port at `x = 0`. With propagation along `+x`, the
+/// dominant TE_{10} mode has E-field along the narrow wall (`+ẑ`)
+/// and amplitude varying as `sin(π y / b)` across the broad wall.
+fn fem_eig_006_modal_e_t_te10(p: nalgebra::Vector3<f64>) -> nalgebra::Vector3<f64> {
+    let norm = (2.0 / (FEM_EIG_006_B_M * FEM_EIG_006_D_M)).sqrt();
+    let amp = norm * (std::f64::consts::PI * p.y / FEM_EIG_006_B_M).sin();
+    nalgebra::Vector3::new(0.0, 0.0, amp)
+}
+
+/// `fem-eig-006`: high-aspect-ratio CFS-PML stability stress test
+/// (Phase 4.fem.eig.3.5 P5; spec §6).
+///
+/// Builds a `100 mm × 10 mm × 1 mm` rectangular cavity meshed with
+/// `(16, 3, 2)` Kuhn 6-tet bricks (~580 tets), extends with a 6-cell
+/// CFS-PML shell on the `+x = 100 mm` face, drives a TE_{10}
+/// wave-port on the `-x = 0` face at 30 GHz, and reports
+/// `S_{11}(30 GHz)` plus the per-gate booleans.
+///
+/// Per spec §6 the strict gates are:
+///
+/// * **(A)** `|S_{11}(30 GHz)| < 0.1` — the PML must absorb the
+///   off-normal modal content the 2nd-order ABC saturates on at
+///   `~ 0.95`.
+/// * **(B)** `S_{11}` finite — PML stability canary (the CFS
+///   `α_α > 0` modification rescues this from the Berenger 1994 PML's
+///   evanescent-mode divergence).
+///
+/// # Errors
+///
+/// Propagates errors from the mesh extension and the per-frequency
+/// driven solve.
+pub fn run_fem_eig_006_high_aspect_pml() -> Result<FemEig006ValidationResult, yee_core::Error> {
+    use yee_fem::{
+        FaceKind, MaterialDatabase, OpenBoundarySolver, PmlAxis, PmlConfig, PortDefinition,
+        extend_mesh_with_pml,
+    };
+    use yee_mesh::TetMesh3D;
+
+    let t0 = Instant::now();
+
+    let cavity = TetMesh3D::cavity_uniform(
+        FEM_EIG_006_A_M,
+        FEM_EIG_006_B_M,
+        FEM_EIG_006_D_M,
+        FEM_EIG_006_NX,
+        FEM_EIG_006_NY,
+        FEM_EIG_006_NZ,
+    )
+    .map_err(|e| yee_core::Error::Invalid(format!("fem-eig-006 cavity_uniform: {e}")))?;
+
+    let pml_config = PmlConfig::default();
+    let (mesh, pml_classes, _faces) =
+        extend_mesh_with_pml(&cavity, &[PmlAxis::XMax], pml_config.thickness_cells)?;
+
+    // Resolve extended-mesh exterior face centroids.
+    let placeholder_kinds = {
+        let mut face_map: std::collections::HashMap<[usize; 3], usize> =
+            std::collections::HashMap::new();
+        const TET_FACES: [[usize; 3]; 4] = [[1, 2, 3], [0, 2, 3], [0, 1, 3], [0, 1, 2]];
+        for tet in &mesh.tetrahedra {
+            for &[a, b, c] in TET_FACES.iter() {
+                let mut key = [tet[a], tet[b], tet[c]];
+                key.sort_unstable();
+                *face_map.entry(key).or_insert(0) += 1;
+            }
+        }
+        let n_exterior = face_map.values().filter(|&&c| c == 1).count();
+        vec![FaceKind::Pec; n_exterior]
+    };
+    let placeholder = OpenBoundarySolver::new(
+        &mesh,
+        placeholder_kinds,
+        Vec::new(),
+        MaterialDatabase::new(),
+    )?;
+    let centroids = placeholder.exterior_face_centroids();
+    drop(placeholder);
+
+    // Classify faces: x ≈ 0 → WavePort(0), everything else → Pec.
+    // The PML inner interface at x = FEM_EIG_006_A_M is internal to
+    // the extended mesh; the outer PML truncation surface at
+    // x = FEM_EIG_006_A_M + t·dx is PEC.
+    let mut face_kinds: Vec<FaceKind> = Vec::with_capacity(centroids.len());
+    let tol = 1e-9;
+    for c in &centroids {
+        let kind = if c.x.abs() < tol {
+            FaceKind::WavePort(0)
+        } else {
+            FaceKind::Pec
+        };
+        face_kinds.push(kind);
+    }
+
+    let port = PortDefinition {
+        beta_mode: Box::new(fem_eig_006_beta_te10),
+        modal_e_t: Box::new(fem_eig_006_modal_e_t_te10),
+    };
+
+    let solver = OpenBoundarySolver::new(&mesh, face_kinds, vec![port], MaterialDatabase::new())?
+        .with_coupled_whitney(true)
+        .with_cfs_pml(pml_config, pml_classes);
+
+    let omega = 2.0 * std::f64::consts::PI * FEM_EIG_006_F_HZ;
+    let sweep = solver.sweep(&[omega])?;
+    let s11 = sweep.s_pp[0][0];
+
+    let s11_magnitude = s11.norm();
+    let s11_db = if s11_magnitude > 0.0 {
+        20.0 * s11_magnitude.log10()
+    } else {
+        f64::NEG_INFINITY
+    };
+
+    let gate_a_magnitude_ok = s11_magnitude < 0.1;
+    let gate_b_finite_ok = s11.re.is_finite() && s11.im.is_finite();
+
+    let passed = gate_a_magnitude_ok && gate_b_finite_ok;
+    let status = if passed {
+        CaseStatus::Passed
+    } else {
+        CaseStatus::Failed
+    };
+
+    let elapsed = t0.elapsed().as_secs_f64();
+    let notes = format!(
+        "fem-eig-006 high-aspect CFS-PML stress ({nx}×{ny}×{nz} cavity, \
+         {tets} extended tets); f = {f_ghz:.1} GHz; |S_11| = {mag:.6} \
+         ({db:.2} dB); gate(A) |S_11|<0.1 = {a}; gate(B) finite = {b}; \
+         wall = {wall:.2}s",
+        nx = FEM_EIG_006_NX,
+        ny = FEM_EIG_006_NY,
+        nz = FEM_EIG_006_NZ,
+        tets = mesh.tetrahedra.len(),
+        f_ghz = FEM_EIG_006_F_HZ * 1e-9,
+        mag = s11_magnitude,
+        db = s11_db,
+        a = gate_a_magnitude_ok,
+        b = gate_b_finite_ok,
+        wall = elapsed,
+    );
+
+    Ok(FemEig006ValidationResult {
+        id: "fem-eig-006".to_string(),
+        frequency_hz: FEM_EIG_006_F_HZ,
+        s11,
+        s11_magnitude,
+        s11_db,
+        gate_a_magnitude_ok,
+        gate_b_finite_ok,
+        notes,
+        status,
         wall_time_seconds: elapsed,
     })
 }

@@ -1,7 +1,58 @@
-//! `fem-eig-003` production-gate test — WR-90 stub with 2nd-order
-//! Engquist-Majda ABC termination, swept `|S_{11}(f)|` across 8-12 GHz
-//! vs spec §8 absorption window (Phase 4.fem.eig.2 step E5; refined to
-//! `(24, 12, 36)` mesh per Phase 4.fem.eig.3.0.3 / Track NNNNNNNNN).
+//! `fem-eig-003` production-gate test — WR-90 stub with **CFS-PML**
+//! termination (Phase 4.fem.eig.3.5; replaces the 2nd-order Engquist-
+//! Majda ABC of Phase 4.fem.eig.3), swept `|S_{11}(f)|` across 8-12
+//! GHz vs spec §8 absorption window.
+//!
+//! ## OOOOOOOOO status (2026-05-20, Phase 4.fem.eig.3.5)
+//!
+//! Track OOOOOOOOO landed the CFS-PML volumetric absorber as a
+//! replacement for the 2nd-order Engquist-Majda surface-integral
+//! kernel. With the spec §6 default grading (`thickness_cells = 6`,
+//! polynomial order `m = 3`, κ_max = 5, α_max ≈ ω₀ ε_0, σ_max
+//! self-resolved from h_cell) on the existing `(24, 12, 36) = 62 208
+//! cavity tets + 10 368 PML tets ≈ 72 k extended tets, the driver
+//! measures `|S_{11}(f)|` band `[0.281, 0.423]` → `s11_db ∈
+//! [-11.0, -7.48] dB` across the 8-12 GHz sweep.
+//!
+//! This is **>30 dB above the new spec §6 `[-60, -40] dB` window**
+//! and triggers the OOOOOOOOO brief escape hatch ("P5 strict gate
+//! >5 dB above [-60, -40] dB band → do NOT weaken bounds; re-
+//! `#[ignore]` with measurement-recorded docstring; queue Phase
+//! 4.fem.eig.3.5.1 grading retune"). Both strict gates remain
+//! `#[ignore]`'d. The CFS-PML wire-in (P1-P4) is correct (the
+//! `pml_assembly_finite_at_dc` causality canary and the
+//! `pml_assembly_zero_thickness_passes_through` v3-equivalence canary
+//! both pass) but the default grading-parameter set
+//! over-reflects rather than over-absorbs — the conjectured root
+//! cause is one of:
+//!
+//! (a) the analytic `h_cell` back-inference from `σ_max` mis-predicts
+//!     the true mesh spacing for the WR-90 aspect ratio (broad-wall
+//!     0.952 mm cells vs axial 0.833 mm cells — the heuristic uses a
+//!     single h_cell estimate);
+//! (b) the `kappa_max = 5` Roden-Gedney 2000 Table-I value for
+//!     "microwave waveguide discontinuity" benchmarks is calibrated
+//!     for FDTD time-domain — frequency-domain FEM may want a smaller
+//!     `kappa_max` ~ 1.5-3;
+//! (c) the polynomial order `m = 3` ramps σ too steeply for the
+//!     thin (6-layer) shell — `m = 2` may improve the inner-boundary
+//!     reflection floor.
+//!
+//! Phase 4.fem.eig.3.5.1 will sweep `(thickness_cells, m, kappa_max,
+//! alpha_max)` to retune; this PR ships the CFS-PML kernel correct in
+//! structure but with default parameters that do not yet hit the
+//! spec §6 window.
+//!
+//! ## Background (pre-CFS-PML)
+//!
+//! Phase 4.fem.eig.3 (2nd-order Engquist-Majda ABC) measured
+//! `|S_{11}(f)|` band `[0.9976, 0.99997]` ⇒ `s11_db ∈
+//! [-2.22e-2, -2.86e-5] dB` across 8-12 GHz on the same `(24, 12,
+//! 36)` mesh — the surface-integral ABC's intrinsic-floor regime
+//! described by ADR-0042 §risks. CFS-PML's `~ -10 dB` is a ~10 dB
+//! improvement in dB (the band collapsed by ~10 dB) but the new
+//! `-40 dB` upper-window bound is still ~30 dB out of reach pending
+//! the v3.5.1 ablation.
 //!
 //! Drives [`yee_validation::run_fem_eig_003_wr90_stub_abc`] end-to-end
 //! on the spec §8 fixture (`a = 22.86 mm`, `b = 10.16 mm`, `d = 30 mm`)
@@ -197,9 +248,10 @@ fn fem_eig_003_passive_structure_no_amplification() {
 ///   but still nowhere near `[-45, -35] dB`; remaining reflection is
 ///   dominated by the 2nd-order ABC's intrinsic floor.
 #[test]
-#[ignore = "fem-eig-003 strict passive bound: refined (24, 12, 36) mesh measures |S_11| band \
-            [0.9976, 0.99997] strictly < 1 (gate would pass) but kept #[ignore]'d coupled \
-            with the still-failing absorption-floor gate per Phase 4.fem.eig.3.5 CFS-PML queue"]
+#[ignore = "fem-eig-003 strict passive bound (Phase 4.fem.eig.3.5): CFS-PML measures |S_11| band \
+            [0.281, 0.423] which is comfortably strictly < 1 (gate would pass); kept #[ignore]'d \
+            coupled with the still-failing absorption-floor gate per Phase 4.fem.eig.3.5.1 \
+            grading retune queue (OOOOOOOOO measurement)"]
 fn fem_eig_003_strict_passive_bound_continuum_limit() {
     let result = run_fem_eig_003_wr90_stub_abc().expect("fem-eig-003 driver");
     let strict_passive_ok = result.s11_magnitude.iter().all(|&m| m < 1.0);
@@ -228,56 +280,25 @@ fn fem_eig_003_sweep_smoothness_no_spurious_resonance() {
     );
 }
 
-/// Gate (A) — Engquist–Majda absorption floor.
-/// `20·log10(|S_{11}(f)|) ∈ [-45, -35] dB` at every swept frequency
-/// (spec §8 + ADR-0040 / ADR-0042).
+/// Gate (A) — CFS-PML absorption floor.
+/// `20·log10(|S_{11}(f)|) ∈ [-60, -40] dB` at every swept frequency
+/// per Phase 4.fem.eig.3.5 spec §6.
 ///
-/// **`#[ignore]`'d per the Phase 4.fem.eig.3.0.3 NNNNNNNNN escape
-/// hatch — Phase 4.fem.eig.3.5 (CFS-PML) is the path to the spec §8
-/// window.**
+/// **`#[ignore]`'d per the Phase 4.fem.eig.3.5 OOOOOOOOO P5 escape
+/// hatch — default-grading CFS-PML measures `[-11.0, -7.48] dB` band,
+/// ~30 dB above the upper window bound. Queued for Phase
+/// 4.fem.eig.3.5.1 grading-parameter ablation.**
 ///
-/// **NNNNNNNNN status (2026-05-20, Phase 4.fem.eig.3.0.3).** The mesh
-/// was refined from the spec-scale `(16, 8, 24) = 18 432 tets` to
-/// `(24, 12, 36) = 62 208 tets` per ADR-0042 §risks (~3.4× tets, ~24
-/// linear samples across the broad wall vs ~16 before). With F1+F2
-/// coupled exact-Whitney-1 modal RHS + projection and F3+F4 2nd-order
-/// Engquist–Majda ABC both enabled, the refined mesh measures
-/// `|S_{11}(f)|` band `[0.9976, 0.99997]` → `s11_db ∈
-/// [-2.22e-2, -2.86e-5] dB` across the 8-12 GHz sweep. The
-/// mesh-refinement step lowered the `|S_{11}|` floor measurably (the
-/// JJJJJJJJJ `(16, 8, 24)` baseline measured `s11_db ∈
-/// [-5.0e-2, -8.1e-5] dB`, so the refinement is ~2× better in dB) but
-/// **the spec §8 target `[-45, -35] dB` is still ~35 dB below the
-/// measured floor** — the residual is no longer mesh-bound.
-///
-/// **Failure-mode diagnosis (revised).** With ~24 cross-section
-/// samples and ~30 axial samples, the WR-90 TE_{10} mode is now
-/// resolved well above the Jin §10.4 table 10.1 ~30-samples/wavelength
-/// guideline at the cross-section, yet the absorption floor barely
-/// budged. The binding constraint at this mesh tier is therefore not
-/// modal-sampling discretisation but the 2nd-order Engquist–Majda
-/// ABC's intrinsic floor for off-normal modal content scattered by
-/// the truncation surface (see spec §10 risk register on near-resonant
-/// TE_{10n} content at 8/12 GHz). 2nd-order Engquist–Majda gives at
-/// best `~ -40 dB` only for plane waves at near-normal incidence; the
-/// closed WR-90 stub's modal scattering pattern includes significant
-/// off-normal content that the local 2nd-order operator cannot
-/// absorb.
-///
-/// **Queued follow-up: Phase 4.fem.eig.3.5 CFS-PML.** Per the Track
-/// NNNNNNNNN brief escape hatch ("strict gate still fails > 5 dB
-/// above -35 dB even at refined mesh → fundamental limit reached;
-/// queue Phase 4.fem.eig.3.5 PML and leave gates ignored"), this
-/// gate is queued for the CFS-PML follow-up rather than further mesh
-/// refinement. ADR-0042 §risks records this transition. Lift the
-/// `#[ignore]` in the Phase 4.fem.eig.3.5 PR once the absorption floor
-/// reaches `[-45, -35] dB`.
+/// See the module-level "OOOOOOOOO status" docstring above for the
+/// full measurement and the three candidate failure modes
+/// (mesh-aspect-ratio h_cell heuristic, kappa_max choice for FD-FEM,
+/// polynomial-order m vs shell-thickness trade-off).
 #[test]
-#[ignore = "fem-eig-003 strict absorption floor: refined (24, 12, 36) mesh measures |S_11| \
-            band [0.9976, 0.99997] (s11_db [-2.22e-2, -2.86e-5] dB) — 2x better in dB than \
-            JJJJJJJJJ's (16, 8, 24) baseline but still ~35 dB above the spec §8 [-45, -35] \
-            dB window; binding constraint is 2nd-order Engquist-Majda intrinsic floor, queue \
-            Phase 4.fem.eig.3.5 CFS-PML per ADR-0042"]
+#[ignore = "fem-eig-003 strict absorption floor (Phase 4.fem.eig.3.5): CFS-PML default-grading \
+            measures |S_11| band [0.281, 0.423] (s11_db [-11.0, -7.48] dB) — ~10 dB \
+            improvement in dB over the 2nd-order Engquist-Majda baseline but still ~30 dB above \
+            the spec §6 [-60, -40] dB window. Queued for Phase 4.fem.eig.3.5.1 grading-parameter \
+            ablation per OOOOOOOOO brief escape hatch (P5 strict gate >5 dB above band)"]
 fn fem_eig_003_strict_absorption_floor_gate() {
     let result = run_fem_eig_003_wr90_stub_abc().expect("fem-eig-003 driver");
     assert!(
