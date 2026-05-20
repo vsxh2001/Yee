@@ -357,22 +357,34 @@ pub struct PmlConfig {
 // either strict band — premature. Strict `#[ignore]`'s on the
 // fem-eig-003 + fem-eig-006 production gates stay with updated
 // measurement docstrings (R4).
+// Phase 4.fem.eig.3.5.2 retune (2026-05-20, sweep CSV 33 rows complete):
+// the full H1+H2+H3+H4 ablation grid (1 + 5 + 9 + 18 = 33 configurations)
+// ran end-to-end on fem-eig-003 (~5 hr release wall-time, ~280-410 s/row).
+// Winning row: H4 (κ_max=2, m=3, thickness_cells=16, alpha_grading_order=1)
+// reaches `|S_11(f)|` band `[-71.53, -55.58] dB` — worst-case ~15 dB past
+// the spec §6 [-60, -40] dB upper bound. fem-eig-006 |S_11|(30 GHz)
+// remains at 0.926 across **all** H4 rows — α_grading_order ∈ {0, 1, 2}
+// did not move fem-eig-006 (the 100:10:1 aspect cavity at 30 GHz has
+// modal content that the +x-face PML alone cannot absorb). The H3 axes
+// extension (thickness > 10) closes the fem-eig-003 gap; the α_α(d)
+// Berenger 2002 §VI grading contributes ~10 dB on top of H3 alone.
+//
+// Decision per spec §3 + ADR-0045 decision 5 (S3 winner-ship path):
+// adopt (κ_max=2, m=3, thickness_cells=16, alpha_grading_order=1) as
+// the new defaults. fem-eig-003 absorption-floor + passive-bound strict
+// gates un-ignore in S4 (both pass under new defaults). fem-eig-006
+// magnitude gate stays #[ignore]'d — α grading proved orthogonal to the
+// fixture; queue Phase 4.fem.eig.3.5.3 for the 100:10:1-specific tuning
+// (rotated PML / multi-face wedges / wave-port termination).
 impl Default for PmlConfig {
     fn default() -> Self {
         Self {
-            thickness_cells: 6,
+            thickness_cells: 16,
             sigma_max: 0.0,
             alpha_max: 0.0,
-            kappa_max: 5.0,
+            kappa_max: 2.0,
             m: 3,
-            // Phase 4.fem.eig.3.5.2: default `0` keeps the v3.5.1
-            // constant-`α_max` behaviour bit-for-bit. The H4 sweep in
-            // `crates/yee-validation/examples/cfs_pml_grading_sweep.rs`
-            // picks the v3.5.2 winning quadruple
-            // `(κ_max, m, thickness_cells, alpha_grading_order)`;
-            // this default updates atomically in S3 (out of scope for
-            // S1+S2).
-            alpha_grading_order: 0,
+            alpha_grading_order: 1,
         }
     }
 }
