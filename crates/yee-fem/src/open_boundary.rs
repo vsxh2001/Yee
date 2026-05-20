@@ -279,10 +279,13 @@ pub enum AbcOrder {
 /// The grading parameters control the polynomial-graded conductivity
 /// `σ_α(d) = σ_max · (d/D)^m`, coordinate stretching
 /// `κ_α(d) = 1 + (κ_max − 1) · (d/D)^m`, and the CFS frequency-shift
-/// `α_α(d) = α_max`. The depth `d ∈ [0, D]` is measured inward from the
-/// PML's outer truncation surface; at the inner boundary (`d = 0`) both
-/// `σ` and `κ − 1` vanish so the material is continuous with the
-/// cavity interior, eliminating surface-reflection spurious modes.
+/// `α_α(d) = α_max · (1 − d/D)^alpha_grading_order` (Phase
+/// 4.fem.eig.3.5.2; with `alpha_grading_order = 0` the formula
+/// collapses to the v3.5.1 constant `α_α(d) ≡ α_max`). The depth
+/// `d ∈ [0, D]` is measured inward from the PML's outer truncation
+/// surface; at the inner boundary (`d = 0`) both `σ` and `κ − 1`
+/// vanish so the material is continuous with the cavity interior,
+/// eliminating surface-reflection spurious modes.
 ///
 /// Default values follow Roden–Gedney 2000 §III + Table I for microwave
 /// waveguide benchmarks. `sigma_max` and `alpha_max` use sentinel
@@ -314,6 +317,16 @@ pub struct PmlConfig {
     /// gradient near the outer truncation surface and the inner cavity
     /// boundary.
     pub m: usize,
+    /// Phase 4.fem.eig.3.5.2: `α_α(d)` polynomial grading order per
+    /// Berenger 2002 §VI. `0` (default) recovers v3.5.1 constant
+    /// `α_α(d) ≡ α_max` bit-for-bit. `n ≥ 1` enables the ramp
+    /// `α_α(d) = α_max · (1 − d/D)^n` falling from `α_max` at the
+    /// cavity-PML interface (`d = 0`) to `0` at the outer truncation
+    /// surface (`d = D`). Berenger 2002 §VI reports ~5–10 dB
+    /// worst-case improvement at the inner boundary with `n ∈ {1, 2, 3}`
+    /// over the canonical 2D evanescent-mode benchmark; `n = 1` is the
+    /// linear ramp §VI defaults to.
+    pub alpha_grading_order: usize,
 }
 
 // Phase 4.fem.eig.3.5.1 retune (2026-05-20, sweep CSV rows 1-6):
@@ -352,6 +365,14 @@ impl Default for PmlConfig {
             alpha_max: 0.0,
             kappa_max: 5.0,
             m: 3,
+            // Phase 4.fem.eig.3.5.2: default `0` keeps the v3.5.1
+            // constant-`α_max` behaviour bit-for-bit. The H4 sweep in
+            // `crates/yee-validation/examples/cfs_pml_grading_sweep.rs`
+            // picks the v3.5.2 winning quadruple
+            // `(κ_max, m, thickness_cells, alpha_grading_order)`;
+            // this default updates atomically in S3 (out of scope for
+            // S1+S2).
+            alpha_grading_order: 0,
         }
     }
 }
@@ -433,6 +454,12 @@ pub(crate) struct ResolvedPmlConfig {
     pub m: usize,
     /// Shell thickness in cells.
     pub thickness_cells: usize,
+    /// Phase 4.fem.eig.3.5.2: `α_α(d)` polynomial grading order per
+    /// Berenger 2002 §VI. Copied verbatim from
+    /// [`PmlConfig::alpha_grading_order`] by [`PmlConfig::resolved`].
+    /// `0` collapses [`pml_stretching_lambda`] to the v3.5.1 constant
+    /// `α_α(d) ≡ α_max` denominator bit-for-bit.
+    pub alpha_grading_order: usize,
 }
 
 impl PmlConfig {
@@ -482,6 +509,7 @@ impl PmlConfig {
             kappa_max: self.kappa_max,
             m: self.m,
             thickness_cells: self.thickness_cells,
+            alpha_grading_order: self.alpha_grading_order,
         }
     }
 }
@@ -2466,7 +2494,25 @@ fn pml_stretching_lambda(
         let pow = ratio.powf(m);
         let sigma_d = cfg.sigma_max_per_axis[axis] * pow;
         let kappa_d = 1.0 + (cfg.kappa_max - 1.0) * pow;
-        let denom = Complex64::new(cfg.alpha_max, omega * yee_core::units::EPS0);
+        // Phase 4.fem.eig.3.5.2: `α_α(d) = α_max · (1 − d/D)^n` per
+        // Berenger 2002 §VI. With `alpha_grading_order = 0`,
+        // `pow_alpha = 1.0` and the denominator collapses bit-for-bit
+        // onto the v3.5.1 constant-`α_max` formulation. With `n ≥ 1`,
+        // `α_α` falls from `α_max` at the cavity-PML interface
+        // (`d = 0`) to `0` at the outer truncation surface (`d = D`),
+        // smoothing the inner-boundary discontinuity §VI attributes
+        // to ~5–10 dB worst-case reflection floor improvement.
+        let pow_alpha = if cfg.alpha_grading_order == 0 {
+            1.0
+        } else {
+            (1.0 - ratio).powi(cfg.alpha_grading_order as i32)
+        };
+        let alpha_alpha = cfg.alpha_max * pow_alpha;
+        // §7 (a) causality canary: when `alpha_alpha(D) = 0` and
+        // `ω → 0` simultaneously, the existing `denom.norm_sqr()`
+        // guard returns `Complex64::new(kappa_d, 0.0)` (no NaN poison;
+        // the assembled stiffness stays finite).
+        let denom = Complex64::new(alpha_alpha, omega * yee_core::units::EPS0);
         if denom.norm_sqr() <= f64::MIN_POSITIVE {
             return Complex64::new(kappa_d, 0.0);
         }
