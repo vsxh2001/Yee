@@ -168,10 +168,13 @@ use yee_core::Error;
 use yee_core::units::C0;
 use yee_mesh::TetMesh3D;
 
+use nalgebra::SMatrix;
+
 use crate::assembly::FemEigenAssembly;
 use crate::element::{
     LOCAL_EDGES, assemble_abc_face_block, assemble_abc2_face_block, assemble_port_face_block,
     assemble_port_face_block_gauss_pts, assemble_port_face_rhs_gauss_pts, assemble_port_modal_rhs,
+    assemble_tet_element_complex, assemble_tet_element_complex_anisotropic,
 };
 use crate::material::MaterialDatabase;
 
@@ -221,8 +224,8 @@ pub enum FaceKind {
     WavePort(PortId),
 }
 
-/// Selects the Engquist–Majda ABC bilinear form on
-/// [`FaceKind::Abc`]-tagged exterior faces (Phase 4.fem.eig.3 step F4).
+/// Selects the open-boundary truncation kernel on
+/// [`FaceKind::Abc`]-tagged exterior faces.
 ///
 /// The default is [`AbcOrder::First`], which reproduces the
 /// Phase 4.fem.eig.2 v2 + CCCCCCCCC behaviour bit-for-bit: every ABC
@@ -239,7 +242,16 @@ pub enum FaceKind {
 /// has a **real** scalar prefactor while the 1st-order part stays
 /// purely imaginary, so the composite block is complex-symmetric with
 /// non-trivial real *and* imaginary content.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+///
+/// [`AbcOrder::CfsPml`] (Phase 4.fem.eig.3.5) replaces the
+/// surface-integral Engquist–Majda kernel with a volumetric CFS-PML
+/// (Roden–Gedney 2000) buffer-layer absorber. The PML is a thin shell
+/// of additional tetrahedra outside the original cavity volume, in
+/// which the constitutive tensor `ε(ω)` becomes the stretched-coordinate
+/// form `ε · Λ(ω)` and absorbs off-normal and evanescent modal content
+/// that the local Engquist–Majda operators cannot. See [`PmlConfig`]
+/// for the grading-parameter surface.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub enum AbcOrder {
     /// 1st-order Engquist–Majda absorbing boundary. The v0 / v2 default
     /// — reproduces the shipped behaviour bit-for-bit. Reflection floor
@@ -250,6 +262,120 @@ pub enum AbcOrder {
     /// tangential-curl correction term per Engquist–Majda 1979 eq. 9.
     /// Reflection floor `~ −60 dB` at normal incidence (Jin §10.4).
     Second,
+    /// CFS-PML (Roden–Gedney 2000) volumetric buffer-layer absorber
+    /// (Phase 4.fem.eig.3.5). Replaces the surface-integral
+    /// Engquist–Majda kernel with a thin shell of extra tetrahedra
+    /// outside the original cavity in which `ε → ε · Λ(ω)` with
+    /// stretched-coordinate factor
+    /// `s_α(ω) = κ_α + σ_α / (α_α + j ω ε_0)`. The variant payload
+    /// carries the grading parameters; see [`PmlConfig`].
+    CfsPml(PmlConfig),
+}
+
+/// CFS-PML grading-parameter configuration (Phase 4.fem.eig.3.5;
+/// Roden–Gedney 2000, *IEEE MWCL* 10:5).
+///
+/// One [`PmlConfig`] applies symmetrically to every PML-tagged face.
+/// The grading parameters control the polynomial-graded conductivity
+/// `σ_α(d) = σ_max · (d/D)^m`, coordinate stretching
+/// `κ_α(d) = 1 + (κ_max − 1) · (d/D)^m`, and the CFS frequency-shift
+/// `α_α(d) = α_max`. The depth `d ∈ [0, D]` is measured inward from the
+/// PML's outer truncation surface; at the inner boundary (`d = 0`) both
+/// `σ` and `κ − 1` vanish so the material is continuous with the
+/// cavity interior, eliminating surface-reflection spurious modes.
+///
+/// Default values follow Roden–Gedney 2000 §III + Table I for microwave
+/// waveguide benchmarks. `sigma_max` and `alpha_max` use sentinel
+/// zeros at construction; the
+/// [`OpenBoundarySolver::with_cfs_pml`] builder recomputes them from
+/// the band-centre `ω` and mean tet edge length using the recommended
+/// `σ_max ≈ (m + 1) / (150 π · h · √ε_r)` and `α_max ≈ ω₀ ε_0`
+/// formulae. Callers wanting full control can populate either field
+/// explicitly; the [`Self::resolved`] helper returns a fully-populated
+/// copy.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PmlConfig {
+    /// PML shell thickness in tet layers. Default 6 (Roden–Gedney 2000
+    /// §III recommends 6 to 10 cells for microwave applications).
+    pub thickness_cells: usize,
+    /// Maximum conductivity (S/m) at the outer truncation surface.
+    /// `0.0` is the sentinel meaning "recompute from frequency and
+    /// mesh"; [`Self::resolved`] fills this in.
+    pub sigma_max: f64,
+    /// CFS frequency-shift parameter `α_max` (rad·s⁻¹ × ε₀, i.e. the
+    /// same units as `j ω ε_0`). `0.0` is the sentinel; [`Self::resolved`]
+    /// sets it to `ω₀ ε_0` per Roden–Gedney 2000 §IV.
+    pub alpha_max: f64,
+    /// Coordinate-stretching parameter `κ_max`. Default 5.0 per
+    /// Roden–Gedney 2000 Table I for microwave-waveguide benchmarks.
+    pub kappa_max: f64,
+    /// Polynomial grading order `m` for `σ_α(d) = σ_max · (d/D)^m`.
+    /// Default 3. Values 2, 3, 4 are typical; higher orders steepen the
+    /// gradient near the outer truncation surface and the inner cavity
+    /// boundary.
+    pub m: usize,
+}
+
+impl Default for PmlConfig {
+    fn default() -> Self {
+        Self {
+            thickness_cells: 6,
+            sigma_max: 0.0,
+            alpha_max: 0.0,
+            kappa_max: 5.0,
+            m: 3,
+        }
+    }
+}
+
+impl PmlConfig {
+    /// Resolve sentinel `0.0` values for `sigma_max` and `alpha_max`
+    /// against a band-centre frequency `freq_hz` and a mean PML tet
+    /// edge length `h_cell` (m).
+    ///
+    /// Per Roden–Gedney 2000 §III + §IV:
+    ///
+    /// * `σ_max ≈ (m + 1) / (150 π · h_cell · √ε_r)` with `ε_r = 1`
+    ///   (PML built outside an air-filled cavity).
+    /// * `α_max ≈ 2 π · freq_hz · ε_0` (band-centre rule of thumb).
+    ///
+    /// Non-zero `sigma_max` / `alpha_max` are passed through verbatim
+    /// (callers retain full control). `kappa_max`, `thickness_cells`,
+    /// `m` are never touched.
+    pub fn resolved(self, freq_hz: f64, h_cell: f64) -> Self {
+        let mut out = self;
+        if out.sigma_max == 0.0 {
+            let m_plus_1 = (self.m as f64) + 1.0;
+            // ε_r = 1 (PML against air).
+            out.sigma_max = m_plus_1 / (150.0 * std::f64::consts::PI * h_cell.max(1e-12));
+        }
+        if out.alpha_max == 0.0 {
+            // ω₀ ε_0 with ω₀ = 2 π f₀.
+            out.alpha_max = 2.0 * std::f64::consts::PI * freq_hz * yee_core::units::EPS0;
+        }
+        out
+    }
+}
+
+/// Caller-supplied designation of which exterior faces become
+/// PML-fronted (Phase 4.fem.eig.3.5).
+///
+/// One [`PmlRegion`] is consumed by
+/// [`OpenBoundarySolver::with_cfs_pml`]; if absent, the builder
+/// defaults to "every [`FaceKind::Abc`]-tagged face is PML-fronted",
+/// which is the standard one-shell-per-ABC pattern used by
+/// fem-eig-003 and fem-eig-006. The per-axis [`PmlConfig`] travels in
+/// the [`Self::config`] payload; if `None`, the solver-level default
+/// applies.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PmlRegion {
+    /// Faces in the original mesh's [`FaceKind::Abc`] set that should
+    /// be replaced with a PML shell. An empty `faces` set is "every
+    /// ABC face becomes PML-fronted" (the spec §6 default).
+    pub faces: Vec<FaceKind>,
+    /// Per-axis PML configuration. If `None`, the solver-level
+    /// [`PmlConfig`] default applies.
+    pub config: Option<PmlConfig>,
 }
 
 /// Caller-supplied wave-port descriptor.
@@ -457,6 +583,16 @@ pub struct OpenBoundarySolver<'m> {
     /// [`AbcOrder::First`] reproduces the v2 1st-order Mur behaviour
     /// bit-for-bit. Toggled by [`Self::with_abc_order`].
     abc_order: AbcOrder,
+    /// CFS-PML per-tet classification array (Phase 4.fem.eig.3.5 P4).
+    /// `None` for the v3 default surface-integral path; `Some` after
+    /// [`Self::with_cfs_pml`] has been invoked. When populated, every
+    /// non-[`crate::PmlClass::Interior`] tet contributes its mass /
+    /// stiffness block through the anisotropic-ε per-tet helper
+    /// ([`crate::assemble_tet_element_complex_anisotropic`]) with the
+    /// stretched-coordinate `Λ(ω)` factor; interior tets use the
+    /// scalar [`crate::assemble_tet_element_complex`] bit-for-bit
+    /// identical to the v3 path.
+    pml_classes: Option<Vec<crate::PmlClass>>,
 }
 
 impl<'m> OpenBoundarySolver<'m> {
@@ -544,6 +680,7 @@ impl<'m> OpenBoundarySolver<'m> {
             pec_global_edges,
             coupled_whitney: false,
             abc_order: AbcOrder::First,
+            pml_classes: None,
         })
     }
 
@@ -618,6 +755,77 @@ impl<'m> OpenBoundarySolver<'m> {
         self.abc_order
     }
 
+    /// Configure the open-boundary solver for **CFS-PML** volumetric
+    /// truncation (Phase 4.fem.eig.3.5 P4; Roden–Gedney 2000).
+    ///
+    /// The caller has already extended the mesh with PML brick shells
+    /// via [`crate::extend_mesh_with_pml`]; this builder accepts the
+    /// resulting per-tet [`crate::PmlClass`] classification (one entry
+    /// per tet in the extended mesh, length must match
+    /// `self.mesh.tetrahedra.len()`) and the [`PmlConfig`] carrying
+    /// the grading parameters.
+    ///
+    /// Effect on assembly:
+    ///
+    /// * Sets `abc_order` to [`AbcOrder::CfsPml(config)`] so the
+    ///   surface-integral Engquist–Majda kernel is **not** applied to
+    ///   ABC-tagged faces — the volumetric PML absorbs in the bulk.
+    ///   ABC-tagged faces become effectively "transparent" (their
+    ///   surface integral is zero in the spec §3.2 limit `Λ(d=0) = I`).
+    /// * Every per-tet stiffness + mass block is now computed via the
+    ///   anisotropic helper [`crate::assemble_tet_element_complex_anisotropic`]
+    ///   with a diagonal `Λ(ω)` factor. Interior tets get
+    ///   `Λ = I` and the result matches the v3 scalar path bit-for-bit.
+    /// * For PML tets, the diagonal `Λ(ω)` follows the
+    ///   stretched-coordinate identity per spec §3.1:
+    ///   `Λ = diag(s_y s_z / s_x, s_z s_x / s_y, s_x s_y / s_z)`,
+    ///   with `s_α(ω) = κ_α(d_α) + σ_α(d_α) / (α_α + j ω ε_0)`. The
+    ///   per-axis depths `d_α` are read from the [`crate::PmlClass`]
+    ///   variant payload (always non-negative; v3.5 emits at most one
+    ///   non-zero axis per tet).
+    ///
+    /// `with_cfs_pml` is **mutually exclusive** with
+    /// `with_abc_order(First | Second)` — calling both is fine
+    /// (later call wins) but only `CfsPml` triggers the volumetric
+    /// path; surface-integral ABC kernels are not applied alongside
+    /// the PML shell.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` — grading parameters. Use [`PmlConfig::default`]
+    ///   plus [`PmlConfig::resolved`] to populate the sentinel
+    ///   `sigma_max` / `alpha_max` from a band-centre frequency and
+    ///   mean tet edge length. Roden–Gedney 2000 §III/IV defaults
+    ///   apply otherwise.
+    /// * `pml_classes` — per-tet classification (length = number of
+    ///   tets in `self.mesh`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `pml_classes.len()` does not match the mesh's tet
+    /// count. The panic is preferred over a `Result` here because the
+    /// classes array is produced by [`crate::extend_mesh_with_pml`]
+    /// against the same extended mesh; a length mismatch is a caller
+    /// bug, not a runtime failure mode.
+    pub fn with_cfs_pml(mut self, config: PmlConfig, pml_classes: Vec<crate::PmlClass>) -> Self {
+        assert_eq!(
+            pml_classes.len(),
+            self.mesh.tetrahedra.len(),
+            "with_cfs_pml: pml_classes length {} does not match mesh tet count {}",
+            pml_classes.len(),
+            self.mesh.tetrahedra.len(),
+        );
+        self.abc_order = AbcOrder::CfsPml(config);
+        self.pml_classes = Some(pml_classes);
+        self
+    }
+
+    /// Read-only borrow of the CFS-PML per-tet classification array,
+    /// `None` if the v3 surface-integral path is active.
+    pub fn pml_classes(&self) -> Option<&[crate::PmlClass]> {
+        self.pml_classes.as_deref()
+    }
+
     /// Number of exterior faces classified by this solver. Equal to
     /// `face_kinds.len()`.
     pub fn n_exterior_faces(&self) -> usize {
@@ -690,6 +898,30 @@ impl<'m> OpenBoundarySolver<'m> {
             return Err(Error::Invalid(format!(
                 "OpenBoundarySolver::assemble_driven_system: omega = {omega} must be positive"
             )));
+        }
+
+        // Phase 4.fem.eig.3.5 P4 dispatch: if CFS-PML has been wired
+        // via `with_cfs_pml`, the assembly path is the volumetric
+        // anisotropic-ε path (per-tet `Λ(ω)` factor on the PML shell;
+        // interior tets reduce to the scalar path bit-for-bit).
+        // Surface-integral ABC scatter is skipped — the PML absorbs in
+        // the bulk and the original Abc-tagged faces become smooth
+        // material interfaces (continuity is preserved by the
+        // polynomial grading `σ(d=0) = 0`).
+        if let AbcOrder::CfsPml(config) = self.abc_order
+            && self.pml_classes.is_some()
+        {
+            return self.assemble_driven_system_pml(omega, config);
+        }
+        // If CfsPml is set but pml_classes is not (caller forgot to
+        // call with_cfs_pml), surface the configuration mismatch.
+        if matches!(self.abc_order, AbcOrder::CfsPml(_)) {
+            return Err(Error::Invalid(
+                "OpenBoundarySolver::assemble_driven_system: \
+                 abc_order = CfsPml but pml_classes is None — call \
+                 `with_cfs_pml(config, classes)` to wire the PML path"
+                    .to_string(),
+            ));
         }
 
         // ---- Step 1: assemble the PEC-reduced complex K(ω), M(ω).
@@ -1499,6 +1731,16 @@ impl<'m> OpenBoundarySolver<'m> {
             AbcOrder::Second => {
                 assemble_abc2_face_block(face.world_vertices(self.mesh), face.normal, k0, 1.0)
             }
+            AbcOrder::CfsPml(_) => {
+                // Unreachable: `assemble_driven_system` returns
+                // `Error::NotEnabled` before reaching this scatter when
+                // `abc_order` is `CfsPml`. The volumetric PML path
+                // wires in at Phase 4.fem.eig.3.5 P4.
+                unreachable!(
+                    "scatter_abc_face called with AbcOrder::CfsPml; \
+                     guarded out by assemble_driven_system early return"
+                );
+            }
         };
         for i in 0..3 {
             let gi = face.global_edges[i];
@@ -1737,6 +1979,203 @@ impl<'m> OpenBoundarySolver<'m> {
 
         out
     }
+
+    /// Assemble the CFS-PML driven open-boundary system at angular
+    /// frequency `omega` (Phase 4.fem.eig.3.5 P4).
+    ///
+    /// Mirrors [`Self::assemble_driven_system`] but uses per-tet
+    /// anisotropic-ε assembly via
+    /// [`crate::assemble_tet_element_complex_anisotropic`] on PML
+    /// tets (the `Λ(ω)` stretched-coordinate factor is computed
+    /// per-axis per-tet) and the scalar
+    /// [`crate::assemble_tet_element_complex`] on cavity-interior
+    /// tets (bit-for-bit unchanged from v3). The boundary-term scatter
+    /// for [`FaceKind::Abc`] is **skipped** — the PML absorbs in the
+    /// bulk and the surface integral is identically zero in the
+    /// `Λ(d=0) = I` continuity limit (spec §3.2).
+    fn assemble_driven_system_pml(
+        &self,
+        omega: f64,
+        config: PmlConfig,
+    ) -> Result<DrivenSystem, Error> {
+        let pml_classes = self.pml_classes.as_ref().ok_or_else(|| {
+            Error::Invalid(
+                "assemble_driven_system_pml: pml_classes is None — \
+                 call `with_cfs_pml(config, classes)` first"
+                    .to_string(),
+            )
+        })?;
+
+        // Resolve sentinel config against the band-centre frequency
+        // and a mean tet edge length read from the mesh.
+        let freq_hz = omega / (2.0 * std::f64::consts::PI);
+        let h_cell = self.mean_tet_edge_length();
+        let cfg = config.resolved(freq_hz, h_cell);
+
+        // ---- 1. Build the per-tet edge connectivity table (mirror of
+        // assembly::TetEdgeTable, reproduced here to keep this method
+        // self-contained inside the open_boundary lane). The same edge
+        // numbering and orientation conventions are used as
+        // FemEigenAssembly so the scalar path produces a matching
+        // matrix structure on interior tets.
+        let edge_table = PmlAssemblyEdgeTable::build(self.mesh);
+        let n_edges = edge_table.edges.len();
+
+        // ---- 2. Classify edges as PEC vs interior. PEC edges are
+        // eliminated by row/column drop.
+        let interior_edges: Vec<usize> = (0..n_edges)
+            .filter(|e| !self.pec_global_edges.contains(e))
+            .collect();
+        let n_interior = interior_edges.len();
+        let mut interior_dof_of_edge: Vec<Option<usize>> = vec![None; n_edges];
+        for (dof, &gid) in interior_edges.iter().enumerate() {
+            interior_dof_of_edge[gid] = Some(dof);
+        }
+
+        // ---- 3. Per-tet scatter into the driven matrix triplet list.
+        // We accumulate `A = K - k0^2 M` directly (rather than separate
+        // K and M COO matrices) because per-frequency assembly is the
+        // only consumer.
+        let k0 = omega / C0;
+        let k0_sq = k0 * k0;
+        let k0_sq_c = Complex64::new(k0_sq, 0.0);
+        let mut triplets: Vec<Triplet<usize, usize, Complex64>> = Vec::new();
+
+        for (tet_idx, conn) in edge_table.tet_edges.iter().enumerate() {
+            let tet = &self.mesh.tetrahedra[tet_idx];
+            let vertices = [
+                self.mesh.vertices[tet[0]],
+                self.mesh.vertices[tet[1]],
+                self.mesh.vertices[tet[2]],
+                self.mesh.vertices[tet[3]],
+            ];
+            let tag = self.mesh.tetrahedron_material[tet_idx];
+            let eps_omega = self.material_db.eps_at(tag, omega);
+            let mu_omega = self.material_db.mu_at(tag, omega);
+
+            let class = pml_classes[tet_idx];
+            let elem = if class.is_interior() {
+                assemble_tet_element_complex(vertices, eps_omega, mu_omega)
+            } else {
+                let lam = pml_stretching_lambda(class, &cfg, omega);
+                let mut eps_tensor = SMatrix::<Complex64, 3, 3>::zeros();
+                let mut mu_inv_tensor = SMatrix::<Complex64, 3, 3>::zeros();
+                let mu_inv = Complex64::new(1.0, 0.0) / mu_omega;
+                for d in 0..3 {
+                    eps_tensor[(d, d)] = eps_omega * lam[d];
+                    // For Roden-Gedney 2000 §II the same Λ applies to
+                    // both ε and μ; μ_inv therefore picks up `1 / Λ_d`.
+                    let lam_d_inv = Complex64::new(1.0, 0.0) / lam[d];
+                    mu_inv_tensor[(d, d)] = mu_inv * lam_d_inv;
+                }
+                assemble_tet_element_complex_anisotropic(vertices, eps_tensor, mu_inv_tensor)?
+            };
+
+            for alpha in 0..6 {
+                let gi = conn.global_edge[alpha];
+                let Some(ii) = interior_dof_of_edge[gi] else {
+                    continue;
+                };
+                let sa = conn.sign[alpha];
+                for beta in 0..6 {
+                    let gj = conn.global_edge[beta];
+                    let Some(jj) = interior_dof_of_edge[gj] else {
+                        continue;
+                    };
+                    let sb = conn.sign[beta];
+                    let signed = Complex64::new(sa * sb, 0.0);
+                    // A_{αβ} = K_{αβ} - k0^2 M_{αβ}
+                    let a_entry = signed
+                        * (elem.k_local[(alpha, beta)] - k0_sq_c * elem.m_local[(alpha, beta)]);
+                    triplets.push(Triplet::new(ii, jj, a_entry));
+                }
+            }
+        }
+
+        // ---- 4. Wave-port face scatter (same as the v3 path). ABC
+        // faces are SKIPPED — the PML absorbs in the bulk.
+        let mut rhs: Vec<Complex64> = vec![Complex64::new(0.0, 0.0); n_interior];
+        for (i, kind) in self.face_kinds.iter().enumerate() {
+            let face = &self.exterior_faces.faces[i];
+            match *kind {
+                FaceKind::Pec | FaceKind::Abc => {
+                    // PEC: row/column drop above already handled.
+                    // Abc: surface-integral kernel suppressed; PML
+                    //      handles absorption volumetrically.
+                }
+                FaceKind::WavePort(p) => {
+                    let port = &self.ports[p];
+                    let beta = (port.beta_mode)(omega);
+                    if self.coupled_whitney {
+                        let face_vertices = face.world_vertices(self.mesh);
+                        let mut e_t_gauss = [Vector3::<f64>::zeros(); 3];
+                        for (g, bary) in TRI_GAUSS_3PT_BARY.iter().enumerate() {
+                            let p_g = bary[0] * face_vertices[0]
+                                + bary[1] * face_vertices[1]
+                                + bary[2] * face_vertices[2];
+                            e_t_gauss[g] = (port.modal_e_t)(p_g);
+                        }
+                        self.scatter_port_face_gauss(
+                            face,
+                            beta,
+                            e_t_gauss,
+                            &interior_dof_of_edge,
+                            &mut triplets,
+                            &mut rhs,
+                        );
+                    } else {
+                        let centroid = face.centroid(self.mesh);
+                        let e_t = (port.modal_e_t)(centroid);
+                        self.scatter_port_face(
+                            face,
+                            beta,
+                            e_t,
+                            &interior_dof_of_edge,
+                            &mut triplets,
+                            &mut rhs,
+                        );
+                    }
+                }
+            }
+        }
+
+        let matrix = SparseColMat::try_new_from_triplets(n_interior, n_interior, &triplets)
+            .map_err(|e| {
+                Error::Numerical(format!(
+                    "OpenBoundarySolver::assemble_driven_system_pml: \
+                     failed to build driven matrix: {e:?}"
+                ))
+            })?;
+
+        Ok(DrivenSystem {
+            matrix,
+            rhs,
+            interior_edges,
+            interior_dof_of_edge,
+        })
+    }
+
+    /// Mean edge length of every tet in the mesh (m). Used by the
+    /// CFS-PML config resolver to populate sentinel `sigma_max` /
+    /// `alpha_max` parameters. Walks every tet's six local edges and
+    /// averages their world-space lengths.
+    fn mean_tet_edge_length(&self) -> f64 {
+        let mut sum = 0.0_f64;
+        let mut count = 0_usize;
+        for tet in &self.mesh.tetrahedra {
+            for &(li, lj) in LOCAL_EDGES.iter() {
+                let v_a = self.mesh.vertices[tet[li]];
+                let v_b = self.mesh.vertices[tet[lj]];
+                sum += (v_b - v_a).norm();
+                count += 1;
+            }
+        }
+        if count == 0 {
+            1.0e-3
+        } else {
+            sum / (count as f64)
+        }
+    }
 }
 
 impl OpenBoundarySolver<'_> {
@@ -1755,6 +2194,161 @@ impl OpenBoundarySolver<'_> {
             }
         }
         max_idx + 1
+    }
+}
+
+// ---------------------------------------------------------------------
+// CFS-PML helpers (Phase 4.fem.eig.3.5 P4)
+// ---------------------------------------------------------------------
+
+/// Evaluate the diagonal `Λ(ω)` stretched-coordinate factor at a tet
+/// classified by `class`.
+///
+/// Implements spec §3.1 (Roden–Gedney 2000 §II):
+///
+/// ```text
+///     Λ = diag( s_y · s_z / s_x,
+///               s_z · s_x / s_y,
+///               s_x · s_y / s_z ),
+///     s_α(ω) = κ_α(d_α) + σ_α(d_α) / (α_α + j ω ε_0).
+/// ```
+///
+/// For a v3.5 single-axis PML tet (e.g. `PmlClass::PmlX`), only one
+/// `s_α` deviates from `1`; the others collapse to unity. Interior
+/// tets are guarded out by the caller — this helper always returns
+/// the unit diagonal `[1, 1, 1]` for `PmlClass::Interior` so callers
+/// can avoid a branch in their own scatter loop.
+fn pml_stretching_lambda(class: crate::PmlClass, cfg: &PmlConfig, omega: f64) -> [Complex64; 3] {
+    use crate::PmlClass;
+    let m = cfg.m as f64;
+    let d_total = (cfg.thickness_cells as f64).max(1.0); // sentinel guard
+    // d_max for a tet centroid in the t-th brick layer is roughly
+    // (t - 0.5) cells. We pick D = thickness_cells * h_cell at the
+    // outer truncation surface and parameterise σ via d / D.
+    // Here we pass `d / D` directly from the PmlClass payload, where
+    // `d` is already in metres; we infer `D` from the cfg by
+    // estimating the cell size as `d_max_observed / (thickness - 1 + 0.5)`.
+    // To keep this self-contained, treat `d_total` as a normalised
+    // count and substitute the per-cell depth d_cells = d_metres /
+    // h_cell. We compute h_cell from the omega-resolved sigma_max
+    // backward — but `cfg.resolved` already used h_cell. The cleanest
+    // recovery is to scale by thickness_cells: `(d / D) ≈ d_cells /
+    // thickness_cells`. We can derive d_cells if we know the lattice
+    // spacing. For v3.5 we make the simplifying choice: pass d in
+    // metres and assume the PML inner depth runs 0 → D_metres where
+    // D_metres ≡ thickness_cells * h_cell_estimate. Since cfg's
+    // `sigma_max` was already calibrated against `h_cell`, the
+    // normalised depth `(d / D_metres) = (d / (thickness * h_cell))`.
+    // We recover h_cell from the sigma_max - back-formula:
+    //
+    //     sigma_max = (m + 1) / (150 π h_cell)  ⇒
+    //     h_cell    = (m + 1) / (150 π sigma_max).
+    //
+    // (This is robust to a caller passing a custom sigma_max; the
+    // estimator just becomes a self-consistent "what h_cell does this
+    // σ_max imply" rather than re-querying the mesh.)
+    let h_cell = if cfg.sigma_max > 0.0 {
+        (m + 1.0) / (150.0 * std::f64::consts::PI * cfg.sigma_max)
+    } else {
+        1.0e-3 // 1 mm fallback if grading parameters degenerate
+    };
+    let d_max = d_total * h_cell;
+
+    let s_for = |d_alpha: f64| -> Complex64 {
+        if d_alpha <= 0.0 || d_max <= 0.0 {
+            return Complex64::new(1.0, 0.0);
+        }
+        // Polynomial grading: σ(d) = σ_max (d/D)^m, κ(d) = 1 + (κ_max - 1) (d/D)^m.
+        let ratio = (d_alpha / d_max).clamp(0.0, 1.0);
+        let pow = ratio.powf(m);
+        let sigma_d = cfg.sigma_max * pow;
+        let kappa_d = 1.0 + (cfg.kappa_max - 1.0) * pow;
+        // s(ω) = κ + σ / (α + j ω ε_0)
+        let denom = Complex64::new(cfg.alpha_max, omega * yee_core::units::EPS0);
+        // Avoid division by zero at DC + zero alpha.
+        if denom.norm_sqr() <= f64::MIN_POSITIVE {
+            return Complex64::new(kappa_d, 0.0);
+        }
+        Complex64::new(kappa_d, 0.0) + Complex64::new(sigma_d, 0.0) / denom
+    };
+
+    let (sx, sy, sz) = match class {
+        PmlClass::Interior => (
+            Complex64::new(1.0, 0.0),
+            Complex64::new(1.0, 0.0),
+            Complex64::new(1.0, 0.0),
+        ),
+        PmlClass::PmlX { d } => (s_for(d), Complex64::new(1.0, 0.0), Complex64::new(1.0, 0.0)),
+        PmlClass::PmlY { d } => (Complex64::new(1.0, 0.0), s_for(d), Complex64::new(1.0, 0.0)),
+        PmlClass::PmlZ { d } => (Complex64::new(1.0, 0.0), Complex64::new(1.0, 0.0), s_for(d)),
+        PmlClass::PmlXY { d_x, d_y } => (s_for(d_x), s_for(d_y), Complex64::new(1.0, 0.0)),
+        PmlClass::PmlYZ { d_y, d_z } => (Complex64::new(1.0, 0.0), s_for(d_y), s_for(d_z)),
+        PmlClass::PmlZX { d_z, d_x } => (s_for(d_x), Complex64::new(1.0, 0.0), s_for(d_z)),
+        PmlClass::PmlXYZ { d_x, d_y, d_z } => (s_for(d_x), s_for(d_y), s_for(d_z)),
+    };
+
+    let one = Complex64::new(1.0, 0.0);
+    // Λ = diag(s_y s_z / s_x, s_z s_x / s_y, s_x s_y / s_z)
+    [
+        if sx.norm_sqr() > 0.0 {
+            sy * sz / sx
+        } else {
+            one
+        },
+        if sy.norm_sqr() > 0.0 {
+            sz * sx / sy
+        } else {
+            one
+        },
+        if sz.norm_sqr() > 0.0 {
+            sx * sy / sz
+        } else {
+            one
+        },
+    ]
+}
+
+/// Edge connectivity table mirroring `assembly::TetEdgeTable` so the
+/// PML assembly path can scatter signed local blocks into the same
+/// global-edge index space without depending on assembly's private
+/// types.
+#[derive(Debug, Clone)]
+struct PmlAssemblyEdgeTable {
+    edges: Vec<EdgeKey>,
+    /// Per-tet local→global edge map + orientation signs (parallel to
+    /// `assembly::TetEdgeConnectivity`).
+    tet_edges: Vec<PmlTetEdgeConnectivity>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PmlTetEdgeConnectivity {
+    global_edge: [usize; 6],
+    sign: [f64; 6],
+}
+
+impl PmlAssemblyEdgeTable {
+    fn build(mesh: &TetMesh3D) -> Self {
+        let mut edge_map: HashMap<EdgeKey, usize> = HashMap::new();
+        let mut edges: Vec<EdgeKey> = Vec::new();
+        let mut tet_edges: Vec<PmlTetEdgeConnectivity> = Vec::with_capacity(mesh.tetrahedra.len());
+
+        for tet in &mesh.tetrahedra {
+            let mut global_edge = [0usize; 6];
+            let mut sign = [0.0f64; 6];
+            for (alpha, &(li, lj)) in LOCAL_EDGES.iter().enumerate() {
+                let a = tet[li];
+                let b = tet[lj];
+                let key = EdgeKey::new(a, b);
+                let idx = *edge_map.entry(key).or_insert_with(|| {
+                    edges.push(key);
+                    edges.len() - 1
+                });
+                global_edge[alpha] = idx;
+                sign[alpha] = if a < b { 1.0 } else { -1.0 };
+            }
+            tet_edges.push(PmlTetEdgeConnectivity { global_edge, sign });
+        }
+        Self { edges, tet_edges }
     }
 }
 

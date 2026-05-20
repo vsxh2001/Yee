@@ -46,3 +46,38 @@ def test_solve_cavity_invalid_dims_raises() -> None:
     (mapped from `yee_mesh::Error::Invalid` through `yee_mesh_to_py`)."""
     with pytest.raises(Exception):
         yee.fem.solve_cavity(0.0, 0.01016, 0.030, 8, 6, 10)
+
+
+def test_solve_open_cavity_with_pml() -> None:
+    """Phase 4.fem.eig.3.5 P6: ``pml_config`` kwarg routes through
+    CFS-PML.
+
+    Drives a tiny WR-90-like fixture with a PML on the ``z=0`` face,
+    asserts ``|S_11|`` is finite and sub-unity.
+    """
+    import numpy as np
+
+    a, b, d = 0.02286, 0.01016, 0.030
+    nx, ny, nz = 4, 2, 6
+
+    s = yee.fem.solve_open_cavity(
+        a, b, d, nx, ny, nz,
+        materials=[],
+        port_faces=[{
+            "axis": "z",
+            "side": "high",
+            "port_id": 0,
+            "modal_e_t": (0.0, 1.0, 0.0),
+        }],
+        abc_faces=[{"axis": "z", "side": "low"}],
+        omegas_hz=[10.0e9],
+        coupled_whitney=True,
+        pml_config={"thickness_cells": 3},
+    )
+    assert s.shape == (1, 1, 1)
+    s11 = complex(s[0, 0, 0])
+    mag = abs(s11)
+    assert np.isfinite(mag), f"|S_11| must be finite under CFS-PML; got {mag}"
+    assert mag < 1.0, (
+        f"|S_11| must be strictly sub-unity (passive bound); got {mag}"
+    )
