@@ -316,33 +316,34 @@ pub struct PmlConfig {
     pub m: usize,
 }
 
-// Phase 4.fem.eig.3.5.1 retune (2026-05-20, sweep CSV rows 1-5):
-// the R2 ablation grid was run partially (H1 baseline + H2 κ_max ∈
-// {1, 1.5, 2, 3} sweep; H3 (m, thickness) sweep not yet evaluated).
-// Findings: the per-axis `h_α` resolver landed in R1 alone moves the
-// fem-eig-003 worst-case from `-7.48 dB` (OOOOOOOOO baseline) to
-// `-21.74 dB` — a ~14 dB improvement in dB. The H2 κ_max sweep at
-// fixed (m=3, thickness=6) varies the worst-case dB by only `~ 1 dB`
-// across κ_max ∈ {1, 1.5, 2, 3, 5}, all clustering at `~ -22 dB`
-// worst-case. κ_max is therefore **not** the binding constraint
-// inside the v3.5.1 ablation scope — neither H1 alone nor H1+H2
-// retires the spec §6 `[-60, -40] dB` window.
+// Phase 4.fem.eig.3.5.1 retune (2026-05-20, sweep CSV rows 1-6):
+// R2 ablation grid evaluated partially. H1 baseline + H2 κ_max ∈
+// {1, 1.5, 2, 3} + H3 most-aggressive (κ_max=2, m=4, thickness=10)
+// probe. Findings:
+//   * R1 per-axis `h_α` resolver alone moves fem-eig-003 worst-case
+//     from `-7.48 dB` (OOOOOOOOO baseline) to `-21.74 dB` — ~14 dB
+//     improvement in dB.
+//   * H2 κ_max ∈ {1, 1.5, 2, 3, 5} at (m=3, thickness=6) clusters
+//     within ~1 dB at `~ -22 dB` worst-case. κ_max is **not** the
+//     binding constraint at this mesh resolution (consistent with
+//     Berenger 2002 §V).
+//   * H3 most-aggressive probe (κ=2, m=4, thickness=10) reaches
+//     `[-58.13, -35.45] dB` — band min already inside the [-60, -40]
+//     dB target, but worst-case still ~5 dB short of -40 dB retire
+//     threshold. Per-axis + (m, thickness) ramp delivers ~28 dB
+//     improvement over OOOOOOOOO baseline but does not retire spec
+//     §6 window.
 //
-// Decision per spec §3 + ADR-0044 decision 5: ship the per-axis
-// resolver (R1) as the only behavioural change; leave the
-// `(κ_max, m, thickness_cells) = (5, 3, 6)` defaults unchanged from
-// the OOOOOOOOO baseline. The strict `#[ignore]`'s in the
-// fem-eig-003 + fem-eig-006 production gate tests stay in place with
-// updated measurement docstrings (R4). Queue Phase 4.fem.eig.3.5.2
-// for H3 (m, thickness) sweep completion plus the `α_α(d)`
-// polynomial-grading ablation per spec §7 (b).
-//
-// CSV row (best partial-sweep worst-case): the H2 row κ_max = 3,
-// m = 3, thickness = 6 reaches `[-30.70, -22.30] dB`; the H2 row
-// κ_max = 1, m = 3, thickness = 6 reaches `[-31.50, -22.78] dB`.
-// The two are within `~ 0.5 dB` of each other — consistent with
-// Berenger 2002 §V's "κ_max only affects PEC-truncation reflection",
-// which is a sub-dominant contribution at this mesh resolution.
+// Decision per spec §3 + ADR-0044 decision 5 (escape-hatch path):
+// ship the per-axis resolver (R1) as the only behavioural change;
+// leave `(κ_max, m, thickness_cells) = (5, 3, 6)` defaults unchanged
+// from the OOOOOOOOO baseline. The H3 finding motivates v3.5.2
+// extending thickness ablation beyond the v3.5.1 grid and adding
+// `α_α(d)` grading per spec §7 (b); shipping (κ=2, m=4, thickness=10)
+// as new defaults would be a second knob change without retiring
+// either strict band — premature. Strict `#[ignore]`'s on the
+// fem-eig-003 + fem-eig-006 production gates stay with updated
+// measurement docstrings (R4).
 impl Default for PmlConfig {
     fn default() -> Self {
         Self {
