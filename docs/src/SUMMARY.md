@@ -82,3 +82,4 @@
 - [ADR-0048: Phase 4.fem.eig.3.5.5 disposition](decisions/0048-phase-4-fem-eig-3-5-5-disposition.md)
 - [ADR-0049: Phase 4.fem.eig.3.5.6 absorbing-mode wave-port](decisions/0049-phase-4-fem-eig-3-5-6-absorbing-mode-wave-port.md)
 - [ADR-0050: Phase 1.3.1.1 step 4 in-tree block LOBPCG eigensolver](decisions/0050-phase-1-3-1-1-step-4-lobpcg-eigensolver.md)
+- [ADR-0051: Phase 1.3.1.1 step 5 mixed longitudinal block](decisions/0051-phase-1-3-1-1-step-5-longitudinal-block.md)
