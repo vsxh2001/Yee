@@ -15,6 +15,26 @@
 //!   step T5) we ship a hand-rolled deflated inverse-power iteration
 //!   on `faer` sparse LU one mode at a time. The downstream gate
 //!   (`fem-eig-001`, T7) is unaffected — it consumes the trait.
+//! * [`LobpcgEigen`] — the Phase 1.3.1.1 step 4 **block** LOBPCG
+//!   (Knyazev 2001) implementation of the same [`SparseEigen`] trait.
+//!   It computes the `num_eigs` smallest `k²` eigenpairs
+//!   *simultaneously*, carrying an `n × b` block (`b = num_eigs +
+//!   guard`) through a single Rayleigh-Ritz step per outer iteration,
+//!   and reuses the very same shift-invert operator `(K − σM)⁻¹M`
+//!   (factored once via the shared `build_shifted` + faer sparse LU)
+//!   as its preconditioner. This resolves the clustered / degenerate
+//!   spectra where the sequential `InverseIterEigen` deflation is
+//!   weak (TE/TM degeneracies, `TE_{mn}`/`TE_{nm}` pairs). It adds
+//!   **no** new dependency (ADR-0050): the small dense `3b × 3b`
+//!   Rayleigh-Ritz subproblem reduces via a Cholesky of `SᵀMS` to a
+//!   standard symmetric eigenproblem solved by `nalgebra`, which is
+//!   already a workspace dep. `InverseIterEigen` remains the default
+//!   for existing consumers; `LobpcgEigen` is selected by the caller.
+//!   The complex arm (`ComplexLobpcgEigen`) is a step-4.1 follow-on:
+//!   lossy dispersive cavities (`fem-eig-002`) keep
+//!   [`ComplexInverseIterEigen`]. An optional `arpack` feature behind
+//!   the same trait remains available if a >10⁵-DoF cross-section ever
+//!   demands Krylov–Schur (ADR-0050 §rationale (4)).
 //! * [`EigenpairList`] — the result type: eigenvalues `k²` (sorted
 //!   ascending) plus the column-stacked eigenvectors on the
 //!   interior-DoF basis the caller supplied.
@@ -476,6 +496,519 @@ fn seed_vector(n: usize, mode_idx: usize) -> Vec<f64> {
         *xi = (1.0 + phase) * t + (1.0 + phase * 0.37).sin() * (t * 7.0).cos();
     }
     x
+}
+
+// =====================================================================
+// Phase 1.3.1.1 step 4 — block LOBPCG (Knyazev 2001)
+// =====================================================================
+
+/// Block **LOBPCG** (Locally Optimal Block Preconditioned Conjugate
+/// Gradient, Knyazev 2001) shift-invert eigensolver implementing the
+/// [`SparseEigen`] trait.
+///
+/// Where [`InverseIterEigen`] iterates one mode at a time and deflates
+/// sequentially, `LobpcgEigen` carries an `n × b` block
+/// (`b = num_eigs + guard`) and resolves it *simultaneously* via a
+/// single dense Rayleigh-Ritz step per outer iteration over the
+/// search space `S = [X | W | P]` — the current block `X`, the
+/// preconditioned residual `W = T·R`, and the previous block `P`. This
+/// is exactly the structure that resolves **clustered / degenerate
+/// spectra** (TE/TM degeneracies, `TE_{mn}`/`TE_{nm}` pairs on a
+/// symmetric cross-section): the block subspace spans the degenerate
+/// eigenspace directly, instead of accumulating Gram-Schmidt
+/// orthogonality error across a cluster.
+///
+/// ## Preconditioner
+///
+/// The preconditioner is the *same* shift-invert operator inverse
+/// iteration uses: `T = (K − σM)⁻¹M`, with `(K − σM)` factored exactly
+/// once via the shared [`build_shifted`] + faer sparse LU. There is no
+/// second factorisation; the only cost delta vs inverse iteration is
+/// the small dense `3b × 3b` Rayleigh-Ritz eigensolve per outer
+/// iteration, negligible for `b ≤ 20`.
+///
+/// ## Dense Rayleigh-Ritz (no new dependency — ADR-0050)
+///
+/// The reduced generalized symmetric problem `(SᵀKS) c = θ (SᵀMS) c`
+/// is solved by the **Cholesky-reduction** path (spec §7 risk (b)):
+/// `SᵀMS = L Lᵀ`, transform to the standard symmetric problem
+/// `(L⁻¹ SᵀKS L⁻ᵀ) y = θ y`, run `nalgebra`'s symmetric eigensolver,
+/// then back-transform `c = L⁻ᵀ y`. `nalgebra` is already a workspace
+/// dependency, so this adds **zero** new `Cargo.toml` lines, matching
+/// the project's pure-Rust LA ethos.
+///
+/// ## Soft-locking
+///
+/// Near convergence the previous block `P` collapses into `span(X)`
+/// and the Gram matrix `SᵀMS` goes near-singular. Following Knyazev §4
+/// ("soft locking") the `[X|W|P]` columns are M-orthonormalised by
+/// modified Gram-Schmidt and any column whose post-orthogonalisation
+/// M-norm falls below `√ε` is dropped, shrinking the search block that
+/// iteration. The first outer iteration carries no `P`; it is
+/// introduced from iteration two onward.
+///
+/// ## Determinism
+///
+/// The initial block `X₀` is seeded from the same deterministic
+/// [`seed_vector`] generator the inverse-power path uses (one column
+/// per block index), so the eigensolve is bit-reproducible across runs
+/// — critical for the CI gate's pass/fail boundary. No thread RNG.
+///
+/// ## Tuning
+///
+/// * `max_iter` — outer-iteration budget for the whole block.
+///   `LobpcgEigen` typically converges the leading `num_eigs` columns
+///   in far fewer outer iterations than `InverseIterEigen` consumes
+///   per mode, because the block step is locally optimal.
+/// * `tol` — per-column relative residual target
+///   `‖K xᵢ − k²ᵢ M xᵢ‖₂ / (k²ᵢ ‖M xᵢ‖₂) < tol` on the leading
+///   `num_eigs` columns.
+/// * `guard` — extra columns beyond `num_eigs` (block width
+///   `b = num_eigs + guard`, capped at `n`). Guard columns accelerate
+///   cluster resolution by giving the block room to separate nearly-
+///   degenerate roots; `guard = 2` is the default.
+///
+/// ## Example
+///
+/// ```ignore
+/// use yee_fem::solve::{LobpcgEigen, SparseEigen};
+/// let solver = LobpcgEigen::new(1000, 1e-8, 2);
+/// let pairs = solver.solve(&k, &m, 10, sigma_k2)?;
+/// // pairs.k is sorted ascending and M-orthonormal — same
+/// // postcondition contract as InverseIterEigen.
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct LobpcgEigen {
+    /// Outer-iteration budget for the block. Failure to converge the
+    /// leading `num_eigs` columns within `max_iter` outer iterations
+    /// causes [`SparseEigen::solve`] to return
+    /// [`yee_core::Error::Numerical`] with the worst-column residual.
+    pub max_iter: usize,
+    /// Per-column relative residual convergence tolerance on the
+    /// leading `num_eigs` columns.
+    pub tol: f64,
+    /// Guard columns beyond `num_eigs`: block width
+    /// `b = (num_eigs + guard).min(n)`. Improves cluster robustness.
+    pub guard: usize,
+}
+
+impl LobpcgEigen {
+    /// Construct a configured solver. See type docs for tuning notes.
+    pub fn new(max_iter: usize, tol: f64, guard: usize) -> Self {
+        Self {
+            max_iter,
+            tol,
+            guard,
+        }
+    }
+}
+
+impl Default for LobpcgEigen {
+    /// `max_iter = 1000`, `tol = 1e-8`, `guard = 2` — the defaults
+    /// mirroring [`InverseIterEigen`] plus a two-column cluster guard.
+    fn default() -> Self {
+        Self::new(1000, 1e-8, 2)
+    }
+}
+
+impl SparseEigen for LobpcgEigen {
+    fn solve(
+        &self,
+        k: &CsrMatrix<f64>,
+        m: &CsrMatrix<f64>,
+        num_eigs: usize,
+        sigma: f64,
+    ) -> Result<EigenpairList, yee_core::Error> {
+        // ---- Validate shapes (identical guards to InverseIterEigen) -
+        if k.nrows() != k.ncols() {
+            return Err(yee_core::Error::Invalid(format!(
+                "LobpcgEigen: K must be square, got {}×{}",
+                k.nrows(),
+                k.ncols()
+            )));
+        }
+        if m.nrows() != m.ncols() {
+            return Err(yee_core::Error::Invalid(format!(
+                "LobpcgEigen: M must be square, got {}×{}",
+                m.nrows(),
+                m.ncols()
+            )));
+        }
+        if k.nrows() != m.nrows() {
+            return Err(yee_core::Error::Invalid(format!(
+                "LobpcgEigen: K and M must have matching dimensions, got K = {}×{} M = {}×{}",
+                k.nrows(),
+                k.ncols(),
+                m.nrows(),
+                m.ncols()
+            )));
+        }
+        let n = k.nrows();
+        if num_eigs == 0 {
+            return Err(yee_core::Error::Invalid(
+                "LobpcgEigen: num_eigs must be >= 1".to_string(),
+            ));
+        }
+        if num_eigs > n {
+            return Err(yee_core::Error::Invalid(format!(
+                "LobpcgEigen: num_eigs = {num_eigs} exceeds dimension {n}"
+            )));
+        }
+
+        // ---- Build (K − σM) and factor once via faer sparse LU ------
+        let shifted = build_shifted(k, m, sigma)?;
+        let lu: Lu<usize, f64> = shifted.sp_lu().map_err(|e| {
+            yee_core::Error::Numerical(format!("LobpcgEigen: sparse LU of (K − σM) failed: {e:?}"))
+        })?;
+        // T x = (K − σM)^{-1} (M x): the shared shift-invert operator.
+        let apply_t = |cols: &[Vec<f64>]| -> Vec<Vec<f64>> {
+            cols.iter()
+                .map(|c| {
+                    let mc = csr_matvec(m, c);
+                    lu_solve(&lu, &mc)
+                })
+                .collect()
+        };
+
+        // ---- Block width and deterministic, M-orthonormal seed ------
+        let b = (num_eigs + self.guard).min(n);
+        let mut x: Vec<Vec<f64>> = (0..b).map(|j| seed_vector(n, j)).collect();
+        block_m_orthonormalize(&mut x, m)?;
+        if x.len() < num_eigs {
+            // Seeds were rank-deficient against M; this only happens for
+            // pathological pencils. Surface rather than silently return
+            // fewer modes than requested.
+            return Err(yee_core::Error::Numerical(format!(
+                "LobpcgEigen: initial block rank {} < num_eigs {num_eigs} after \
+                 M-orthonormalisation (degenerate seed against M)",
+                x.len()
+            )));
+        }
+
+        // Previous block P, M-orthonormalised against X each iteration.
+        let mut p: Vec<Vec<f64>> = Vec::new();
+        // Current Ritz values (k²) for the block columns.
+        let mut theta_k2: Vec<f64> = vec![sigma; x.len()];
+
+        let mut last_max_res = f64::INFINITY;
+        let mut converged = false;
+
+        for _outer in 0..self.max_iter {
+            // ---- Block residual R = K X − M X Λ  (Λ = current k²) ----
+            let mut residual: Vec<Vec<f64>> = Vec::with_capacity(x.len());
+            let mut max_res = 0.0f64;
+            for (col, xi) in x.iter().enumerate() {
+                let kx = csr_matvec(k, xi);
+                let mx = csr_matvec(m, xi);
+                let lam = theta_k2[col];
+                let ri: Vec<f64> = kx
+                    .iter()
+                    .zip(mx.iter())
+                    .map(|(&kxi, &mxi)| kxi - lam * mxi)
+                    .collect();
+                // Per-column relative residual on the leading num_eigs.
+                if col < num_eigs {
+                    let rnorm = dot(&ri, &ri).sqrt();
+                    let mxnorm = dot(&mx, &mx).sqrt();
+                    let denom = lam.abs() * mxnorm;
+                    let rel = if denom > 0.0 { rnorm / denom } else { rnorm };
+                    if rel > max_res {
+                        max_res = rel;
+                    }
+                }
+                residual.push(ri);
+            }
+            last_max_res = max_res;
+            if max_res < self.tol {
+                converged = true;
+                break;
+            }
+
+            // ---- Preconditioned residual W = T R --------------------
+            let w = apply_t(&residual);
+
+            // ---- Search space S = [X | W | P], M-orthonormalised ----
+            // Soft-locking: M-orthonormalise the whole stack by modified
+            // Gram-Schmidt and drop near-null columns (Knyazev §4).
+            let nx = x.len();
+            let nw = w.len();
+            let mut s: Vec<Vec<f64>> = Vec::with_capacity(nx + nw + p.len());
+            s.extend(x.iter().cloned());
+            s.extend(w.into_iter());
+            s.extend(p.iter().cloned());
+            block_m_orthonormalize(&mut s, m)?;
+            let bb = s.len();
+            if bb < num_eigs {
+                return Err(yee_core::Error::Numerical(format!(
+                    "LobpcgEigen: search space collapsed to rank {bb} < num_eigs \
+                     {num_eigs} (basis ill-conditioning — raise guard or move σ)"
+                )));
+            }
+
+            // ---- Dense Rayleigh-Ritz on S ---------------------------
+            // Sᵀ K S and Sᵀ M S (bb × bb, symmetric). S is M-orthonormal
+            // so SᵀMS ≈ I, but we form it explicitly for the Cholesky
+            // reduction so rounding does not bias the Ritz values.
+            let st_k_s = block_gram(&s, k);
+            let st_m_s = block_gram(&s, m);
+            let (ritz_vals, ritz_vecs) = dense_gen_sym_eigen(&st_k_s, &st_m_s)?;
+
+            // The bb Ritz pairs are sorted ascending; the leading `nx`
+            // (= block width) define the next X. Columns are the
+            // coefficient vectors in the S basis.
+            let take = nx.min(bb);
+
+            // New X = S · C[:, 0..take].
+            let new_x = combine(&s, &ritz_vecs, 0, take);
+            // New P built from the W,P portion of the Ritz combination
+            // (columns nx.. of S) so the conjugate direction is carried
+            // forward (Knyazev's "local optimality").
+            let new_p = if bb > nx {
+                combine_rows(&s, &ritz_vecs, nx, bb, 0, take)
+            } else {
+                Vec::new()
+            };
+
+            theta_k2 = ritz_vals[0..take].to_vec();
+            x = new_x;
+            p = new_p;
+            block_m_orthonormalize(&mut x, m)?;
+            if !p.is_empty() {
+                block_m_orthonormalize(&mut p, m)?;
+            }
+        }
+
+        if !converged {
+            return Err(yee_core::Error::Numerical(format!(
+                "LobpcgEigen: block failed to converge in {} outer iterations \
+                 (worst leading-column relative residual = {last_max_res:e}, tol = {:e})",
+                self.max_iter, self.tol
+            )));
+        }
+
+        // ---- Assemble the leading num_eigs pairs, sorted ascending --
+        // theta_k2 is already ascending (Ritz order); take the leading
+        // num_eigs and the matching block columns. Re-M-orthonormalise
+        // the returned set so the EigenpairList postcondition holds to
+        // working tolerance.
+        let mut take_vecs: Vec<Vec<f64>> = x[0..num_eigs].to_vec();
+        block_m_orthonormalize(&mut take_vecs, m)?;
+        if take_vecs.len() < num_eigs {
+            return Err(yee_core::Error::Numerical(format!(
+                "LobpcgEigen: returned block rank {} < num_eigs {num_eigs} after final \
+                 M-orthonormalisation",
+                take_vecs.len()
+            )));
+        }
+
+        // Recompute Ritz values on the final orthonormal vectors so the
+        // reported k² is the Rayleigh quotient of the returned vector,
+        // not a stale block value: k²ᵢ = xᵢᵀ K xᵢ / xᵢᵀ M xᵢ.
+        let mut k_vals: Vec<f64> = Vec::with_capacity(num_eigs);
+        for xi in &take_vecs {
+            let kx = csr_matvec(k, xi);
+            let mx = csr_matvec(m, xi);
+            let num = dot(xi, &kx);
+            let den = dot(xi, &mx);
+            k_vals.push(num / den);
+        }
+
+        let mut order: Vec<usize> = (0..num_eigs).collect();
+        order.sort_by(|&a, &c| k_vals[a].total_cmp(&k_vals[c]));
+        let sorted_k: Vec<f64> = order.iter().map(|&i| k_vals[i]).collect();
+        let mut e = DMatrix::<f64>::zeros(n, num_eigs);
+        for (col, &i) in order.iter().enumerate() {
+            for row in 0..n {
+                e[(row, col)] = take_vecs[i][row];
+            }
+        }
+
+        Ok(EigenpairList { k: sorted_k, e })
+    }
+}
+
+// ---------------------------------------------------------------------
+// Block helpers — peers of the single-vector helpers above, reusing
+// `csr_matvec` / `dot` / `seed_vector` (no duplication).
+// ---------------------------------------------------------------------
+
+/// In-place block M-orthonormalisation by **modified Gram-Schmidt** in
+/// the `M`-inner product: each column is M-orthogonalised against the
+/// already-accepted columns, then M-normalised. Columns whose
+/// post-orthogonalisation M-norm falls below `√ε` are **dropped** (the
+/// returned block shrinks) — this is Knyazev's "soft locking" guard
+/// against the near-singular `[X|W|P]` Gram matrix at convergence.
+///
+/// Postcondition: `block[i]ᵀ M block[j] ≈ δ_{ij}` for the surviving
+/// columns. Reuses [`csr_matvec`] and [`dot`].
+fn block_m_orthonormalize(
+    block: &mut Vec<Vec<f64>>,
+    m: &CsrMatrix<f64>,
+) -> Result<(), yee_core::Error> {
+    // Drop-tolerance on the M-norm after orthogonalisation. sqrt(eps)
+    // is the standard soft-locking threshold (Knyazev §4).
+    let drop_tol = f64::EPSILON.sqrt();
+    let mut accepted: Vec<Vec<f64>> = Vec::with_capacity(block.len());
+    for col in block.drain(..) {
+        let mut v = col;
+        // Modified Gram-Schmidt against accepted columns (each already
+        // M-normalised, so the projection coefficient is e_jᵀ M v).
+        for ej in &accepted {
+            let mv = csr_matvec(m, &v);
+            let coeff = dot(ej, &mv);
+            for (vi, eji) in v.iter_mut().zip(ej.iter()) {
+                *vi -= coeff * eji;
+            }
+        }
+        let mv = csr_matvec(m, &v);
+        let norm_sq = dot(&v, &mv);
+        if !norm_sq.is_finite() {
+            return Err(yee_core::Error::Numerical(format!(
+                "LobpcgEigen: block M-norm went non-finite ({norm_sq}) during \
+                 orthonormalisation"
+            )));
+        }
+        if norm_sq <= drop_tol * drop_tol {
+            // Soft-lock: this column collapsed into the accepted span;
+            // drop it and continue (search block shrinks this iter).
+            continue;
+        }
+        let inv = 1.0 / norm_sq.sqrt();
+        for vi in v.iter_mut() {
+            *vi *= inv;
+        }
+        accepted.push(v);
+    }
+    *block = accepted;
+    Ok(())
+}
+
+/// Dense `b' × b'` Gram matrix `Sᵀ A S` for a block `S` (`Vec` of `n`-
+/// vectors) and a sparse CSR `A`. Symmetric by construction for
+/// symmetric `A`; we symmetrise the result to kill rounding asymmetry
+/// before it feeds the symmetric dense eigensolver. Reuses
+/// [`csr_matvec`] and [`dot`].
+fn block_gram(s: &[Vec<f64>], a: &CsrMatrix<f64>) -> DMatrix<f64> {
+    let bb = s.len();
+    let a_s: Vec<Vec<f64>> = s.iter().map(|c| csr_matvec(a, c)).collect();
+    let mut g = DMatrix::<f64>::zeros(bb, bb);
+    for i in 0..bb {
+        for j in i..bb {
+            let v = dot(&s[i], &a_s[j]);
+            g[(i, j)] = v;
+            g[(j, i)] = v;
+        }
+    }
+    g
+}
+
+/// Solve the small dense **generalized symmetric** eigenproblem
+/// `A c = θ B c` (`A = SᵀKS`, `B = SᵀMS`) via the **Cholesky-reduction**
+/// path (spec §7 risk (b)): `B = L Lᵀ`, transform to the standard
+/// symmetric problem `(L⁻¹ A L⁻ᵀ) y = θ y`, solve with `nalgebra`'s
+/// symmetric eigensolver, then back-transform the generalized
+/// eigenvectors `c = L⁻ᵀ y`. Returns `(eigenvalues, eigenvectors)`
+/// sorted **ascending** by eigenvalue, eigenvectors column-stacked in
+/// the `S` basis.
+///
+/// `nalgebra` is already a workspace dependency, so this Rayleigh-Ritz
+/// dense solve adds **no** new `Cargo.toml` line (ADR-0050).
+fn dense_gen_sym_eigen(
+    a: &DMatrix<f64>,
+    bmat: &DMatrix<f64>,
+) -> Result<(Vec<f64>, DMatrix<f64>), yee_core::Error> {
+    let bb = a.nrows();
+    // B = L Lᵀ. B is SᵀMS with M SPD on the surviving block, so the
+    // Cholesky should succeed; a failure means the block is rank-
+    // deficient despite the soft-lock drop — surface it.
+    let chol = bmat.clone().cholesky().ok_or_else(|| {
+        yee_core::Error::Numerical(
+            "LobpcgEigen: Rayleigh-Ritz Cholesky of SᵀMS failed (near-singular \
+             block Gram matrix; raise guard or move σ)"
+                .to_string(),
+        )
+    })?;
+    let l = chol.l();
+    let l_inv = l.clone().try_inverse().ok_or_else(|| {
+        yee_core::Error::Numerical(
+            "LobpcgEigen: Rayleigh-Ritz triangular inverse of L failed".to_string(),
+        )
+    })?;
+    // Standard symmetric problem matrix Ã = L⁻¹ A L⁻ᵀ. Symmetrise to
+    // remove rounding asymmetry before the symmetric eigensolve.
+    let mut a_tilde = &l_inv * a * l_inv.transpose();
+    let a_sym = (&a_tilde + a_tilde.transpose()) * 0.5;
+    a_tilde = a_sym;
+    let eig = a_tilde.symmetric_eigen();
+    // nalgebra does not guarantee sorted eigenvalues; sort ascending and
+    // permute the eigenvectors to match.
+    let mut idx: Vec<usize> = (0..bb).collect();
+    idx.sort_by(|&i, &j| eig.eigenvalues[i].total_cmp(&eig.eigenvalues[j]));
+    let vals: Vec<f64> = idx.iter().map(|&i| eig.eigenvalues[i]).collect();
+    // Back-transform generalized eigenvectors c = L⁻ᵀ y, then permute.
+    let l_inv_t = l_inv.transpose();
+    let mut c = DMatrix::<f64>::zeros(bb, bb);
+    for (new_col, &old_col) in idx.iter().enumerate() {
+        let y = eig.eigenvectors.column(old_col);
+        let cy = &l_inv_t * y;
+        for row in 0..bb {
+            c[(row, new_col)] = cy[row];
+        }
+    }
+    Ok((vals, c))
+}
+
+/// Linear combination of block columns: `out[j] = Σ_r S[r] · C[r, c0+j]`
+/// for `j ∈ 0..(take)`. Forms the `take` new physical-space vectors
+/// from the Ritz coefficient matrix `C` (S-basis) columns `c0..c0+take`.
+fn combine(s: &[Vec<f64>], c: &DMatrix<f64>, c0: usize, take: usize) -> Vec<Vec<f64>> {
+    let n = s[0].len();
+    let bb = s.len();
+    let mut out: Vec<Vec<f64>> = Vec::with_capacity(take);
+    for col in c0..c0 + take {
+        let mut v = vec![0.0f64; n];
+        for (r, sr) in s.iter().enumerate().take(bb) {
+            let coeff = c[(r, col)];
+            if coeff == 0.0 {
+                continue;
+            }
+            for (vi, &sri) in v.iter_mut().zip(sr.iter()) {
+                *vi += coeff * sri;
+            }
+        }
+        out.push(v);
+    }
+    out
+}
+
+/// Like [`combine`] but uses only the `S` rows `r0..r1` of the Ritz
+/// coefficients (the `W`,`P` portion), forming the next conjugate
+/// block `P` from the non-`X` part of the Ritz combination — Knyazev's
+/// local-optimality direction. Columns `c0..c0+take` of `C`.
+fn combine_rows(
+    s: &[Vec<f64>],
+    c: &DMatrix<f64>,
+    r0: usize,
+    r1: usize,
+    c0: usize,
+    take: usize,
+) -> Vec<Vec<f64>> {
+    let n = s[0].len();
+    let mut out: Vec<Vec<f64>> = Vec::with_capacity(take);
+    for col in c0..c0 + take {
+        let mut v = vec![0.0f64; n];
+        for r in r0..r1 {
+            let coeff = c[(r, col)];
+            if coeff == 0.0 {
+                continue;
+            }
+            for (vi, &sri) in v.iter_mut().zip(s[r].iter()) {
+                *vi += coeff * sri;
+            }
+        }
+        out.push(v);
+    }
+    out
 }
 
 // =====================================================================

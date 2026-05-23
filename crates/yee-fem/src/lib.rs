@@ -28,6 +28,22 @@
 //! `docs/superpowers/specs/2026-05-18-phase-4-fem-eigenmode-design.md`
 //! and ADRs 0029 / 0032 in `docs/src/decisions/` for the scope decisions
 //! that gate every module below.
+//!
+//! ## Eigensolver options (Phase 1.3.1.1 step 4)
+//!
+//! [`solve`] exposes the [`solve::SparseEigen`] trait with two
+//! real-coefficient implementations: the default
+//! [`solve::InverseIterEigen`] (deflated shift-invert inverse-power
+//! iteration, one mode at a time) and [`solve::LobpcgEigen`] (in-tree
+//! block LOBPCG, Knyazev 2001), which resolves clustered / degenerate
+//! cross-section spectra a sequential deflation handles poorly.
+//! `LobpcgEigen` adds no new dependency — its small dense Rayleigh-Ritz
+//! step reuses `nalgebra` and its preconditioner is the same faer
+//! sparse LU of `(K − σM)` (ADR-0050; the `arpack` Krylov–Schur path is
+//! deferred behind the same trait). The complex-coefficient
+//! [`solve::ComplexInverseIterEigen`] keeps the lossy dispersive
+//! `fem-eig-002` path; a `ComplexLobpcgEigen` peer is a step-4.1
+//! follow-on.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -55,6 +71,6 @@ pub use open_boundary::{
 };
 pub use pml_mesh::{FaceIndexMap, PmlAxis, PmlClass, extend_mesh_with_pml};
 pub use solve::{
-    ComplexInverseIterEigen, EigenpairList, EigenpairListComplex, InverseIterEigen, SparseEigen,
-    SparseEigenComplex,
+    ComplexInverseIterEigen, EigenpairList, EigenpairListComplex, InverseIterEigen, LobpcgEigen,
+    SparseEigen, SparseEigenComplex,
 };
