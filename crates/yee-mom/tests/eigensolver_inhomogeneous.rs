@@ -88,7 +88,32 @@ const B: f64 = 10.16e-3; // WR-90 short dimension (m)
 const FREQ_HZ: f64 = 10.0e9;
 const EPS_FILL: f64 = 2.2; // vertical-slab dielectric relative permittivity
 const EPS_FILL_HI: f64 = 10.2; // horizontal-slab high-contrast substrate (RT/duroid 6010)
+const EPS_FILL_UNIFORM: f64 = 2.55; // uniformly-filled guide (PTFE), step-5.2 analytic anchor
 const C0: f64 = 299_792_458.0;
+
+/// Analytic dominant-mode β of a **uniformly-filled** rectangular guide:
+/// the fully-filled TE10, `β = √(ε_r k₀² − (π/a)²)` (Pozar §3.3). For
+/// `ε_r = 2.55` at 10 GHz on WR-90 this is ≈305.16 rad/m. A uniform fill
+/// has no inhomogeneity and no E_t/E_z coupling, so the only thing this
+/// can test is the β-extraction itself — the step-5.2 smoking gun.
+fn uniform_fill_beta_analytic(eps_r: f64, freq_hz: f64) -> f64 {
+    let k0 = std::f64::consts::TAU * freq_hz / C0;
+    let kx = PI / A;
+    (eps_r * k0 * k0 - kx * kx).sqrt()
+}
+
+/// ε_r / μ_r maps for a **uniformly-filled** guide: every material tag
+/// carries the same `eps_fill`, `μ_r = 1`. Tags 0 and 1 both populated so
+/// the helper works regardless of which mesh fixture feeds it.
+fn uniform_eps_mu(eps_fill: f64) -> (HashMap<u32, Complex64>, HashMap<u32, Complex64>) {
+    let mut eps = HashMap::new();
+    eps.insert(0u32, Complex64::new(eps_fill, 0.0));
+    eps.insert(1u32, Complex64::new(eps_fill, 0.0));
+    let mut mu = HashMap::new();
+    mu.insert(0u32, Complex64::new(1.0, 0.0));
+    mu.insert(1u32, Complex64::new(1.0, 0.0));
+    (eps, mu)
+}
 
 // ─────────────────────────────────────────────────────────────────────────
 // Published transcendental reference (Phase 1.3.1.1 step 5.1).
@@ -292,6 +317,45 @@ fn loaded_eps_mu_with(eps_fill: f64) -> (HashMap<u32, Complex64>, HashMap<u32, C
     mu.insert(0u32, Complex64::new(1.0, 0.0));
     mu.insert(1u32, Complex64::new(1.0, 0.0));
     (eps, mu)
+}
+
+#[test]
+#[ignore = "step-5.2 F1 bug witness: current β-extraction gives 191.07 vs analytic 305.16 \
+            (rel 0.374); un-ignored by the F2 fix"]
+fn dod1_uniform_fill_beta_matches_analytic() {
+    // DoD-1 (step-5.2 PRIMARY ANCHOR): a WR-90 guide UNIFORMLY filled with
+    // ε_r = 2.55 has the trivial analytic dominant-mode β = √(ε_r k₀² −
+    // (π/a)²) ≈ 305.16 rad/m (Pozar §3.3, the fully-filled TE10). A uniform
+    // fill has NO inhomogeneity and NO E_t/E_z coupling, so a failure here
+    // is unambiguously the β-extraction — the smoking gun that isolates the
+    // bug from the coupling block and the slab geometry.
+    //
+    // step-5.2 BUG (now fixed): the solver formed `S x = k_c² T_ε x` with an
+    // ε_r-weighted mass `T_ε = ∫ε_r N·N`, then extracted `β² = k₀² − k_c²`
+    // with vacuum k₀ — which is `β² = ε_r(k₀² − k_c²)` only when ε_r ≡ 1.
+    // For ε_r = 2.55 the old form returned β ≈ 191.07 rad/m (ε_eff ≈ 1.34,
+    // barely above air — physically impossible for a guide fully filled
+    // with ε_r = 2.55; measured rel err 0.374 vs the analytic 305.16).
+    // Reformulating to `(k₀² T_ε − S) x = β² T₁ x` (eigenvalue = β²
+    // directly, RHS = unweighted T₁ = ∫N·N) makes β the physical quantity
+    // and removes the ε_r ≡ 1 special-case assumption.
+    let freq_hz = FREQ_HZ;
+    let mesh = air_mesh(6, 6); // single material tag (0), uniformly filled below
+    let (eps, mu) = uniform_eps_mu(EPS_FILL_UNIFORM);
+    let mut mode = NumericalCrossSection::new(mesh, eps, mu);
+    mode.solve(freq_hz).expect("uniform-fill mixed solve");
+    let beta_num = mode.beta.expect("β cached").re;
+    let beta_analytic = uniform_fill_beta_analytic(EPS_FILL_UNIFORM, freq_hz);
+    let rel = (beta_num - beta_analytic).abs() / beta_analytic;
+    eprintln!(
+        "DoD-1 uniform fill (ε_r={EPS_FILL_UNIFORM}): numerical β {beta_num:.4} rad/m, \
+         analytic √(ε_r k₀²−(π/a)²) {beta_analytic:.4} rad/m, rel err {rel:.4e}"
+    );
+    assert!(
+        rel < 0.01,
+        "uniform-fill β {beta_num} must match analytic {beta_analytic} within 1 % \
+         (rel {rel:.4e}); a failure here is the β-extraction bug, not inhomogeneity"
+    );
 }
 
 #[test]
