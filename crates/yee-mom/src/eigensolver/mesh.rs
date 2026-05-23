@@ -130,6 +130,31 @@ impl EdgeTable {
     pub fn n_interior_edges(&self) -> usize {
         self.is_boundary.iter().filter(|&&b| !b).count()
     }
+
+    /// Flag, per mesh vertex, whether the vertex lies on the PEC
+    /// boundary (i.e. is an endpoint of at least one boundary edge).
+    ///
+    /// The mixed `(E_t, E_z)` formulation
+    /// ([`super::assembly::assemble_mixed`]) imposes homogeneous
+    /// Dirichlet on the longitudinal nodal `E_z` DoFs at PEC walls,
+    /// exactly mirroring the boundary-edge elimination applied to the
+    /// transverse `E_t` DoFs. A boundary vertex is therefore dropped
+    /// from the interior-vertex DoF set the same way a boundary edge is
+    /// dropped from the interior-edge DoF set.
+    ///
+    /// `n_verts` is the mesh's vertex count
+    /// ([`yee_mesh::TriMesh2D::n_verts`]); the returned vector has that
+    /// length with `true` marking boundary vertices.
+    pub fn boundary_vertices(&self, n_verts: usize) -> Vec<bool> {
+        let mut is_bnd = vec![false; n_verts];
+        for (gid, edge) in self.edges.iter().enumerate() {
+            if self.is_boundary[gid] {
+                is_bnd[edge.from] = true;
+                is_bnd[edge.to] = true;
+            }
+        }
+        is_bnd
+    }
 }
 
 #[cfg(test)]
