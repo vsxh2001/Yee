@@ -3685,11 +3685,29 @@ pub const FEM_EIG_006_NX: usize = 16;
 pub const FEM_EIG_006_NY: usize = 3;
 /// Mesh subdivisions along the axial direction (thin film axis).
 pub const FEM_EIG_006_NZ: usize = 2;
-/// Single-frequency operating point (Hz) — 30 GHz is well above the
-/// TE_{10} cutoff (~1.5 GHz for `a = 100 mm`) and forces the WR-90
-/// modal scattering pattern's off-normal content onto the PML inner
-/// boundary.
-pub const FEM_EIG_006_F_HZ: f64 = 30.0e9;
+/// Single-frequency operating point (Hz).
+///
+/// Phase 4.fem.eig.3.5.5 retuned this from 30 GHz to **40 GHz** (ADR-0048
+/// Option (a)). At 30 GHz the TE_{20} cutoff sat exactly on the operating
+/// frequency (`f_c = c / B = 30 GHz`, `β = 0`), so the v3.5.4 multi-mode
+/// wave-port basis collapsed to single-mode and the residual `|S_{11}|`
+/// stayed pinned at ~0.926 regardless of how many modes the basis named.
+/// Moving to 40 GHz puts TE_{20} 33% above its cutoff with real
+/// propagating content for the multi-mode termination to absorb. The
+/// port-face cross-section is `B = 10 mm` (broad wall) × `D = 1 mm`
+/// (narrow wall); cutoffs in that convention:
+///
+/// ```text
+///     mode     f_c                    at 40 GHz       β (rad/m)
+///     -------  ---------------------  --------------  ----------------
+///     TE_{10}  c/(2 B) = 15.0 GHz     propagating     ≈ 776  (driving)
+///     TE_{20}  c/B     = 30.0 GHz     propagating     ≈ 554  (outgoing)
+///     TE_{01}  c/(2 D) = 150.0 GHz    evanescent      0      (clipped)
+/// ```
+///
+/// See the spec §2.2 cutoff table and ADR-0048 for the geometry-convention
+/// derivation and the v3.5.4 cutoff-degeneracy finding it corrects.
+pub const FEM_EIG_006_F_HZ: f64 = 40.0e9;
 
 /// Public driver result for the `fem-eig-006` validation gate.
 #[derive(Debug, Clone)]

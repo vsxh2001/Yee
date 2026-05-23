@@ -13,13 +13,17 @@
 //! at the +x face regardless of grading parameters.
 //!
 //! Stress-tests the wave-port modal projection on a 100 : 10 : 1
-//! cavity at 30 GHz where the TE_{20} cutoff sits exactly at the
-//! operating frequency — the regime where a TE_{10}-only port may
-//! underestimate the reflection per spec §7 (a).
+//! cavity. Phase 4.fem.eig.3.5.5 retuned the operating point from
+//! 30 GHz to **40 GHz** (ADR-0048 Option (a)) so the TE_{20} mode
+//! propagates (`β ≈ 554 rad/m`) instead of sitting exactly at its
+//! `c / B = 30 GHz` cutoff, giving the v3.5.4 multi-mode basis real
+//! propagating content to terminate. See the
+//! `fem_eig_006_magnitude_bounded` docstring for the measurement and
+//! the escape-hatch disposition.
 //!
 //! Gate inventory (spec §6):
 //!
-//! 1. `fem_eig_006_magnitude_bounded` — `|S_{11}(30 GHz)| < 0.1`.
+//! 1. `fem_eig_006_magnitude_bounded` — `|S_{11}(40 GHz)| < 0.1`.
 //! 2. `fem_eig_006_no_nan_inf` — `S_{11}` is finite (numerical-
 //!    stability canary on the wave-port modal projection).
 //!
@@ -53,47 +57,59 @@ fn fem_eig_006_no_nan_inf() {
     );
 }
 
-/// Phase 4.fem.eig.3.5.4 measurement (multi-mode wave-port,
-/// `PortDefinition::modes = [TE_{10}, TE_{20}, TE_{01}]`):
-/// `|S_{11}|(30 GHz) = 0.925637 (-0.67 dB)` on the native (16, 3, 2)
-/// cavity (576 Kuhn-6 tets). Numerically indistinguishable from
-/// the v3.5.3 W1 single-mode TE_{10} measurement `0.925644` — the
-/// modal basis collapses to single-mode at 30 GHz because:
+/// Phase 4.fem.eig.3.5.5 measurement (ADR-0048 Option (a) — frequency
+/// retune to **40 GHz**, multi-mode wave-port basis unchanged):
+/// `|S_{11}|(40 GHz) = 0.955397 (-0.40 dB)` on the native (16, 3, 2)
+/// cavity (576 Kuhn-6 tets).
 ///
-/// 1. `TE_{20}` cutoff on the port-face broad wall `B = 10 mm` is
-///    `f_c = c / B = 30.0 GHz` **exactly** — at cutoff, `β = 0` and
-///    the multi-mode stiffness block contribution vanishes.
-/// 2. `TE_{01}` cutoff on the narrow wall `D = 1 mm` is
-///    `f_c = c / (2 D) = 150.0 GHz` — evanescent at 30 GHz; carries
-///    no propagating modal content.
+/// At 40 GHz TE_{20} now propagates with `β ≈ 554 rad/m` (33% above
+/// its `f_c = c / B = 30 GHz` cutoff), so the modal-degeneracy that
+/// pinned v3.5.4 at 30 GHz no longer applies — the multi-mode basis
+/// carries real propagating content. The residual nonetheless stayed
+/// high (0.955, marginally **above** the v3.5.4 30 GHz value 0.926),
+/// so the retune did **not** retire the gate.
 ///
-/// The v3.5.4 design spec §2.2 mis-derived these cutoffs by treating
-/// the cavity's propagation length `A = 100 mm` as the modal
-/// analysis broad wall; corrected derivation lives in the test
-/// docstring (here), the ROADMAP v3.5.4 entry, and ADR-0048 (the
-/// v3.5.5 disposition: either retune the test frequency off the
-/// cutoff edge, or land an absorbing-mode wave-port per Lee-Mittra
-/// 1997).
+/// **Refinement probe (one-shot, reverted).** To rule out the spec §4(a)
+/// discretisation-limited hypothesis (~2.3 transverse cells/λ at
+/// 40 GHz), the transverse mesh was bumped (NY 3→9, NZ 2→6, 5184 tets):
+/// `|S_{11}|(40 GHz, refined) = 0.913956 (-0.78 dB)`. A 9× transverse
+/// element-count increase moved the residual only ~0.04, nowhere near
+/// the 0.1 gate — the reflection is **not** discretisation-limited. The
+/// bump was reverted; the native (16, 3, 2) mesh stands.
 ///
-/// Gate stays `#[ignore]`'d. Tolerance `< 0.1` is **not** weakened.
+/// **Disposition: escape-hatch (gate stays `#[ignore]`'d).** With both
+/// modal degeneracy (v3.5.4) and discretisation (this probe) excluded,
+/// the residual is a genuine limitation of the modal-projection
+/// wave-port: projecting onto a finite TE_{mn} basis cannot fully match
+/// the field at the truncation face of a strongly off-square cavity.
+/// Per ADR-0048 the next step is Option (b) — the Lee-Mittra 1997
+/// absorbing-mode wave-port — queued for Phase 4.fem.eig.3.5.6 in
+/// ADR-0049. Tolerance `< 0.1` is **not** weakened.
+///
+/// History: v3.5.3 W1 single-mode TE_{10} `|S_{11}|(30 GHz) = 0.925644`;
+/// v3.5.4 multi-mode `0.925637` (cutoff-degenerate, ADR-0048);
+/// v3.5.5 retune to 40 GHz `0.955397` (this record, ADR-0049).
 #[test]
-#[ignore = "fem-eig-006 strict magnitude bound (Phase 4.fem.eig.3.5.4 multi-mode measurement): \
-            PortDefinition modes = [TE_{10} (a_inc=1), TE_{20} (a_inc=0), TE_{01} (a_inc=0)]; \
-            |S_11|(30 GHz) = 0.925637 (-0.67 dB) on native (16,3,2) cavity, 576 tets. Multi-mode \
-            basis collapses to single-mode at 30 GHz: TE_{20} f_c = c/B = 30 GHz exactly (β=0 \
-            at cutoff, stiffness block vanishes); TE_{01} f_c = c/(2 D) = 150 GHz (evanescent). \
-            Queued for Phase 4.fem.eig.3.5.5: either retune test frequency off the cutoff edge \
-            (e.g. 25 GHz, where TE_{20} propagates) or land absorbing-mode wave-port per \
-            Lee-Mittra 1997 (ADR-0048). Tolerance < 0.1 not weakened."]
+#[ignore = "fem-eig-006 strict magnitude bound (Phase 4.fem.eig.3.5.5 frequency retune, ADR-0048 \
+            Option (a)): FEM_EIG_006_F_HZ retuned 30→40 GHz so TE_{20} propagates (β≈554 rad/m, \
+            33% above its c/B=30 GHz cutoff). |S_11|(40 GHz) = 0.955397 (-0.40 dB) on native \
+            (16,3,2) cavity, 576 tets — did NOT retire (marginally above the 30 GHz value 0.926). \
+            One-shot refinement probe (NY 3→9, NZ 2→6, 5184 tets) gave 0.913956 (-0.78 dB): a 9× \
+            transverse refinement moved |S_11| only ~0.04, so the residual is NOT \
+            discretisation-limited (probe reverted). Escape-hatch: residual is a genuine \
+            modal-projection wave-port limitation; queued for Phase 4.fem.eig.3.5.6 \
+            absorbing-mode wave-port per Lee-Mittra 1997 (ADR-0048 Option (b), ADR-0049). \
+            Tolerance < 0.1 not weakened."]
 fn fem_eig_006_magnitude_bounded() {
     let result = run_fem_eig_006_high_aspect_pml().expect("fem-eig-006 driver");
     assert!(
         result.gate_a_magnitude_ok,
-        "fem-eig-006 gate (A) FAILED: |S_11(30 GHz)| = {:.6} ({:.2} dB) \
-         ≥ 0.1 — multi-mode wave-port basis collapses to single-mode \
-         at 30 GHz (TE_{{20}} f_c = c/B = 30 GHz exactly, TE_{{01}} \
-         f_c = 150 GHz evanescent). v3.5.5 disposition queued per \
-         ADR-0048 (retune frequency or absorbing-mode wave-port): {}",
+        "fem-eig-006 gate (A) FAILED: |S_11(40 GHz)| = {:.6} ({:.2} dB) \
+         ≥ 0.1 — multi-mode wave-port retune to 40 GHz (TE_{{20}} \
+         propagating, β≈554 rad/m) did not retire the gate; refinement \
+         probe excluded discretisation as the cause. Queued for Phase \
+         4.fem.eig.3.5.6 absorbing-mode wave-port per ADR-0048 Option \
+         (b) / ADR-0049: {}",
         result.s11_magnitude, result.s11_db, result.notes
     );
 }
