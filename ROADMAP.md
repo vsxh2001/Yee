@@ -148,10 +148,10 @@ Conventions used below:
 
 **Pending (high priority):**
 
+- **Phase 1.3.1.1 step 4 sparse block LOBPCG eigensolver — SHIPPED 2026-05-23 (Track ZZZZZZZZZ merge `4c2f4e1`)**: `LobpcgEigen: SparseEigen` in `crates/yee-fem/src/solve.rs` — block LOBPCG (Knyazev 2001) over the shared `build_shifted` + faer sparse LU preconditioner, dense Rayleigh-Ritz via Cholesky reduction on `nalgebra` (zero new dependency; arpack-rs declined per ADR-0050). DoD-V2 pencil tests + DoD-V5 degenerate-cluster test (double root resolved M-orthonormal to 1e-6, ~8× faster + ~5 orders more accurate than `InverseIterEigen` on the cluster) green; consumer gates `eigensolver_wr90` 2/2 + `fem-eig-001` 4/4 unchanged (still on the default `InverseIterEigen`). Spec + plan + ADR-0050 (`dd9286f`). Complex `ComplexLobpcgEigen` and the consumer-default swap are step-4.1 follow-ons.
+
 *In-flight (this session):*
 - WWWWWWW mom-002 TEM-mode smoothed RHS port-excitation fix (TTTTTTT P1 root cause)
-- Phase 1.3.1.1 step 4 sparse LOBPCG eigensolver — **spec + plan + ADR-0050 drafted 2026-05-23** (in-tree pure-Rust block LOBPCG over arpack-rs per ADR-0050; spec `2026-05-23-phase-1-3-1-1-step-4-lobpcg-eigensolver-design.md`); implementation dispatched to a `yee-fem`-lane worktree
-  - **shipped 2026-05-23** (base `dd9286f`, `yee-fem` lane): `LobpcgEigen: SparseEigen` in `crates/yee-fem/src/solve.rs` — block LOBPCG (Knyazev 2001) over the shared `build_shifted` + faer sparse LU preconditioner, dense Rayleigh-Ritz via Cholesky reduction on `nalgebra` (zero new dependency). DoD-V2 pencil tests + DoD-V5 degenerate-cluster test (double root resolved M-orthonormal to 1e-6) green; consumer gates `eigensolver_wr90` + `fem-eig-001` unchanged (still on the default `InverseIterEigen`). Complex `ComplexLobpcgEigen` and the consumer-default swap are step-4.1 follow-ons.
 - Phase 1.3.1.1 step 5 longitudinal block for quasi-TEM microstrip wave-ports
 
 *Design-coverage shipped, impl pending:*
