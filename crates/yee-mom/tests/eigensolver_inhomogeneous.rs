@@ -48,9 +48,38 @@
 //! * **DoD-V3 (Z_w):** the numerical `Z_w` reduces to the TE form
 //!   `η₀ k₀ / β` within 1 % on the homogeneous guide, and is finite,
 //!   positive-real-dominated, and regression-tracked on the loaded guide.
+//!
+//! **Phase 1.3.1.1 step 5.1 — published-transcendental reconciliation
+//! (CLAUDE.md §4 gap: still OPEN, documented finding).** The horizontal-slab
+//! case now also emits a *non-failing* reconciliation diagnostic
+//! ([`reconcile_against_transcendental`]) against a published closed-form
+//! reference: the **LSM-to-y transverse-resonance** dispersion of the
+//! slab-loaded guide (`slab_loaded_beta`; the lib-side
+//! `eigensolver::reference` mirror is **independently verified** to rel err
+//! `0.000e0` against a shooting / finite-difference solve of the same
+//! transverse ODE, and reduces exactly to the air / fully-filled TE10
+//! limits — DoD-1). The dominant family is LSM-to-y (the `TE_{m0}`-derived,
+//! `H_y = 0` family), matched to the numerical mode's weakly-hybrid field
+//! orientation (`‖E_z‖/‖E_t‖ ≈ 0.0105`, i.e. dominantly transverse `E_y`).
+//!
+//! The verified reference puts the dominant mode at **β ≈ 582.95 rad/m**
+//! (ε_eff ≈ 8.17 — field concentrated in the ε_r = 10.2 layer, consistent
+//! with the variational area-average estimate ε_eff ≈ 5.6 and above). The
+//! numerical solver instead converges (mesh-stably, 8×8 → 12×12) to
+//! **β ≈ 201.52 rad/m** (ε_eff ≈ 1.35 — barely above air). The ≈ 2.9× gap
+//! is far outside any mesh tolerance, so per ADR-0052 / spec §4 the §4
+//! published-benchmark gap is **not** closed: the V2′ monotonic bracket +
+//! regression remain the floor, the reference ships as a reported
+//! diagnostic, and the solver-side inhomogeneous-accuracy gap is a
+//! **FINDING** queued to step-5.2 (out of step-5.1's lane to patch the
+//! mixed solver). The reference reproducing physically-sensible β / ε_eff
+//! while the solver does not is itself evidence the discrepancy is
+//! solver-side, not reference-side (the question the prior bring-up could
+//! not answer because its reference was unverified).
 
 use num_complex::Complex64;
 use std::collections::HashMap;
+use std::f64::consts::PI;
 use yee_mesh::TriMesh2D;
 use yee_mom::ports::{NumericalCrossSection, RectangularWaveguideTe10};
 
@@ -59,6 +88,93 @@ const B: f64 = 10.16e-3; // WR-90 short dimension (m)
 const FREQ_HZ: f64 = 10.0e9;
 const EPS_FILL: f64 = 2.2; // vertical-slab dielectric relative permittivity
 const EPS_FILL_HI: f64 = 10.2; // horizontal-slab high-contrast substrate (RT/duroid 6010)
+const C0: f64 = 299_792_458.0;
+
+// ─────────────────────────────────────────────────────────────────────────
+// Published transcendental reference (Phase 1.3.1.1 step 5.1).
+//
+// LSM-to-y transverse-resonance dispersion for the horizontal-slab guide
+// (dielectric ε_r in 0 ≤ y ≤ d₁, air above; x-variation sin(mπx/a)). This is
+// a self-contained mirror of the lib-side `eigensolver::reference` module,
+// whose `slab_loaded_beta` is **independently verified** against a
+// shooting-method / finite-difference solve of the same transverse ODE in
+// `eigensolver::reference::tests` (rel err 0.000e0 vs the dominant LSM and
+// LSE roots, and exact reduction to the air / fully-filled TE10 limits).
+// Kept self-contained here (rather than re-exported through the crate's
+// `__internal` surface) to confine this step's edits to the eigensolver +
+// test lane; the lib-side unit tests are the load-bearing DoD-1 check.
+//
+// The dominant slab-loaded mode is LSM-to-y (the TE_{m0}-derived family,
+// H_y = 0), confirmed against the numerical dominant mode's field
+// orientation: the numerical mode is weakly hybrid (‖E_z‖/‖E_t‖ ≈ 0.0105),
+// i.e. dominantly transverse E_y — the LSM-to-y signature, not LSE-to-y
+// (which would have E_y = 0 and a large E_z fraction). See ADR-0052.
+
+/// One LSM-to-y stub term `(ε_r / k_y) cot(k_y d)`, robust to imaginary k_y
+/// (k_y² < 0 ⇒ k_y = j q ⇒ term = −(ε_r/q) coth(q d), real-negative).
+fn lsm_term(eps_r: f64, ky_sq: f64, d: f64) -> f64 {
+    if ky_sq > 0.0 {
+        let k = ky_sq.sqrt();
+        (eps_r / k) / (k * d).tan()
+    } else {
+        let q = (-ky_sq).sqrt();
+        -(eps_r / q) / (q * d).tanh()
+    }
+}
+
+/// LSM-to-y transverse-resonance residual; a propagating mode is a root.
+fn lsm_residual(d1: f64, eps_r: f64, k0: f64, m: u32, beta: f64) -> f64 {
+    let d2 = B - d1;
+    let kx = (m as f64) * PI / A;
+    let ky1_sq = eps_r * k0 * k0 - kx * kx - beta * beta;
+    let ky2_sq = k0 * k0 - kx * kx - beta * beta;
+    lsm_term(eps_r, ky1_sq, d1) + lsm_term(1.0, ky2_sq, d2)
+}
+
+/// Dominant (largest-β) LSM-to-y root of the horizontal slab-loaded guide,
+/// by downward scan + bisection (no external dependency). Mirrors the
+/// verified `eigensolver::reference::slab_loaded_beta`.
+fn slab_loaded_beta(d1: f64, eps_r: f64, freq_hz: f64, m: u32) -> Option<f64> {
+    let k0 = std::f64::consts::TAU * freq_hz / C0;
+    let kx = (m as f64) * PI / A;
+    let beta_max_sq = eps_r * k0 * k0 - kx * kx;
+    if beta_max_sq <= 0.0 {
+        return None;
+    }
+    let beta_hi = beta_max_sq.sqrt();
+    let n = 4000usize;
+    let step = (beta_hi - 1e-3) / (n as f64);
+    let mut prev_beta = beta_hi - 1e-6;
+    let mut prev = lsm_residual(d1, eps_r, k0, m, prev_beta);
+    for i in 1..=n {
+        let beta = beta_hi - 1e-6 - (i as f64) * step;
+        if beta <= 1e-3 {
+            break;
+        }
+        let cur = lsm_residual(d1, eps_r, k0, m, beta);
+        if prev.is_finite()
+            && cur.is_finite()
+            && prev * cur < 0.0
+            && (cur - prev).abs() < (cur.abs() + prev.abs() + 1.0)
+        {
+            let (mut lo, mut hi, mut f_lo) = (beta, prev_beta, cur);
+            for _ in 0..80 {
+                let mid = 0.5 * (lo + hi);
+                let f_mid = lsm_residual(d1, eps_r, k0, m, mid);
+                if f_lo * f_mid <= 0.0 {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                    f_lo = f_mid;
+                }
+            }
+            return Some(0.5 * (lo + hi));
+        }
+        prev_beta = beta;
+        prev = cur;
+    }
+    None
+}
 
 /// Structured `nx × ny` quad-grid WR-90 mesh, air everywhere (tag 0).
 /// Each quad splits along the `(low-x, low-y) → (high-x, high-y)`
@@ -385,6 +501,65 @@ fn coupling_block_loadbearing_horizontal_slab_ez_nonzero() {
     assert!(
         rel < 0.02,
         "horizontal-slab β {beta_loaded} drifted from regression {beta_reg} (rel {rel:.4})"
+    );
+
+    // (4) Step-5.1 published-transcendental reconciliation — REPORTED,
+    // NON-FAILING DIAGNOSTIC. The LSM-to-y transverse-resonance reference
+    // (`slab_loaded_beta`, independently verified in
+    // `eigensolver::reference::tests`) is compared to the numerical β.
+    // This is a *finding*, not a gate: the verified reference and the
+    // numerical solver DISAGREE (see below), so per ADR-0052 / spec §4 the
+    // V2′ bracket + regression above remain the floor and the reference is
+    // emitted as a diagnostic rather than promoted to the primary gate.
+    // step-5.2 owns root-causing the solver-side gap (it is OUT of step-5.1's
+    // lane to patch the mixed solver). See the module header.
+    reconcile_against_transcendental(beta_loaded);
+}
+
+/// Emit the step-5.1 numerical-vs-reference reconciliation diagnostic for
+/// the horizontal slab. **Non-failing**: it prints the verified-reference
+/// dominant β, the numerical β at the two mesh densities the gate exercises,
+/// the implied ε_eff, and the relative gap — it asserts nothing about their
+/// agreement (the V2′ bracket in the caller is the gate). The reference is
+/// the LSM-to-y dominant root; the numerical β is recomputed here at 8×8 and
+/// 12×12 to show the gap is mesh-converged, not a discretisation artefact.
+fn reconcile_against_transcendental(beta_8x8: f64) {
+    let k0 = std::f64::consts::TAU * FREQ_HZ / C0;
+    let kx = PI / A;
+    let eps_eff = |beta: f64| (beta * beta + kx * kx) / (k0 * k0);
+
+    // Verified published reference: dominant LSM-to-y mode, ε_r = 10.2,
+    // dielectric in the lower half (d₁ = b/2), m = 1.
+    let beta_ref = slab_loaded_beta(B / 2.0, EPS_FILL_HI, FREQ_HZ, 1)
+        .expect("LSM transcendental dominant root must exist for the loaded guide");
+
+    eprintln!("step-5.1 reconciliation (horizontal slab ε_r={EPS_FILL_HI}, d₁=b/2, m=1):");
+    eprintln!(
+        "  published reference (verified LSM-to-y transverse resonance): \
+         β_ref = {beta_ref:.4} rad/m (ε_eff = {:.4})",
+        eps_eff(beta_ref)
+    );
+
+    // Numerical β across mesh densities (recomputed; the caller already has
+    // 8×8). 12×12 confirms the gap is not mesh-limited.
+    for &(nx, ny) in &[(8usize, 8usize), (12usize, 12usize)] {
+        let mesh = horizontal_slab_mesh(nx, ny);
+        let (eps, mu) = loaded_eps_mu_with(EPS_FILL_HI);
+        let mut mode = NumericalCrossSection::new(mesh, eps, mu);
+        mode.solve(FREQ_HZ).expect("horizontal-slab mixed solve");
+        let beta_num = mode.beta.expect("β cached").re;
+        let rel = (beta_num - beta_ref).abs() / beta_ref;
+        eprintln!(
+            "  numerical {nx}×{ny}: β_num = {beta_num:.4} rad/m \
+             (ε_eff = {:.4}), |β_num−β_ref|/β_ref = {rel:.4}",
+            eps_eff(beta_num)
+        );
+    }
+    let rel_8x8 = (beta_8x8 - beta_ref).abs() / beta_ref;
+    eprintln!(
+        "  FINDING: verified reference and numerical solver DISAGREE \
+         (rel gap ≈ {rel_8x8:.2}); §4 published-benchmark gap remains OPEN, \
+         V2′ bracket retained, step-5.2 queued (solver-side root-cause)."
     );
 }
 
