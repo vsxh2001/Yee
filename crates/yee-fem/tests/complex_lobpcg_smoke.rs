@@ -1,8 +1,10 @@
-//! Phase 4.fem.eig.1 step D2 — smoke tests for
-//! [`yee_fem::solve::ComplexInverseIterEigen`] (the complex peer of
-//! [`yee_fem::solve::InverseIterEigen`]).
+//! Phase 4.fem.eig.1 step D2 / Phase 1.3.1.1 step 4.1 — smoke tests for
+//! the complex sparse eigensolvers: [`yee_fem::solve::ComplexInverseIterEigen`]
+//! (the complex peer of [`yee_fem::solve::InverseIterEigen`]) and
+//! [`yee_fem::solve::ComplexLobpcgEigen`] (the complex-symmetric block
+//! LOBPCG peer of [`yee_fem::solve::LobpcgEigen`]).
 //!
-//! These tests exercise the new `SparseEigenComplex` trait against
+//! These tests exercise the `SparseEigenComplex` trait against
 //! analytically-known eigenpairs of small (≤ 4 × 4) hand-built
 //! complex symmetric pencils. They are intentionally cheap so they
 //! run in milliseconds on the default `cargo test` flow — the
@@ -34,6 +36,19 @@
 //!    eigenvalues. Verifies the solver handles off-diagonal coupling
 //!    correctly, not just diagonal pencils.
 //!
+//! 5. `complex_lobpcg_matches_inverse_iter_on_smoke_pencil` (step 4.1)
+//!    — **parity gate.** `ComplexLobpcgEigen` recovers the same
+//!    eigenvalues as `ComplexInverseIterEigen` on the gate-1 diagonal
+//!    pencil to `1e-8`, with both returned bases (transposed-)
+//!    M-orthonormal. The two solvers share the shift-invert sparse-LU
+//!    preconditioner but differ in the outer iteration (block
+//!    Rayleigh-Ritz vs sequential deflation), so agreement to tol is
+//!    the cross-check that the complex-symmetric block path is correct.
+//!
+//! 6. `complex_lobpcg_matches_inverse_iter_on_coupled_pencil`
+//!    (step 4.1) — the same parity check on the off-diagonal
+//!    complex-symmetric 2 × 2 pencil from gate 4.
+//!
 //! References:
 //! * `docs/superpowers/specs/2026-05-19-phase-4-fem-eig-1-dispersive-design.md`
 //!   §8 (sparse-eigen library — complex lift).
@@ -43,6 +58,7 @@
 use nalgebra_sparse::coo::CooMatrix;
 use nalgebra_sparse::csr::CsrMatrix;
 use num_complex::Complex64;
+use yee_fem::solve::ComplexLobpcgEigen;
 use yee_fem::{ComplexInverseIterEigen, InverseIterEigen, SparseEigen, SparseEigenComplex};
 
 /// Build a complex diagonal CSR matrix from a slice.
@@ -283,4 +299,111 @@ fn complex_symmetric_pencil_recovers_complex_eigenvalues() {
         "high eigenvalue: expected {lambda_hi}, got {}",
         pairs.k[1],
     );
+}
+
+/// Compute the maximum deviation of `e^T M e` from the identity in the
+/// **transposed** (not Hermitian) inner product, for a diagonal `M = I`.
+/// A helper for the parity gates' M-orthonormality assertion.
+fn max_t_orthonormality_defect_identity_m(e: &nalgebra::DMatrix<Complex64>) -> f64 {
+    let n = e.nrows();
+    let ncols = e.ncols();
+    let mut worst = 0.0f64;
+    for i in 0..ncols {
+        for j in 0..ncols {
+            // (e_i)^T (I e_j) = Σ_r e[r,i] * e[r,j] (transposed).
+            let mut acc = Complex64::new(0.0, 0.0);
+            for r in 0..n {
+                acc += e[(r, i)] * e[(r, j)];
+            }
+            let expected = if i == j {
+                Complex64::new(1.0, 0.0)
+            } else {
+                Complex64::new(0.0, 0.0)
+            };
+            worst = worst.max((acc - expected).norm());
+        }
+    }
+    worst
+}
+
+/// Step-4.1 parity gate (gate 5): `ComplexLobpcgEigen` recovers the
+/// same eigenpairs as `ComplexInverseIterEigen` on the gate-1 diagonal
+/// pencil. Both solvers share the shift-invert sparse-LU preconditioner
+/// but run different outer iterations (block Rayleigh-Ritz vs
+/// sequential deflation), so eigenvalue agreement to `1e-8` is the
+/// cross-check that the complex-symmetric block path is correct. Both
+/// returned bases are verified (transposed-)M-orthonormal.
+#[test]
+fn complex_lobpcg_matches_inverse_iter_on_smoke_pencil() {
+    let lambdas = [
+        Complex64::new(1.0, 0.1),
+        Complex64::new(2.0, 0.2),
+        Complex64::new(5.0, 0.05),
+        Complex64::new(10.0, 1.0),
+    ];
+    let k = diag_csr_complex(&lambdas);
+    let m = diag_csr_complex(&[Complex64::new(1.0, 0.0); 4]);
+
+    let iter_solver = ComplexInverseIterEigen::new(2000, 1e-12);
+    let block_solver = ComplexLobpcgEigen::new(2000, 1e-12, 2);
+
+    let iter_pairs = iter_solver
+        .solve(&k, &m, 3, Complex64::new(0.1, 0.0))
+        .expect("inverse-iter solve");
+    let block_pairs = block_solver
+        .solve(&k, &m, 3, Complex64::new(0.1, 0.0))
+        .expect("block solve");
+
+    assert_eq!(iter_pairs.k.len(), block_pairs.k.len());
+    // Documented parity tolerance: 1e-8 on the complex eigenvalue.
+    for (i, (a, b)) in iter_pairs.k.iter().zip(block_pairs.k.iter()).enumerate() {
+        assert!(
+            (a - b).norm() < 1e-8,
+            "parity mode {i}: inverse-iter k²={a}, block k²={b}, |Δ|={:e}",
+            (a - b).norm(),
+        );
+    }
+
+    // Both bases (transposed-)M-orthonormal to 1e-8 (M = I here).
+    let iter_defect = max_t_orthonormality_defect_identity_m(&iter_pairs.e);
+    let block_defect = max_t_orthonormality_defect_identity_m(&block_pairs.e);
+    assert!(
+        iter_defect < 1e-8,
+        "inverse-iter basis not transposed-M-orthonormal: defect {iter_defect:e}"
+    );
+    assert!(
+        block_defect < 1e-8,
+        "block basis not transposed-M-orthonormal: defect {block_defect:e}"
+    );
+}
+
+/// Step-4.1 parity gate (gate 6): the same `ComplexLobpcgEigen` vs
+/// `ComplexInverseIterEigen` parity check on the off-diagonal
+/// complex-symmetric 2 × 2 pencil from gate 4 (genuine coupling).
+#[test]
+fn complex_lobpcg_matches_inverse_iter_on_coupled_pencil() {
+    let a = Complex64::new(3.0, 0.1);
+    let d = Complex64::new(5.0, 0.2);
+    let b = Complex64::new(1.0, 0.05);
+    let k = csr_from_dense_complex(2, 2, &[a, b, b, d]);
+    let m = diag_csr_complex(&[Complex64::new(1.0, 0.0), Complex64::new(1.0, 0.0)]);
+
+    let iter_solver = ComplexInverseIterEigen::new(2000, 1e-12);
+    let block_solver = ComplexLobpcgEigen::new(2000, 1e-12, 1);
+
+    let iter_pairs = iter_solver
+        .solve(&k, &m, 2, Complex64::new(0.1, 0.0))
+        .expect("inverse-iter solve");
+    let block_pairs = block_solver
+        .solve(&k, &m, 2, Complex64::new(0.1, 0.0))
+        .expect("block solve");
+
+    assert_eq!(iter_pairs.k.len(), block_pairs.k.len());
+    for (i, (x, y)) in iter_pairs.k.iter().zip(block_pairs.k.iter()).enumerate() {
+        assert!(
+            (x - y).norm() < 1e-8,
+            "coupled parity mode {i}: inverse-iter k²={x}, block k²={y}, |Δ|={:e}",
+            (x - y).norm(),
+        );
+    }
 }

@@ -1473,6 +1473,747 @@ fn seed_vector_complex(n: usize, mode_idx: usize) -> Vec<Complex64> {
     x
 }
 
+// =====================================================================
+// Phase 1.3.1.1 step 4.1 — complex-symmetric block LOBPCG
+// =====================================================================
+
+/// Complex-coefficient peer of [`LobpcgEigen`] — block **LOBPCG**
+/// (Knyazev 2001) for the **complex-symmetric** generalised pencil
+/// `K e = k² M e`, implementing the [`SparseEigenComplex`] trait.
+///
+/// Where [`ComplexInverseIterEigen`] iterates one mode at a time and
+/// deflates sequentially, `ComplexLobpcgEigen` carries an `n × b` block
+/// (`b = num_eigs + guard`) and resolves it *simultaneously* via a
+/// single dense Rayleigh-Ritz step per outer iteration over the search
+/// space `S = [X | W | P]` — the current block `X`, the preconditioned
+/// residual `W = T·R`, and the previous block `P`. This is exactly the
+/// structure that resolves **clustered / degenerate spectra** (the
+/// lossy `TE_{mn}`/`TE_{nm}` pairs of `fem-eig-002`): the block subspace
+/// spans the degenerate eigenspace directly, instead of accumulating
+/// Gram-Schmidt orthogonality error across a cluster.
+///
+/// ## Complex-symmetric, NOT Hermitian (the load-bearing convention)
+///
+/// The dispersive-cavity matrices are **complex-symmetric** (`Kᵀ = K`,
+/// `Mᵀ = M`) but **not Hermitian** (`Kᴴ ≠ K`). Every inner product in
+/// this solver is therefore the **bilinear** form `xᵀ M y` (transpose,
+/// **no** conjugate), matching [`ComplexInverseIterEigen`] exactly
+/// (`dot_complex`, `lu_solve_complex` with `Conj::No`). Using the
+/// Hermitian (conjugated) inner product would be a *correctness bug*:
+/// the eigenvectors of a complex-symmetric pencil are bilinear-
+/// orthonormal, not Hermitian-orthonormal, and the Hellmann–Feynman
+/// identity (plan step D5) lands in the transposed form precisely
+/// because of this. The postcondition is `e[:, i]ᵀ M e[:, j] ≈ δ_{ij}`
+/// (transposed), the same contract as [`EigenpairListComplex`].
+///
+/// ## Preconditioner (shared with the inverse-power path)
+///
+/// The preconditioner is the *same* shift-invert operator
+/// [`ComplexInverseIterEigen`] uses: `T = (K − σM)⁻¹M`, with `(K − σM)`
+/// factored exactly once via the shared [`build_shifted_complex`] +
+/// faer sparse complex LU. There is no second factorisation; the only
+/// cost delta vs inverse iteration is the small dense `3b × 3b`
+/// Rayleigh-Ritz solve per outer iteration.
+///
+/// ## Dense complex-symmetric Rayleigh-Ritz (no new dependency)
+///
+/// The reduced pencil `(SᵀKS) c = θ (SᵀMS) c` is complex-symmetric:
+/// `SᵀKS` and `SᵀMS` are complex-symmetric because `K`, `M` are. The
+/// real arm's **Cholesky** of `SᵀMS` is **invalid here** — there is no
+/// Cholesky for a complex-symmetric matrix (it is not Hermitian-
+/// positive-definite). We instead use the reduction path that
+/// `nalgebra` 0.34 supports for `Complex<f64>` *without a new
+/// dependency*:
+///
+/// 1. **Complex-symmetric (unconjugated) `LDLᵀ`-style Cholesky** of
+///    `B = SᵀMS`: `B = L Lᵀ` with the principal complex square root on
+///    the diagonal pivots ([`complex_sym_cholesky`]). For the
+///    `M`-orthonormal block `S`, `B ≈ I`, so the factorisation is
+///    well-conditioned. This is the complex analogue of the real path's
+///    `B = L Lᵀ`, except `Lᵀ` is the plain transpose (no conjugate),
+///    which **preserves complex symmetry**.
+/// 2. Transform to the standard problem `Ã y = θ y` with
+///    `Ã = L⁻¹ (SᵀKS) L⁻ᵀ` (still complex-symmetric: `Ãᵀ = Ã`), via
+///    triangular *solves* rather than an explicit `L⁻¹`.
+/// 3. **Schur decomposition** of `Ã` ([`nalgebra::linalg::Schur`],
+///    which is defined for any `T: ComplexField`) gives the
+///    eigenvalues on the upper-triangular factor's diagonal, robustly
+///    even for clusters. Per-eigenvector recovery is a `ztrevc`-style
+///    triangular back-substitution `(T − θᵢ I) y = 0` on the Schur
+///    factor, mapped back through the unitary `Q`
+///    ([`schur_eigenvectors`]).
+/// 4. Back-transform the generalised eigenvectors `c = L⁻ᵀ y`.
+///
+/// `nalgebra`'s general (non-symmetric) `Eigen` type is **not usable**
+/// at this version — it is commented out of `nalgebra::linalg` and
+/// carries a stray `println!` — so the Schur-plus-back-substitution
+/// path above is the robust route. It adds **zero** new `Cargo.toml`
+/// lines: `nalgebra` and `num_complex` are already workspace deps.
+///
+/// ## Soft-locking and determinism
+///
+/// Identical in spirit to [`LobpcgEigen`]: the `[X|W|P]` columns are
+/// `M`-orthonormalised (bilinear) by modified Gram-Schmidt and any
+/// column whose post-orthogonalisation `M`-norm magnitude falls below
+/// `√ε` is dropped (Knyazev §4). Converged residual columns are
+/// soft-locked out of `W`. The initial block `X₀` is seeded from a
+/// deterministic generator (no RNG), so the eigensolve is
+/// bit-reproducible across runs.
+///
+/// ## Tuning
+///
+/// * `max_iter` — outer-iteration budget for the whole block.
+/// * `tol` — per-column relative residual target
+///   `‖K xᵢ − k²ᵢ M xᵢ‖₂ / (|k²ᵢ| ‖M xᵢ‖₂) < tol` (complex norm) on the
+///   leading `num_eigs` columns.
+/// * `guard` — extra columns beyond `num_eigs` (block width
+///   `b = (num_eigs + guard).min(n)`). `guard = 2` is the default.
+///
+/// ## Example
+///
+/// ```ignore
+/// use yee_fem::solve::{ComplexLobpcgEigen, SparseEigenComplex};
+/// use num_complex::Complex64;
+/// let solver = ComplexLobpcgEigen::new(1000, 1e-8, 2);
+/// let pairs = solver.solve(&k, &m, 10, Complex64::new(0.1, 0.0))?;
+/// // pairs.k is sorted ascending by Re(k²) and (transposed-)M-
+/// // orthonormal — same postcondition as ComplexInverseIterEigen.
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct ComplexLobpcgEigen {
+    /// Outer-iteration budget for the block. Failure to converge the
+    /// leading `num_eigs` columns within `max_iter` outer iterations
+    /// causes [`SparseEigenComplex::solve`] to return
+    /// [`yee_core::Error::Numerical`] with the worst-column residual.
+    pub max_iter: usize,
+    /// Per-column relative residual convergence tolerance (complex
+    /// norm) on the leading `num_eigs` columns.
+    pub tol: f64,
+    /// Guard columns beyond `num_eigs`: block width
+    /// `b = (num_eigs + guard).min(n)`. Improves cluster robustness.
+    pub guard: usize,
+}
+
+impl ComplexLobpcgEigen {
+    /// Construct a configured solver. See type docs for tuning notes.
+    pub fn new(max_iter: usize, tol: f64, guard: usize) -> Self {
+        Self {
+            max_iter,
+            tol,
+            guard,
+        }
+    }
+}
+
+impl Default for ComplexLobpcgEigen {
+    /// `max_iter = 1000`, `tol = 1e-8`, `guard = 2` — mirroring
+    /// [`ComplexInverseIterEigen`] plus a two-column cluster guard.
+    fn default() -> Self {
+        Self::new(1000, 1e-8, 2)
+    }
+}
+
+impl SparseEigenComplex for ComplexLobpcgEigen {
+    fn solve(
+        &self,
+        k: &CsrMatrix<Complex64>,
+        m: &CsrMatrix<Complex64>,
+        num_eigs: usize,
+        sigma: Complex64,
+    ) -> Result<EigenpairListComplex, yee_core::Error> {
+        // ---- Validate shapes (identical guards to the peers) --------
+        if k.nrows() != k.ncols() {
+            return Err(yee_core::Error::Invalid(format!(
+                "ComplexLobpcgEigen: K must be square, got {}×{}",
+                k.nrows(),
+                k.ncols()
+            )));
+        }
+        if m.nrows() != m.ncols() {
+            return Err(yee_core::Error::Invalid(format!(
+                "ComplexLobpcgEigen: M must be square, got {}×{}",
+                m.nrows(),
+                m.ncols()
+            )));
+        }
+        if k.nrows() != m.nrows() {
+            return Err(yee_core::Error::Invalid(format!(
+                "ComplexLobpcgEigen: K and M must have matching dimensions, \
+                 got K = {}×{} M = {}×{}",
+                k.nrows(),
+                k.ncols(),
+                m.nrows(),
+                m.ncols()
+            )));
+        }
+        let n = k.nrows();
+        if num_eigs == 0 {
+            return Err(yee_core::Error::Invalid(
+                "ComplexLobpcgEigen: num_eigs must be >= 1".to_string(),
+            ));
+        }
+        if num_eigs > n {
+            return Err(yee_core::Error::Invalid(format!(
+                "ComplexLobpcgEigen: num_eigs = {num_eigs} exceeds dimension {n}"
+            )));
+        }
+
+        // ---- Build (K − σM) and factor once via faer complex sparse LU
+        let shifted = build_shifted_complex(k, m, sigma)?;
+        let lu: Lu<usize, Complex64> = shifted.sp_lu().map_err(|e| {
+            yee_core::Error::Numerical(format!(
+                "ComplexLobpcgEigen: sparse LU of (K − σM) failed: {e:?}"
+            ))
+        })?;
+        // T x = (K − σM)^{-1} (M x): the shared shift-invert operator,
+        // with the unconjugated complex solve (`Conj::No`) matching the
+        // transposed-bilinear convention.
+        let apply_t = |cols: &[Vec<Complex64>]| -> Vec<Vec<Complex64>> {
+            cols.iter()
+                .map(|c| {
+                    let mc = csr_matvec_complex(m, c);
+                    lu_solve_complex(&lu, &mc)
+                })
+                .collect()
+        };
+
+        // ---- Block width and deterministic, M-orthonormal seed ------
+        let b = (num_eigs + self.guard).min(n);
+        let mut x: Vec<Vec<Complex64>> = (0..b).map(|j| block_seed_complex(n, j)).collect();
+        block_m_orthonormalize_complex(&mut x, m)?;
+        if x.len() < num_eigs {
+            return Err(yee_core::Error::Numerical(format!(
+                "ComplexLobpcgEigen: initial block rank {} < num_eigs {num_eigs} after \
+                 M-orthonormalisation (degenerate seed against M)",
+                x.len()
+            )));
+        }
+
+        // Previous block P, M-orthonormalised against X each iteration.
+        let mut p: Vec<Vec<Complex64>> = Vec::new();
+        // Current Ritz values (k²) for the block columns.
+        let mut theta_k2: Vec<Complex64> = vec![sigma; x.len()];
+
+        let mut last_max_res = f64::INFINITY;
+        let mut converged = false;
+
+        for _outer in 0..self.max_iter {
+            // ---- Block residual R = K X − M X Λ (Λ = current k²) -----
+            // Per-column relative residual ‖K xᵢ − k²ᵢ M xᵢ‖₂ /
+            // (|k²ᵢ| ‖M xᵢ‖₂) in the *complex* (2-)norm; `max_res` tracks
+            // the worst of the leading `num_eigs`. Converged columns are
+            // soft-locked out of `W` (Knyazev §4) so the preconditioned
+            // residual of a converged column — `T` on numerical noise —
+            // does not contaminate the search space and pin the leading
+            // residual at a non-zero floor.
+            let mut active: Vec<Vec<Complex64>> = Vec::with_capacity(x.len());
+            let mut max_res = 0.0f64;
+            for (col, xi) in x.iter().enumerate() {
+                let kx = csr_matvec_complex(k, xi);
+                let mx = csr_matvec_complex(m, xi);
+                let lam = theta_k2[col];
+                let ri: Vec<Complex64> = kx
+                    .iter()
+                    .zip(mx.iter())
+                    .map(|(&kxi, &mxi)| kxi - lam * mxi)
+                    .collect();
+                let rnorm = complex_l2_norm(&ri);
+                let mxnorm = complex_l2_norm(&mx);
+                let denom = lam.norm() * mxnorm;
+                let rel = if denom > 0.0 { rnorm / denom } else { rnorm };
+                if col < num_eigs && rel > max_res {
+                    max_res = rel;
+                }
+                if rel > self.tol {
+                    active.push(ri);
+                }
+            }
+            last_max_res = max_res;
+            if max_res < self.tol {
+                converged = true;
+                break;
+            }
+
+            // ---- Preconditioned residual W = T R (active columns) ---
+            let w = apply_t(&active);
+
+            // ---- Search space S = [X | W | P], M-orthonormalised ----
+            let nx = x.len();
+            let nw = w.len();
+            let mut s: Vec<Vec<Complex64>> = Vec::with_capacity(nx + nw + p.len());
+            s.extend(x.iter().cloned());
+            s.extend(w.into_iter());
+            s.extend(p.iter().cloned());
+            block_m_orthonormalize_complex(&mut s, m)?;
+            let bb = s.len();
+            if bb < num_eigs {
+                return Err(yee_core::Error::Numerical(format!(
+                    "ComplexLobpcgEigen: search space collapsed to rank {bb} < num_eigs \
+                     {num_eigs} (basis ill-conditioning — raise guard or move σ)"
+                )));
+            }
+
+            // ---- Dense complex-symmetric Rayleigh-Ritz on S ---------
+            // SᵀKS and SᵀMS are bb × bb and complex-symmetric (because
+            // K, M are). S is M-orthonormal so SᵀMS ≈ I, but we form it
+            // explicitly so rounding does not bias the Ritz values.
+            let st_k_s = block_gram_complex(&s, k);
+            let st_m_s = block_gram_complex(&s, m);
+            let (ritz_vals, ritz_vecs) = dense_gen_sym_eigen_complex(&st_k_s, &st_m_s)?;
+
+            // Leading `nx` (= block width) Ritz pairs (ascending by
+            // Re(θ)) define the next X; columns are S-basis coefficients.
+            let take = nx.min(bb);
+            let new_x = combine_complex(&s, &ritz_vecs, 0, take);
+            // New P from the W,P portion (rows nx..) — Knyazev's local-
+            // optimality conjugate direction.
+            let new_p = if bb > nx {
+                combine_rows_complex(&s, &ritz_vecs, nx, bb, 0, take)
+            } else {
+                Vec::new()
+            };
+
+            // `new_x` is already (bilinear-)M-orthonormal — `S` is and
+            // the Ritz coefficients are M-orthonormal in the `SᵀMS ≈ I`
+            // metric — so we do NOT re-orthonormalise it (that would
+            // perturb `x` off the Ritz solution and decouple it from
+            // `theta_k2`, pinning the residual at a non-zero floor). `P`
+            // is M-orthonormalised together with `[X|W|P]` next iter.
+            theta_k2 = ritz_vals[0..take].to_vec();
+            x = new_x;
+            p = new_p;
+        }
+
+        if !converged {
+            return Err(yee_core::Error::Numerical(format!(
+                "ComplexLobpcgEigen: block failed to converge in {} outer iterations \
+                 (worst leading-column relative residual = {last_max_res:e}, tol = {:e})",
+                self.max_iter, self.tol
+            )));
+        }
+
+        // ---- Assemble the leading num_eigs pairs, sorted ascending --
+        // theta_k2 is ascending by Re (Ritz order); take the leading
+        // num_eigs and re-M-orthonormalise so the EigenpairListComplex
+        // postcondition holds to working tolerance.
+        let mut take_vecs: Vec<Vec<Complex64>> = x[0..num_eigs].to_vec();
+        block_m_orthonormalize_complex(&mut take_vecs, m)?;
+        if take_vecs.len() < num_eigs {
+            return Err(yee_core::Error::Numerical(format!(
+                "ComplexLobpcgEigen: returned block rank {} < num_eigs {num_eigs} after \
+                 final M-orthonormalisation",
+                take_vecs.len()
+            )));
+        }
+
+        // Recompute Ritz values on the final orthonormal vectors so the
+        // reported k² is the (transposed) Rayleigh quotient of the
+        // returned vector: k²ᵢ = xᵢᵀ K xᵢ / xᵢᵀ M xᵢ.
+        let mut k_vals: Vec<Complex64> = Vec::with_capacity(num_eigs);
+        for xi in &take_vecs {
+            let kx = csr_matvec_complex(k, xi);
+            let mx = csr_matvec_complex(m, xi);
+            let num = dot_complex(xi, &kx);
+            let den = dot_complex(xi, &mx);
+            k_vals.push(num / den);
+        }
+
+        let mut order: Vec<usize> = (0..num_eigs).collect();
+        order.sort_by(|&a, &c| k_vals[a].re.total_cmp(&k_vals[c].re));
+        let sorted_k: Vec<Complex64> = order.iter().map(|&i| k_vals[i]).collect();
+        let mut e = DMatrix::<Complex64>::zeros(n, num_eigs);
+        for (col, &i) in order.iter().enumerate() {
+            for row in 0..n {
+                e[(row, col)] = take_vecs[i][row];
+            }
+        }
+
+        Ok(EigenpairListComplex { k: sorted_k, e })
+    }
+}
+
+// ---------------------------------------------------------------------
+// Complex block helpers — peers of the real block helpers above,
+// reusing `csr_matvec_complex` / `dot_complex` / `lu_solve_complex`
+// (no duplication of the sparse-LU / matvec primitives).
+// ---------------------------------------------------------------------
+
+/// Complex `‖x‖₂` — the genuine Euclidean (Hermitian) 2-norm
+/// `sqrt(Σ |xᵢ|²)`, used **only** for the relative-residual *magnitude*
+/// convergence test (a real, non-negative scalar). This is deliberately
+/// the Hermitian norm: it is a size measure, not an inner product, so it
+/// does not affect the complex-symmetric orthogonality convention (which
+/// stays the bilinear `xᵀ M y` everywhere it matters).
+fn complex_l2_norm(x: &[Complex64]) -> f64 {
+    x.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt()
+}
+
+/// Deterministic seed vector for complex block column `col` of the
+/// LOBPCG initial block `X₀`. Real part matches the real
+/// [`block_seed`] generator (distinct dominant spatial frequency per
+/// column plus a unit spike) so a `b`-column block spans a genuinely
+/// `b`-dimensional subspace; the imaginary part is identically zero at
+/// seed time (the complex content is generated by the operator `T` and
+/// the complex pencil during iteration). No RNG — a fixed function of
+/// `(n, col)` for bit-reproducibility. Peer of [`block_seed`].
+fn block_seed_complex(n: usize, col: usize) -> Vec<Complex64> {
+    let mut x = vec![Complex64::new(0.0, 0.0); n];
+    let freq = (col as f64 + 1.0) * std::f64::consts::PI;
+    let phase = 0.37 * col as f64;
+    for (i, xi) in x.iter_mut().enumerate() {
+        let t = (i as f64 + 0.5) / (n as f64);
+        let re = (freq * t + phase).cos() + 0.25 * (2.0 * freq * t).sin();
+        *xi = Complex64::new(re, 0.0);
+    }
+    x[col % n] += Complex64::new(1.0, 0.0);
+    x
+}
+
+/// In-place complex block M-orthonormalisation by **modified
+/// Gram-Schmidt** in the *transposed* (bilinear) `M`-inner product
+/// `xᵀ M y` — **not** Hermitian. Each column is M-orthogonalised against
+/// the already-accepted columns, then M-normalised by the principal
+/// complex square root of `xᵀ M x`. Columns whose post-orthogonalisation
+/// `M`-norm *magnitude* falls below `√ε` are **dropped** (Knyazev's soft
+/// locking). Peer of [`block_m_orthonormalize`]; reuses
+/// [`csr_matvec_complex`] and [`dot_complex`].
+///
+/// Postcondition: `block[i]ᵀ M block[j] ≈ δ_{ij}` (transposed) for the
+/// surviving columns.
+fn block_m_orthonormalize_complex(
+    block: &mut Vec<Vec<Complex64>>,
+    m: &CsrMatrix<Complex64>,
+) -> Result<(), yee_core::Error> {
+    let drop_tol = f64::EPSILON.sqrt();
+    let mut accepted: Vec<Vec<Complex64>> = Vec::with_capacity(block.len());
+    for col in block.drain(..) {
+        let mut v = col;
+        // Modified Gram-Schmidt against accepted columns (each already
+        // M-normalised, so the projection coefficient is e_jᵀ M v —
+        // transposed, not conjugated).
+        for ej in &accepted {
+            let mv = csr_matvec_complex(m, &v);
+            let coeff = dot_complex(ej, &mv);
+            for (vi, eji) in v.iter_mut().zip(ej.iter()) {
+                *vi -= coeff * eji;
+            }
+        }
+        let mv = csr_matvec_complex(m, &v);
+        let norm_sq = dot_complex(&v, &mv);
+        if !norm_sq.is_finite() {
+            return Err(yee_core::Error::Numerical(format!(
+                "ComplexLobpcgEigen: block M-norm went non-finite ({norm_sq}) during \
+                 orthonormalisation"
+            )));
+        }
+        // Soft-lock on the *magnitude* of the bilinear M-norm: a column
+        // collapsing into the accepted span has |xᵀ M x| → 0.
+        if norm_sq.norm() <= drop_tol * drop_tol {
+            continue;
+        }
+        let inv = Complex64::new(1.0, 0.0) / norm_sq.sqrt();
+        for vi in v.iter_mut() {
+            *vi *= inv;
+        }
+        accepted.push(v);
+    }
+    *block = accepted;
+    Ok(())
+}
+
+/// Dense `bb × bb` complex Gram matrix `Sᵀ A S` (transposed, **not**
+/// Hermitian) for a block `S` and sparse complex CSR `A`. Complex-
+/// symmetric by construction for complex-symmetric `A`; symmetrised
+/// (plain transpose, no conjugate) to kill rounding asymmetry before
+/// the dense complex-symmetric eigensolve. Peer of [`block_gram`];
+/// reuses [`csr_matvec_complex`] and [`dot_complex`].
+fn block_gram_complex(s: &[Vec<Complex64>], a: &CsrMatrix<Complex64>) -> DMatrix<Complex64> {
+    let bb = s.len();
+    let a_s: Vec<Vec<Complex64>> = s.iter().map(|c| csr_matvec_complex(a, c)).collect();
+    let mut g = DMatrix::<Complex64>::zeros(bb, bb);
+    for i in 0..bb {
+        for j in i..bb {
+            // Sᵀ A S entry (i,j) = s[i]ᵀ (A s[j]) — bilinear.
+            let v = dot_complex(&s[i], &a_s[j]);
+            g[(i, j)] = v;
+            g[(j, i)] = v;
+        }
+    }
+    g
+}
+
+/// Linear combination of complex block columns:
+/// `out[j] = Σ_r S[r] · C[r, c0+j]` for `j ∈ 0..take`. Peer of
+/// [`combine`].
+fn combine_complex(
+    s: &[Vec<Complex64>],
+    c: &DMatrix<Complex64>,
+    c0: usize,
+    take: usize,
+) -> Vec<Vec<Complex64>> {
+    let n = s[0].len();
+    let bb = s.len();
+    let mut out: Vec<Vec<Complex64>> = Vec::with_capacity(take);
+    for col in c0..c0 + take {
+        let mut v = vec![Complex64::new(0.0, 0.0); n];
+        for (r, sr) in s.iter().enumerate().take(bb) {
+            let coeff = c[(r, col)];
+            if coeff == Complex64::new(0.0, 0.0) {
+                continue;
+            }
+            for (vi, &sri) in v.iter_mut().zip(sr.iter()) {
+                *vi += coeff * sri;
+            }
+        }
+        out.push(v);
+    }
+    out
+}
+
+/// Like [`combine_complex`] but uses only the `S` rows `r0..r1` (the
+/// `W`,`P` portion) — Knyazev's local-optimality conjugate block `P`.
+/// Peer of [`combine_rows`].
+fn combine_rows_complex(
+    s: &[Vec<Complex64>],
+    c: &DMatrix<Complex64>,
+    r0: usize,
+    r1: usize,
+    c0: usize,
+    take: usize,
+) -> Vec<Vec<Complex64>> {
+    let n = s[0].len();
+    let mut out: Vec<Vec<Complex64>> = Vec::with_capacity(take);
+    for col in c0..c0 + take {
+        let mut v = vec![Complex64::new(0.0, 0.0); n];
+        for r in r0..r1 {
+            let coeff = c[(r, col)];
+            if coeff == Complex64::new(0.0, 0.0) {
+                continue;
+            }
+            for (vi, &sri) in v.iter_mut().zip(s[r].iter()) {
+                *vi += coeff * sri;
+            }
+        }
+        out.push(v);
+    }
+    out
+}
+
+/// Complex-symmetric (unconjugated) Cholesky `B = L Lᵀ` for a complex-
+/// symmetric `B`, lower-triangular `L`. Unlike the Hermitian Cholesky
+/// (`B = L Lᴴ`), the factor uses the **plain transpose** `Lᵀ` so the
+/// factorisation is the natural one for the complex-symmetric Rayleigh-
+/// Ritz `B = SᵀMS`. Diagonal pivots are the principal complex square
+/// root. Returns `None` if a pivot magnitude underflows (rank-deficient
+/// `B` despite the soft-lock drop).
+///
+/// This is the complex analogue of `nalgebra`'s real `cholesky()` used
+/// by [`dense_gen_sym_eigen`]; `nalgebra` does not ship a complex-
+/// *symmetric* Cholesky (its `Cholesky` is Hermitian-positive-definite
+/// only), so we roll the tiny `bb × bb` factorisation by hand. No new
+/// dependency.
+fn complex_sym_cholesky(b: &DMatrix<Complex64>) -> Option<DMatrix<Complex64>> {
+    let n = b.nrows();
+    let mut l = DMatrix::<Complex64>::zeros(n, n);
+    for j in 0..n {
+        let mut djj = b[(j, j)];
+        for kk in 0..j {
+            djj -= l[(j, kk)] * l[(j, kk)];
+        }
+        let ljj = djj.sqrt(); // principal complex square root
+        if ljj.norm() < f64::EPSILON.sqrt() {
+            return None;
+        }
+        l[(j, j)] = ljj;
+        for i in (j + 1)..n {
+            let mut s = b[(i, j)];
+            for kk in 0..j {
+                s -= l[(i, kk)] * l[(j, kk)];
+            }
+            l[(i, j)] = s / ljj;
+        }
+    }
+    Some(l)
+}
+
+/// Forward-substitution solve `L y = rhs` for a lower-triangular complex
+/// `L` (single rhs column). Companion to [`complex_sym_cholesky`].
+fn solve_lower_complex(l: &DMatrix<Complex64>, rhs: &[Complex64]) -> Vec<Complex64> {
+    let n = l.nrows();
+    let mut y = vec![Complex64::new(0.0, 0.0); n];
+    for i in 0..n {
+        let mut s = rhs[i];
+        for kk in 0..i {
+            s -= l[(i, kk)] * y[kk];
+        }
+        y[i] = s / l[(i, i)];
+    }
+    y
+}
+
+/// Back-substitution solve `Lᵀ x = rhs` for a lower-triangular complex
+/// `L` (so `Lᵀ` is upper-triangular; single rhs column). Companion to
+/// [`complex_sym_cholesky`]; used for the back-transform `c = L⁻ᵀ y`.
+fn solve_lt_complex(l: &DMatrix<Complex64>, rhs: &[Complex64]) -> Vec<Complex64> {
+    let n = l.nrows();
+    let mut x = vec![Complex64::new(0.0, 0.0); n];
+    for i in (0..n).rev() {
+        let mut s = rhs[i];
+        for kk in (i + 1)..n {
+            // (Lᵀ)_{i,kk} = L_{kk,i}.
+            s -= l[(kk, i)] * x[kk];
+        }
+        x[i] = s / l[(i, i)];
+    }
+    x
+}
+
+/// Eigenpairs of a small dense **complex** (here complex-symmetric)
+/// matrix `a` via [`nalgebra::linalg::Schur`] plus a `ztrevc`-style
+/// triangular eigenvector back-substitution.
+///
+/// `Schur::try_new` is defined for any `T: ComplexField` and yields a
+/// unitary `Q` and upper-triangular `T` with `a = Q T Qᴴ`; the
+/// eigenvalues are `diag(T)`. For each eigenvalue `λ = T[col, col]` the
+/// corresponding eigenvector of `T` solves the upper-triangular system
+/// `(T − λ I) y = 0` with `y[col] = 1`, recovered by back-substitution
+/// over rows `col-1 .. 0`; the eigenvector of `a` is then `Q y`. A
+/// near-zero denominator (defective / clustered eigenvalue) is floored
+/// to `√ε` so the recursion stays finite and yields an *independent*
+/// vector per Schur column — the block M-orthonormalisation downstream
+/// then separates a degenerate cluster.
+///
+/// Returns `(eigenvalues, eigenvectors)` **unsorted** (Schur order);
+/// the caller sorts. Eigenvectors are column-stacked, each `ℓ²`-
+/// normalised. No new dependency: `nalgebra`'s general (non-symmetric)
+/// `Eigen` is unavailable at this version (commented out, stray
+/// `println!`), so Schur-plus-back-substitution is the robust route.
+fn schur_eigenvectors(
+    a: &DMatrix<Complex64>,
+) -> Result<(Vec<Complex64>, DMatrix<Complex64>), yee_core::Error> {
+    let n = a.nrows();
+    let schur =
+        nalgebra::linalg::Schur::try_new(a.clone(), f64::EPSILON, 1000).ok_or_else(|| {
+            yee_core::Error::Numerical(
+                "ComplexLobpcgEigen: Schur decomposition of the reduced complex-symmetric \
+             Rayleigh-Ritz matrix failed to converge"
+                    .to_string(),
+            )
+        })?;
+    let (q, t) = schur.unpack();
+    let floor = f64::EPSILON.sqrt();
+    let mut evals = vec![Complex64::new(0.0, 0.0); n];
+    let mut evecs = DMatrix::<Complex64>::zeros(n, n);
+    for col in 0..n {
+        let lam = t[(col, col)];
+        evals[col] = lam;
+        // Eigenvector of T: (T − λ I) y = 0, y[col] = 1, back-substitute.
+        let mut y = vec![Complex64::new(0.0, 0.0); n];
+        y[col] = Complex64::new(1.0, 0.0);
+        for i in (0..col).rev() {
+            let mut s = Complex64::new(0.0, 0.0);
+            for j in (i + 1)..=col {
+                s += t[(i, j)] * y[j];
+            }
+            let mut denom = t[(i, i)] - lam;
+            if denom.norm() < floor {
+                // Defective / clustered diagonal: floor the denominator
+                // so back-substitution stays finite; the resulting vector
+                // is independent of the cluster's other Schur columns and
+                // is separated by the downstream M-orthonormalisation.
+                denom = Complex64::new(floor, 0.0);
+            }
+            y[i] = -s / denom;
+        }
+        // Eigenvector of `a` is Q y; ℓ²-normalise for a stable scale.
+        let yv = DMatrix::<Complex64>::from_column_slice(n, 1, &y);
+        let ev = &q * yv;
+        let nrm = complex_l2_norm(ev.as_slice());
+        let inv = if nrm > 0.0 {
+            Complex64::new(1.0 / nrm, 0.0)
+        } else {
+            Complex64::new(1.0, 0.0)
+        };
+        for r in 0..n {
+            evecs[(r, col)] = ev[(r, 0)] * inv;
+        }
+    }
+    Ok((evals, evecs))
+}
+
+/// Solve the small dense **generalised complex-symmetric** eigenproblem
+/// `A c = θ B c` (`A = SᵀKS`, `B = SᵀMS`, both complex-symmetric) via
+/// the reduction documented on [`ComplexLobpcgEigen`]:
+///
+/// 1. complex-symmetric Cholesky `B = L Lᵀ` ([`complex_sym_cholesky`]),
+/// 2. standard problem `Ã = L⁻¹ A L⁻ᵀ` via triangular solves (preserves
+///    complex symmetry),
+/// 3. Schur + `ztrevc` back-substitution on `Ã` ([`schur_eigenvectors`]),
+/// 4. back-transform `c = L⁻ᵀ y`.
+///
+/// Returns `(eigenvalues, eigenvectors)` sorted **ascending by `Re(θ)`**
+/// (the [`EigenpairListComplex`] convention), eigenvectors column-
+/// stacked in the `S` basis. Complex peer of [`dense_gen_sym_eigen`];
+/// **no** new `Cargo.toml` line (ADR-0050 ethos).
+fn dense_gen_sym_eigen_complex(
+    a: &DMatrix<Complex64>,
+    bmat: &DMatrix<Complex64>,
+) -> Result<(Vec<Complex64>, DMatrix<Complex64>), yee_core::Error> {
+    let bb = a.nrows();
+    // B = L Lᵀ (complex-symmetric Cholesky). B is SᵀMS with M complex-
+    // symmetric and the block M-orthonormal, so B ≈ I and the
+    // factorisation is well-conditioned; a failure means the block is
+    // rank-deficient despite the soft-lock drop — surface it.
+    let l = complex_sym_cholesky(bmat).ok_or_else(|| {
+        yee_core::Error::Numerical(
+            "ComplexLobpcgEigen: Rayleigh-Ritz complex-symmetric Cholesky of SᵀMS failed \
+             (near-singular block Gram matrix; raise guard or move σ)"
+                .to_string(),
+        )
+    })?;
+    // Ã = L⁻¹ A L⁻ᵀ via triangular solves:
+    //   Y  = L⁻¹ A             ← solve  L Y  = A    (column-wise)
+    //   Ã  = Y L⁻ᵀ = (L⁻¹ Yᵀ)ᵀ ← solve  L Z  = Yᵀ, then Ã = Zᵀ.
+    let mut y = DMatrix::<Complex64>::zeros(bb, bb);
+    for jcol in 0..bb {
+        let col: Vec<Complex64> = (0..bb).map(|r| a[(r, jcol)]).collect();
+        let yc = solve_lower_complex(&l, &col);
+        for r in 0..bb {
+            y[(r, jcol)] = yc[r];
+        }
+    }
+    let yt = y.transpose();
+    let mut z = DMatrix::<Complex64>::zeros(bb, bb);
+    for jcol in 0..bb {
+        let col: Vec<Complex64> = (0..bb).map(|r| yt[(r, jcol)]).collect();
+        let zc = solve_lower_complex(&l, &col);
+        for r in 0..bb {
+            z[(r, jcol)] = zc[r];
+        }
+    }
+    let a_tilde = z.transpose();
+    // Symmetrise (plain transpose, no conjugate) to remove rounding
+    // asymmetry before the complex-symmetric eigensolve.
+    let a_sym = (&a_tilde + a_tilde.transpose()).map(|zz| zz * Complex64::new(0.5, 0.0));
+
+    let (vals_unsorted, y_evecs) = schur_eigenvectors(&a_sym)?;
+
+    // Sort ascending by Re(θ) and permute eigenvectors to match, while
+    // back-transforming the generalised eigenvectors c = L⁻ᵀ y.
+    let mut idx: Vec<usize> = (0..bb).collect();
+    idx.sort_by(|&i, &j| vals_unsorted[i].re.total_cmp(&vals_unsorted[j].re));
+    let vals: Vec<Complex64> = idx.iter().map(|&i| vals_unsorted[i]).collect();
+    let mut c = DMatrix::<Complex64>::zeros(bb, bb);
+    for (new_col, &old_col) in idx.iter().enumerate() {
+        let yc: Vec<Complex64> = (0..bb).map(|r| y_evecs[(r, old_col)]).collect();
+        let cc = solve_lt_complex(&l, &yc);
+        for r in 0..bb {
+            c[(r, new_col)] = cc[r];
+        }
+    }
+    Ok((vals, c))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1863,6 +2604,263 @@ mod tests {
                 ka.to_bits(),
                 kb.to_bits(),
                 "non-deterministic: {ka} vs {kb}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 1.3.1.1 step 4.1 — ComplexLobpcgEigen tests
+    // -----------------------------------------------------------------
+
+    /// Diagonal complex CSR matrix (test helper).
+    fn diag_csr_complex(diag: &[Complex64]) -> CsrMatrix<Complex64> {
+        use nalgebra_sparse::coo::CooMatrix;
+        let n = diag.len();
+        let mut coo = CooMatrix::new(n, n);
+        for (i, &d) in diag.iter().enumerate() {
+            if d.norm() != 0.0 {
+                coo.push(i, i, d);
+            }
+        }
+        CsrMatrix::from(&coo)
+    }
+
+    /// Complex CSR from a dense row-major slice, filtering exact zeros.
+    fn csr_from_dense_complex(
+        rows: usize,
+        cols: usize,
+        data: &[Complex64],
+    ) -> CsrMatrix<Complex64> {
+        use nalgebra_sparse::coo::CooMatrix;
+        assert_eq!(data.len(), rows * cols);
+        let mut coo = CooMatrix::new(rows, cols);
+        for r in 0..rows {
+            for c in 0..cols {
+                let v = data[r * cols + c];
+                if v.norm() != 0.0 {
+                    coo.push(r, c, v);
+                }
+            }
+        }
+        CsrMatrix::from(&coo)
+    }
+
+    /// Build a **dense, non-diagonal, complex-symmetric** pencil
+    /// `K = H diag(λ) Hᵀ` from a *real* Householder reflector `H`
+    /// (`Hᵀ = H`, `HᵀH = I`) and complex eigenvalues `λ`. Because `H` is
+    /// real and symmetric, `Kᵀ = (H diag(λ) H)ᵀ = H diag(λ) H = K`, so
+    /// `K` is complex-symmetric (NOT Hermitian) with the prescribed
+    /// complex spectrum and a *known orthonormal eigenbasis* (the
+    /// columns of `H`). Used by the complex degenerate-cluster test so
+    /// the cluster is genuinely coupled, not trivially diagonal. Complex
+    /// peer of [`householder_pencil`].
+    fn householder_pencil_complex(lambdas: &[Complex64]) -> CsrMatrix<Complex64> {
+        let n = lambdas.len();
+        let v: Vec<f64> = (0..n).map(|i| 1.0 + (i as f64) * 0.7).collect();
+        let vtv: f64 = v.iter().map(|x| x * x).sum();
+        let h = |a: usize, b: usize| -> f64 {
+            let kron = if a == b { 1.0 } else { 0.0 };
+            kron - 2.0 * v[a] * v[b] / vtv
+        };
+        let mut dense = vec![Complex64::new(0.0, 0.0); n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let mut s = Complex64::new(0.0, 0.0);
+                for (p, &lp) in lambdas.iter().enumerate() {
+                    s += Complex64::new(h(i, p), 0.0) * lp * Complex64::new(h(p, j), 0.0);
+                }
+                dense[i * n + j] = s;
+            }
+        }
+        csr_from_dense_complex(n, n, &dense)
+    }
+
+    /// Recovery test — known 4×4 complex diagonal pencil
+    /// `K = diag(1+0.1j, 2+0.2j, 5+0.05j, 10+1j)`, `M = I`. The block
+    /// solver recovers the three smallest (by Re) to `1e-8`, ascending.
+    #[test]
+    fn complex_lobpcg_recovers_diagonal_pencil() {
+        let lambdas = [
+            Complex64::new(1.0, 0.1),
+            Complex64::new(2.0, 0.2),
+            Complex64::new(5.0, 0.05),
+            Complex64::new(10.0, 1.0),
+        ];
+        let k = diag_csr_complex(&lambdas);
+        let m = diag_csr_complex(&[Complex64::new(1.0, 0.0); 4]);
+
+        let solver = ComplexLobpcgEigen::new(1000, 1e-10, 2);
+        let pairs = solver
+            .solve(&k, &m, 3, Complex64::new(0.1, 0.0))
+            .expect("solve");
+
+        assert_eq!(pairs.k.len(), 3);
+        let expected = [lambdas[0], lambdas[1], lambdas[2]];
+        for (got, want) in pairs.k.iter().zip(expected.iter()) {
+            assert!(
+                (got - want).norm() < 1e-8,
+                "complex diagonal pencil: expected {want}, got {got}"
+            );
+        }
+        for w in pairs.k.windows(2) {
+            assert!(w[0].re <= w[1].re, "expected ascending Re(k²)");
+        }
+    }
+
+    /// Off-diagonal coupling — the 2×2 complex-symmetric pencil from the
+    /// `ComplexInverseIterEigen` smoke set, closed-form eigenvalues.
+    #[test]
+    fn complex_lobpcg_recovers_coupled_2x2() {
+        let a = Complex64::new(3.0, 0.1);
+        let d = Complex64::new(5.0, 0.2);
+        let b = Complex64::new(1.0, 0.05);
+        let k = csr_from_dense_complex(2, 2, &[a, b, b, d]);
+        let m = diag_csr_complex(&[Complex64::new(1.0, 0.0), Complex64::new(1.0, 0.0)]);
+
+        let half_sum = (a + d) / Complex64::new(2.0, 0.0);
+        let half_diff = (a - d) / Complex64::new(2.0, 0.0);
+        let disc = (half_diff * half_diff + b * b).sqrt();
+        let lambda_lo = half_sum - disc;
+        let lambda_hi = half_sum + disc;
+
+        let solver = ComplexLobpcgEigen::new(2000, 1e-12, 1);
+        let pairs = solver
+            .solve(&k, &m, 2, Complex64::new(0.1, 0.0))
+            .expect("solve");
+
+        assert_eq!(pairs.k.len(), 2);
+        assert!(pairs.k[0].re <= pairs.k[1].re, "expected ascending Re(k²)");
+        assert!(
+            (pairs.k[0] - lambda_lo).norm() < 1e-8,
+            "low eigenvalue: expected {lambda_lo}, got {}",
+            pairs.k[0]
+        );
+        assert!(
+            (pairs.k[1] - lambda_hi).norm() < 1e-8,
+            "high eigenvalue: expected {lambda_hi}, got {}",
+            pairs.k[1]
+        );
+    }
+
+    /// **Complex degenerate-cluster** test. A 6×6 complex-symmetric
+    /// pencil with a known *double* eigenvalue at `3.4 − 0.2j` (spectrum
+    /// `{0.5−0.05j, 1.2−0.1j, 3.4−0.2j, 3.4−0.2j, 5.0−0.3j, 7.8−0.4j}`),
+    /// built dense via a real Householder reflector so the degenerate
+    /// pair is genuinely coupled. `ComplexLobpcgEigen` must return
+    /// **both** members, each with per-mode residual below `tol`, and
+    /// the returned basis mutually **bilinear**-M-orthonormal
+    /// (`eᵢᵀ M eⱼ ≈ δ_{ij}`, NOT Hermitian) to `1e-6`. This is the lossy
+    /// `TE_{mn}`/`TE_{nm}` degeneracy this solver exists to resolve.
+    #[test]
+    fn complex_lobpcg_resolves_degenerate_cluster() {
+        let lambdas = [
+            Complex64::new(0.5, -0.05),
+            Complex64::new(1.2, -0.1),
+            Complex64::new(3.4, -0.2),
+            Complex64::new(3.4, -0.2),
+            Complex64::new(5.0, -0.3),
+            Complex64::new(7.8, -0.4),
+        ];
+        let k = householder_pencil_complex(&lambdas);
+        let m = diag_csr_complex(&[Complex64::new(1.0, 0.0); 6]);
+
+        let solver = ComplexLobpcgEigen::new(2000, 1e-10, 3);
+        let pairs = solver
+            .solve(&k, &m, 4, Complex64::new(0.1, 0.0))
+            .expect("solve");
+
+        assert_eq!(pairs.k.len(), 4);
+        let expected = [lambdas[0], lambdas[1], lambdas[2], lambdas[3]];
+        for (got, exp) in pairs.k.iter().zip(expected.iter()) {
+            assert!(
+                (got - exp).norm() < 1e-6,
+                "cluster eigenvalue mismatch: expected {exp}, got {got}"
+            );
+        }
+        // Both members of the double root present (indices 2 and 3 both
+        // ≈ 3.4−0.2j — the cluster was resolved, not collapsed to one).
+        let dbl = Complex64::new(3.4, -0.2);
+        assert!(
+            (pairs.k[2] - dbl).norm() < 1e-6 && (pairs.k[3] - dbl).norm() < 1e-6,
+            "double eigenvalue {dbl} not resolved as a pair: {:?}",
+            pairs.k
+        );
+
+        // Per-mode residual ‖K eᵢ − k²ᵢ M eᵢ‖₂ / (|k²ᵢ| ‖M eᵢ‖₂) < tol.
+        let n = pairs.e.nrows();
+        for col in 0..pairs.k.len() {
+            let ei: Vec<Complex64> = (0..n).map(|r| pairs.e[(r, col)]).collect();
+            let kei = csr_matvec_complex(&k, &ei);
+            let mei = csr_matvec_complex(&m, &ei);
+            let lam = pairs.k[col];
+            let resid: Vec<Complex64> = kei
+                .iter()
+                .zip(mei.iter())
+                .map(|(&a, &b)| a - lam * b)
+                .collect();
+            let rnorm = complex_l2_norm(&resid);
+            let mnorm = complex_l2_norm(&mei);
+            let rel = rnorm / (lam.norm() * mnorm);
+            assert!(
+                rel < 1e-6,
+                "mode {col} (k²={lam}) residual {rel:e} not below tol"
+            );
+        }
+
+        // Mutual *bilinear* (transposed) M-orthonormality to 1e-6,
+        // including the degenerate pair: eᵢᵀ M eⱼ ≈ δ_{ij} (no conjugate).
+        let ncols = pairs.e.ncols();
+        for i in 0..ncols {
+            for j in 0..ncols {
+                let col_j: Vec<Complex64> = (0..n).map(|r| pairs.e[(r, j)]).collect();
+                let mxj = csr_matvec_complex(&m, &col_j);
+                // Transposed inner product: Σ_r e[r,i] * (M e_j)[r].
+                let acc: Complex64 = (0..n).map(|r| pairs.e[(r, i)] * mxj[r]).sum();
+                let expected = if i == j {
+                    Complex64::new(1.0, 0.0)
+                } else {
+                    Complex64::new(0.0, 0.0)
+                };
+                assert!(
+                    (acc - expected).norm() < 1e-6,
+                    "cluster (transposed) M-orthonormality failed at ({i},{j}): got {acc}"
+                );
+            }
+        }
+    }
+
+    /// Determinism guard — the complex degenerate cluster solved twice
+    /// gives bit-identical eigenvalues (real and imaginary parts).
+    #[test]
+    fn complex_lobpcg_degenerate_cluster_is_deterministic() {
+        let lambdas = [
+            Complex64::new(0.5, -0.05),
+            Complex64::new(1.2, -0.1),
+            Complex64::new(3.4, -0.2),
+            Complex64::new(3.4, -0.2),
+            Complex64::new(5.0, -0.3),
+            Complex64::new(7.8, -0.4),
+        ];
+        let k = householder_pencil_complex(&lambdas);
+        let m = diag_csr_complex(&[Complex64::new(1.0, 0.0); 6]);
+
+        let solver = ComplexLobpcgEigen::new(2000, 1e-10, 3);
+        let a = solver
+            .solve(&k, &m, 4, Complex64::new(0.1, 0.0))
+            .expect("solve a");
+        let b = solver
+            .solve(&k, &m, 4, Complex64::new(0.1, 0.0))
+            .expect("solve b");
+        for (ka, kb) in a.k.iter().zip(b.k.iter()) {
+            assert_eq!(
+                ka.re.to_bits(),
+                kb.re.to_bits(),
+                "non-deterministic Re: {ka} vs {kb}"
+            );
+            assert_eq!(
+                ka.im.to_bits(),
+                kb.im.to_bits(),
+                "non-deterministic Im: {ka} vs {kb}"
             );
         }
     }
