@@ -205,8 +205,8 @@ impl SlabGuide {
 ///
 /// A propagating mode satisfies `β² < ε_r k₀² − (mπ/a)²` (so the dielectric
 /// layer is propagating in y) and lies in `0 < β ≤ √(ε_r k₀² − (mπ/a)²)`.
-/// The residual [`residual`] has poles where a layer hits an internal
-/// half-wave resonance (`k_{y,i} d_i = nπ`); between consecutive poles it is
+/// The residual ([`SlabGuide::residual`]) has poles where a layer hits an
+/// internal half-wave resonance (`k_{y,i} d_i = nπ`); between consecutive poles it is
 /// smooth and monotone, so a sign change that is **not** a pole jump is a
 /// genuine root. The scan walks β downward from the upper edge of the
 /// window and bisects the first genuine sign change — the largest-β root,
