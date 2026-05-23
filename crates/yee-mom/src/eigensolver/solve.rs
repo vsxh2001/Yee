@@ -411,12 +411,15 @@ pub(crate) fn solve_dense_mixed(
     // p=2 spurious gradient-cluster captures (low ε_eff) that defeated the
     // smallest-cutoff selection. ──
     let mut best: Option<(f64, Vec<f64>)> = None; // (β²_true, x_true)
+    let n_candidates = candidates.len();
+    let mut n_converged = 0usize; // shift-inverts that yielded a valid transverse mode
     for (sigma0, x_c) in &candidates {
         match beta_direct_shift_invert(&k_op, &b1_re, n, n_t, *sigma0, Some(x_c)) {
             Ok((beta_sq, x_true)) => {
                 if beta_sq <= 0.0 || !beta_sq.is_finite() {
                     continue;
                 }
+                n_converged += 1;
                 let take = match &best {
                     None => true,
                     Some((curr, _)) => beta_sq > *curr,
@@ -433,12 +436,14 @@ pub(crate) fn solve_dense_mixed(
         }
     }
 
+    // Failure here is rare (no propagating transverse mode found at all); the
+    // candidate-tried / converged counts make the message grep-able for CI
+    // triage rather than requiring a debugger re-run (step-5.6 review P1-1).
     let (beta_sq_re, x_true) = best.ok_or_else(|| {
-        yee_core::Error::Numerical(
+        yee_core::Error::Numerical(format!(
             "eigensolver(mixed): no candidate shift converged to a transverse-dominated \
-             propagating mode"
-                .into(),
-        )
+             propagating mode ({n_converged}/{n_candidates} candidates yielded a valid mode)"
+        ))
     })?;
 
     Ok(pack_mixed_solution(beta_sq_re, n_t, n, &x_true))

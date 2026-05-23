@@ -386,6 +386,13 @@ impl NumericalCrossSection {
     /// not apply). A `Numerical2D` wave-port RHS therefore still requires
     /// the first-order order; this knob exists so the validated p=2 β path
     /// is reachable end-to-end (e.g. for dispersion / β studies).
+    ///
+    /// **The p=2 `Z_w = η₀k₀/β` closed form is valid only on a homogeneous
+    /// (`μ_r ≡ 1`) guide.** On an inhomogeneous (dielectric-loaded)
+    /// cross-section it is **systematically incorrect** — the first-order
+    /// path computes the energy-averaged `Z_w` (see [`Self::solve`]), but
+    /// the p=2 path does not. Use the p=2 knob for `β` / dispersion studies,
+    /// not for inhomogeneous `Z_w`.
     pub fn with_element_order(mut self, order: ElementOrder) -> Self {
         self.element_order = order;
         self
