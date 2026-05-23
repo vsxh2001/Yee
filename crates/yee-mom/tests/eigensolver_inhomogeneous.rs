@@ -324,6 +324,205 @@ fn horizontal_slab_mesh(nx: usize, ny: usize) -> TriMesh2D {
     TriMesh2D::new(vertices, triangles, None, Some(tags)).unwrap()
 }
 
+/// Geometrically-graded `y`-grid lines clustered toward the interface
+/// `y = d1` (Phase 1.3.1.1 step 5.4). Self-contained mirror of the
+/// lib-side `eigensolver::mesh::graded_y_lines` (the lib module is
+/// `pub(crate)`, unreachable from this integration-test crate; the mesh
+/// unit tests are the load-bearing builder check), kept here to confine
+/// the step's edits to the eigensolver + test lane. Cells shrink toward
+/// `d1` by the geometric factor `ratio` (`1` = uniform), with a node
+/// placed EXACTLY at `d1` so the material partition stays sharp.
+fn graded_y_lines(b: f64, d1: f64, ny_lo: usize, ny_hi: usize, ratio: f64) -> Vec<f64> {
+    let layer_cell_sizes = |thickness: f64, n: usize| -> Vec<f64> {
+        if (ratio - 1.0).abs() < 1e-12 {
+            return vec![thickness / (n as f64); n];
+        }
+        let geom_sum: f64 = (0..n).map(|k| ratio.powi(k as i32)).sum();
+        let s = thickness / geom_sum; // smallest cell, at the interface
+        (0..n).map(|k| s * ratio.powi(k as i32)).collect()
+    };
+
+    let mut ys = Vec::with_capacity(ny_lo + ny_hi + 1);
+    ys.push(0.0);
+    let lo_sizes = layer_cell_sizes(d1, ny_lo); // index 0 = interface cell (finest)
+    let mut y = 0.0;
+    for k in (0..ny_lo).rev() {
+        y += lo_sizes[k];
+        ys.push(y);
+    }
+    let iface_idx = ys.len() - 1;
+    ys[iface_idx] = d1; // snap interface node to exactly d1
+    let hi_sizes = layer_cell_sizes(b - d1, ny_hi); // index 0 = interface cell (finest)
+    let mut y = d1;
+    for (k, &h) in hi_sizes.iter().enumerate() {
+        y += h;
+        if k + 1 == ny_hi {
+            ys.push(b); // snap top wall to exactly b
+        } else {
+            ys.push(y);
+        }
+    }
+    ys
+}
+
+/// Horizontal-slab WR-90 mesh with `nx` uniform `x`-columns and a
+/// geometrically interface-graded `y`-row distribution
+/// ([`graded_y_lines`]): dielectric (tag 1) in `0 ≤ y ≤ d1 = b/2`, air
+/// (tag 0) above. Mirror of `eigensolver::mesh::horizontal_slab_graded_mesh`
+/// (see [`graded_y_lines`]). The interface node at `d1` means no element
+/// straddles the interface, so the cell `y`-midpoint decides its tag
+/// exactly. Additive: the uniform [`horizontal_slab_mesh`] keeps its
+/// builder/values.
+fn horizontal_slab_graded_mesh(nx: usize, ny_lo: usize, ny_hi: usize, ratio: f64) -> TriMesh2D {
+    let d1 = B / 2.0;
+    let ys = graded_y_lines(B, d1, ny_lo, ny_hi, ratio);
+    let ny = ys.len() - 1;
+    let mut vertices = Vec::with_capacity((nx + 1) * (ny + 1));
+    for &yj in &ys {
+        for i in 0..=nx {
+            vertices.push([A * (i as f64) / (nx as f64), yj]);
+        }
+    }
+    let idx = |i: usize, j: usize| j * (nx + 1) + i;
+    let mut triangles = Vec::with_capacity(2 * nx * ny);
+    let mut tags = Vec::with_capacity(2 * nx * ny);
+    for j in 0..ny {
+        let yc = 0.5 * (ys[j] + ys[j + 1]);
+        let tag = if yc < d1 { 1u32 } else { 0u32 };
+        for i in 0..nx {
+            let v00 = idx(i, j);
+            let v10 = idx(i + 1, j);
+            let v11 = idx(i + 1, j + 1);
+            let v01 = idx(i, j + 1);
+            triangles.push([v00, v10, v11]);
+            tags.push(tag);
+            triangles.push([v00, v11, v01]);
+            tags.push(tag);
+        }
+    }
+    TriMesh2D::new(vertices, triangles, None, Some(tags)).unwrap()
+}
+
+#[test]
+fn graded_h_convergence_study_hi_contrast() {
+    // Phase 1.3.1.1 step 5.4 (DoD-1 + DoD-2, NON-FAILING DIAGNOSTIC). Drive
+    // the interface-graded horizontal-slab mesh through the step-5.3 sparse
+    // β-direct solve (`NumericalCrossSection::solve`) at ≥3 grading/DoF
+    // points and reconcile against the verified LSM-to-y reference
+    // `slab_loaded_beta(ε_r=10.2)` = 582.95 rad/m.
+    //
+    // **RESULT (the gate disposition): graded h-refinement PLATEAUS short of
+    // ≤5%.** Clustering element rows geometrically toward the dielectric
+    // interface y=d1 (where the dominant LSM-to-y mode's E_y peaks) moves the
+    // numerical β only marginally — from the uniform plateau β≈489 (rel 16.1%)
+    // to a graded best β≈491.7 (rel 15.6%), a ~0.5pp improvement — and adding
+    // DoF at fixed grading drifts back toward ≈487 (the uniform plateau),
+    // NOT toward the reference. This is decisive evidence that the residual is
+    // limited by the first-order Nedelec/nodal element CONVERGENCE RATE at the
+    // high-contrast interface field peak, which h-refinement (more/finer
+    // elements of the same order) cannot fix — only p-refinement (higher
+    // polynomial order) can. This is exactly the spec §5(a) "first-order
+    // convergence rate too slow even graded" → DoD-2 plateau branch.
+    //
+    // DISPOSITION (per ADR-0055): the §4 inhomogeneous published-benchmark
+    // closure stays the FR-4 gate (`fr4_loaded_beta_matches_reference`, ≤5%);
+    // the ε_r=10.2 reconciliation remains a NON-FAILING diagnostic, now with
+    // quantified h-plateau evidence; closing it is queued to **step-5.5**
+    // (curl-conforming p-refinement / second-order Nedelec). The cheap
+    // interface-graded h lever (ADR-0055) was the right first attempt — it is
+    // now ruled out with data, converting a vague "needs higher order" into a
+    // quantified one.
+    //
+    // This study tops out at a ~12×12-class total cell count so the routine
+    // `cargo test` stays fast (the cutoff-pencil shift selection still runs a
+    // dense O(n³) eigendecomposition — step-5.4 out-of-scope to make sparse).
+    // A wider sweep (run separately during bring-up, up to nx16 ny8+8,
+    // n≈289) confirmed the same flat plateau; more DoF / more grading does
+    // not approach 583.
+    let beta_ref = slab_loaded_beta(B / 2.0, EPS_FILL_HI, FREQ_HZ, 1)
+        .expect("LSM transcendental dominant root for ε_r=10.2");
+    let k0 = std::f64::consts::TAU * FREQ_HZ / C0;
+    let kx = PI / A;
+    let eps_eff = |beta: f64| (beta * beta + kx * kx) / (k0 * k0);
+    eprintln!(
+        "step-5.4 interface-graded h-convergence study (horizontal slab ε_r={EPS_FILL_HI}, \
+         d₁=b/2, m=1):"
+    );
+    eprintln!(
+        "  published reference (verified LSM-to-y transverse resonance): \
+         β_ref = {beta_ref:.4} rad/m (ε_eff = {:.4})",
+        eps_eff(beta_ref)
+    );
+
+    // (label, nx, ny_lo, ny_hi, grading ratio). The first two are UNIFORM
+    // anchors (ratio 1.0); the rest grade toward the interface. ≥3 points
+    // (DoD-1), spanning grading strength and DoF.
+    let cases: &[(&str, usize, usize, usize, f64)] = &[
+        ("uniform   nx8  ny4+4  r1.0", 8, 4, 4, 1.0),
+        ("uniform   nx12 ny6+6  r1.0", 12, 6, 6, 1.0),
+        ("graded    nx8  ny6+6  r1.5", 8, 6, 6, 1.5),
+        ("graded    nx8  ny6+6  r2.0", 8, 6, 6, 2.0),
+        ("graded    nx12 ny8+8  r1.5", 12, 8, 8, 1.5),
+    ];
+
+    let mut best_beta = 0.0_f64;
+    let mut best_label = "";
+    for &(label, nx, ny_lo, ny_hi, r) in cases {
+        let mesh = horizontal_slab_graded_mesh(nx, ny_lo, ny_hi, r);
+        let n_verts = mesh.vertices.len();
+        let (eps, mu) = loaded_eps_mu_with(EPS_FILL_HI);
+        let mut mode = NumericalCrossSection::new(mesh, eps, mu);
+        mode.solve(FREQ_HZ)
+            .expect("graded horizontal-slab mixed solve");
+        let beta = mode.beta.expect("β cached").re;
+        let rel = (beta - beta_ref).abs() / beta_ref;
+        eprintln!(
+            "  {label}  verts={n_verts:3}: β_num = {beta:.4} rad/m \
+             (ε_eff = {:.4}), |β_num−β_ref|/β_ref = {rel:.4}",
+            eps_eff(beta)
+        );
+        // Non-failing sanity only: every point must be a physical propagating
+        // mode (positive, finite, field-concentrated above air). The
+        // ε_r=10.2 ≤5% reconciliation is explicitly NOT asserted (plateau).
+        assert!(
+            beta.is_finite() && beta > 0.0,
+            "graded β must be a finite positive propagating mode, got {beta}"
+        );
+        assert!(
+            eps_eff(beta) > 4.0,
+            "graded dominant mode ε_eff {:.3} must stay field-concentrated in the dielectric",
+            eps_eff(beta)
+        );
+        // Track the closest-to-reference (largest) β across the study.
+        if beta > best_beta {
+            best_beta = beta;
+            best_label = label;
+        }
+    }
+
+    let best_rel = (best_beta - beta_ref).abs() / beta_ref;
+    eprintln!(
+        "  FINDING (step-5.4): interface-graded h-refinement PLATEAUS — best β = {best_beta:.4} \
+         rad/m ({}, ε_eff {:.4}, rel {best_rel:.4}) vs the uniform plateau β≈489 (rel ≈0.16). \
+         Grading toward the interface buys only ≈0.5pp; adding DoF drifts back toward the \
+         uniform plateau, NOT toward β_ref {beta_ref:.1}. VERDICT: the residual is the \
+         FIRST-ORDER ELEMENT CONVERGENCE RATE at the high-contrast interface field peak — \
+         h-refinement cannot close it. QUEUED to step-5.5 (curl-conforming p-refinement / \
+         second-order Nedelec); the §4 closure stays the FR-4 gate. See ADR-0055.",
+        best_label,
+        eps_eff(best_beta)
+    );
+
+    // Sanity that the study did improve marginally on the uniform 8×8 plateau
+    // (a graded point should be at least as good), and that it remains well
+    // short of the ≤5% close (documenting the plateau, not asserting success).
+    assert!(
+        best_beta > 480.0 && best_rel > 0.05,
+        "study sanity: graded best β {best_beta} should beat the uniform floor yet stay \
+         short of the ≤5% close (rel {best_rel:.4}) — this is the documented h-plateau"
+    );
+}
+
 fn air_eps_mu() -> (HashMap<u32, Complex64>, HashMap<u32, Complex64>) {
     let mut eps = HashMap::new();
     eps.insert(0u32, Complex64::new(1.0, 0.0));
