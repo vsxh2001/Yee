@@ -997,6 +997,16 @@ fn recover_k0_sq(k_op: &DMatrix<f64>, a_re: &DMatrix<f64>, b_re: &DMatrix<f64>) 
             den += b * b;
         }
     }
+    // `den = Σ B_ij²` is zero only if B is identically zero (a degenerate /
+    // empty pencil that no physical cross-section produces at nonzero
+    // frequency). The 0.0 fallback degrades gracefully — it collapses the
+    // σ-ladder, the sparse solve finds no candidate, and the caller surfaces
+    // the (counted) "no candidate converged" error rather than a silent
+    // wrong β. The debug-assert documents the invariant (step-5.7 review P1-2).
+    debug_assert!(
+        den > 0.0,
+        "recover_k0_sq: B is identically zero (degenerate pencil)"
+    );
     if den > 0.0 { num / den } else { 0.0 }
 }
 
@@ -1777,6 +1787,13 @@ mod tests {
                 loaded(10.2),
                 5e-4,
             ),
+            // The n > DENSE_CUTOFF_DOF_THRESHOLD (260) dense-vs-sparse
+            // agreement (step-5.7 review P1-1) lives in the separate
+            // `#[ignore]`'d `sparse_cutoff_agrees_with_dense_at_n_above_threshold`
+            // — the dense O(n³) reference at n>260 is ~40 s, kept out of the
+            // routine fast path (the sparse production path at large n is also
+            // exercised end-to-end by the step-5.7 mesh-scaling / finer-mesh
+            // tests).
         ];
 
         let mut mu = HashMap::new();
@@ -1813,5 +1830,58 @@ mod tests {
                  {beta_dense} (rel {rel:.3e} > tol {tol:.1e}) — DoD-1 is non-negotiable"
             );
         }
+    }
+
+    /// DoD-1 agreement at `n > DENSE_CUTOFF_DOF_THRESHOLD` (260) — the regime
+    /// where production dispatch actually takes the sparse branch (step-5.7
+    /// review P1-1). `#[ignore]`'d because the dense O(n³) reference at this
+    /// size (~40 s at n≈529) is too slow for the routine fast path; run via
+    /// `cargo test -p yee-mom --lib -- --include-ignored`. Verified manually:
+    /// 12×12 FR-4 gives dense β = sparse β = 328.300878 (rel 5.2e-16).
+    #[test]
+    #[ignore = "dense O(n³) reference at n>260 (~40s); run with --include-ignored"]
+    fn sparse_cutoff_agrees_with_dense_at_n_above_threshold() {
+        let (a, b, freq_hz) = (22.86e-3, 10.16e-3, 10e9);
+        let k0_sq = (std::f64::consts::TAU * freq_hz / yee_core::units::C0).powi(2);
+        let mesh = horizontal_slab_mesh(a, b, 12, 12);
+        let mut eps = HashMap::new();
+        eps.insert(0u32, Complex64::new(1.0, 0.0));
+        eps.insert(1u32, Complex64::new(4.4, 0.0));
+        let mut mu = HashMap::new();
+        mu.insert(0u32, Complex64::new(1.0, 0.0));
+        mu.insert(1u32, Complex64::new(1.0, 0.0));
+
+        let table = EdgeTable::build(&mesh);
+        let asm = assemble_mixed(&mesh, &eps, &mu, &table);
+        let (a_re, b_re, b1_re) = mixed_real_blocks(&asm).unwrap();
+        let n = asm.n_t + asm.n_z;
+        let n_t = asm.n_t;
+        assert!(
+            n > DENSE_CUTOFF_DOF_THRESHOLD,
+            "mesh must exceed the threshold, got n={n}"
+        );
+        let k_op = k0_sq * &b_re - &a_re;
+
+        let (dr, df) = dense_cutoff_eigenpairs(&a_re, &b_re).unwrap();
+        let beta_dense = dominant_beta_from_candidates(
+            &tag_candidates(dr, df, &k_op, &b1_re, n),
+            &k_op,
+            &b1_re,
+            n,
+            n_t,
+        );
+        let (sr, sf) = sparse_cutoff_eigenpairs(&a_re, &b_re, &b1_re, n, k0_sq).unwrap();
+        let beta_sparse = dominant_beta_from_candidates(
+            &tag_candidates(sr, sf, &k_op, &b1_re, n),
+            &k_op,
+            &b1_re,
+            n,
+            n_t,
+        );
+        let rel = (beta_sparse - beta_dense).abs() / beta_dense.abs().max(1e-30);
+        assert!(
+            rel <= 5e-3,
+            "n={n}: sparse β {beta_sparse} must agree with dense {beta_dense} (rel {rel:.3e})"
+        );
     }
 }

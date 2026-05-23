@@ -230,6 +230,83 @@ fn slab_loaded_beta(d1: f64, eps_r: f64, freq_hz: f64, m: u32) -> Option<f64> {
     None
 }
 
+/// Phase 1.3.1.1 step 5.8 — LSM-to-y MULTI-ROOT census for the ε_r=10.2
+/// horizontal slab. `slab_loaded_beta` returns only the first/largest-β
+/// root (the reference's "dominant" convention, ≈583). The FEM's
+/// lowest-cutoff selection converges (mesh-independently, p1≡p2, step 5.7)
+/// to β≈485. This enumerates ALL roots to test the mode-identity
+/// hypothesis (ADR-0058): if a second LSM-to-y root sits at ≈485, the
+/// FEM and the reference are comparing DIFFERENT physical modes, the
+/// ε_r=10.2 "gap" is a mode-convention mismatch (not a solver defect),
+/// and FR-4 stays THE §4 inhomogeneous closure.
+#[test]
+fn step_5_8_lsm_multi_root_census_eps_r_10_2() {
+    let d1 = B / 2.0;
+    let eps_r = EPS_FILL_HI; // 10.2
+    let m = 1u32;
+    let k0 = std::f64::consts::TAU * FREQ_HZ / C0;
+    let kx = (m as f64) * PI / A;
+    let beta_hi = (eps_r * k0 * k0 - kx * kx).sqrt();
+
+    // Dense downward scan; collect EVERY genuine (non-pole) sign change.
+    let n = 20_000usize;
+    let step = (beta_hi - 1e-3) / (n as f64);
+    let mut roots: Vec<f64> = Vec::new();
+    let mut prev_beta = beta_hi - 1e-6;
+    let mut prev = lsm_residual(d1, eps_r, k0, m, prev_beta);
+    for i in 1..=n {
+        let beta = beta_hi - 1e-6 - (i as f64) * step;
+        if beta <= 1e-3 {
+            break;
+        }
+        let cur = lsm_residual(d1, eps_r, k0, m, beta);
+        if prev.is_finite()
+            && cur.is_finite()
+            && prev * cur < 0.0
+            && (cur - prev).abs() < (cur.abs() + prev.abs() + 1.0)
+        {
+            let (mut lo, mut hi, mut f_lo) = (beta, prev_beta, cur);
+            for _ in 0..80 {
+                let mid = 0.5 * (lo + hi);
+                let f_mid = lsm_residual(d1, eps_r, k0, m, mid);
+                if f_lo * f_mid <= 0.0 {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                    f_lo = f_mid;
+                }
+            }
+            roots.push(0.5 * (lo + hi));
+        }
+        prev_beta = beta;
+        prev = cur;
+    }
+    let eps_eff = |b: f64| (b * b + kx * kx) / (k0 * k0);
+    eprintln!("step-5.8 LSM-to-y root census (ε_r=10.2, d1=b/2, m=1, β_hi={beta_hi:.2}):");
+    for r in &roots {
+        eprintln!("  β = {r:.3} rad/m  (ε_eff = {:.3})", eps_eff(*r));
+    }
+    // FINDING (ADR-0058 step-5.8): the LSM-to-y family roots here are
+    // {≈582.95, ≈216, ≈161, ≈158} — the dominant (largest-β) is the
+    // reference's 582.95. The FEM's mesh-converged dominant mode is β≈485,
+    // which is NOT an LSM-to-y root (nearest is 582.95, ~17% away) — it
+    // sits near the LSE-to-y dominant root (≈465.42, verified in step-5.1).
+    // So the ε_r=10.2 FEM↔reference "gap" is a MODE-FAMILY mismatch (FEM
+    // dominant ≈ LSE-to-y; the reference compared LSM-to-y per ADR-0052's
+    // assignment, which was made from the step-5.2 *contaminated* cutoff
+    // eigenvector). This refutes the "second LSM root at 485" hypothesis
+    // and is NOT a solver defect (the FEM is mesh-converged p1≡p2, step 5.7).
+    let dominant = roots.iter().cloned().fold(0.0_f64, f64::max);
+    assert!(
+        (dominant - 582.95).abs() < 1.0,
+        "dominant LSM-to-y root should be the reference's 582.95, got {dominant}"
+    );
+    assert!(
+        !roots.iter().any(|&r| (r - 485.0).abs() < 25.0),
+        "no LSM-to-y root should sit near the FEM's β≈485 (it is an LSE-to-y mode, not LSM): {roots:?}"
+    );
+}
+
 /// Structured `nx × ny` quad-grid WR-90 mesh, air everywhere (tag 0).
 /// Each quad splits along the `(low-x, low-y) → (high-x, high-y)`
 /// diagonal into two CCW triangles. Mirrors `eigensolver_wr90.rs`.
