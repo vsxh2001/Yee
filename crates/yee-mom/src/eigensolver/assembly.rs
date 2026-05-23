@@ -2130,8 +2130,11 @@ mod tests {
         // minutes-scale)). The p=2 element family itself is a reusable,
         // VALIDATED capability (J1+J3) regardless of this solver gap.
         //
-        // Cheap meshes only (4×4..6×6) so routine `cargo test` stays bounded;
-        // the dense cutoff selection is the binding cost.
+        // Two cheap meshes (4×4, 5×5) so routine `cargo test` stays fast; the
+        // 6×6 point (n≈457, ~40 s under the dense O(n³) cutoff selection) is
+        // dropped from the routine run — two points already establish the
+        // finding (p=2 does not converge toward the reference), and the wider
+        // sweep belongs to the step-5.6 sparse-selection release path.
         let k0 = std::f64::consts::TAU * 10.0e9 / yee_core::units::C0;
         let kx = std::f64::consts::PI / 22.86e-3;
         let eps_eff = |b: f64| (b * b + kx * kx) / (k0 * k0);
@@ -2155,7 +2158,7 @@ mod tests {
 
         let mut best_p2_rel = f64::INFINITY;
         let mut max_p2_eps_eff = 0.0_f64;
-        for &(nx, ny) in &[(4usize, 4usize), (5, 5), (6, 6)] {
+        for &(nx, ny) in &[(4usize, 4usize), (5, 5)] {
             let b1 = solve_slab_beta(nx, ny, 10.2, super::super::ElementOrder::First);
             let b2 = solve_slab_beta(nx, ny, 10.2, super::super::ElementOrder::Second);
             let n = {
