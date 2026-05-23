@@ -672,7 +672,7 @@ impl SparseEigen for LobpcgEigen {
 
         // ---- Block width and deterministic, M-orthonormal seed ------
         let b = (num_eigs + self.guard).min(n);
-        let mut x: Vec<Vec<f64>> = (0..b).map(|j| seed_vector(n, j)).collect();
+        let mut x: Vec<Vec<f64>> = (0..b).map(|j| block_seed(n, j)).collect();
         block_m_orthonormalize(&mut x, m)?;
         if x.len() < num_eigs {
             // Seeds were rank-deficient against M; this only happens for
@@ -695,7 +695,16 @@ impl SparseEigen for LobpcgEigen {
 
         for _outer in 0..self.max_iter {
             // ---- Block residual R = K X − M X Λ  (Λ = current k²) ----
-            let mut residual: Vec<Vec<f64>> = Vec::with_capacity(x.len());
+            // Per-column relative residual ‖K xᵢ − k²ᵢ M xᵢ‖₂ /
+            // (k²ᵢ ‖M xᵢ‖₂); `max_res` tracks the worst of the leading
+            // `num_eigs` for the convergence test. `active` collects the
+            // residual columns *not yet converged* — converged columns
+            // are **soft-locked out of `W`** (Knyazev §4): the
+            // preconditioned residual of a converged column is `T`
+            // applied to a near-null vector, i.e. numerical noise, which
+            // otherwise contaminates the search space and pins the
+            // leading residual at a non-zero floor.
+            let mut active: Vec<Vec<f64>> = Vec::with_capacity(x.len());
             let mut max_res = 0.0f64;
             for (col, xi) in x.iter().enumerate() {
                 let kx = csr_matvec(k, xi);
@@ -706,17 +715,16 @@ impl SparseEigen for LobpcgEigen {
                     .zip(mx.iter())
                     .map(|(&kxi, &mxi)| kxi - lam * mxi)
                     .collect();
-                // Per-column relative residual on the leading num_eigs.
-                if col < num_eigs {
-                    let rnorm = dot(&ri, &ri).sqrt();
-                    let mxnorm = dot(&mx, &mx).sqrt();
-                    let denom = lam.abs() * mxnorm;
-                    let rel = if denom > 0.0 { rnorm / denom } else { rnorm };
-                    if rel > max_res {
-                        max_res = rel;
-                    }
+                let rnorm = dot(&ri, &ri).sqrt();
+                let mxnorm = dot(&mx, &mx).sqrt();
+                let denom = lam.abs() * mxnorm;
+                let rel = if denom > 0.0 { rnorm / denom } else { rnorm };
+                if col < num_eigs && rel > max_res {
+                    max_res = rel;
                 }
-                residual.push(ri);
+                if rel > self.tol {
+                    active.push(ri);
+                }
             }
             last_max_res = max_res;
             if max_res < self.tol {
@@ -724,8 +732,8 @@ impl SparseEigen for LobpcgEigen {
                 break;
             }
 
-            // ---- Preconditioned residual W = T R --------------------
-            let w = apply_t(&residual);
+            // ---- Preconditioned residual W = T R (active columns) ---
+            let w = apply_t(&active);
 
             // ---- Search space S = [X | W | P], M-orthonormalised ----
             // Soft-locking: M-orthonormalise the whole stack by modified
@@ -769,13 +777,18 @@ impl SparseEigen for LobpcgEigen {
                 Vec::new()
             };
 
+            // `new_x = S · C[:, 0..take]` is *already* M-orthonormal:
+            // `S` is M-orthonormal and the Ritz coefficients `C` are
+            // M-orthonormal in the `SᵀMS ≈ I` metric. Re-running
+            // Gram-Schmidt here would perturb `x` away from the Ritz
+            // solution and decouple it from `theta_k2`, capping the
+            // residual at a non-zero floor — so we do **not** re-
+            // orthonormalise `x`. `P` is only a search direction; it is
+            // M-orthonormalised together with `[X|W|P]` at the top of
+            // the next iteration, so it needs no separate step here.
             theta_k2 = ritz_vals[0..take].to_vec();
             x = new_x;
             p = new_p;
-            block_m_orthonormalize(&mut x, m)?;
-            if !p.is_empty() {
-                block_m_orthonormalize(&mut p, m)?;
-            }
         }
 
         if !converged {
@@ -831,6 +844,33 @@ impl SparseEigen for LobpcgEigen {
 // Block helpers — peers of the single-vector helpers above, reusing
 // `csr_matvec` / `dot` / `seed_vector` (no duplication).
 // ---------------------------------------------------------------------
+
+/// Deterministic seed vector for block column `col` of the LOBPCG
+/// initial block `X₀`. Unlike the single-vector [`seed_vector`] (whose
+/// columns differ mostly by amplitude and collapse under M-Gram-
+/// Schmidt), `block_seed` gives each column a **distinct dominant
+/// spatial frequency** plus a unit spike, so a `b`-column block spans a
+/// genuinely `b`-dimensional subspace even for small `n`. No RNG — the
+/// generator is a fixed function of `(n, col)`, so the eigensolve is
+/// bit-reproducible across runs (spec §3.2 determinism guard). For
+/// `col == 0` it reduces to a near-constant mode, the natural seed for
+/// the lowest eigenvector.
+fn block_seed(n: usize, col: usize) -> Vec<f64> {
+    let mut x = vec![0.0f64; n];
+    // Frequency grows with the column index so columns are linearly
+    // independent; the +1 offset keeps col 0 a smooth low mode.
+    let freq = (col as f64 + 1.0) * std::f64::consts::PI;
+    let phase = 0.37 * col as f64;
+    for (i, xi) in x.iter_mut().enumerate() {
+        let t = (i as f64 + 0.5) / (n as f64);
+        *xi = (freq * t + phase).cos() + 0.25 * (2.0 * freq * t).sin();
+    }
+    // A deterministic unit spike on a column-dependent coordinate breaks
+    // residual symmetry that pure smooth modes can share, hardening the
+    // block against rank deficiency on highly-structured pencils.
+    x[col % n] += 1.0;
+    x
+}
 
 /// In-place block M-orthonormalisation by **modified Gram-Schmidt** in
 /// the `M`-inner product: each column is M-orthogonalised against the
@@ -929,14 +969,24 @@ fn dense_gen_sym_eigen(
         )
     })?;
     let l = chol.l();
-    let l_inv = l.clone().try_inverse().ok_or_else(|| {
+    // Standard symmetric problem matrix Ã = L⁻¹ A L⁻ᵀ, formed via
+    // triangular *solves* rather than an explicit L⁻¹ (better
+    // conditioned, lower residual floor than `try_inverse`):
+    //   Y  = L⁻¹ A             ← solve  L Y  = A    (lower-triangular)
+    //   Ã  = Y L⁻ᵀ = (L⁻¹ Yᵀ)ᵀ ← solve  L Z  = Yᵀ, then Ã = Zᵀ.
+    let y = l.solve_lower_triangular(a).ok_or_else(|| {
         yee_core::Error::Numerical(
-            "LobpcgEigen: Rayleigh-Ritz triangular inverse of L failed".to_string(),
+            "LobpcgEigen: Rayleigh-Ritz lower-triangular solve L⁻¹A failed".to_string(),
         )
     })?;
-    // Standard symmetric problem matrix Ã = L⁻¹ A L⁻ᵀ. Symmetrise to
-    // remove rounding asymmetry before the symmetric eigensolve.
-    let mut a_tilde = &l_inv * a * l_inv.transpose();
+    let z = l.solve_lower_triangular(&y.transpose()).ok_or_else(|| {
+        yee_core::Error::Numerical(
+            "LobpcgEigen: Rayleigh-Ritz lower-triangular solve L⁻¹Yᵀ failed".to_string(),
+        )
+    })?;
+    let mut a_tilde = z.transpose();
+    // Symmetrise to remove rounding asymmetry before the symmetric
+    // eigensolve.
     let a_sym = (&a_tilde + a_tilde.transpose()) * 0.5;
     a_tilde = a_sym;
     let eig = a_tilde.symmetric_eigen();
@@ -945,12 +995,19 @@ fn dense_gen_sym_eigen(
     let mut idx: Vec<usize> = (0..bb).collect();
     idx.sort_by(|&i, &j| eig.eigenvalues[i].total_cmp(&eig.eigenvalues[j]));
     let vals: Vec<f64> = idx.iter().map(|&i| eig.eigenvalues[i]).collect();
-    // Back-transform generalized eigenvectors c = L⁻ᵀ y, then permute.
-    let l_inv_t = l_inv.transpose();
+    // Back-transform generalized eigenvectors c = L⁻ᵀ y by an
+    // upper-triangular solve Lᵀ c = y, then permute into ascending
+    // order.
+    let lt = l.transpose();
     let mut c = DMatrix::<f64>::zeros(bb, bb);
     for (new_col, &old_col) in idx.iter().enumerate() {
-        let y = eig.eigenvectors.column(old_col);
-        let cy = &l_inv_t * y;
+        let yvec = eig.eigenvectors.column(old_col).into_owned();
+        let cy = lt.solve_upper_triangular(&yvec).ok_or_else(|| {
+            yee_core::Error::Numerical(
+                "LobpcgEigen: Rayleigh-Ritz upper-triangular back-transform Lᵀc=y failed"
+                    .to_string(),
+            )
+        })?;
         for row in 0..bb {
             c[(row, new_col)] = cy[row];
         }
@@ -1601,5 +1658,212 @@ mod tests {
             "smallest 3-D Laplacian eigenvalue: expected {expected}, got {}",
             pairs.k[0]
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 1.3.1.1 step 4 — LobpcgEigen tests (DoD-V2 + DoD-V5)
+    // -----------------------------------------------------------------
+
+    /// DoD-V2 mirror of test 1 for `LobpcgEigen`: known 4×4 pencil with
+    /// eigenvalues {0.5, 1.2, 3.4, 7.8} recovered to `1e-8`.
+    #[test]
+    fn lobpcg_recovers_smallest_eigenvalue_on_known_dense_pencil() {
+        let lambdas = [0.5, 1.2, 3.4, 7.8];
+        let k = diag_csr(&lambdas);
+        let m = diag_csr(&[1.0; 4]);
+
+        let solver = LobpcgEigen::new(1000, 1e-10, 2);
+        let pairs = solver.solve(&k, &m, 3, 0.1).expect("solve");
+
+        assert_eq!(pairs.k.len(), 3);
+        assert!(
+            (pairs.k[0] - 0.5).abs() < 1e-8,
+            "expected 0.5, got {}",
+            pairs.k[0]
+        );
+        assert!(
+            (pairs.k[1] - 1.2).abs() < 1e-8,
+            "expected 1.2, got {}",
+            pairs.k[1]
+        );
+        assert!(
+            (pairs.k[2] - 3.4).abs() < 1e-8,
+            "expected 3.4, got {}",
+            pairs.k[2]
+        );
+        for w in pairs.k.windows(2) {
+            assert!(w[0] <= w[1]);
+        }
+    }
+
+    /// DoD-V2 mirror of test 2 for `LobpcgEigen`: scaled-identity pencil
+    /// `K = αI`, `M = βI` → every eigenvalue is `α/β`.
+    #[test]
+    fn lobpcg_scaled_identity_pencil() {
+        let alpha = 3.7;
+        let beta = 1.5;
+        let k = diag_csr(&[alpha; 5]);
+        let m = diag_csr(&[beta; 5]);
+
+        let solver = LobpcgEigen::new(200, 1e-10, 2);
+        let pairs = solver.solve(&k, &m, 3, 0.5).expect("solve");
+
+        let expected = alpha / beta;
+        for &k_sq in &pairs.k {
+            assert!(
+                (k_sq - expected).abs() < 1e-8,
+                "expected {expected}, got {k_sq}"
+            );
+        }
+    }
+
+    /// DoD-V2 mirror of test 3 for `LobpcgEigen`: block M-orthogonality
+    /// `eᵀ M e ≈ I` on the returned eigenvector basis.
+    #[test]
+    fn lobpcg_eigenvectors_m_orthogonal() {
+        let lambdas = [0.5, 1.2, 3.4, 7.8];
+        let k = diag_csr(&lambdas);
+        let m = diag_csr(&[1.0; 4]);
+
+        let solver = LobpcgEigen::new(1000, 1e-10, 2);
+        let pairs = solver.solve(&k, &m, 3, 0.1).expect("solve");
+
+        let n = pairs.e.nrows();
+        let ncols = pairs.e.ncols();
+        for i in 0..ncols {
+            for j in 0..ncols {
+                let col_j: Vec<f64> = (0..n).map(|r| pairs.e[(r, j)]).collect();
+                let mxj = csr_matvec(&m, &col_j);
+                let acc: f64 = (0..n).map(|r| pairs.e[(r, i)] * mxj[r]).sum();
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!(
+                    (acc - expected).abs() < 1e-8,
+                    "M-orthogonality failed at ({i},{j}): got {acc}, expected {expected}"
+                );
+            }
+        }
+    }
+
+    /// Apply a Householder reflector `H = I − 2 v vᵀ / (vᵀv)` to the
+    /// rows and columns of `diag(λ)` to build a **dense, non-diagonal**
+    /// SPD-pencil `K = H diag(λ) H` with the prescribed spectrum and an
+    /// orthonormal eigenbasis (the columns of `H`). Used by the
+    /// degenerate-cluster test so the cluster is genuinely coupled, not
+    /// trivially diagonal.
+    fn householder_pencil(lambdas: &[f64]) -> CsrMatrix<f64> {
+        let n = lambdas.len();
+        // A fixed deterministic reflector direction (no RNG).
+        let v: Vec<f64> = (0..n).map(|i| 1.0 + (i as f64) * 0.7).collect();
+        let vtv: f64 = v.iter().map(|x| x * x).sum();
+        // H_{ab} = δ_{ab} − 2 v_a v_b / vᵀv.
+        let h = |a: usize, b: usize| -> f64 {
+            let kron = if a == b { 1.0 } else { 0.0 };
+            kron - 2.0 * v[a] * v[b] / vtv
+        };
+        // K = H diag(λ) H  ⇒  K_{ij} = Σ_p H_{ip} λ_p H_{pj}.
+        let mut dense = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let mut s = 0.0;
+                for (p, &lp) in lambdas.iter().enumerate() {
+                    s += h(i, p) * lp * h(p, j);
+                }
+                dense[i * n + j] = s;
+            }
+        }
+        csr_from_dense(n, n, &dense)
+    }
+
+    /// DoD-V5 — **degenerate-cluster** test. A 6×6 pencil with a known
+    /// *double* eigenvalue at 3.4 (spectrum {0.5, 1.2, 3.4, 3.4, 5.0,
+    /// 7.8}), built dense via a Householder reflector so the degenerate
+    /// pair is genuinely coupled. `LobpcgEigen` must return **both**
+    /// members of the cluster, each with per-mode residual below `tol`
+    /// and the returned basis mutually M-orthonormal to `1e-6`. This is
+    /// the capability `InverseIterEigen` is weak at and the reason
+    /// step 4 exists.
+    #[test]
+    fn lobpcg_resolves_degenerate_cluster() {
+        let lambdas = [0.5, 1.2, 3.4, 3.4, 5.0, 7.8];
+        let k = householder_pencil(&lambdas);
+        let m = diag_csr(&[1.0; 6]);
+
+        // Request the four smallest, which spans the double root, with a
+        // guard for cluster room. Shift below the spectrum.
+        let solver = LobpcgEigen::new(2000, 1e-10, 3);
+        let pairs = solver.solve(&k, &m, 4, 0.1).expect("solve");
+
+        assert_eq!(pairs.k.len(), 4);
+        // Spectrum recovered: {0.5, 1.2, 3.4, 3.4}.
+        let expected = [0.5, 1.2, 3.4, 3.4];
+        for (got, exp) in pairs.k.iter().zip(expected.iter()) {
+            assert!(
+                (got - exp).abs() < 1e-6,
+                "cluster eigenvalue mismatch: expected {exp}, got {got}"
+            );
+        }
+        // Both members of the double root present (indices 2 and 3 both
+        // ≈ 3.4 — i.e. the cluster was resolved, not collapsed to one).
+        assert!(
+            (pairs.k[2] - 3.4).abs() < 1e-6 && (pairs.k[3] - 3.4).abs() < 1e-6,
+            "double eigenvalue 3.4 not resolved as a pair: {:?}",
+            pairs.k
+        );
+
+        // Per-mode residual ‖K eᵢ − k²ᵢ M eᵢ‖₂ / (k²ᵢ ‖M eᵢ‖₂) < tol.
+        let n = pairs.e.nrows();
+        for col in 0..pairs.k.len() {
+            let ei: Vec<f64> = (0..n).map(|r| pairs.e[(r, col)]).collect();
+            let kei = csr_matvec(&k, &ei);
+            let mei = csr_matvec(&m, &ei);
+            let lam = pairs.k[col];
+            let resid: Vec<f64> = kei
+                .iter()
+                .zip(mei.iter())
+                .map(|(&a, &b)| a - lam * b)
+                .collect();
+            let rnorm = dot(&resid, &resid).sqrt();
+            let mnorm = dot(&mei, &mei).sqrt();
+            let rel = rnorm / (lam.abs() * mnorm);
+            assert!(
+                rel < 1e-6,
+                "mode {col} (k²={lam}) residual {rel:e} not below tol"
+            );
+        }
+
+        // Mutual M-orthonormality to 1e-6, including the degenerate pair.
+        let ncols = pairs.e.ncols();
+        for i in 0..ncols {
+            for j in 0..ncols {
+                let col_j: Vec<f64> = (0..n).map(|r| pairs.e[(r, j)]).collect();
+                let mxj = csr_matvec(&m, &col_j);
+                let acc: f64 = (0..n).map(|r| pairs.e[(r, i)] * mxj[r]).sum();
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!(
+                    (acc - expected).abs() < 1e-6,
+                    "cluster M-orthonormality failed at ({i},{j}): got {acc}"
+                );
+            }
+        }
+    }
+
+    /// DoD-V5 contrast: the same degenerate cluster solved twice gives
+    /// bit-reproducible eigenvalues (determinism guard, spec §3.2).
+    #[test]
+    fn lobpcg_degenerate_cluster_is_deterministic() {
+        let lambdas = [0.5, 1.2, 3.4, 3.4, 5.0, 7.8];
+        let k = householder_pencil(&lambdas);
+        let m = diag_csr(&[1.0; 6]);
+
+        let solver = LobpcgEigen::new(2000, 1e-10, 3);
+        let a = solver.solve(&k, &m, 4, 0.1).expect("solve a");
+        let b = solver.solve(&k, &m, 4, 0.1).expect("solve b");
+        for (ka, kb) in a.k.iter().zip(b.k.iter()) {
+            assert_eq!(
+                ka.to_bits(),
+                kb.to_bits(),
+                "non-deterministic: {ka} vs {kb}"
+            );
+        }
     }
 }
