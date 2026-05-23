@@ -293,17 +293,27 @@ fn local_b_ze(geom: &TriGeom, mu_r: Complex64, signs: [f64; 3]) -> [[Complex64; 
 pub(crate) struct AssembledTransverse {
     /// Curl-curl stiffness matrix `S[i,j] = ∫ (1/μ_r) (∇×N_i)(∇×N_j) dA`.
     pub s: DMatrix<Complex64>,
-    /// ε_r-weighted Nedelec mass matrix `T[i,j] = ∫ ε_r N_i · N_j dA`.
+    /// ε_r-weighted Nedelec mass matrix `T_ε[i,j] = ∫ ε_r N_i · N_j dA`.
     pub t: DMatrix<Complex64>,
+    /// **Unweighted** Nedelec mass matrix `T_1[i,j] = ∫ N_i · N_j dA`
+    /// (ε_r ≡ 1). This is the RHS metric of the β-direct generalized
+    /// eigenproblem `(k_0² T_ε − S) x = β² T_1 x` (Phase 1.3.1.1 step 5.2):
+    /// the physical transverse Helmholtz equation
+    /// `∇×(1/μ_r ∇×E_t) = (k_0² ε_r − β²) E_t` puts ε_r only on the
+    /// `k_0²` side, so the `−β² E_t` term carries the **unweighted** mass.
+    /// The earlier `S x = k_c² T_ε x` / `β² = k_0² − k_c²` extraction was
+    /// algebraically correct only for `ε_r ≡ 1` (then `T_1 = T_ε`); for any
+    /// `ε_r ≠ 1` it under-counted the dielectric.
+    pub t1: DMatrix<Complex64>,
     /// Map from interior-edge DoF index to the global edge index, so
     /// post-solve eigenvector components can be located back on the mesh.
     #[allow(dead_code)] // consumed by the Phase 1.3.1.1 step 5 eigenvector recovery
     pub interior_to_global: Vec<usize>,
-    /// Largest ε_r magnitude seen during assembly. Recorded for the
-    /// caller-side `β² = k_0² − k_c²` translation (the ε_r weighting in
-    /// `T` is folded into `k_c²` since `T` is ε_r-weighted, so the
-    /// relation is exactly `β² = k_0² − k_c²` when ε_r is real and
-    /// uniform; lossy / heterogeneous ε_r is Phase 1.3.1.2).
+    /// Largest ε_r magnitude seen during assembly. Retained as a diagnostic
+    /// of the fill contrast; the β-extraction itself no longer needs it
+    /// (the β-direct form `(k_0² T_ε − S) x = β² T_1 x` carries ε_r through
+    /// the `T_ε` operator, not a scalar correction). Lossy / heterogeneous
+    /// complex ε_r is Phase 1.3.1.2.
     #[allow(dead_code)]
     pub eps_r_max_re: f64,
 }
@@ -347,6 +357,7 @@ pub(crate) fn assemble_transverse(
     let zero = Complex64::new(0.0, 0.0);
     let mut s = DMatrix::from_element(n, n, zero);
     let mut t = DMatrix::from_element(n, n, zero);
+    let mut t1 = DMatrix::from_element(n, n, zero);
     let mut eps_r_max_re: f64 = 1.0;
 
     let default_one = Complex64::new(1.0, 0.0);
@@ -362,6 +373,8 @@ pub(crate) fn assemble_transverse(
 
         let s_local = local_a_ee_curl(&geom, mu, conn.sign);
         let t_local = local_b_ee_mass(&geom, eps, conn.sign);
+        // Unweighted mass (ε_r ≡ 1) for the β-direct RHS metric T_1.
+        let t1_local = local_b_ee_mass(&geom, default_one, conn.sign);
 
         // Scatter into globals (Dirichlet-eliminated): skip rows/cols
         // whose global edge is on the PEC boundary.
@@ -377,6 +390,7 @@ pub(crate) fn assemble_transverse(
                 };
                 s[(ii, jj)] += s_local[li][lj];
                 t[(ii, jj)] += t_local[li][lj];
+                t1[(ii, jj)] += t1_local[li][lj];
             }
         }
     }
@@ -384,24 +398,35 @@ pub(crate) fn assemble_transverse(
     AssembledTransverse {
         s,
         t,
+        t1,
         interior_to_global,
         eps_r_max_re,
     }
 }
 
 /// Result of [`assemble_mixed`]: the **mixed `(E_t, E_z)`**
-/// Lee-Sun-Cendes (1991) block generalized eigenproblem
-/// `A x = k_c² B x` with `x = [E_t; E_z]`.
+/// Lee-Sun-Cendes (1991) block generalized eigenproblem with
+/// `x = [E_t; E_z]`. The staged blocks are a **stiffness** `A` and **two**
+/// mass matrices — the ε_r-weighted [`Self::b`] and the unweighted
+/// [`Self::b1`] — which [`super::solve_dense_mixed`] combines into the
+/// β-direct pencil `(k_0² B − A) x = β² B_1 x`.
 ///
-/// **Eigenvalue convention.** This pencil is assembled in the
-/// **cutoff-wavenumber** parameterization `k_c² = k_0² − β²`, identical
-/// to [`AssembledTransverse`] / [`super::solve_dense`]. The propagation
-/// constant follows from `β² = k_0² − k_c²` at the post-solve mapping;
-/// the pencil itself is **frequency-independent** (the staged
-/// longitudinal element matrices carry no `k_0²` term — see
-/// [`local_a_zz`] / [`local_b_zz`] — which is the decisive evidence that
-/// the `k_c²` parameterization is the one they were built for, not the
-/// `β²` parameterization quoted in the design-spec §3 prose).
+/// **Eigenvalue convention (Phase 1.3.1.1 step 5.2 — β-direct).** The
+/// solver now extracts `β²` as the **direct eigenvalue** of
+/// `(k_0² B − A) x = β² B_1 x`, where `A = diag(A_tt, A_zz)` is the pure
+/// curl/gradient stiffness (no `k_0²` term — see [`local_a_zz`] /
+/// [`local_b_zz`]), `B` is the ε_r-weighted block-mass + coupling, and
+/// `B_1` is the **unweighted** block-mass + coupling. This replaces the
+/// step-5 cutoff parameterization `A x = k_c² B x` followed by
+/// `β² = k_0² − k_c²` (vacuum `k_0`), which was algebraically correct only
+/// for `ε_r ≡ 1` (where `B_1 ≡ B`, so the two pencils coincide and the
+/// dominant-mode β is unchanged — the DoD-V1 canary). For `ε_r ≠ 1` the
+/// old extraction under-counted the dielectric; the β-direct form puts ε_r
+/// on the `k_0² B` side and the `−β²` (unweighted-mass) term on the RHS,
+/// matching the transverse Helmholtz equation
+/// `∇×(1/μ_r ∇×E_t) = (k_0² ε_r − β²) E_t`. The pencil remains
+/// **frequency-independent** in `A`, `B`, `B_1`; `k_0²` enters only at the
+/// solve.
 ///
 /// **Block layout** (edge DoFs stacked above vertex DoFs):
 ///
@@ -445,8 +470,22 @@ pub(crate) struct AssembledMixed {
     /// Block-stiffness matrix `A = diag(A_tt, A_zz)`, size `n × n` with
     /// `n = n_t + n_z`. Edge DoFs occupy `0..n_t`, vertex DoFs `n_t..n`.
     pub a: DMatrix<Complex64>,
-    /// Block-mass matrix `B = [[B_tt, B_tz], [B_zt, B_zz]]`, size `n × n`.
+    /// ε_r-weighted block-mass matrix `B = [[B_tt, B_tz], [B_zt, B_zz]]`,
+    /// size `n × n`. `B_tt = ∫ε_r N·N`, `B_zz = ∫ε_r L·L`; the off-diagonal
+    /// coupling `B_tz = B_ztᵀ = ∫(1/μ_r)∇L·N` is ε-independent.
     pub b: DMatrix<Complex64>,
+    /// **Unweighted** block-mass matrix `B_1`, identical to [`Self::b`]
+    /// except the diagonal mass blocks use `ε_r ≡ 1`
+    /// (`B_tt → ∫N·N`, `B_zz → ∫L·L`); the `1/μ_r`-weighted coupling block
+    /// is ε-independent and therefore unchanged. This is the RHS metric of
+    /// the β-direct mixed pencil `(k_0² B − A) x = β² B_1 x` (Phase 1.3.1.1
+    /// step 5.2): the `−β²` term of the transverse vector-Helmholtz system
+    /// carries no ε_r, so its mass is unweighted. On a homogeneous guide
+    /// (`ε_r ≡ 1`) `B_1 ≡ B` and the pencil reduces to the step-5 form
+    /// (`β² = k_0² − k_c²`), preserving the DoD-V1 canary; for `ε_r ≠ 1`
+    /// the two differ and the β-direct form removes the ε_r=1-only bias of
+    /// the old `β² = k_0² − k_c²` extraction.
+    pub b1: DMatrix<Complex64>,
     /// Map from interior-edge DoF index (`0..n_t`) to the global edge
     /// index, for scattering the `E_t` eigenvector components back onto
     /// the mesh. Identical in meaning to
@@ -514,6 +553,9 @@ pub(crate) fn assemble_mixed(
     let zero = Complex64::new(0.0, 0.0);
     let mut a = DMatrix::from_element(n, n, zero);
     let mut b = DMatrix::from_element(n, n, zero);
+    // Unweighted block-mass B_1: same structure as B but the diagonal mass
+    // blocks use ε_r ≡ 1. The β-direct RHS metric (Phase 1.3.1.1 step 5.2).
+    let mut b1 = DMatrix::from_element(n, n, zero);
 
     let default_one = Complex64::new(1.0, 0.0);
 
@@ -527,10 +569,14 @@ pub(crate) fn assemble_mixed(
         let b_tt = local_b_ee_mass(&geom, eps, conn.sign);
         let a_zz = local_a_zz(&geom, mu);
         let b_zz = local_b_zz(&geom, eps);
+        // Unweighted (ε_r ≡ 1) mass blocks for B_1.
+        let b_tt1 = local_b_ee_mass(&geom, default_one, conn.sign);
+        let b_zz1 = local_b_zz(&geom, default_one);
         // B_ze[i_vert][j_edge] = ∫ (1/μ_r) ∇L_i · N_j (vertex-row /
         // edge-col). The 1/μ_r weight (matching A_zz) is the load-bearing
         // curl-curl coupling; see `local_b_ze`'s docstring for why the
-        // ε_r weight was inert.
+        // ε_r weight was inert. The coupling is ε-independent, so it is the
+        // SAME in B and B_1.
         let b_ze = local_b_ze(&geom, mu, conn.sign);
 
         let tri = mesh.triangles[tri_idx];
@@ -546,6 +592,7 @@ pub(crate) fn assemble_mixed(
                 };
                 a[(ii, jj)] += a_tt[li][lj];
                 b[(ii, jj)] += b_tt[li][lj];
+                b1[(ii, jj)] += b_tt1[li][lj];
             }
         }
 
@@ -562,6 +609,7 @@ pub(crate) fn assemble_mixed(
                 let gj = n_t + jj;
                 a[(gi, gj)] += a_zz[li][lj];
                 b[(gi, gj)] += b_zz[li][lj];
+                b1[(gi, gj)] += b_zz1[li][lj];
             }
         }
 
@@ -569,8 +617,11 @@ pub(crate) fn assemble_mixed(
         // B_ze[lv][le] sits at global (vertex-row n_t+iv, edge-col ie):
         // that is the B_zt block. Its transpose populates B_tz at
         // (edge-row ie, vertex-col n_t+iv). Assembling both halves keeps
-        // B symmetric (B_tz = B_ztᵀ), which the Cholesky-symmetrised
-        // solve requires.
+        // B symmetric (B_tz = B_ztᵀ), which the solve requires. The
+        // coupling is ε-independent, so it populates BOTH B and B_1
+        // identically (on a homogeneous guide B_1 ≡ B, preserving the
+        // canary; the coupling is the curl-curl cross term, present on the
+        // β-direct RHS through B_1's coupling sub-block).
         for lv in 0..3 {
             let Some(iv) = interior_dof_of_vert[tri[lv]] else {
                 continue;
@@ -583,6 +634,8 @@ pub(crate) fn assemble_mixed(
                 let c = b_ze[lv][le];
                 b[(row_v, ie)] += c; // B_zt
                 b[(ie, row_v)] += c; // B_tz = B_ztᵀ
+                b1[(row_v, ie)] += c;
+                b1[(ie, row_v)] += c;
             }
         }
     }
@@ -590,6 +643,7 @@ pub(crate) fn assemble_mixed(
     AssembledMixed {
         a,
         b,
+        b1,
         interior_to_global_edges,
         interior_to_global_verts,
         n_t,
@@ -755,7 +809,8 @@ mod tests {
         assert_eq!(asm.interior_to_global_verts.len(), asm.n_z);
 
         // Real-symmetric (Gram structure; the coupling is assembled as
-        // B_tz = B_ztᵀ explicitly).
+        // B_tz = B_ztᵀ explicitly). Both mass matrices B and the
+        // unweighted B_1 must be symmetric.
         for i in 0..n {
             for j in 0..n {
                 assert!(
@@ -766,8 +821,99 @@ mod tests {
                     (asm.b[(i, j)] - asm.b[(j, i)]).norm() < 1e-12,
                     "B not symmetric at ({i},{j})"
                 );
+                assert!(
+                    (asm.b1[(i, j)] - asm.b1[(j, i)]).norm() < 1e-12,
+                    "B_1 not symmetric at ({i},{j})"
+                );
             }
         }
+
+        // On this homogeneous (air, ε_r ≡ 1) mesh the unweighted B_1 must
+        // equal the ε_r-weighted B bit-for-bit — the structural guarantee
+        // that the β-direct pencil reduces to the step-5 form on a
+        // homogeneous guide (DoD-V1 canary at the matrix level).
+        for i in 0..n {
+            for j in 0..n {
+                assert!(
+                    (asm.b[(i, j)] - asm.b1[(i, j)]).norm() < 1e-12,
+                    "homogeneous B and B_1 must coincide at ({i},{j})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn b1_unweighted_differs_from_b_under_dielectric_loading() {
+        // The β-direct fix hinges on B_1 (unweighted mass) differing from B
+        // (ε_r-weighted) when ε_r ≠ 1. On a dielectric-loaded mesh the mass
+        // diagonal blocks must differ; the ε-independent coupling must not.
+        let a = 22.86e-3;
+        let b = 10.16e-3;
+        let mesh = horizontal_slab_mesh(a, b, 6, 6);
+        let mut eps = HashMap::new();
+        eps.insert(0u32, Complex64::new(1.0, 0.0));
+        eps.insert(1u32, Complex64::new(10.2, 0.0));
+        let mut mu = HashMap::new();
+        mu.insert(0u32, Complex64::new(1.0, 0.0));
+        mu.insert(1u32, Complex64::new(1.0, 0.0));
+        let table = EdgeTable::build(&mesh);
+        let asm = assemble_mixed(&mesh, &eps, &mu, &table);
+        let n_t = asm.n_t;
+        let n = n_t + asm.n_z;
+
+        // Some diagonal mass entry in the dielectric region must differ
+        // (B carries ε_r = 10.2, B_1 carries 1).
+        let mut any_mass_diff = false;
+        for i in 0..n {
+            if (asm.b[(i, i)] - asm.b1[(i, i)]).norm() > 1e-9 {
+                any_mass_diff = true;
+                break;
+            }
+        }
+        assert!(
+            any_mass_diff,
+            "B_1 must differ from B on the diagonal under dielectric loading"
+        );
+
+        // The off-diagonal edge↔vertex coupling block is ε-independent, so
+        // B and B_1 must agree there exactly.
+        for i in 0..n_t {
+            for j in n_t..n {
+                assert!(
+                    (asm.b[(i, j)] - asm.b1[(i, j)]).norm() < 1e-12,
+                    "coupling block must be identical in B and B_1 at ({i},{j})"
+                );
+            }
+        }
+    }
+
+    /// Horizontal-slab WR-90 mesh: lower-y half tagged 1, rest tagged 0.
+    /// Mirrors the integration-test fixture; used by the B_1 contrast test.
+    fn horizontal_slab_mesh(a: f64, b: f64, nx: usize, ny: usize) -> TriMesh2D {
+        let mut vertices = Vec::with_capacity((nx + 1) * (ny + 1));
+        for j in 0..=ny {
+            for i in 0..=nx {
+                vertices.push([a * (i as f64) / (nx as f64), b * (j as f64) / (ny as f64)]);
+            }
+        }
+        let idx = |i: usize, j: usize| j * (nx + 1) + i;
+        let mut triangles = Vec::with_capacity(2 * nx * ny);
+        let mut tags = Vec::with_capacity(2 * nx * ny);
+        for j in 0..ny {
+            for i in 0..nx {
+                let v00 = idx(i, j);
+                let v10 = idx(i + 1, j);
+                let v11 = idx(i + 1, j + 1);
+                let v01 = idx(i, j + 1);
+                let yc = b * ((j as f64) + 0.5) / (ny as f64);
+                let tag = if yc < b / 2.0 { 1u32 } else { 0u32 };
+                triangles.push([v00, v10, v11]);
+                tags.push(tag);
+                triangles.push([v00, v11, v01]);
+                tags.push(tag);
+            }
+        }
+        TriMesh2D::new(vertices, triangles, None, Some(tags)).unwrap()
     }
 
     #[test]
