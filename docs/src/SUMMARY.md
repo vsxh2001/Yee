@@ -89,3 +89,4 @@
 - [ADR-0053: Phase 1.3.1.1 step 5.2 dielectric β-extraction fix](decisions/0053-phase-1-3-1-1-step-5-2-dielectric-beta-fix.md)
 - [ADR-0054: Phase 1.3.1.1 step 5.3 direct β-direct sparse shift-invert](decisions/0054-phase-1-3-1-1-step-5-3-direct-sparse-beta.md)
 - [ADR-0055: Phase 1.3.1.1 step 5.4 interface-graded mesh](decisions/0055-phase-1-3-1-1-step-5-4-interface-graded-mesh.md)
+- [ADR-0056: Phase 1.3.1.1 step 5.5 second-order Nedelec elements](decisions/0056-phase-1-3-1-1-step-5-5-second-order-nedelec.md)
