@@ -11,6 +11,7 @@
 - [FDTD: CPML, NTFF, TF/SF, lumped, dispersive](theory/fdtd-details.md)
 - [FDTD Subgridding](theory/fdtd-subgridding.md)
 - [Waveguide Cross-Section Eigenmode Solver](theory/waveguide-eigenmode.md)
+- [Cross-Section (Waveguide-Port) Eigensolver](theory/cross-section-eigensolver.md)
 - [FEM Eigenmode Solver (3-D Nedelec)](theory/fem-eigenmode.md)
 - [CUDA backend](theory/cuda-backend.md)
 - [Touchstone v1.1 File Format](theory/touchstone-format.md)
@@ -29,6 +30,7 @@
 - [Dispersive FEM cavity eigenmode from Python](tutorials/06-fem-cavity-dispersive.md)
 - [Open-boundary FEM driven sweep from Python](tutorials/07-fem-open-cavity.md)
 - [Multi-port FEM S-matrix from Python](tutorials/08-fem-multi-port.md)
+- [Cross-section wave-port eigensolve (Rust)](tutorials/09-cross-section-waveport.md)
 
 # Decisions
 
