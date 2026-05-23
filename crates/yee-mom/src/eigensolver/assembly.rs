@@ -223,29 +223,47 @@ fn local_b_zz(geom: &TriGeom, eps_r: Complex64) -> [[Complex64; 3]; 3] {
 /// Local edge-node coupling on a single triangle:
 ///
 /// ```text
-///   B_ze^e[i,j] = ∫_T ε_r ∇L_i · N_j dA
+///   B_ze^e[i,j] = ∫_T (1/μ_r) ∇L_i · N_j dA
 /// ```
 ///
-/// Linear in `λ` and constant in `∇λ`, so the integral reduces to
-/// `(A/3) ε_r ℓ_j σ_j (∇λ_i · ∇λ_{b_j} − ∇λ_i · ∇λ_{a_j})` — wait, more
-/// carefully: `N_j = ℓ_j σ_j (λ_{a_j} ∇λ_{b_j} − λ_{b_j} ∇λ_{a_j})` and
+/// `N_j = ℓ_j σ_j (λ_{a_j} ∇λ_{b_j} − λ_{b_j} ∇λ_{a_j})` and
 /// `∇L_i = ∇λ_i` is constant, so
 /// `∫ ∇λ_i · N_j dA = ℓ_j σ_j [(∫ λ_{a_j} dA) (∇λ_i · ∇λ_{b_j})
 ///                              − (∫ λ_{b_j} dA) (∇λ_i · ∇λ_{a_j})]`
-/// and `∫ λ_p dA = A/3`.
+/// with `∫ λ_p dA = A/3`.
 ///
-/// Used by the mixed Lee-Sun-Cendes formulation
-/// ([`assemble_mixed`]) as the edge-node coupling block. Unused by the
-/// transverse-only WR-90 validation path.
+/// **Weight convention (Phase 1.3.1.1 step-5 review fix — `1/μ_r`, not
+/// `ε_r`).** The Lee-Sun-Cendes inter-block coupling arises from the
+/// **curl-curl** term of the transverse vector Helmholtz functional
+/// (`∫(1/μ_r)(∇_t E_z + jβ E_t)·(…)` — the `jβ ∇_t E_z · N` cross term),
+/// so it carries the `1/μ_r` weight, matching [`local_a_zz`]. The
+/// originally-staged `ε_r` weight made the coupling a *divergence-penalty*
+/// term (`∫ε_r ∇L·E_t`), which the curl-curl eigenvector is **exactly
+/// orthogonal** to in the ε_r-mass inner product (Boffi-Brezzi-Demkowicz:
+/// the Whitney-1 curl kernel is the Whitney-0 gradient space, and the
+/// eigenvector is `T = ∫ε_r N·N`-orthogonal to gradients). With the `ε_r`
+/// weight the coupling was therefore **structurally inert** for the
+/// dominant mode (`B_zt e_t = 0` to machine precision, `E_z ≡ 0` for any
+/// piecewise-constant fill) — so it never participated and could not be
+/// validated, which is exactly the step-5-review coverage gap. The
+/// `1/μ_r` weight is *not* annihilated (`∫(1/μ_r)∇L·E_t ≠ 0` when ε_r
+/// varies, since `E_t` is ε_r-orthogonal, not `1/μ_r`-orthogonal, to
+/// gradients), so the dominant mode of an inhomogeneous guide genuinely
+/// develops `E_z ≠ 0`. On a homogeneous guide with `μ_r = ε_r = 1` both
+/// weights coincide and give `E_z ≡ 0`, preserving the WR-90 canary.
+///
+/// Used by the mixed Lee-Sun-Cendes formulation ([`assemble_mixed`]).
+/// Unused by the transverse-only WR-90 validation path.
 #[allow(clippy::needless_range_loop)]
-fn local_b_ze(geom: &TriGeom, eps_r: Complex64, signs: [f64; 3]) -> [[Complex64; 3]; 3] {
+fn local_b_ze(geom: &TriGeom, mu_r: Complex64, signs: [f64; 3]) -> [[Complex64; 3]; 3] {
     let mut out = [[Complex64::new(0.0, 0.0); 3]; 3];
+    let inv_mu = Complex::new(1.0, 0.0) / mu_r;
     let third_area = geom.area / 3.0;
     for i in 0..3 {
         for j in 0..3 {
             let [aj, bj] = LOCAL_EDGES[j];
             let s = third_area * (geom.grad_dot(i, bj) - geom.grad_dot(i, aj));
-            out[i][j] = eps_r * Complex::new(geom.edge_len[j] * signs[j] * s, 0.0);
+            out[i][j] = inv_mu * Complex::new(geom.edge_len[j] * signs[j] * s, 0.0);
         }
     }
     out
@@ -390,26 +408,36 @@ pub(crate) fn assemble_transverse(
 ///     └  0   A_zz ┘ └E_z┘         └ B_zt   B_zz ┘ └E_z┘
 /// ```
 ///
-/// with the blocks taken **verbatim** from the staged element matrices:
+/// with the blocks from the staged element matrices:
 /// * `A_tt` = curl-curl stiffness ([`local_a_ee_curl`], `∫(1/μ_r)(∇×N)(∇×N)`);
 /// * `A_zz` = nodal gradient stiffness ([`local_a_zz`], `∫(1/μ_r)∇L·∇L`);
 /// * `B_tt` = Nedelec mass ([`local_b_ee_mass`], `∫ε_r N·N`);
 /// * `B_zz` = nodal mass ([`local_b_zz`], `∫ε_r L·L`);
 /// * `B_tz = B_ztᵀ` = edge-node coupling from [`local_b_ze`]
-///   (`B_ze[i_vert][j_edge] = ∫ε_r ∇L_i·N_j`, so the **edge-row /
+///   (`B_ze[i_vert][j_edge] = ∫(1/μ_r) ∇L_i·N_j`, so the **edge-row /
 ///   vertex-col** block `B_tz` is the transpose of the assembled
-///   `B_ze`, and `B_zt` is `B_ze` itself).
+///   `B_ze`, and `B_zt` is `B_ze` itself). The coupling carries the
+///   `1/μ_r` weight (the curl-curl cross term), **not** the `ε_r` weight
+///   of the originally-staged matrix — see [`local_b_ze`] for the
+///   step-5-review correction and why the `ε_r` weight was inert.
 ///
-/// **Homogeneous decoupling.** Per-element `B_ze` does *not* vanish for
-/// uniform ε_r (its column sums vanish because `Σ_i ∇L_i = ∇(1) = 0`,
-/// but individual entries do not). Decoupling is a **global**, not
-/// element-local, property: for the discrete divergence-free Nedelec
-/// transverse eigenvector `e_t`, `B_zt e_t = ε_r ∫∇L_j·E_t dA =
-/// −ε_r ∫L_j ∇·E_t dA = 0` (integration by parts; `L_j = 0` on the PEC
-/// boundary for interior vertices, `∇·E_t = 0` for the discretely
-/// divergence-free mode). Hence `[e_t; 0]` solves the mixed pencil with
-/// the *same* `k_c²` as the transverse pencil — the DoD-V1 regression
-/// canary that guards the block sign/placement.
+/// **Homogeneous decoupling.** On a homogeneous guide with
+/// `μ_r = ε_r = 1` the coupling acting on the transverse eigenvector
+/// vanishes: `B_zt e_t = ∫(1/μ_r)∇L_j·E_t dA = ∫∇L_j·E_t dA`, and the
+/// Nedelec curl-curl eigenvector is exactly orthogonal to nodal
+/// gradients in the `T = ∫ε_r N·N` inner product
+/// (Boffi-Brezzi-Demkowicz), which for `ε_r = 1` is the same integral.
+/// So `B_zt e_t = 0` and `[e_t; 0]` solves the mixed pencil with the
+/// *same* `k_c²` as the transverse pencil (the DoD-V1 regression canary).
+/// On an **inhomogeneous** guide (`ε_r` varying, `μ_r = 1`) the `1/μ_r`
+/// coupling is **no longer** annihilated — `∫∇L·E_t ≠ 0` because `E_t`
+/// is `ε_r`-orthogonal, not plain-orthogonal, to gradients — so the
+/// dominant mode genuinely develops `E_z ≠ 0` and the coupling block is
+/// load-bearing (guarded by the horizontal-slab test). NB: the canary
+/// alone guards only `A_tt`/`A_zz`/`B_tt`/`B_zz` placement and the
+/// vertex elimination; the **coupling** sign/scale/transpose is guarded
+/// by the dedicated `local_b_ze` pin + the load-bearing tests, since on
+/// the homogeneous guide the coupling never multiplies a nonzero `E_z`.
 pub(crate) struct AssembledMixed {
     /// Block-stiffness matrix `A = diag(A_tt, A_zz)`, size `n × n` with
     /// `n = n_t + n_z`. Edge DoFs occupy `0..n_t`, vertex DoFs `n_t..n`.
@@ -496,8 +524,11 @@ pub(crate) fn assemble_mixed(
         let b_tt = local_b_ee_mass(&geom, eps, conn.sign);
         let a_zz = local_a_zz(&geom, mu);
         let b_zz = local_b_zz(&geom, eps);
-        // B_ze[i_vert][j_edge] = ∫ ε_r ∇L_i · N_j (vertex-row / edge-col).
-        let b_ze = local_b_ze(&geom, eps, conn.sign);
+        // B_ze[i_vert][j_edge] = ∫ (1/μ_r) ∇L_i · N_j (vertex-row /
+        // edge-col). The 1/μ_r weight (matching A_zz) is the load-bearing
+        // curl-curl coupling; see `local_b_ze`'s docstring for why the
+        // ε_r weight was inert.
+        let b_ze = local_b_ze(&geom, mu, conn.sign);
 
         let tri = mesh.triangles[tri_idx];
 
@@ -738,16 +769,16 @@ mod tests {
 
     #[test]
     fn local_b_ze_column_sums_vanish_partition_of_unity() {
-        // The per-element coupling B_ze[i_vert][j_edge] = ∫ε_r ∇L_i·N_j
-        // does NOT vanish entry-wise for uniform ε_r, but its column
-        // sums (Σ_i over the three vertices, for each edge j) vanish
-        // because Σ_i ∇L_i = ∇(Σ_i L_i) = ∇(1) = 0. This is the
-        // element-local fingerprint of the global decoupling that lets
-        // the homogeneous-guide transverse mode survive the mixed
-        // pencil — the spec's "B_tz zero for uniform ε_r" claim holds
-        // only in this column-sum / global-divergence sense, NOT
-        // entry-wise. (Verifying the entry-wise claim was the convention
-        // canary; this records the correct interpretation.)
+        // The per-element coupling B_ze[i_vert][j_edge] = ∫(1/μ_r) ∇L_i·N_j
+        // does NOT vanish entry-wise, but its column sums (Σ_i over the
+        // three vertices, for each edge j) vanish because
+        // Σ_i ∇L_i = ∇(Σ_i L_i) = ∇(1) = 0. This is the element-local
+        // partition-of-unity fingerprint, NOT a statement that the
+        // coupling is inert: globally the 1/μ_r coupling is load-bearing
+        // on inhomogeneous guides (see the horizontal-slab test). The
+        // earlier ε_r-weighted coupling WAS globally inert for the
+        // dominant mode (annihilated by the divergence-free transverse
+        // eigenvector) — the step-5-review bug this weight fix corrects.
         let mesh = unit_right_triangle();
         let table = EdgeTable::build(&mesh);
         let geom = TriGeom::from_mesh(&mesh, 0);
@@ -782,6 +813,91 @@ mod tests {
         for row in &bze {
             for entry in row {
                 assert!(entry.re.is_finite() && entry.im.is_finite());
+            }
+        }
+    }
+
+    #[test]
+    fn local_b_ze_matches_independent_quadrature_sign_and_scale() {
+        // Step-5-review P1-1 guard for the highest-risk item: pin every
+        // entry of the coupling block `B_ze[i][j] = ∫(1/μ_r)∇L_i·N_j`
+        // against an INDEPENDENT 3-point edge-midpoint quadrature (exact
+        // for the linear `λ × const` integrand). A sign / scale /
+        // edge-endpoint-ordering error in `local_b_ze` changes individual
+        // entries and is caught here — the homogeneous β canary cannot
+        // catch it because its dominant eigenvector has `E_z = 0`, so the
+        // coupling never multiplies a nonzero vector.
+        //
+        // Uses a deliberately GENERIC triangle (non-right, non-unit,
+        // mixed-sign edge orientations) so the test exercises the σ and ℓ
+        // factors, not just the trivial unit-triangle symmetry.
+        let mesh = TriMesh2D::new(
+            vec![[0.2, 0.1], [1.3, 0.0], [0.4, 1.1]],
+            vec![[0, 1, 2]],
+            None,
+            None,
+        )
+        .unwrap();
+        let table = EdgeTable::build(&mesh);
+        let geom = TriGeom::from_mesh(&mesh, 0);
+        let signs = table.tri_edges[0].sign;
+        // μ_r = 1 so the weight is unity and the quadrature is a pure
+        // geometric reference.
+        let bze = local_b_ze(&geom, Complex64::new(1.0, 0.0), signs);
+
+        let v: [[f64; 2]; 3] = [mesh.vertices[0], mesh.vertices[1], mesh.vertices[2]];
+        let area = geom.area;
+        // ∇λ_i = (b_i, c_i)/(2A) — recompute independently.
+        let grad = |i: usize| -> [f64; 2] {
+            let i1 = (i + 1) % 3;
+            let i2 = (i + 2) % 3;
+            let b = v[i1][1] - v[i2][1];
+            let c = v[i2][0] - v[i1][0];
+            [b / (2.0 * area), c / (2.0 * area)]
+        };
+        // Barycentric coords of an arbitrary point via sub-triangle areas.
+        let lam_at = |p: [f64; 2]| -> [f64; 3] {
+            let sub = |a: [f64; 2], b: [f64; 2], c: [f64; 2]| {
+                0.5 * ((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]))
+            };
+            [
+                sub(p, v[1], v[2]) / area,
+                sub(v[0], p, v[2]) / area,
+                sub(v[0], v[1], p) / area,
+            ]
+        };
+        // Nedelec basis N_j at point p.
+        let n_at = |p: [f64; 2], j: usize| -> [f64; 2] {
+            let [a, b] = LOCAL_EDGES[j];
+            let lam = lam_at(p);
+            let ga = grad(a);
+            let gb = grad(b);
+            let s = signs[j] * geom.edge_len[j];
+            [
+                s * (lam[a] * gb[0] - lam[b] * ga[0]),
+                s * (lam[a] * gb[1] - lam[b] * ga[1]),
+            ]
+        };
+        // 3-point midpoint rule (weight A/3 at each edge midpoint).
+        let mids: [[f64; 2]; 3] = [
+            [0.5 * (v[1][0] + v[2][0]), 0.5 * (v[1][1] + v[2][1])],
+            [0.5 * (v[2][0] + v[0][0]), 0.5 * (v[2][1] + v[0][1])],
+            [0.5 * (v[0][0] + v[1][0]), 0.5 * (v[0][1] + v[1][1])],
+        ];
+        for (i, row) in bze.iter().enumerate() {
+            let gi = grad(i);
+            for (j, entry) in row.iter().enumerate() {
+                let mut quad = 0.0;
+                for &mp in &mids {
+                    let nj = n_at(mp, j);
+                    quad += (area / 3.0) * (gi[0] * nj[0] + gi[1] * nj[1]);
+                }
+                assert!(
+                    (entry.re - quad).abs() < 1e-12,
+                    "B_ze[{i}][{j}] = {} disagrees with independent quadrature {quad}",
+                    entry.re
+                );
+                assert!(entry.im.abs() < 1e-15, "lossless → real");
             }
         }
     }

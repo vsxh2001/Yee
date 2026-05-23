@@ -351,16 +351,19 @@ pub(crate) fn solve_dense_mixed(
         if !k_c_sq.is_finite() || k_c_sq <= spurious_floor {
             continue;
         }
-        // Recover the eigenvector as the null vector of (A − k_c² B).
-        let pencil = &a_re - k_c_sq * &b_re;
-        let svd = pencil.svd(false, true);
-        let Some(v_t) = svd.v_t else {
+        // Recover the generalized eigenvector for this k_c² by **inverse
+        // iteration** on the shifted pencil `(A − σ B)`, σ slightly off
+        // the eigenvalue. The naive "smallest right singular vector of
+        // (A − k_c² B)" does NOT work here: `A_tt` (curl-curl) carries
+        // the large Nedelec gradient null-space, so `(A − k_c² B)` has a
+        // forest of tiny singular values whose smallest is a spurious
+        // E_t-only gradient direction (E_z ≡ 0), not the physical mode
+        // — the step-5-review bug. Inverse iteration converges to the
+        // eigenvector of the eigenvalue *closest to σ*, which correctly
+        // picks the physical mode and recovers its genuine E_z content.
+        let Some(x) = inverse_iterate(&a_re, &b_re, k_c_sq) else {
             continue;
         };
-        // Smallest singular value → its right singular vector (last row
-        // of Vᵀ) is the null-space direction.
-        let last = v_t.nrows() - 1;
-        let x = v_t.row(last).transpose();
 
         // Transverse-energy fraction (Euclidean): ‖e_t‖² / ‖x‖².
         let total: f64 = x.iter().map(|&v| v * v).sum();
@@ -418,6 +421,58 @@ pub(crate) fn solve_dense_mixed(
         e_t,
         e_z,
     })
+}
+
+/// Recover the generalized eigenvector of `A x = λ B x` for the
+/// eigenvalue nearest `lambda` by **inverse iteration** on the shifted
+/// pencil `(A − σ B)` with `σ = lambda · (1 + δ)` (a small relative
+/// shift `δ` off the eigenvalue so the shifted matrix is non-singular
+/// and the iteration converges to *this* eigenvector rather than
+/// stalling on an exact null space).
+///
+/// Returns the converged eigenvector (length `A.nrows()`), or `None` if
+/// the shifted-pencil LU is singular or the iterate collapses to zero.
+/// A handful of iterations is sufficient because the shift sits right on
+/// top of the target eigenvalue (the dominant amplification factor
+/// `1/(λ_i − σ)` is enormous for the nearest eigenvalue and small for
+/// all others).
+///
+/// This replaces a smallest-singular-vector null-space recovery that
+/// failed on the mixed pencil: `A_tt` carries the Nedelec curl
+/// gradient null-space, so `(A − λ B)` has many spurious near-null
+/// directions in the `E_t`-only subspace, and the global smallest
+/// singular vector picked one of those (`E_z ≡ 0`) instead of the
+/// physical mode.
+fn inverse_iterate(a: &DMatrix<f64>, b: &DMatrix<f64>, lambda: f64) -> Option<Vec<f64>> {
+    let n = a.nrows();
+    // Relative shift off the eigenvalue. Large enough to keep (A − σB)
+    // well away from exact singularity, small enough that the target
+    // eigenvalue still dominates the inverse-iteration amplification.
+    let sigma = lambda * (1.0 + 1e-6) + 1e-6;
+    let shifted = a - sigma * b;
+    let lu = shifted.lu();
+
+    // Seed with a deterministic non-symmetric vector (avoids accidental
+    // orthogonality to the target eigenvector).
+    let mut z = DMatrix::<f64>::from_fn(n, 1, |i, _| 1.0 + (i as f64) * 0.001);
+    let mut last_norm = 0.0;
+    for _ in 0..50 {
+        // z_{k+1} = (A − σB)⁻¹ (B z_k)
+        let rhs = b * &z;
+        let y = lu.solve(&rhs)?;
+        let norm = y.norm();
+        if !norm.is_finite() || norm == 0.0 {
+            return None;
+        }
+        z = y / norm;
+        // Converged when the normalized iterate stops moving (Rayleigh
+        // amplification has saturated on the dominant eigenvector).
+        if (norm - last_norm).abs() <= 1e-10 * norm {
+            break;
+        }
+        last_norm = norm;
+    }
+    Some(z.column(0).iter().copied().collect())
 }
 
 /// Minimum transverse-block `B`-norm energy fraction for a candidate to
