@@ -84,3 +84,4 @@
 - [ADR-0050: Phase 1.3.1.1 step 4 in-tree block LOBPCG eigensolver](decisions/0050-phase-1-3-1-1-step-4-lobpcg-eigensolver.md)
 - [ADR-0051: Phase 1.3.1.1 step 5 mixed longitudinal block](decisions/0051-phase-1-3-1-1-step-5-longitudinal-block.md)
 - [ADR-0052: Phase 1.3.1.1 step 5.1 transcendental reference](decisions/0052-phase-1-3-1-1-step-5-1-transcendental-reference.md)
+- [ADR-0053: Phase 1.3.1.1 step 5.2 dielectric β-extraction fix](decisions/0053-phase-1-3-1-1-step-5-2-dielectric-beta-fix.md)
