@@ -29,4 +29,4 @@ pub(crate) mod assembly;
 pub(crate) mod mesh;
 pub(crate) mod solve;
 
-pub(crate) use solve::{solve_dense, solve_dense_mixed};
+pub(crate) use solve::solve_dense_mixed;

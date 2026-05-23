@@ -307,6 +307,20 @@ pub struct NumericalCrossSection {
     /// build the wave-port RHS by interpolating the modal `E_t`
     /// field at port-edge midpoints in the MoM-side mesh.
     pub mode_profile: Option<Vec<Complex64>>,
+    /// Dominant-mode **longitudinal** field `E_z` (nodal-Lagrange
+    /// vertex-DoF amplitudes, **global-vertex** indexing — already
+    /// scattered out from the interior-vertex DoF set with Dirichlet
+    /// boundary vertices set to 0). Cached on a successful
+    /// [`Self::solve`]. `None` otherwise.
+    ///
+    /// Filled by the Phase 1.3.1.1 step 5 mixed `(E_t, E_z)`
+    /// Lee-Sun-Cendes solve. On a homogeneous (air-filled) guide the
+    /// dominant mode is purely transverse so this is ~zero; on an
+    /// inhomogeneous (dielectric-loaded / microstrip) cross-section it
+    /// carries the genuine longitudinal field that couples through the
+    /// dielectric interface. Real-valued on the lossless path; stored
+    /// as `Complex64` to mirror [`Self::mode_profile`].
+    pub mode_profile_ez: Option<Vec<Complex64>>,
     /// Per-triangle local→global edge map (the `EdgeTable::tri_edges`
     /// payload) cached on a successful [`Self::solve`]. Needed by
     /// [`Self::e_tangential_at`] to interpolate the Nedelec edge basis
@@ -340,37 +354,58 @@ impl NumericalCrossSection {
             beta: None,
             z_w: None,
             mode_profile: None,
+            mode_profile_ez: None,
             tri_edges_cache: None,
         }
     }
 
     /// Run the 2-D eigensolve at `freq_hz`.
     ///
-    /// **Phase 1.3.1.1 step 2-3 (this commit):** assembles the
-    /// transverse-only (`E_t`-block) Nedelec generalized eigenproblem
-    /// `A x = β² B x` on [`Self::mesh`] with `eps_r` / `mu_r` looked up
-    /// per [`yee_mesh::MaterialTag`], then runs a dense
-    /// `nalgebra`-backed eigensolve on `B⁻¹ A`. Picks the largest
-    /// physically valid `β²` (smallest cutoff, dominant guided mode)
-    /// and caches `β = √β²` plus a TE-mode approximation
-    /// `Z_w ≈ η₀ / √(1 − (β/k₀)²)` on the struct.
+    /// **Phase 1.3.1.1 step 5 (this commit):** assembles the full mixed
+    /// `(E_t, E_z)` Lee-Sun-Cendes block generalized eigenproblem
+    /// `A x = k_c² B x` on [`Self::mesh`] (via
+    /// [`crate::eigensolver::assemble_mixed`], with `eps_r` / `mu_r`
+    /// looked up per [`yee_mesh::MaterialTag`]), dense-solves the dominant
+    /// quasi-TEM mode (via [`crate::eigensolver::solve_dense_mixed`] — the
+    /// `B⁻¹A` non-symmetric path, since the block pencil is symmetric
+    /// *indefinite*), caches `β = √(k_0² − k_c²)`, and extracts a
+    /// **numerical** wave impedance `Z_w` off the solved eigenvector
+    /// (see below) — replacing the earlier TE-mode `η₀k₀/β`
+    /// approximation.
     ///
-    /// The dense path is `O(n³)` in the interior-edge DoF count `n`,
-    /// so this is only viable for coarse cross-sections
-    /// (≤ a few hundred DoF). The WR-90 TE10 validation case lands
-    /// at `n ≈ 60`, well inside that envelope. Sparse shift-and-invert
-    /// is Phase 1.3.1.1 step 4 (escape-hatched).
+    /// On a **homogeneous** (air-filled) cross-section the longitudinal
+    /// `E_z` block decouples and the result reproduces the transverse-
+    /// only solve to machine precision (the WR-90 TE10 gate stays green
+    /// within its 1 % tolerance — DoD-V1). On an **inhomogeneous**
+    /// (dielectric-loaded / microstrip) cross-section the `E_z` coupling
+    /// through the dielectric interface shifts `β` and the mode shape —
+    /// the capability this solver exists for.
     ///
-    /// The full mixed (`E_t`, `E_z`) Lee-Sun-Cendes formulation
-    /// (`local_a_zz` / `local_b_zz` / `local_b_ze`) is staged inside the
-    /// crate-private `eigensolver::assembly` module but is unused by the
-    /// transverse-only solve below; it will be wired in once non-trivial
-    /// dielectric stack-ups need quasi-TEM mode extraction.
+    /// **Numerical Z_w.** For the dominant mode the energy-averaged wave
+    /// impedance is
+    ///
+    /// ```text
+    ///   Z_w = (ω μ₀ / β) · ( ∫_Ω |E_t|² dA ) / ( ∫_Ω (1/μ_r) |E_t|² dA )
+    /// ```
+    ///
+    /// from the modal field relation `H_t = (β / ω μ₀ μ_r)(ẑ × E_t)`
+    /// (so the local wave impedance is `ω μ₀ μ_r / β` and the above is
+    /// its `|E_t|²`-energy-weighted average). On a homogeneous guide
+    /// `μ_r ≡ 1` this reduces **exactly** to `ω μ₀ / β = η₀ k₀ / β`,
+    /// the TE-mode value the closed-form
+    /// [`RectangularWaveguideTe10::wave_impedance`] gives — the DoD-V3
+    /// regression guard. The two transverse-energy integrals are
+    /// computed by Nedelec quadrature off the cached eigenvector
+    /// (`local_b_ee_mass`-style closed forms).
+    ///
+    /// The dense path is `O(n³)` in `n = n_t + n_z`; viable for coarse
+    /// cross-sections (≤ a few hundred DoF). The WR-90 case lands at
+    /// `n ≈ 121`. Sparse shift-and-invert is a later step.
     pub fn solve(&mut self, freq_hz: f64) -> yee_core::Result<()> {
-        use crate::eigensolver::{assembly::assemble_transverse, mesh::EdgeTable, solve_dense};
+        use crate::eigensolver::{assembly::assemble_mixed, mesh::EdgeTable, solve_dense_mixed};
         let table = EdgeTable::build(&self.mesh);
-        let asm = assemble_transverse(&self.mesh, &self.eps_r, &self.mu_r, &table);
-        let sol = solve_dense(&asm, freq_hz)?;
+        let asm = assemble_mixed(&self.mesh, &self.eps_r, &self.mu_r, &table);
+        let sol = solve_dense_mixed(&asm, freq_hz)?;
         // β = √(β²). Lossless inputs give real β² ≥ 0; take the
         // principal square root (positive real branch).
         let beta_sq = sol.beta_sq;
@@ -381,26 +416,23 @@ impl NumericalCrossSection {
         };
         self.beta = Some(beta);
 
-        // TE-mode wave-impedance approximation `Z_TE = ω μ₀ / β`,
-        // i.e. `η₀ · k₀ / β`. Exact for the air-filled rectangular-
-        // waveguide TE10 case the validation gate uses; matches the
-        // closed-form [`RectangularWaveguideTe10::wave_impedance`] at
-        // the analytic β. The full numerical Z_w extraction
-        // (line-integral of E across the conductor pair on the solved
-        // eigenvector) is Phase 1.3.1.1 step 5.
-        let omega = std::f64::consts::TAU * freq_hz;
-        let k0 = omega / yee_core::units::C0;
-        let eta0_k0 = Complex64::new(yee_core::units::ETA0 * k0, 0.0);
-        self.z_w = Some(eta0_k0 / beta);
-
-        // Scatter the interior-DoF eigenvector out to global-edge
-        // indexing. PEC boundary edges have E_t = 0 by Dirichlet
+        // Scatter the interior-edge DoF eigenvector out to global-edge
+        // indexing (E_t). PEC boundary edges have E_t = 0 by Dirichlet
         // elimination so they remain zero in the global profile.
         let mut global_mode = vec![Complex64::new(0.0, 0.0); table.n_edges()];
-        for (i_dof, &gid) in asm.interior_to_global.iter().enumerate() {
-            global_mode[gid] = sol.eigenvector[i_dof];
+        for (i_dof, &gid) in asm.interior_to_global_edges.iter().enumerate() {
+            global_mode[gid] = sol.e_t[i_dof];
         }
         self.mode_profile = Some(global_mode);
+
+        // Scatter the interior-vertex DoF eigenvector out to global-
+        // vertex indexing (E_z). PEC boundary vertices are 0 by Dirichlet
+        // elimination.
+        let mut global_ez = vec![Complex64::new(0.0, 0.0); self.mesh.n_verts()];
+        for (i_dof, &vid) in asm.interior_to_global_verts.iter().enumerate() {
+            global_ez[vid] = sol.e_z[i_dof];
+        }
+        self.mode_profile_ez = Some(global_ez);
 
         // Cache per-triangle (tri_idx, global_edge_indices, orientation
         // signs) so e_tangential_at can interpolate without rebuilding
@@ -412,9 +444,99 @@ impl NumericalCrossSection {
             .enumerate()
             .map(|(t, c)| (t, c.global_edge, c.sign))
             .collect();
-        self.tri_edges_cache = Some(tri_edges);
+        self.tri_edges_cache = Some(tri_edges.clone());
+
+        // Numerical wave impedance Z_w (see method docstring): the
+        // |E_t|²-energy-weighted modal wave impedance, which reduces to
+        // `η₀ k₀ / β` on the homogeneous guide and shifts with the
+        // dielectric fill otherwise.
+        let omega = std::f64::consts::TAU * freq_hz;
+        let mu0 = yee_core::units::MU0;
+        // Accumulate ∫|E_t|² dA and ∫(1/μ_r)|E_t|² dA over the mesh by
+        // Nedelec quadrature off the cached eigenvector.
+        let (energy_plain, energy_inv_mu) = self.transverse_energy_integrals(&table);
+        let z_w = if beta.norm() > 0.0 && energy_inv_mu > 0.0 {
+            Complex64::new(omega * mu0 / beta.re * (energy_plain / energy_inv_mu), 0.0)
+        } else {
+            // Degenerate fallback to the closed-form TE relation so a
+            // single-DoF / pathological mesh still caches a finite value.
+            let k0 = omega / yee_core::units::C0;
+            Complex64::new(yee_core::units::ETA0 * k0, 0.0) / beta
+        };
+        self.z_w = Some(z_w);
 
         Ok(())
+    }
+
+    /// Compute the two transverse-energy integrals
+    /// `(∫_Ω |E_t|² dA, ∫_Ω (1/μ_r) |E_t|² dA)` over the cross-section
+    /// by Nedelec quadrature off the cached `mode_profile` eigenvector.
+    ///
+    /// Used by the numerical `Z_w` extraction in [`Self::solve`]. The
+    /// `∫|E_t|² dA` integrand is `N_i · N_j` (the unweighted Nedelec
+    /// mass), assembled from the same closed-form linear-triangle moments
+    /// the element-matrix code uses; the `1/μ_r`-weighted variant divides
+    /// each triangle's contribution by its `μ_r` so the ratio reduces to
+    /// `1` on a homogeneous non-magnetic guide.
+    fn transverse_energy_integrals(
+        &self,
+        table: &crate::eigensolver::mesh::EdgeTable,
+    ) -> (f64, f64) {
+        let Some(profile) = &self.mode_profile else {
+            return (0.0, 0.0);
+        };
+        let default_one = Complex64::new(1.0, 0.0);
+        let local_edges: [[usize; 2]; 3] = [[1, 2], [2, 0], [0, 1]];
+        let mut energy_plain = 0.0_f64;
+        let mut energy_inv_mu = 0.0_f64;
+        for (t_idx, conn) in table.tri_edges.iter().enumerate() {
+            let tri = self.mesh.triangles[t_idx];
+            let v: [[f64; 2]; 3] = [
+                self.mesh.vertices[tri[0]],
+                self.mesh.vertices[tri[1]],
+                self.mesh.vertices[tri[2]],
+            ];
+            let area = self.mesh.area(t_idx);
+            let tag = self.mesh.triangle_material[t_idx];
+            let mu = self.mu_r.get(&tag).unwrap_or(&default_one).re;
+            // Local FEM scalars (Jin convention).
+            let mut bb = [0.0; 3];
+            let mut cc = [0.0; 3];
+            let mut ell = [0.0; 3];
+            for i in 0..3 {
+                let i1 = (i + 1) % 3;
+                let i2 = (i + 2) % 3;
+                bb[i] = v[i1][1] - v[i2][1];
+                cc[i] = v[i2][0] - v[i1][0];
+            }
+            for (e, &[a, b]) in local_edges.iter().enumerate() {
+                let dx = v[b][0] - v[a][0];
+                let dy = v[b][1] - v[a][1];
+                ell[e] = (dx * dx + dy * dy).sqrt();
+            }
+            let grad_dot =
+                |p: usize, q: usize| (bb[p] * bb[q] + cc[p] * cc[q]) / (4.0 * area * area);
+            let int_ll = |p: usize, q: usize| area * (1.0 + if p == q { 1.0 } else { 0.0 }) / 12.0;
+            // Local |E_t|² = Σ_ij amp_i amp_j ∫ N_i·N_j dA.
+            let mut tri_energy = 0.0_f64;
+            for li in 0..3 {
+                let [ai, bi] = local_edges[li];
+                let amp_i = profile[conn.global_edge[li]].re * conn.sign[li] * ell[li];
+                for lj in 0..3 {
+                    let [aj, bj] = local_edges[lj];
+                    let amp_j = profile[conn.global_edge[lj]].re * conn.sign[lj] * ell[lj];
+                    // ∫ (λ_ai∇λ_bi − λ_bi∇λ_ai)·(λ_aj∇λ_bj − λ_bj∇λ_aj) dA
+                    let m = int_ll(ai, aj) * grad_dot(bi, bj)
+                        - int_ll(ai, bj) * grad_dot(bi, aj)
+                        - int_ll(bi, aj) * grad_dot(ai, bj)
+                        + int_ll(bi, bj) * grad_dot(ai, aj);
+                    tri_energy += amp_i * amp_j * m;
+                }
+            }
+            energy_plain += tri_energy;
+            energy_inv_mu += tri_energy / mu;
+        }
+        (energy_plain, energy_inv_mu)
     }
 
     /// Evaluate the dominant-mode transverse electric field

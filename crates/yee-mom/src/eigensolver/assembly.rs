@@ -262,6 +262,13 @@ fn local_b_ze(geom: &TriGeom, eps_r: Complex64, signs: [f64; 3]) -> [[Complex64;
 /// formulation that lets the spurious gradient null-space cluster at
 /// `k_c² = 0` (easy to filter out) instead of `k_c² = k_0²` (impossible
 /// to distinguish from the physical mode in a single-precision solve).
+///
+/// Retained as the transverse-only reference (and exercised by the
+/// homogeneous-guide regression tests) after
+/// [`crate::ports::NumericalCrossSection::solve`] switched to the mixed
+/// [`AssembledMixed`] / [`super::solve_dense_mixed`] path in Phase
+/// 1.3.1.1 step 5.
+#[allow(dead_code)]
 pub(crate) struct AssembledTransverse {
     /// Curl-curl stiffness matrix `S[i,j] = ∫ (1/μ_r) (∇×N_i)(∇×N_j) dA`.
     pub s: DMatrix<Complex64>,
@@ -292,6 +299,12 @@ pub(crate) struct AssembledTransverse {
 /// keys default to vacuum (ε_r = μ_r = 1). The assembly is
 /// **frequency-independent**; the caller maps the resulting cutoff
 /// eigenvalue to a propagation constant via `β² = k_0² − k_c²`.
+///
+/// Retained as the transverse-only reference path after
+/// [`crate::ports::NumericalCrossSection::solve`] switched to
+/// [`assemble_mixed`] in Phase 1.3.1.1 step 5; exercised by the
+/// homogeneous-guide regression tests.
+#[allow(dead_code)]
 pub(crate) fn assemble_transverse(
     mesh: &TriMesh2D,
     eps_r: &HashMap<MaterialTag, Complex64>,
@@ -418,10 +431,6 @@ pub(crate) struct AssembledMixed {
     /// Number of interior-vertex (`E_z`) DoFs. Equals
     /// `interior_to_global_verts.len()`.
     pub n_z: usize,
-    /// Largest ε_r magnitude seen during assembly. Recorded for the
-    /// caller-side spurious-mode / β-validity bounds
-    /// (`k_0 < β < k_0√ε_r,max`).
-    pub eps_r_max_re: f64,
 }
 
 /// Assemble the mixed `(E_t, E_z)` Lee-Sun-Cendes generalized
@@ -474,7 +483,6 @@ pub(crate) fn assemble_mixed(
     let zero = Complex64::new(0.0, 0.0);
     let mut a = DMatrix::from_element(n, n, zero);
     let mut b = DMatrix::from_element(n, n, zero);
-    let mut eps_r_max_re: f64 = 1.0;
 
     let default_one = Complex64::new(1.0, 0.0);
 
@@ -483,9 +491,6 @@ pub(crate) fn assemble_mixed(
         let tag = mesh.triangle_material[tri_idx];
         let eps = *eps_r.get(&tag).unwrap_or(&default_one);
         let mu = *mu_r.get(&tag).unwrap_or(&default_one);
-        if eps.re > eps_r_max_re {
-            eps_r_max_re = eps.re;
-        }
 
         let a_tt = local_a_ee_curl(&geom, mu, conn.sign);
         let b_tt = local_b_ee_mass(&geom, eps, conn.sign);
@@ -555,7 +560,6 @@ pub(crate) fn assemble_mixed(
         interior_to_global_verts,
         n_t,
         n_z,
-        eps_r_max_re,
     }
 }
 

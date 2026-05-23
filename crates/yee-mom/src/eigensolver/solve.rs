@@ -36,6 +36,12 @@ use num_complex::Complex64;
 use super::assembly::{AssembledMixed, AssembledTransverse};
 
 /// Solved-eigensolution payload returned by [`solve_dense`].
+///
+/// Retained as the transverse-only reference path (and exercised by the
+/// homogeneous-guide regression tests / DoD-V1 canary) after
+/// [`crate::ports::NumericalCrossSection::solve`] switched to the mixed
+/// [`solve_dense_mixed`] path in Phase 1.3.1.1 step 5.
+#[allow(dead_code)]
 pub(crate) struct EigenSolution {
     /// `β² = k_0² − k_c²` for the dominant propagating mode at the
     /// supplied frequency. Stored as `Complex64` to keep the API
@@ -69,6 +75,13 @@ pub(crate) struct EigenSolution {
 /// keep `n` below a few hundred. The eigensolver's only validation
 /// case (WR-90 TE10 on a ~72-triangle mesh) lands at `n ≈ 84` interior
 /// edges, well inside this envelope.
+///
+/// Retained as the transverse-only reference path after
+/// [`crate::ports::NumericalCrossSection::solve`] switched to the mixed
+/// [`solve_dense_mixed`] in Phase 1.3.1.1 step 5; exercised by the
+/// homogeneous-guide regression tests (the DoD-V1 canary asserts the
+/// mixed solve reproduces this path's β to machine precision).
+#[allow(dead_code)]
 pub(crate) fn solve_dense(
     asm: &AssembledTransverse,
     freq_hz: f64,
@@ -276,8 +289,9 @@ pub(crate) fn solve_dense_mixed(
     asm: &AssembledMixed,
     freq_hz: f64,
 ) -> Result<MixedEigenSolution, yee_core::Error> {
-    let n = asm.a.nrows();
     let n_t = asm.n_t;
+    let n = n_t + asm.n_z;
+    debug_assert_eq!(n, asm.a.nrows(), "mixed pencil size must be n_t + n_z");
     if n == 0 || n_t == 0 {
         return Err(yee_core::Error::Numerical(
             "eigensolver(mixed): empty DoF set (no interior edges?)".into(),
