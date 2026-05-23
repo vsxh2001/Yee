@@ -71,6 +71,6 @@ pub use open_boundary::{
 };
 pub use pml_mesh::{FaceIndexMap, PmlAxis, PmlClass, extend_mesh_with_pml};
 pub use solve::{
-    ComplexInverseIterEigen, EigenpairList, EigenpairListComplex, InverseIterEigen, LobpcgEigen,
-    SparseEigen, SparseEigenComplex,
+    ComplexInverseIterEigen, ComplexLobpcgEigen, EigenpairList, EigenpairListComplex,
+    InverseIterEigen, LobpcgEigen, SparseEigen, SparseEigenComplex,
 };
