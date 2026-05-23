@@ -395,7 +395,7 @@ pub(crate) fn solve_dense_mixed(
     // and the transverse screen is applied to the converged β-direct
     // eigenvector below. Candidates are ordered by `R(x_c)` descending
     // (the dominant quasi-TEM mode = slowest wave = highest ε_eff first).
-    let candidates = cutoff_candidates(&a_re, &b_re, &k_op, &b1_re, n)?;
+    let candidates = cutoff_candidates(&a_re, &b_re, &k_op, &b1_re, n, k0_sq)?;
     if candidates.is_empty() {
         return Err(yee_core::Error::Numerical(
             "eigensolver(mixed): no propagating cutoff candidate above the spurious floor".into(),
@@ -499,6 +499,15 @@ fn rayleigh_beta_sq(k_op: &DMatrix<f64>, b1_re: &DMatrix<f64>, n: usize, x: &[f6
 /// ordering, length `n`, used to seed the β-direct shift-and-invert).
 type CutoffCandidate = (f64, Vec<f64>);
 
+/// A raw cutoff eigenpair `(k_c², x_c)` (interior-DoF ordering, length `n`)
+/// before the β-direct tagging / floor in [`cutoff_candidates`].
+type CutoffEigenpair = (f64, Vec<f64>);
+
+/// The output of a raw cutoff-eigenpair source ([`dense_cutoff_eigenpairs`] /
+/// [`sparse_cutoff_eigenpairs`]): the eigenpairs plus the gradient-cluster
+/// floor `k_c² ≤ floor` the caller drops.
+type CutoffEigenpairs = (Vec<CutoffEigenpair>, f64);
+
 /// Gather the propagating candidates of the **cutoff** pencil
 /// `A x = k_c² B x`, each recovered by inverse iteration and tagged with
 /// its β-direct Rayleigh quotient `β² = R(x_c)`, sorted by `R(x_c)`
@@ -528,33 +537,33 @@ fn cutoff_candidates(
     k_op: &DMatrix<f64>,
     b1_re: &DMatrix<f64>,
     n: usize,
+    k0_sq: f64,
 ) -> Result<Vec<CutoffCandidate>, yee_core::Error> {
-    let b_lu = b_re.clone().lu();
-    let binv_a = b_lu.solve(a_re).ok_or_else(|| {
-        yee_core::Error::Numerical(
-            "eigensolver(mixed): block mass matrix B is singular on the interior DoF set".into(),
-        )
-    })?;
-    let kc_evals = binv_a.complex_eigenvalues();
-    let max_abs = kc_evals
-        .iter()
-        .map(|z| z.norm())
-        .fold(0.0_f64, f64::max)
-        .max(1.0);
-    let spurious_floor = max_abs * 1e-6;
+    // Source the raw `(k_c², x_c)` cutoff eigenpairs either from the dense
+    // `O(n³)` `complex_eigenvalues` (small `n`, the reference path) or from
+    // the sparse shift-invert (large `n`, the Phase 1.3.1.1 step 5.7
+    // production path; mesh scaling past the dense cap). Both yield the same
+    // *physical* low-cutoff pairs; the tagging + sort below is identical.
+    //
+    // Each source also returns the **gradient null-space floor**: candidates
+    // with `k_c² ≤ floor` are the curl-free gradient cluster and are dropped.
+    // The dense path uses its original full-spectrum `max|k_c²|·1e-6`; the
+    // sparse path uses a `k_0²`-relative floor (it does not form the full
+    // spectrum) — see [`sparse_cutoff_eigenpairs`]. The floor is load-bearing
+    // here because a homogeneous-guide gradient mode is *purely transverse*
+    // (`E_z ≡ 0`, t-frac = 1), so the downstream transverse screen cannot
+    // distinguish it — only its near-zero cutoff does.
+    let (raw, spurious_floor): (Vec<(f64, Vec<f64>)>, f64) = if n <= DENSE_CUTOFF_DOF_THRESHOLD {
+        dense_cutoff_eigenpairs(a_re, b_re)?
+    } else {
+        sparse_cutoff_eigenpairs(a_re, b_re, b1_re, n, k0_sq)?
+    };
 
     let mut cands: Vec<CutoffCandidate> = Vec::new();
-    for ev in kc_evals.iter() {
-        if ev.im.abs() > 1e-6 * ev.re.abs().max(1.0) {
-            continue;
-        }
-        let k_c_sq = ev.re;
+    for (k_c_sq, x) in raw {
         if !k_c_sq.is_finite() || k_c_sq <= spurious_floor {
-            continue; // curl-free gradient null-space
-        }
-        let Some(x) = inverse_iterate(a_re, b_re, k_c_sq) else {
             continue;
-        };
+        }
         let total: f64 = x.iter().map(|&v| v * v).sum();
         if total <= 0.0 {
             continue;
@@ -575,6 +584,420 @@ fn cutoff_candidates(
     // its shift is tried first.
     cands.sort_by(|p, q| q.0.partial_cmp(&p.0).unwrap_or(std::cmp::Ordering::Equal));
     Ok(cands)
+}
+
+/// Interior-DoF count at or below which [`cutoff_candidates`] uses the dense
+/// `O(n³)` `complex_eigenvalues` cutoff eigendecomposition (the step-5.2
+/// reference / fallback). Above it, the sparse shift-invert
+/// ([`sparse_cutoff_eigenpairs`]) is used instead (Phase 1.3.1.1 step 5.7).
+///
+/// The threshold is set just above the validation-anchor sizes that DoD-1
+/// pins bit-identical (the WR-90 6×6 / 8×8 homogeneous, vertical-slab, and
+/// uniform-fill meshes land at `n ≤ 225` interior DoF) so those gates keep
+/// running through the dense reference, while the finer ε_r=10.2 meshes
+/// (DoD-2) and any realistic cross-section (DoD-3) take the sparse path.
+const DENSE_CUTOFF_DOF_THRESHOLD: usize = 260;
+
+/// Dense reference: every real cutoff eigenpair `(k_c², x_c)` of
+/// `A x = k_c² B x`, recovered by `B⁻¹A` `complex_eigenvalues` + inverse
+/// iteration, plus the **gradient-cluster floor** `max|k_c²|·1e-6` (the
+/// original step-5.2 pencil filter, preserved verbatim so this path stays
+/// bit-identical). `O(n³)`; the small-`n` reference / fallback path of
+/// [`cutoff_candidates`]. Returns *all* real eigenpairs (gradient cluster
+/// included); the caller floors out the non-physical ones.
+fn dense_cutoff_eigenpairs(
+    a_re: &DMatrix<f64>,
+    b_re: &DMatrix<f64>,
+) -> Result<CutoffEigenpairs, yee_core::Error> {
+    let b_lu = b_re.clone().lu();
+    let binv_a = b_lu.solve(a_re).ok_or_else(|| {
+        yee_core::Error::Numerical(
+            "eigensolver(mixed): block mass matrix B is singular on the interior DoF set".into(),
+        )
+    })?;
+    let kc_evals = binv_a.complex_eigenvalues();
+    let max_abs = kc_evals
+        .iter()
+        .map(|z| z.norm())
+        .fold(0.0_f64, f64::max)
+        .max(1.0);
+    let floor = max_abs * 1e-6;
+    let mut out: Vec<(f64, Vec<f64>)> = Vec::new();
+    for ev in kc_evals.iter() {
+        if ev.im.abs() > 1e-6 * ev.re.abs().max(1.0) {
+            continue;
+        }
+        let k_c_sq = ev.re;
+        if !k_c_sq.is_finite() {
+            continue;
+        }
+        let Some(x) = inverse_iterate(a_re, b_re, k_c_sq) else {
+            continue;
+        };
+        out.push((k_c_sq, x));
+    }
+    Ok((out, floor))
+}
+
+/// Sparse production path (Phase 1.3.1.1 step 5.7): the few **lowest
+/// strictly-positive** cutoff eigenpairs `(k_c², x_c)` of `A x = k_c² B x`,
+/// found by a **block shift-and-invert** (faer sparse LU of `(A − σB)`, then
+/// subspace inverse iteration with a `B`-inner-product Rayleigh-Ritz), with
+/// **no** dense `O(n³)` eigendecomposition. This lifts the ~457-DoF dense cap
+/// that limited the whole cross-section eigensolver.
+///
+/// **The gradient null cluster.** `A` (curl-curl + nodal stiffness) has a
+/// large curl-free gradient null space; on this pencil that cluster lands at
+/// k_c² ≤ 0 (slightly negative / ≈0), while the physical guided modes sit at
+/// strictly positive k_c² (the dominant TE10 of the air guide at `(π/a)²`;
+/// the dielectric-loaded modes lower). A shift placed *at a small positive
+/// value* does not cleanly separate the cluster (it is the nearest spectrum
+/// to any small σ), so instead we sweep a **σ ladder spanning the physical
+/// k_c² window `(0, k_0²·ε_r,max)`** — the upper bound a propagating mode can
+/// have (`β² > 0 ⇒ k_c² < k_0²·ε_eff ≤ k_0²·ε_r,max`). Each rung's block
+/// shift-invert returns the eigenpairs nearest that σ; we keep only the
+/// strictly-positive-k_c² ones (gradient cluster excluded by sign) and union
+/// across rungs, deduplicating by k_c². At least one rung lands near the
+/// dominant mode regardless of where it sits in the positive window, so the
+/// physical dominant candidate is always captured — its β-direct screen +
+/// highest-β² pick happen downstream, unchanged from the dense path.
+///
+/// `ε_r,max` is recovered from the diagonal ratio of the ε_r-weighted mass
+/// `B` to the unweighted `B_1` over the transverse block (no geometry input).
+fn sparse_cutoff_eigenpairs(
+    a_re: &DMatrix<f64>,
+    b_re: &DMatrix<f64>,
+    b1_re: &DMatrix<f64>,
+    n: usize,
+    k0_sq: f64,
+) -> Result<CutoffEigenpairs, yee_core::Error> {
+    // ε_r,max from the diagonal mass ratio B_ii / B1_ii (B = ε_r·mass on the
+    // diagonal blocks, B_1 = unweighted): the max over DoF is ε_r,max. Floor
+    // at 1.0 (vacuum) so the window is never degenerate.
+    let mut eps_max = 1.0_f64;
+    for i in 0..n {
+        let d1 = b1_re[(i, i)];
+        if d1.abs() > 0.0 {
+            let ratio = b_re[(i, i)] / d1;
+            if ratio.is_finite() && ratio > eps_max {
+                eps_max = ratio;
+            }
+        }
+    }
+    // Upper edge of the physical k_c² window. A small margin (1.05) keeps the
+    // top rung from sitting exactly on the bound.
+    let kc_window = (k0_sq * eps_max * 1.05).max(k0_sq);
+
+    // σ ladder across the positive window. Geometric-ish spacing favours the
+    // low end (where the dielectric-loaded dominant modes live) while still
+    // reaching the air-cutoff fraction (~0.43·k_0²) and above. Block width
+    // grabs a handful of eigenpairs nearest each σ; positive-k_c² survivors
+    // are unioned. The block + ladder are intentionally modest — the
+    // downstream β-direct shift-invert does the precise mode lock-on.
+    const LADDER_FRACS: &[f64] = &[0.02, 0.06, 0.15, 0.3, 0.5, 0.75, 1.0];
+    let block = (12usize).min(n);
+
+    let mut pairs: Vec<(f64, Vec<f64>)> = Vec::new();
+    let mut last_err: Option<yee_core::Error> = None;
+    for &frac in LADDER_FRACS {
+        let sigma = (frac * kc_window).max(1.0);
+        match block_shift_invert_cutoff(a_re, b_re, sigma, block, n) {
+            Ok(found) => {
+                for (k_c_sq, x) in found {
+                    if k_c_sq.is_finite() && k_c_sq > 0.0 {
+                        pairs.push((k_c_sq, x));
+                    }
+                }
+            }
+            // A rung whose `(A − σB)` is singular (σ on an eigenvalue) or that
+            // fails to converge is skipped; other rungs cover the window.
+            Err(e) => last_err = Some(e),
+        }
+    }
+
+    if pairs.is_empty() {
+        return Err(last_err.unwrap_or_else(|| {
+            yee_core::Error::Numerical(
+                "eigensolver(mixed): sparse cutoff shift-invert found no positive-k_c² mode \
+                 across the σ ladder (gradient cluster only?)"
+                    .into(),
+            )
+        }));
+    }
+
+    // Deduplicate by k_c² (the same physical mode is found by adjacent rungs):
+    // sort ascending, drop near-duplicates within a tight relative tolerance.
+    pairs.sort_by(|p, q| p.0.partial_cmp(&q.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut deduped: Vec<(f64, Vec<f64>)> = Vec::with_capacity(pairs.len());
+    for (k_c_sq, x) in pairs {
+        let dup = deduped
+            .last()
+            .is_some_and(|(prev, _)| (k_c_sq - prev).abs() <= 1e-6 * prev.abs().max(1.0));
+        if !dup {
+            deduped.push((k_c_sq, x));
+        }
+    }
+    // Gradient null-space floor for the caller. The sparse path does not form
+    // the full spectrum, so it cannot use the dense `max|k_c²|·1e-6`; instead
+    // it floors relative to `k_0²`. The curl-free gradient cluster sits at
+    // k_c² ≈ 0 (the homogeneous-guide leak measured at k_c² ≈ 2 ≈ 5e-5·k_0²),
+    // while the physical dominant cutoff is `O((π/a)²) ≈ 0.43·k_0²` (lower for
+    // dielectric loading, but still ≳ 0.07·k_0² on the validated slabs). A
+    // floor of `k_0²·1e-3` therefore sits safely between the cluster and the
+    // lowest physical mode.
+    let floor = k0_sq * SPARSE_GRADIENT_FLOOR_FRAC;
+    Ok((deduped, floor))
+}
+
+/// Sparse-path gradient-cluster floor as a fraction of `k_0²`: candidates
+/// with `k_c² ≤ k_0²·this` are dropped as curl-free gradient noise. Set
+/// well above the measured homogeneous-guide gradient leak (≈5e-5·k_0²) and
+/// well below the lowest physical dominant cutoff (≳0.07·k_0² on the
+/// validation slabs, `(π/a)² ≈ 0.43·k_0²` for the air guide). See
+/// [`sparse_cutoff_eigenpairs`].
+const SPARSE_GRADIENT_FLOOR_FRAC: f64 = 1e-3;
+
+/// Block shift-and-invert for the **few cutoff eigenpairs nearest `sigma`** of
+/// `A x = k_c² B x`. Factors `(A − σ B)` once via faer `sp_lu` (the yee-fem
+/// `build_shifted` + step-5.3 sparse-LU pattern, re-implemented here — no
+/// cross-crate coupling), carries a `block`-wide subspace through
+/// inverse-iteration `S ← (A − σB)⁻¹ B S`, and runs a dense `B`-inner-product
+/// Rayleigh-Ritz each sweep to extract the `block` Ritz pairs nearest `σ`
+/// (largest shift-invert eigenvalue `θ = 1/(k_c² − σ)`). Returns
+/// `(k_c², eigenvector)` for the converged Ritz pairs (interior-DoF ordering,
+/// length `n`).
+///
+/// This is the block analogue of the single-vector [`inverse_iterate`]; the
+/// block resolves the clustered low cutoff modes (and any near-degeneracy)
+/// that a one-vector iteration would smear, mirroring why yee-fem's
+/// [`LobpcgEigen`] carries a block. `B` is SPD-on-the-physical-subspace here
+/// (it is indefinite globally because of the edge↔node coupling, but the
+/// Rayleigh-Ritz uses the symmetric-definite reduction only on the small
+/// projected pencil, which is well-conditioned for the recovered block).
+fn block_shift_invert_cutoff(
+    a_re: &DMatrix<f64>,
+    b_re: &DMatrix<f64>,
+    sigma: f64,
+    block: usize,
+    n: usize,
+) -> Result<Vec<(f64, Vec<f64>)>, yee_core::Error> {
+    // (A − σB) as a sparse column matrix from its nonzeros (entry-summing
+    // triplets; exact-zero entries dropped — the step-5.3 / yee-fem pattern).
+    let mut triplets: Vec<Triplet<usize, usize, f64>> = Vec::with_capacity(n * 8);
+    for j in 0..n {
+        for i in 0..n {
+            let v = a_re[(i, j)] - sigma * b_re[(i, j)];
+            if v != 0.0 {
+                triplets.push(Triplet::new(i, j, v));
+            }
+        }
+    }
+    let shifted =
+        SparseColMat::<usize, f64>::try_new_from_triplets(n, n, &triplets).map_err(|e| {
+            yee_core::Error::Numerical(format!(
+                "eigensolver(mixed): failed to build sparse (A − σB) for cutoff shift-invert: {e:?}"
+            ))
+        })?;
+    let lu: Lu<usize, f64> = shifted.sp_lu().map_err(|e| {
+        yee_core::Error::Numerical(format!(
+            "eigensolver(mixed): sparse LU of (A − σB) failed: {e:?} (cutoff shift σ={sigma})"
+        ))
+    })?;
+
+    // Apply T = (A − σB)⁻¹ B to a single column.
+    let apply_t = |col: &DMatrix<f64>| -> DMatrix<f64> {
+        let rhs = b_re * col;
+        let mut y = faer::Mat::<f64>::zeros(n, 1);
+        for i in 0..n {
+            y[(i, 0)] = rhs[(i, 0)];
+        }
+        lu.solve_in_place_with_conj(faer::Conj::No, y.as_mut());
+        DMatrix::<f64>::from_fn(n, 1, |i, _| y[(i, 0)])
+    };
+
+    // Deterministic block seed (distinct dominant spatial frequency per
+    // column + a column-dependent spike, mirroring yee-fem `block_seed`), so
+    // the subspace spans a genuinely `block`-dimensional space and the
+    // eigensolve is bit-reproducible.
+    let mut s: Vec<DMatrix<f64>> = (0..block)
+        .map(|c| {
+            let freq = (c as f64 + 1.0) * std::f64::consts::PI;
+            let phase = 0.37 * c as f64;
+            let mut v = DMatrix::<f64>::from_fn(n, 1, |i, _| {
+                let t = (i as f64 + 0.5) / (n as f64);
+                (freq * t + phase).cos() + 0.25 * (2.0 * freq * t).sin()
+            });
+            v[(c % n, 0)] += 1.0;
+            v
+        })
+        .collect();
+
+    let mut prev_kc: Vec<f64> = vec![f64::NAN; block];
+    let mut ritz: Vec<(f64, DMatrix<f64>)> = Vec::new();
+    let max_sweeps = 100usize;
+    for _sweep in 0..max_sweeps {
+        // Inverse-iterate every column: S ← T S.
+        for col in s.iter_mut() {
+            *col = apply_t(col);
+        }
+        // B-orthonormalize the block by modified Gram-Schmidt in the B-inner
+        // product, dropping columns that collapse (soft-locking). `B` is
+        // SPD on the recovered physical subspace; a non-positive B-norm
+        // signals a column that fell into the indefinite coupling/gradient
+        // direction — drop it.
+        b_orthonormalize_block(&mut s, b_re, n);
+        if s.is_empty() {
+            break;
+        }
+        // Dense Rayleigh-Ritz on the B-orthonormal block: solve the small
+        // projected standard pencil (SᵀAS) c = k_c² (SᵀBS) c. With S
+        // B-orthonormal, SᵀBS ≈ I, but we form it for the Cholesky reduction
+        // so rounding does not bias the Ritz values.
+        let bb = s.len();
+        let sa: Vec<DMatrix<f64>> = s.iter().map(|c| a_re * c).collect();
+        let sb: Vec<DMatrix<f64>> = s.iter().map(|c| b_re * c).collect();
+        let mut g_a = DMatrix::<f64>::zeros(bb, bb);
+        let mut g_b = DMatrix::<f64>::zeros(bb, bb);
+        for i in 0..bb {
+            for j in i..bb {
+                let va = (s[i].transpose() * &sa[j])[(0, 0)];
+                let vb = (s[i].transpose() * &sb[j])[(0, 0)];
+                g_a[(i, j)] = va;
+                g_a[(j, i)] = va;
+                g_b[(i, j)] = vb;
+                g_b[(j, i)] = vb;
+            }
+        }
+        let Some((vals, vecs)) = dense_small_gen_sym_eigen(&g_a, &g_b) else {
+            break;
+        };
+        // Rotate the block into the Ritz basis: new S column k = Σ_r S[r]·C[r,k].
+        let mut new_s: Vec<DMatrix<f64>> = Vec::with_capacity(bb);
+        for k in 0..bb {
+            let mut v = DMatrix::<f64>::zeros(n, 1);
+            for (r, sr) in s.iter().enumerate() {
+                let c = vecs[(r, k)];
+                if c != 0.0 {
+                    v += c * sr;
+                }
+            }
+            new_s.push(v);
+        }
+        ritz = vals.iter().cloned().zip(new_s.iter().cloned()).collect();
+        s = new_s;
+
+        // Convergence: the (up to `block`) Ritz k_c² nearest σ have stopped
+        // moving. Compare the sorted-by-|k_c²−σ| leading values.
+        let mut idx: Vec<usize> = (0..bb).collect();
+        idx.sort_by(|&p, &q| {
+            (vals[p] - sigma)
+                .abs()
+                .partial_cmp(&(vals[q] - sigma).abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut moved = false;
+        for (rank, &i) in idx.iter().enumerate().take(prev_kc.len().min(bb)) {
+            let pv = prev_kc[rank];
+            if !pv.is_finite() || (vals[i] - pv).abs() > 1e-9 * vals[i].abs().max(1.0) {
+                moved = true;
+            }
+            prev_kc[rank] = vals[i];
+        }
+        if !moved {
+            break;
+        }
+    }
+
+    if ritz.is_empty() {
+        return Err(yee_core::Error::Numerical(format!(
+            "eigensolver(mixed): cutoff block shift-invert collapsed to an empty subspace \
+             at σ={sigma}"
+        )));
+    }
+    Ok(ritz
+        .into_iter()
+        .map(|(kc, v)| (kc, v.column(0).iter().copied().collect::<Vec<f64>>()))
+        .collect())
+}
+
+/// In-place block `B`-orthonormalization by modified Gram-Schmidt in the
+/// `B`-inner product (`⟨u,v⟩_B = uᵀ B v`), dropping columns whose
+/// post-orthogonalization `B`-norm is non-positive or below `√ε` (soft
+/// locking — and, here, also the guard that rejects columns that drifted into
+/// the indefinite coupling/gradient directions where `uᵀ B u ≤ 0`). Peer of
+/// yee-fem's `block_m_orthonormalize`, on `DMatrix` columns.
+fn b_orthonormalize_block(block: &mut Vec<DMatrix<f64>>, b_re: &DMatrix<f64>, n: usize) {
+    let drop_tol = f64::EPSILON.sqrt();
+    let mut accepted: Vec<DMatrix<f64>> = Vec::with_capacity(block.len());
+    for col in block.drain(..) {
+        let mut v = col;
+        for ej in &accepted {
+            let bv = b_re * &v;
+            let coeff = (ej.transpose() * &bv)[(0, 0)];
+            v -= coeff * ej;
+        }
+        let bv = b_re * &v;
+        let norm_sq = (v.transpose() * &bv)[(0, 0)];
+        if !norm_sq.is_finite() || norm_sq <= drop_tol * drop_tol {
+            continue; // collapsed into the accepted span, or non-B-positive
+        }
+        let inv = 1.0 / norm_sq.sqrt();
+        accepted.push(DMatrix::<f64>::from_fn(n, 1, |i, _| v[(i, 0)] * inv));
+    }
+    *block = accepted;
+}
+
+/// Solve the small dense **generalized symmetric** pencil `G_a c = λ G_b c`
+/// (`G_a = SᵀAS`, `G_b = SᵀBS`) by the Cholesky-reduction path (peer of
+/// yee-fem's `dense_gen_sym_eigen`): `G_b = L Lᵀ`, standard problem
+/// `(L⁻¹ G_a L⁻ᵀ) y = λ y`, `nalgebra` symmetric eigensolve, back-transform
+/// `c = L⁻ᵀ y`. Returns `(eigenvalues, eigenvectors)` (eigenvectors
+/// column-stacked in the `S` basis), or `None` if `G_b` is not SPD (the block
+/// is rank-deficient despite the soft-lock drop — the caller stops the sweep).
+fn dense_small_gen_sym_eigen(
+    g_a: &DMatrix<f64>,
+    g_b: &DMatrix<f64>,
+) -> Option<(Vec<f64>, DMatrix<f64>)> {
+    let bb = g_a.nrows();
+    let chol = g_b.clone().cholesky()?;
+    let l = chol.l();
+    let y = l.solve_lower_triangular(g_a)?;
+    let z = l.solve_lower_triangular(&y.transpose())?;
+    let a_tilde = z.transpose();
+    let a_sym = 0.5 * (&a_tilde + a_tilde.transpose());
+    let eig = SymmetricEigen::new(a_sym);
+    let lt = l.transpose();
+    let mut c = DMatrix::<f64>::zeros(bb, bb);
+    let mut vals = vec![0.0_f64; bb];
+    for col in 0..bb {
+        vals[col] = eig.eigenvalues[col];
+        let yvec = eig.eigenvectors.column(col).clone_owned();
+        let cy = lt.solve_upper_triangular(&yvec)?;
+        for row in 0..bb {
+            c[(row, col)] = cy[row];
+        }
+    }
+    Some((vals, c))
+}
+
+/// Recover `k_0²` from the β-direct operator `k_op = k_0² B − A` given `A` and
+/// `B`, via the least-squares ratio `Σ k_op_ij·B_ij / Σ B_ij²` of
+/// `(k_op + A) = k_0² B`. Used only to thread a consistent σ scale into
+/// [`cutoff_candidates`] from the dense-reference caller; the result is
+/// exact up to floating-point since `k_op + A = k_0² B` holds entrywise.
+fn recover_k0_sq(k_op: &DMatrix<f64>, a_re: &DMatrix<f64>, b_re: &DMatrix<f64>) -> f64 {
+    let mut num = 0.0_f64;
+    let mut den = 0.0_f64;
+    let n = b_re.nrows();
+    for j in 0..n {
+        for i in 0..n {
+            let kb = k_op[(i, j)] + a_re[(i, j)]; // = k_0² B_ij
+            let b = b_re[(i, j)];
+            num += kb * b;
+            den += b * b;
+        }
+    }
+    if den > 0.0 { num / den } else { 0.0 }
 }
 
 /// Select the dominant mode of the **cutoff** pencil whose *cutoff-pencil*
@@ -599,7 +1022,14 @@ fn select_dominant_cutoff_rq(
     n_t: usize,
 ) -> Result<(Vec<f64>, f64), yee_core::Error> {
     let mut best: Option<(f64, Vec<f64>)> = None; // (R(x_c), eigenvector)
-    for (rq, x) in cutoff_candidates(a_re, b_re, k_op, b1_re, n)? {
+    // The dense-reference path is exercised on small-`n` anchors only; pass
+    // `k0_sq` recovered from the supplied `k_op = k0² B − A` so the shared
+    // [`cutoff_candidates`] sparse-or-dense dispatch sees a consistent scale.
+    // (`select_dominant_cutoff_rq` is itself only reached on small `n`, so the
+    // dense branch is taken regardless; `k0_sq` is needed only for the sparse
+    // branch's σ ladder.)
+    let k0_sq = recover_k0_sq(k_op, a_re, b_re);
+    for (rq, x) in cutoff_candidates(a_re, b_re, k_op, b1_re, n, k0_sq)? {
         let total: f64 = x.iter().map(|&v| v * v).sum();
         let trans: f64 = (0..n_t).map(|i| x[i] * x[i]).sum();
         if total <= 0.0 || trans / total < TRANSVERSE_ENERGY_FLOOR {
@@ -1027,6 +1457,35 @@ mod tests {
         TriMesh2D::new(vertices, triangles, None, Some(tags)).unwrap()
     }
 
+    /// Vertical-slab WR-90 mesh: lower-x half tagged 1, rest tagged 0
+    /// (mirrors `eigensolver_inhomogeneous::vertical_slab_mesh`).
+    fn vertical_slab_mesh(a: f64, b: f64, nx: usize, ny: usize) -> TriMesh2D {
+        let mut vertices = Vec::with_capacity((nx + 1) * (ny + 1));
+        for j in 0..=ny {
+            for i in 0..=nx {
+                vertices.push([a * (i as f64) / (nx as f64), b * (j as f64) / (ny as f64)]);
+            }
+        }
+        let idx = |i: usize, j: usize| j * (nx + 1) + i;
+        let mut triangles = Vec::with_capacity(2 * nx * ny);
+        let mut tags = Vec::with_capacity(2 * nx * ny);
+        for j in 0..ny {
+            for i in 0..nx {
+                let v00 = idx(i, j);
+                let v10 = idx(i + 1, j);
+                let v11 = idx(i + 1, j + 1);
+                let v01 = idx(i, j + 1);
+                let xc = a * ((i as f64) + 0.5) / (nx as f64);
+                let tag = if xc < a / 2.0 { 1u32 } else { 0u32 };
+                triangles.push([v00, v10, v11]);
+                tags.push(tag);
+                triangles.push([v00, v11, v01]);
+                tags.push(tag);
+            }
+        }
+        TriMesh2D::new(vertices, triangles, None, Some(tags)).unwrap()
+    }
+
     #[test]
     fn zeroing_coupling_changes_hybrid_mode() {
         // Step-5-review P1-1 load-bearing guard (the coupling-block coverage
@@ -1181,5 +1640,178 @@ mod tests {
             "sparse direct β {beta_sparse} must match dense-RQ β {beta_rq} on a uniform fill \
              (rel {rel:.3e}); the eigenvectors coincide there"
         );
+    }
+
+    /// Run the production downstream selection (β-direct shift-invert from
+    /// each candidate shift + transverse screen + highest-β²) given an
+    /// already-gathered candidate list, returning the dominant β. Mirrors the
+    /// step-2 loop of [`solve_dense_mixed`]; used by the M2 dense-vs-sparse
+    /// agreement guard to isolate the **candidate source** from the rest of
+    /// the pipeline.
+    fn dominant_beta_from_candidates(
+        cands: &[CutoffCandidate],
+        k_op: &DMatrix<f64>,
+        b1_re: &DMatrix<f64>,
+        n: usize,
+        n_t: usize,
+    ) -> f64 {
+        let mut best: Option<f64> = None;
+        for (sigma0, x_c) in cands {
+            if let Ok((beta_sq, _)) =
+                beta_direct_shift_invert(k_op, b1_re, n, n_t, *sigma0, Some(x_c))
+                && beta_sq > 0.0
+                && beta_sq.is_finite()
+            {
+                best = Some(match best {
+                    None => beta_sq,
+                    Some(c) => c.max(beta_sq),
+                });
+            }
+        }
+        best.expect("a transverse-dominated propagating mode")
+            .sqrt()
+    }
+
+    /// Tag a raw `(k_c², x_c)` list with the β-direct Rayleigh quotient and
+    /// the positive-k_c² floor, then sort descending — the same post-
+    /// processing [`cutoff_candidates`] applies, factored for the M2 test so
+    /// it can compare the dense and sparse *sources* through identical
+    /// tagging.
+    fn tag_candidates(
+        raw: Vec<(f64, Vec<f64>)>,
+        spurious_floor: f64,
+        k_op: &DMatrix<f64>,
+        b1_re: &DMatrix<f64>,
+        n: usize,
+    ) -> Vec<CutoffCandidate> {
+        let mut cands: Vec<CutoffCandidate> = Vec::new();
+        for (k_c_sq, x) in raw {
+            if !k_c_sq.is_finite() || k_c_sq <= spurious_floor {
+                continue;
+            }
+            let total: f64 = x.iter().map(|&v| v * v).sum();
+            if total <= 0.0 {
+                continue;
+            }
+            let Some(rq) = rayleigh_beta_sq(k_op, b1_re, n, &x) else {
+                continue;
+            };
+            if rq <= 0.0 || !rq.is_finite() {
+                continue;
+            }
+            cands.push((rq, x));
+        }
+        cands.sort_by(|p, q| q.0.partial_cmp(&p.0).unwrap_or(std::cmp::Ordering::Equal));
+        cands
+    }
+
+    /// M2 (Phase 1.3.1.1 step 5.7, DoD-1 — THE GUARD). The **sparse** cutoff
+    /// shift-invert (`sparse_cutoff_eigenpairs`) must yield the SAME dominant
+    /// mode as the **dense** `complex_eigenvalues` path
+    /// (`dense_cutoff_eigenpairs`) at the existing validation meshes, when
+    /// fed through the identical downstream selection. This pins that
+    /// switching the candidate source to sparse does not change the selected
+    /// physical mode — the non-negotiable agreement the escape-hatch forbids
+    /// shipping without. Covered cases: homogeneous (ε_r=1), uniform fill
+    /// (ε_r=2.55), vertical slab (ε_r=2.2), FR-4 horizontal slab (ε_r=4.4),
+    /// and the high-contrast horizontal slab (ε_r=10.2).
+    #[test]
+    fn sparse_cutoff_agrees_with_dense_dominant_beta() {
+        let a = 22.86e-3;
+        let b = 10.16e-3;
+        let freq_hz = 10e9;
+        let omega = std::f64::consts::TAU * freq_hz;
+        let k0 = omega / yee_core::units::C0;
+        let k0_sq = k0 * k0;
+
+        // (label, mesh, ε_r map, agreement tolerance). The homogeneous /
+        // uniform cases are essentially exact (the dominant cutoff is well
+        // isolated); the loaded slabs allow a small tol for the sparse
+        // subspace's benign rounding vs the dense QR. All are far tighter
+        // than the gate tolerances (≤5 % FR-4, etc.).
+        let air = || {
+            let mut e = HashMap::new();
+            e.insert(0u32, Complex64::new(1.0, 0.0));
+            e
+        };
+        let uniform = || {
+            let mut e = HashMap::new();
+            e.insert(0u32, Complex64::new(2.55, 0.0));
+            e
+        };
+        let loaded = |eps_fill: f64| {
+            let mut e = HashMap::new();
+            e.insert(0u32, Complex64::new(1.0, 0.0));
+            e.insert(1u32, Complex64::new(eps_fill, 0.0));
+            e
+        };
+
+        let cases: Vec<(&str, TriMesh2D, HashMap<u32, Complex64>, f64)> = vec![
+            (
+                "homogeneous 6x6 ε_r=1",
+                rectangular_mesh(a, b, 6, 6),
+                air(),
+                1e-6,
+            ),
+            (
+                "uniform 6x6 ε_r=2.55",
+                rectangular_mesh(a, b, 6, 6),
+                uniform(),
+                1e-6,
+            ),
+            (
+                "vertical-slab 8x8 ε_r=2.2",
+                vertical_slab_mesh(a, b, 8, 8),
+                loaded(2.2),
+                5e-4,
+            ),
+            (
+                "FR-4 horiz 8x8 ε_r=4.4",
+                horizontal_slab_mesh(a, b, 8, 8),
+                loaded(4.4),
+                5e-4,
+            ),
+            (
+                "hi-contrast horiz 8x8 ε_r=10.2",
+                horizontal_slab_mesh(a, b, 8, 8),
+                loaded(10.2),
+                5e-4,
+            ),
+        ];
+
+        let mut mu = HashMap::new();
+        mu.insert(0u32, Complex64::new(1.0, 0.0));
+        mu.insert(1u32, Complex64::new(1.0, 0.0));
+
+        for (label, mesh, eps, tol) in cases {
+            let table = EdgeTable::build(&mesh);
+            let asm = assemble_mixed(&mesh, &eps, &mu, &table);
+            let (a_re, b_re, b1_re) = mixed_real_blocks(&asm).unwrap();
+            let n = asm.n_t + asm.n_z;
+            let n_t = asm.n_t;
+            let k_op = k0_sq * &b_re - &a_re;
+
+            let (dense_raw, dense_floor) = dense_cutoff_eigenpairs(&a_re, &b_re).unwrap();
+            let dense_cands = tag_candidates(dense_raw, dense_floor, &k_op, &b1_re, n);
+            let beta_dense = dominant_beta_from_candidates(&dense_cands, &k_op, &b1_re, n, n_t);
+
+            let (sparse_raw, sparse_floor) =
+                sparse_cutoff_eigenpairs(&a_re, &b_re, &b1_re, n, k0_sq).unwrap();
+            let sparse_cands = tag_candidates(sparse_raw, sparse_floor, &k_op, &b1_re, n);
+            let beta_sparse = dominant_beta_from_candidates(&sparse_cands, &k_op, &b1_re, n, n_t);
+
+            let rel = (beta_sparse - beta_dense).abs() / beta_dense.abs().max(1e-30);
+            eprintln!(
+                "M2 {label} (n={n}): dense β={beta_dense:.6}, sparse β={beta_sparse:.6}, \
+                 rel {rel:.3e}  (#dense_cands={}, #sparse_cands={})",
+                dense_cands.len(),
+                sparse_cands.len()
+            );
+            assert!(
+                rel <= tol,
+                "{label}: sparse cutoff dominant β {beta_sparse} must agree with dense \
+                 {beta_dense} (rel {rel:.3e} > tol {tol:.1e}) — DoD-1 is non-negotiable"
+            );
+        }
     }
 }
