@@ -73,6 +73,30 @@ either way), not a grind.
   remain open but are documented as grind-risky — to be approached with
   tight bounded-experiment framing when chosen, not as open dives.
 
+## As-built outcome (2026-05-23, merge `516acec`)
+
+The p=2 elements are **correct and validated** (J1 independent-quadrature
+pins every element matrix to <1e-12; J3 reproduces analytic TE10 ≤ p1 on
+the homogeneous WR-90 — both reviewer-confirmed sound), but the ε_r=10.2
+gate did **NOT** close: p=2 is *worse* than p1 (ε_eff ~4.8 vs ~5.9,
+reference 8.17). The root-cause is **out-of-lane** and reviewer-confirmed:
+`solve.rs::solve_dense_mixed`'s mode selection takes the smallest
+transverse-dominated k_c²; at p=2 the curl-free gradient edge functions
+`∇(λ_aλ_b)` enlarge the near-null cluster, so the selection locks onto a
+non-dominant low-ε_eff mode. J1 (element matrices, contrast-agnostic) +
+J3 (full chain on the analytic homogeneous case) logically exclude an
+element bug, forcing the failure downstream into selection. The
+escape-hatch "documented finding, do NOT touch solve.rs, queue step-5.6"
+branch was taken; the p=2 elements ship as a reusable validated asset.
+
+**step-5.6 (the real closure, in `solve.rs`):** a p=2-robust mode
+selection — seed the β-direct shift-invert from a TEM-like / physical-β
+estimate and screen by ε_eff, rather than the smallest cutoff k_c²;
+and/or a sparse cutoff selection for finer p=2 meshes. Step-5.5 review
+carry-ins: P1-1 (a p=2 uniform-fill ε_r=2.55 analytic anchor closing the
+ε_r≠1 `assemble_mixed_p2` coverage gap) and wiring `ElementOrder::Second`
+through `ports.rs` so p=2 is reachable end-to-end (currently lib-internal).
+
 ## References
 
 * Jin, *FEM in EM* 3rd ed. §9.4. Webb, IEEE TAP 1999 (hierarchal vector
