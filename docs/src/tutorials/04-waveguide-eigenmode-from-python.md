@@ -230,15 +230,18 @@ dielectric inclusion forces stronger fields near a material interface.
   comparing the numerical sweep to a dense analytic curve, lives at
   `examples/python/eigensolver_wr90_te10.ipynb`. Run it after `maturin
   develop --release` from the same virtualenv.
-- The current `solve` path uses a dense generalised eigendecomposition.
-  **Phase 1.3.1.1 step 4** swaps in a sparse shift-and-invert (ARPACK-style)
-  for cross-sections with more than a few hundred DOF — same Python API,
-  larger meshes feasible.
-- **Phase 1.3.1.1 step 5** adds the longitudinal block that turns this
-  TE-only solver into a full quasi-TEM cross-section solver, which is
-  what a microstrip wave-port actually needs. Until then,
-  `NumericalCrossSection` is correct for hollow / homogeneously-filled
-  rectangular and circular guides only.
+- **Status update (steps 4–5.2 shipped).** The roadmap items below have
+  since landed: step 4 added an in-tree block LOBPCG (ADR-0050), step 5
+  the mixed `(E_t, E_z)` longitudinal block (ADR-0051), and step 5.2 the
+  β-direct extraction fix that makes dielectric fills correct (ADR-0053).
+  `NumericalCrossSection` is now production-quality for hollow and
+  *uniformly*-filled guides and supports *inhomogeneous* (microstrip-style)
+  fills, with a high-contrast accuracy gap still closing (step 5.3). For
+  the current formulation, solver options, and validation status see the
+  theory chapter
+  [Cross-Section (Waveguide-Port) Eigensolver](../theory/cross-section-eigensolver.md).
+  This tutorial's TE10-only homogeneous walkthrough remains correct as an
+  introduction.
 - Theory background and references for the Nedelec edge-element
   formulation live in `docs/src/theory/planar-mom.md`; Pozar §3.3
   remains the textbook reference for the analytic side.

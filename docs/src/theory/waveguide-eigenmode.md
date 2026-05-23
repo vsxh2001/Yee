@@ -299,22 +299,27 @@ style) eigensolve is required.
 
 ## 10. Limitations and roadmap
 
+> **Status update.** The roadmap items called "future" below have since
+> shipped (steps 4–5.2). This page documents the transverse-only,
+> homogeneous step-3 foundation + the Nedelec element-matrix
+> derivations; for the current mixed formulation, β-direct extraction,
+> solver options, and validation status see
+> [Cross-Section (Waveguide-Port) Eigensolver](./cross-section-eigensolver.md).
+
 - **Higher-order Nedelec.** Phase 1.3.1.x will land second-order
   edge elements (Whitney-1 plus quadratic bubble), bringing
-  convergence to `O(h²)` energy / `O(h⁴)` eigenvalue. The curl is
-  no longer constant per triangle, so embedded Gauss quadrature
-  per element becomes load-bearing.
-- **Sparse shift-and-invert eigensolve.** Dense `SymmetricEigen`
-  is `O(n³)` and viable only up to a few hundred DoF. Phase
-  1.3.1.1 step 4 wires in a sparse Arnoldi / LOBPCG path
-  (`arpack-rs` was escape-hatched; current candidate is hand-rolled
-  LOBPCG against `faer`-sparse). See spec
-  `2026-05-17-phase-1-3-1-1-cross-section-eigensolver-design.md`.
-- **Mixed `(E_t, E_z)` formulation for inhomogeneous fills.** The
-  longitudinal-block element matrices are implemented and unit-
-  tested; the eigensolve wires in transverse-only. Phase 1.3.1.1
-  step 5 turns on the mixed formulation, required for quasi-TEM
-  microstrip on a layered substrate where `E_z = 0` breaks down.
+  convergence to `O(h²)` energy / `O(h⁴)` eigenvalue — the candidate
+  fix for the residual high-contrast inhomogeneous discretisation gap.
+- **Sparse shift-and-invert eigensolve.** *Shipped:* step 4 added an
+  in-tree block LOBPCG against `faer`-sparse (ADR-0050; `arpack-rs`
+  declined). Dense `SymmetricEigen` remains the small-`n` reference;
+  step 5.3 adds a direct β-direct sparse shift-and-invert (ADR-0054).
+- **Mixed `(E_t, E_z)` formulation for inhomogeneous fills.** *Shipped:*
+  step 5 turned on the mixed formulation (ADR-0051; the coupling carries
+  the `1/μ_r` curl-curl weight, ADR-0053), and step 5.2 fixed the
+  β-direct extraction so dielectric fills are correct. Required for
+  quasi-TEM microstrip on a layered substrate where `E_z = 0` breaks
+  down.
 - **Anisotropic / dispersive media.** Tensor `ε_r`, `μ_r` are Phase
   1.3.3+. Dispersive (Drude/Lorentz/Debye) materials live in
   `yee-fdtd` and are not wired into the MoM port path.
