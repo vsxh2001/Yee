@@ -63,6 +63,27 @@ residual, if any, isolates discretization for higher-order work.
   pure discretization → step-5.4 (higher-order / p-refinement).
 * Lossy complex-ε_r sparse solve remains Phase 1.3.1.2.
 
+## As-built outcome (2026-05-23, merge `6eca76a` + hardening `d051ebf`)
+
+The decision held as designed. Confirmed results:
+
+* **§4 closed at FR-4:** ε_r=4.4 horizontal slab β=328.57 vs the verified
+  reference 324.05 — rel 1.39% ≤5%, a failing→passing gate.
+* **(a)-vs-(b) settled empirically:** the true β-direct eigenvector
+  improved on the step-5.2 hybrid by only **~1%** (483→489), so the
+  RQ-eigenvector-mismatch (b) is ~1%; the ε_r=10.2 ~16% residual is
+  **(a) discretization-dominated** (β plateaus 489→487→486 under
+  refinement) → step-5.4 (higher-order elements).
+* **Eigenvector finding:** the true β-direct dominant mode is
+  near-pure-transverse (‖E_z‖/‖E_t‖≈2e-5); the step-5.2 hybrid's 0.0105
+  was a *cutoff-pencil* artifact, not the physical mode. The coupling
+  block is nonetheless strongly load-bearing (zeroing `B_tz` shifts β
+  ≈49%), so the coupling guard was re-anchored from the E_z-fraction
+  onto that β-sensitivity (a stronger test).
+* **Hardening (`d051ebf`):** `beta_direct_shift_invert` now errors on
+  non-convergence rather than returning an unconverged β² (review P1-1) —
+  landed before step-5.4 introduces new geometries.
+
 ## References
 
 * Saad, *Numerical Methods for Large Eigenvalue Problems* (shift-invert).
