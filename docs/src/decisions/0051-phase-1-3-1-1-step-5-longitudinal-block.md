@@ -94,21 +94,29 @@ authoritative where this section and the design prose above differ.
    **indefinite** (the off-diagonal coupling straddles zero even though
    `B_tt`, `B_zz` are individually SPD), so Cholesky / symmetric-
    generalized solvers are invalid. `solve_dense_mixed` forms `B⁻¹A`
-   and uses a non-symmetric real-Schur eigensolve with SVD null-space
+   and uses a non-symmetric real-Schur eigensolve with **inverse-iteration**
    eigenvector recovery — acceptable at the `n ≈ 121` validation scale;
    a symmetric-indefinite / LDLᵀ path is the right move when the sparse
-   solve lands.
+   solve lands. (An initial SVD null-space recovery was abandoned: it
+   grabbed a spurious E_t-only gradient direction from `A_tt`'s curl
+   null-space instead of the physical hybrid mode.)
 
-2. **Decoupling on a homogeneous guide is a *global* property, not
-   entry-wise.** `local_b_ze` does **not** vanish entry-wise for
-   uniform `ε_r` (only its column sums vanish, `Σ∇L_i = 0`); the
-   transverse mode decouples because `B_zt e_t = 0` for the
-   divergence-free mode. Consequence: the DoD-V1 homogeneous canary
-   leaves `B_tz` multiplying a zero `E_z` block, so it does **not**
-   exercise the coupling-block sign. A **horizontal-slab** (`y = const`
-   interface) case with the dominant mode carrying `E_z ≠ 0`
-   (`‖E_z‖/‖E_t‖ > 1e-2`), plus a zero-`B_tz` perturbation guard, is
-   what pins the coupling sign.
+2. **Coupling-block weight corrected `ε_r → 1/μ_r` — a real bug fix.**
+   The originally-staged `local_b_ze` computed `∫ε_r ∇L·N`, a
+   divergence-penalty term that the divergence-free curl-null-space mode
+   annihilates (Boffi-Brezzi), making the coupling **physically inert on
+   every geometry** (`‖E_z‖/‖E_t‖ = 0`). The correct Lee-Sun-Cendes
+   coupling is the curl-curl cross term `∫(1/μ_r) ∇L·N` (matching
+   `A_zz`); spec §3 prose had the right weight, the staged docstring did
+   not. With the fix the coupling is **load-bearing on inhomogeneous
+   guides**. The DoD-V1 homogeneous canary cannot guard it — the
+   homogeneous dominant mode is pure-TE (`E_z = 0`), weight-independent —
+   so the coupling sign/scale is pinned instead by three new guards: a
+   **horizontal-slab** `E_z ≠ 0` case (`‖E_z‖/‖E_t‖ = 0.0105`), an
+   independent-midpoint-quadrature sign/scale unit test, and a
+   zero-`B_tz` β-delta test (β shifts 4.7%). Without the review's demand
+   for coupling coverage (P1-1) this no-op coupling would have shipped,
+   producing plausible-but-wrong β/Z_w on real microstrip cross-sections.
 
 3. **Validation shipped on DoD-V2′, not the published transcendental.**
    The closed-form dielectric-loaded-guide transcendental reference
