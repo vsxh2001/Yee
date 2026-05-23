@@ -2022,6 +2022,68 @@ mod tests {
         );
     }
 
+    /// Solve the dominant-mode β for a WR-90 guide **uniformly** filled with
+    /// `eps_fill` at the given element order. Both material tags carry the
+    /// same permittivity, so there is no interface and no E_t/E_z coupling —
+    /// isolating the β-extraction. Shared by the p=2 uniform-fill anchor.
+    fn solve_uniform_fill_beta(
+        nx: usize,
+        ny: usize,
+        eps_fill: f64,
+        order: super::super::ElementOrder,
+    ) -> f64 {
+        let a = 22.86e-3;
+        let b = 10.16e-3;
+        let mesh = rectangular_mesh(a, b, nx, ny); // single tag 0
+        let mut eps = HashMap::new();
+        eps.insert(0u32, Complex64::new(eps_fill, 0.0));
+        eps.insert(1u32, Complex64::new(eps_fill, 0.0));
+        let mut mu = HashMap::new();
+        mu.insert(0u32, Complex64::new(1.0, 0.0));
+        mu.insert(1u32, Complex64::new(1.0, 0.0));
+        let table = EdgeTable::build(&mesh);
+        let asm = match order {
+            super::super::ElementOrder::First => assemble_mixed(&mesh, &eps, &mu, &table),
+            super::super::ElementOrder::Second => assemble_mixed_p2(&mesh, &eps, &mu, &table),
+        };
+        let sol =
+            crate::eigensolver::solve_dense_mixed(&asm, 10.0e9).expect("uniform-fill mixed solve");
+        sol.beta_sq.re.max(0.0).sqrt()
+    }
+
+    #[test]
+    fn p2_uniform_fill_beta_matches_analytic() {
+        // Phase 1.3.1.1 step 5.6 K2 (review P1-1): a WR-90 guide UNIFORMLY
+        // filled with ε_r = 2.55 (PTFE) at SECOND ORDER must reproduce the
+        // analytic fully-filled-TE10 β = √(ε_r k₀² − (π/a)²) ≈ 305.16 rad/m
+        // (Pozar §3.3) within 1 %. A uniform fill has NO inhomogeneity and NO
+        // E_t/E_z coupling, so this isolates the p=2 β-EXTRACTION at ε_r ≠ 1 —
+        // the coverage gap the p1 anchor (`dod1_uniform_fill_beta_matches_…`)
+        // and the homogeneous p2 anchor (`p2_homogeneous_wr90_te10_…`, ε_r=1)
+        // together leave open: a p=2 `b_tt`/`b_tt1` weighted-vs-unweighted
+        // mass swap would pass both yet fail here. The selection fix
+        // (step-5.6 K1) is also exercised end-to-end at p=2 on a clean
+        // (no-spurious-cluster) inhomogeneity.
+        let a = 22.86e-3;
+        let k0 = std::f64::consts::TAU * 10.0e9 / yee_core::units::C0;
+        let kx = std::f64::consts::PI / a;
+        let eps_r = 2.55;
+        let beta_analytic = (eps_r * k0 * k0 - kx * kx).sqrt();
+
+        let beta_p2 = solve_uniform_fill_beta(6, 6, eps_r, super::super::ElementOrder::Second);
+        let rel = (beta_p2 - beta_analytic).abs() / beta_analytic;
+        eprintln!(
+            "K2 p=2 uniform fill (ε_r={eps_r}): p2 β {beta_p2:.6}, analytic \
+             √(ε_r k₀²−(π/a)²) {beta_analytic:.6}, rel {rel:.4e}"
+        );
+        assert!(
+            rel < 0.01,
+            "p=2 uniform-fill β {beta_p2} must match analytic {beta_analytic} within 1 % \
+             (rel {rel:.4e}); a failure here is the p=2 β-extraction / b_tt-vs-b_tt1 mass, \
+             not inhomogeneity"
+        );
+    }
+
     /// Uniform horizontal-slab WR-90 mesh: dielectric (tag 1) in 0≤y<b/2,
     /// air (tag 0) above. Interface node sits exactly at b/2 for even ny.
     fn slab_mesh(nx: usize, ny: usize) -> TriMesh2D {
@@ -2077,64 +2139,56 @@ mod tests {
 
     #[test]
     fn p2_hi_contrast_convergence_study_documented_finding() {
-        // Phase 1.3.1.1 step 5.5 J4 (DoD-1/2, NON-FAILING DOCUMENTED FINDING).
-        // The ≤5 % §4 high-contrast closure gate is NOT added — p=2 does NOT
-        // reach it through the EXISTING (step-5.3) dense cutoff-pencil mode
-        // selection, and the escape-hatch is explicit: a solver change is a
-        // FINDING, not a fix (do NOT edit solve.rs to force a match; do NOT
-        // weaken any gate). This test records the evidence.
+        // Phase 1.3.1.1 step 5.6 (DoD-3, NON-FAILING DOCUMENTED FINDING —
+        // the *finer-mesh branch*). The ≤5 % §4 high-contrast closure gate is
+        // NOT added: with the step-5.6 mode-selection fix the SELECTION now
+        // lands the physical dominant mode (the wrong-mode capture is gone),
+        // but the residual gap to the verified reference does NOT close to
+        // ≤5 % at the dense-cap mesh — it is the SAME first-order-class
+        // discretization plateau the step-5.4 h-study already pinned for p=1,
+        // and p=2 at the affordable (dense O(n³) cutoff-selection) mesh does
+        // not escape it. Do NOT weaken any gate; the §4 closure stays the
+        // FR-4 gate. This test records the evidence.
         //
-        // ── FINDING ─────────────────────────────────────────────────────────
-        // The p=2 element matrices are PROVEN correct independently of this
-        // study: each is pinned against an independent degree-5 quadrature
-        // (the J1 `p2_*_matches_independent_quadrature` tests), the basis is
-        // full-rank-8 + tangentially conforming, and — decisively — p=2
-        // reproduces the analytic homogeneous-WR-90 TE10 β at least as
-        // accurately as p=1 (the J3 `p2_homogeneous_wr90_te10_*` anchor). So
-        // the elements, DoF map, edge-DoF signs, and global assembly are
-        // RIGHT.
+        // ── WHAT step 5.6 FIXED (the selection) ─────────────────────────────
+        // The production solve (`solve::solve_dense_mixed`) previously seeded
+        // its β-direct shift-invert from the SMALLEST transverse-energy-
+        // dominated cutoff k_c², pre-rejecting candidates whose *cutoff-pencil*
+        // eigenvector was not transverse-dominated. At p=2 the curl-free
+        // gradient edge functions ∇(λ_aλ_b) enlarge the near-null cluster, so
+        // the PHYSICAL dominant mode's cutoff-pencil eigenvector mixes heavily
+        // with the E_z/gradient block (its ‖e_t‖²/‖x‖² drops to ≈0.03) even
+        // though its TRUE β-direct eigenvector is fully transverse (≈1.0). The
+        // pre-filter therefore discarded the physical mode's shift and the
+        // solver locked onto a non-dominant mode at ε_eff ≈ 4.8 (BELOW the
+        // area-average 5.6 — the wrong-mode signature). Step 5.6 gathers every
+        // propagating cutoff candidate (no cutoff-pencil transverse pre-filter,
+        // which is unreliable at p=2), shift-inverts from each, screens the
+        // CONVERGED β-direct eigenvector for transverse-dominance, and keeps
+        // the highest-β² (= highest-ε_eff = dominant quasi-TEM) survivor. The
+        // captured ε_eff recovers from ≈4.8 to ≈5.8 — the SAME field-
+        // concentrated dominant mode p=1 finds (the p=2 β now coincides with
+        // p=1's mesh-converged plateau, no longer "consistently worse").
         //
-        // At the ε_r=10.2 HIGH CONTRAST, however, the numerical β does NOT
-        // converge toward the verified reference 582.95 (ε_eff 8.17). The
-        // p=2 β lands ≈437-440 rad/m with ε_eff ≈ 4.8 — *below* the
-        // area-average ε_r=5.6 and far below the dominant LSM mode's 8.17 —
-        // and it is consistently *worse* than the p=1 result on the same
-        // mesh. An ε_eff that low is the signature of a WRONG-MODE capture:
-        // the solver is not landing the dominant field-concentrated mode.
+        // ── WHAT REMAINS (the discretization plateau → finer-mesh branch) ───
+        // The dominant mode's ε_eff PLATEAUS at ≈5.8 (β≈486) for BOTH p=1 and
+        // p=2 across 4×4→6×6 (release-mode 8×8 confirms the flat plateau),
+        // well short of the verified LSM-to-y reference 582.95 (ε_eff 8.17).
+        // With the eigenvector mismatch removed (step 5.3) AND the wrong-mode
+        // capture removed (step 5.6), the residual is unambiguously the
+        // FIRST-ORDER-CLASS discretization rate at the high-contrast interface
+        // field peak (step-5.4 verdict), which p=2 at the dense-cap mesh does
+        // not escape: the dense O(n³) cutoff selection caps p=2 at ≈6×6
+        // (n≈457, ~40 s); ≥8×8 is minutes-scale, so the finer p=2 meshes where
+        // a second-order convergence advantage would actually manifest are not
+        // routinely affordable. Closing ≤5 % is the DoD-3 finer-`--release`-
+        // mesh / sparse-cutoff-selection branch — queued to step-5.7. The
+        // selection fix is VALIDATED here by the ε_eff recovery toward 8.17
+        // (the wrong-mode signature is gone) even though ≤5 % is not reached.
         //
-        // ── ROOT CAUSE (out of the step-5.5 lane → finding, not fix) ─────────
-        // The production solve (`solve::solve_dense_mixed`) selects its
-        // physics shift from a DENSE cutoff-pencil eigendecomposition
-        // (`select_cutoff_mode`, O(n³)) that takes the SMALLEST
-        // transverse-energy-dominated k_c². At p=2 the curl-free space is much
-        // larger — the gradient edge functions G_e = ∇(λ_aλ_b) are curl-free,
-        // joining the nodal-gradient null-space — so the cutoff spectrum is
-        // far denser near zero and interleaved with several low-k_c²
-        // transverse-dominated modes. The selection + inverse-iteration then
-        // locks onto a NON-dominant mode (lower ε_eff), and the subsequent
-        // β-direct shift-invert refines *that* wrong eigenpair. On the
-        // HOMOGENEOUS guide this does not happen (J3 passes) because the
-        // dominant TE10 is cleanly separated; the failure is specific to the
-        // dense inhomogeneous p=2 spectrum. This is a SOLVER / mode-selection
-        // limitation (`solve.rs`, OUT OF the step-5.5 lane), exposed — not
-        // caused — by the correct higher-order elements.
-        //
-        // ── DISPOSITION ─────────────────────────────────────────────────────
-        // Queued to step-5.6: a mode-selection / shift strategy robust to the
-        // dense p=2 curl-free cluster (e.g. seed the β-direct shift-invert
-        // directly from the physical β estimate / a TEM-like initial vector
-        // and screen by ε_eff, rather than from the smallest cutoff k_c²;
-        // and/or a sparse cutoff selection so finer p=2 meshes — where the
-        // higher-order convergence would actually show — become affordable
-        // (the dense O(n³) selection caps p=2 at ≈6×6, n≈457, ~40s; ≥8×8 is
-        // minutes-scale)). The p=2 element family itself is a reusable,
-        // VALIDATED capability (J1+J3) regardless of this solver gap.
-        //
-        // Two cheap meshes (4×4, 5×5) so routine `cargo test` stays fast; the
-        // 6×6 point (n≈457, ~40 s under the dense O(n³) cutoff selection) is
-        // dropped from the routine run — two points already establish the
-        // finding (p=2 does not converge toward the reference), and the wider
-        // sweep belongs to the step-5.6 sparse-selection release path.
+        // Clean-interface meshes only (even ny: 4×4, 6×6) so b/2 lands on a
+        // node — an odd-ny straddled interface is a meshing artifact that
+        // depresses ε_eff independently of the selection.
         let k0 = std::f64::consts::TAU * 10.0e9 / yee_core::units::C0;
         let kx = std::f64::consts::PI / 22.86e-3;
         let eps_eff = |b: f64| (b * b + kx * kx) / (k0 * k0);
@@ -2148,7 +2202,7 @@ mod tests {
         )
         .expect("LSM transcendental dominant root for ε_r=10.2");
         eprintln!(
-            "step-5.5 p=2 high-contrast convergence study (horizontal slab ε_r=10.2, d₁=b/2, m=1):"
+            "step-5.6 p=2 high-contrast convergence study (horizontal slab ε_r=10.2, d₁=b/2, m=1):"
         );
         eprintln!(
             "  published reference (verified LSM-to-y): β_ref = {beta_ref:.4} rad/m \
@@ -2158,7 +2212,10 @@ mod tests {
 
         let mut best_p2_rel = f64::INFINITY;
         let mut max_p2_eps_eff = 0.0_f64;
-        for &(nx, ny) in &[(4usize, 4usize), (5, 5)] {
+        // Track the worst p2-vs-p1 ε_eff shortfall to assert p=2 is no longer
+        // "consistently worse" than p=1 (the step-5.5 wrong-mode signature).
+        let mut max_p1_minus_p2_eps_eff = f64::NEG_INFINITY;
+        for &(nx, ny) in &[(4usize, 4usize), (6, 6)] {
             let b1 = solve_slab_beta(nx, ny, 10.2, super::super::ElementOrder::First);
             let b2 = solve_slab_beta(nx, ny, 10.2, super::super::ElementOrder::Second);
             let n = {
@@ -2175,6 +2232,7 @@ mod tests {
                 eps_eff(b1),
                 eps_eff(b2),
             );
+            max_p1_minus_p2_eps_eff = max_p1_minus_p2_eps_eff.max(eps_eff(b1) - eps_eff(b2));
             // Every p=2 point must be a finite positive propagating mode
             // (the elements/solve are not producing garbage).
             assert!(
@@ -2185,35 +2243,47 @@ mod tests {
             max_p2_eps_eff = max_p2_eps_eff.max(eps_eff(b2));
         }
         eprintln!(
-            "  FINDING (step-5.5): the p=2 ELEMENTS are correct (J1 independent-quadrature pins + \
-             J3 homogeneous-TE10 anchor both pass), but at ε_r=10.2 the EXISTING dense \
-             cutoff-pencil mode-selection (solve.rs, out of lane) locks onto a non-dominant \
-             mode (ε_eff ≈ {max_p2_eps_eff:.2} ≪ the dominant 8.17), so β does NOT reach the \
-             reference. The §4 high-contrast closure stays the FR-4 gate; the ε_r=10.2 \
-             reconciliation remains a NON-FAILING diagnostic. QUEUED to step-5.6 (p=2-robust \
-             mode selection / sparse cutoff selection). Do NOT weaken any gate; the solver \
-             change is a finding, not a fix."
+            "  FINDING (step-5.6): the step-5.6 mode-selection fix LANDS THE PHYSICAL DOMINANT \
+             MODE at p=2 (captured ε_eff ≈ {max_p2_eps_eff:.2}, recovered from the step-5.5 \
+             wrong-mode ≈4.8 and now ≥ the area-average 5.6 / on par with p=1) — the wrong-mode \
+             capture is GONE. But the dominant-mode ε_eff PLATEAUS at ≈5.8 for BOTH p=1 and p=2 \
+             (best p2 rel {best_p2_rel:.4} ≫ 0.05), short of the reference 8.17: the residual is \
+             the first-order-class discretization rate at the high-contrast interface (step-5.4 \
+             verdict), which p=2 at the dense-cap mesh does not escape. The §4 high-contrast \
+             closure stays the FR-4 gate; ≤5 % is the DoD-3 finer-mesh / sparse-cutoff-selection \
+             branch, QUEUED to step-5.7. Do NOT weaken any gate."
         );
 
-        // Document the finding as an ASSERTION (so a future fix that closes
-        // ≤5 % trips this and prompts adding the real gate), NOT a success
-        // claim: p=2 stays short of ≤5 % AND the captured mode's ε_eff is the
-        // wrong-mode signature (well below the dominant 8.17). If a step-5.6
-        // solver fix makes p=2 converge, BOTH conditions flip and this test
-        // must be replaced by the `loaded_beta_hi_contrast_p2_matches_reference`
-        // failing gate.
+        // ASSERTIONS — the step-5.6 finer-mesh-branch disposition (DoD-3):
+        // (1) the SELECTION FIX is validated — the captured-mode ε_eff has
+        //     recovered ABOVE the area-average 5.6 (the step-5.5 wrong-mode
+        //     capture sat below it, ≈4.8); and
+        // (2) p=2 is no longer "consistently worse" than p=1 — the two now
+        //     land the same dominant mode (their ε_eff differ by < ~0.5, vs
+        //     the step-5.5 ≈1.4 shortfall); yet
+        // (3) ≤5 % is STILL NOT reached (the discretization plateau) — so the
+        //     failing closure gate is NOT added here.
+        // A future step-5.7 finer-`--release`-mesh / sparse-selection fix that
+        // closes ≤5 % trips (3) and prompts replacing this diagnostic with the
+        // `loaded_beta_hi_contrast_p2_matches_reference` FAILING gate.
         assert!(
-            best_p2_rel > 0.05,
-            "DOCUMENTED FINDING TRIPPED: p=2 now reaches ≤5 % (best rel {best_p2_rel:.4}) — the \
-             mode-selection gap appears closed. Replace this diagnostic with the \
-             `loaded_beta_hi_contrast_p2_matches_reference` FAILING gate (§4 high-contrast \
-             closure) per the step-5.5 DoD."
+            max_p2_eps_eff >= 5.6,
+            "SELECTION-FIX REGRESSED: p=2 captured-mode ε_eff {max_p2_eps_eff:.3} fell below the \
+             area-average 5.6 — the step-5.6 highest-β-direct-RQ selection is no longer landing \
+             the dominant field-concentrated mode (the step-5.5 wrong-mode capture)."
         );
         assert!(
-            max_p2_eps_eff < 6.5,
-            "DOCUMENTED FINDING CHANGED: p=2 captured-mode ε_eff {max_p2_eps_eff:.3} rose toward \
-             the dominant 8.17 — the wrong-mode capture may be resolving. Re-evaluate the \
-             step-5.6 disposition."
+            max_p1_minus_p2_eps_eff < 0.6,
+            "SELECTION-FIX REGRESSED: p=2 ε_eff trails p=1 by {max_p1_minus_p2_eps_eff:.3} (> 0.6) \
+             — p=2 is again 'consistently worse', the step-5.5 wrong-mode signature. The \
+             step-5.6 selection should land p=2 on the SAME dominant mode as p=1."
+        );
+        assert!(
+            best_p2_rel > 0.05,
+            "DOCUMENTED FINDING TRIPPED: p=2 now reaches ≤5 % (best rel {best_p2_rel:.4}) at the \
+             dense-cap mesh — the discretization plateau appears closed. Replace this diagnostic \
+             with the `loaded_beta_hi_contrast_p2_matches_reference` FAILING gate (§4 \
+             high-contrast closure) per the DoD-3 finer-mesh branch."
         );
     }
 }

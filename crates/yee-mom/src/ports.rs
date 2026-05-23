@@ -32,6 +32,9 @@ use num_complex::Complex64;
 use std::collections::HashMap;
 use yee_mesh::{MaterialTag, TriMesh2D};
 
+#[doc(inline)]
+pub use crate::eigensolver::ElementOrder;
+
 /// Excitation source contract for the MoM solver.
 ///
 /// A port owns:
@@ -327,6 +330,14 @@ pub struct NumericalCrossSection {
     /// without rebuilding the edge table on every sample. `None`
     /// otherwise.
     pub(crate) tri_edges_cache: Option<Vec<TriEdgesCacheEntry>>,
+    /// Finite-element polynomial order for the cross-section mixed
+    /// `(E_t, E_z)` eigensolve. Defaults to [`ElementOrder::First`] (the
+    /// validated Whitney-1 Nedelec + linear-nodal path with full field
+    /// reconstruction). [`ElementOrder::Second`] (Phase 1.3.1.1 step 5.6,
+    /// set via [`Self::with_element_order`]) selects the second-order
+    /// family for the high-contrast inhomogeneous case; see [`Self::solve`]
+    /// for the p=2 field-reconstruction caveat.
+    pub element_order: ElementOrder,
 }
 
 /// Compact per-triangle cache entry for the [`NumericalCrossSection`]
@@ -356,7 +367,28 @@ impl NumericalCrossSection {
             mode_profile: None,
             mode_profile_ez: None,
             tri_edges_cache: None,
+            element_order: ElementOrder::First,
         }
+    }
+
+    /// Select the finite-element polynomial order for the cross-section
+    /// eigensolve (Phase 1.3.1.1 step 5.6). Non-breaking builder:
+    /// [`ElementOrder::First`] is the default. [`ElementOrder::Second`]
+    /// uses the validated p=2 element family (Nedelec-first-kind order-2 +
+    /// quadratic nodal-Lagrange) for the high-contrast inhomogeneous case.
+    ///
+    /// **p=2 caveat.** At second order [`Self::solve`] caches the
+    /// propagation constant `β` (the validated quantity) and a closed-form
+    /// TE wave impedance `Z_w = η₀k₀/β`, but does **not** populate the
+    /// [`Self::mode_profile`] / [`Self::e_tangential_at`] field
+    /// reconstruction (the p=2 interior-face / edge-midpoint DoFs have no
+    /// owning global edge / vertex, so the first-order edge-scatter does
+    /// not apply). A `Numerical2D` wave-port RHS therefore still requires
+    /// the first-order order; this knob exists so the validated p=2 β path
+    /// is reachable end-to-end (e.g. for dispersion / β studies).
+    pub fn with_element_order(mut self, order: ElementOrder) -> Self {
+        self.element_order = order;
+        self
     }
 
     /// Run the 2-D eigensolve at `freq_hz`.
@@ -402,9 +434,17 @@ impl NumericalCrossSection {
     /// cross-sections (≤ a few hundred DoF). The WR-90 case lands at
     /// `n ≈ 121`. Sparse shift-and-invert is a later step.
     pub fn solve(&mut self, freq_hz: f64) -> yee_core::Result<()> {
-        use crate::eigensolver::{assembly::assemble_mixed, mesh::EdgeTable, solve_dense_mixed};
+        use crate::eigensolver::{
+            ElementOrder,
+            assembly::{assemble_mixed, assemble_mixed_p2},
+            mesh::EdgeTable,
+            solve_dense_mixed,
+        };
         let table = EdgeTable::build(&self.mesh);
-        let asm = assemble_mixed(&self.mesh, &self.eps_r, &self.mu_r, &table);
+        let asm = match self.element_order {
+            ElementOrder::First => assemble_mixed(&self.mesh, &self.eps_r, &self.mu_r, &table),
+            ElementOrder::Second => assemble_mixed_p2(&self.mesh, &self.eps_r, &self.mu_r, &table),
+        };
         let sol = solve_dense_mixed(&asm, freq_hz)?;
         // β = √(β²). Lossless inputs give real β² ≥ 0; take the
         // principal square root (positive real branch).
@@ -415,6 +455,22 @@ impl NumericalCrossSection {
             beta_sq.sqrt()
         };
         self.beta = Some(beta);
+
+        // ── p=2 path (Phase 1.3.1.1 step 5.6): β is the validated quantity;
+        // the first-order edge-scatter field reconstruction does NOT apply
+        // (interior-face / edge-midpoint DoFs carry `usize::MAX` sentinels in
+        // `interior_to_global_*`). Cache β + a closed-form TE wave impedance
+        // and leave the field-profile caches `None`; see
+        // `with_element_order`'s caveat. ──
+        if matches!(self.element_order, ElementOrder::Second) {
+            let omega = std::f64::consts::TAU * freq_hz;
+            let k0 = omega / yee_core::units::C0;
+            self.z_w = Some(Complex64::new(yee_core::units::ETA0 * k0, 0.0) / beta);
+            self.mode_profile = None;
+            self.mode_profile_ez = None;
+            self.tri_edges_cache = None;
+            return Ok(());
+        }
 
         // Scatter the interior-edge DoF eigenvector out to global-edge
         // indexing (E_t). PEC boundary edges have E_t = 0 by Dirichlet
