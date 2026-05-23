@@ -78,3 +78,7 @@
 - [ADR-0044: Phase 4.fem.eig.3.5.1 CFS-PML grading retune](decisions/0044-phase-4-fem-eig-3-5-1-grading-retune.md)
 - [ADR-0045: Phase 4.fem.eig.3.5.2 alpha grading + extended H3 thickness](decisions/0045-phase-4-fem-eig-3-5-2-alpha-grading.md)
 - [ADR-0046: Phase 4.fem.eig.3.5.3 fem-eig-006 retire via wave-port termination](decisions/0046-phase-4-fem-eig-3-5-3-fem-eig-006-retire.md)
+- [ADR-0047: Phase 4.fem.eig.3.5.4 multi-mode wave-port API](decisions/0047-phase-4-fem-eig-3-5-4-multi-mode-wave-port.md)
+- [ADR-0048: Phase 4.fem.eig.3.5.5 disposition](decisions/0048-phase-4-fem-eig-3-5-5-disposition.md)
+- [ADR-0049: Phase 4.fem.eig.3.5.6 absorbing-mode wave-port](decisions/0049-phase-4-fem-eig-3-5-6-absorbing-mode-wave-port.md)
+- [ADR-0050: Phase 1.3.1.1 step 4 in-tree block LOBPCG eigensolver](decisions/0050-phase-1-3-1-1-step-4-lobpcg-eigensolver.md)

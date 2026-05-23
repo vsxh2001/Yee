@@ -150,7 +150,7 @@ Conventions used below:
 
 *In-flight (this session):*
 - WWWWWWW mom-002 TEM-mode smoothed RHS port-excitation fix (TTTTTTT P1 root cause)
-- Phase 1.3.1.1 step 4 sparse arpack-rs / LOBPCG eigensolver
+- Phase 1.3.1.1 step 4 sparse LOBPCG eigensolver — **spec + plan + ADR-0050 drafted 2026-05-23** (in-tree pure-Rust block LOBPCG over arpack-rs per ADR-0050; spec `2026-05-23-phase-1-3-1-1-step-4-lobpcg-eigensolver-design.md`); implementation dispatched to a `yee-fem`-lane worktree
 - Phase 1.3.1.1 step 5 longitudinal block for quasi-TEM microstrip wave-ports
 
 *Design-coverage shipped, impl pending:*
