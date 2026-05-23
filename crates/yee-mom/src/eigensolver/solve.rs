@@ -1,26 +1,38 @@
 //! Dense generalized-eigensolve fallback for the 2-D cross-section
 //! eigenproblem.
 //!
-//! Solves `S x = k_c² T x` (real-symmetric for the lossless case),
-//! where `S` is the curl-curl stiffness and `T` is the ε_r-weighted
-//! Nedelec mass — both produced by [`super::assembly::assemble_transverse`].
-//! The propagation constant `β` for a given operating frequency
-//! follows from the dispersion relation `β² = k_0² − k_c²`.
+//! **β-direct formulation (Phase 1.3.1.1 step 5.2).** Solves
+//! `(k_0² T_ε − S) x = β² T_1 x` (real-symmetric for the lossless case),
+//! where `S` is the curl-curl stiffness, `T_ε = ∫ε_r N·N` the ε_r-weighted
+//! Nedelec mass, and `T_1 = ∫N·N` the **unweighted** mass — all produced
+//! by [`super::assembly::assemble_transverse`]. The eigenvalue is `β²`
+//! **directly**: this is the discrete form of the transverse Helmholtz
+//! equation `∇×(1/μ_r ∇×E_t) = (k_0² ε_r − β²) E_t`, where ε_r appears only
+//! on the `k_0²` side. The earlier `S x = k_c² T_ε x` / `β² = k_0² − k_c²`
+//! extraction (vacuum `k_0`, ε_r-weighted RHS) was correct only for
+//! `ε_r ≡ 1` — for any `ε_r ≠ 1` it under-counted the dielectric; the
+//! β-direct form fixes that.
 //!
 //! **Spurious-mode handling.** First-order Nedelec edge elements admit
 //! a large gradient null-space (every nodal-Lagrange gradient is in
-//! their span and lies in the kernel of `curl`); these modes show up
-//! with `k_c² ≈ 0` and are filtered out by a threshold relative to the
-//! largest eigenvalue. The physical dominant mode is the **smallest
-//! strictly-positive** `k_c²` eigenvalue.
+//! their span and lies in the kernel of `curl`). These curl-free modes
+//! satisfy `S x ≈ 0`, so in the β-direct pencil `(k_0² T_ε − S) x = β² T_1 x`
+//! they land at `β² ≈ k_0² ⟨ε_r⟩` (the **top** of the spectrum, not the
+//! bottom). They are filtered by their vanishing **cutoff Rayleigh
+//! quotient** `k_c² := (xᵀS x)/(xᵀT_ε x) ≈ 0` (the same physical quantity
+//! the old pencil used as its eigenvalue), and the physical dominant mode
+//! is then the **largest β²** (equivalently the lowest cutoff `k_c²`)
+//! among the survivors.
 //!
-//! **Numerical method.** Reduce `S x = k_c² T x` to a standard
-//! symmetric problem `M y = k_c² y` via the Cholesky factor `T = L Lᵀ`,
-//! then `M = L⁻¹ S L⁻ᵀ`. Solve `M` with [`nalgebra::SymmetricEigen`]
-//! (tridiagonal QR). `O(n³)` flops; viable only for coarse cross
-//! sections (≤ a few hundred DoF). Sparse shift-and-invert with
-//! `arpack-rs` is Phase 1.3.1.1 step 4 and is escape-hatched away from
-//! the lossless TE10 validation gate.
+//! **Numerical method.** `T_1` is SPD (a Gram matrix with ε_r ≡ 1 > 0), so
+//! reduce `(k_0² T_ε − S) x = β² T_1 x` to a standard symmetric problem
+//! `M y = β² y` via the Cholesky factor `T_1 = L Lᵀ`, then
+//! `M = L⁻¹ (k_0² T_ε − S) L⁻ᵀ` (the operator `k_0² T_ε − S` is symmetric
+//! **indefinite**, which the symmetric QR handles). Solve `M` with
+//! [`nalgebra::SymmetricEigen`] (tridiagonal QR). `O(n³)` flops; viable
+//! only for coarse cross sections (≤ a few hundred DoF). Sparse
+//! shift-and-invert with `arpack-rs` is Phase 1.3.1.1 step 4 and is
+//! escape-hatched away from the lossless TE10 validation gate.
 //!
 //! **Real-arithmetic restriction.** Lossless inputs only for Phase
 //! 1.3.1.1 step 3. The [`super::assembly`] module produces
@@ -43,10 +55,11 @@ use super::assembly::{AssembledMixed, AssembledTransverse};
 /// [`solve_dense_mixed`] path in Phase 1.3.1.1 step 5.
 #[allow(dead_code)]
 pub(crate) struct EigenSolution {
-    /// `β² = k_0² − k_c²` for the dominant propagating mode at the
-    /// supplied frequency. Stored as `Complex64` to keep the API
-    /// future-proof for the lossy / complex-symmetric path; the
-    /// Phase 1.3.1.1 step 3 path always returns a real value.
+    /// `β²` for the dominant propagating mode at the supplied frequency,
+    /// the **direct eigenvalue** of `(k_0² T_ε − S) x = β² T_1 x` (Phase
+    /// 1.3.1.1 step 5.2). Stored as `Complex64` to keep the API
+    /// future-proof for the lossy / complex-symmetric path; the lossless
+    /// path always returns a real value.
     pub beta_sq: Complex64,
     /// Eigenvector for the dominant mode in the **interior-edge DoF**
     /// ordering of [`AssembledTransverse::interior_to_global`]. Length
@@ -66,9 +79,9 @@ pub(crate) struct EigenSolution {
     pub eigenvector: Vec<Complex64>,
 }
 
-/// Solve `S x = k_c² T x` densely on the lossless / real-symmetric path
-/// and return `β² = k_0² − k_c²` for the dominant propagating mode at
-/// `freq_hz`.
+/// Solve the β-direct generalized eigenproblem `(k_0² T_ε − S) x = β² T_1 x`
+/// densely on the lossless / real-symmetric path and return `β²` for the
+/// dominant propagating mode at `freq_hz` (Phase 1.3.1.1 step 5.2).
 ///
 /// **Size limit.** The implementation builds dense `n×n` matrices and
 /// runs an `O(n³)` Cholesky + symmetric-tridiagonal QR. Callers must
@@ -116,22 +129,29 @@ pub(crate) fn solve_dense(
     }
 
     let s_re = DMatrix::<f64>::from_fn(n, n, |i, j| asm.s[(i, j)].re);
-    let t_re = DMatrix::<f64>::from_fn(n, n, |i, j| asm.t[(i, j)].re);
+    let t_eps_re = DMatrix::<f64>::from_fn(n, n, |i, j| asm.t[(i, j)].re);
+    let t1_re = DMatrix::<f64>::from_fn(n, n, |i, j| asm.t1[(i, j)].re);
 
-    // Cholesky factor T = L Lᵀ. For the lossless Nedelec mass matrix
-    // with ε_r > 0 on the interior-edge DoF set this is SPD by
-    // construction.
-    let chol_t = t_re.clone().cholesky().ok_or_else(|| {
+    // β-direct LHS operator: K := k_0² T_ε − S (symmetric **indefinite**).
+    let omega = std::f64::consts::TAU * freq_hz;
+    let k0 = omega / yee_core::units::C0;
+    let k0_sq = k0 * k0;
+    let k_op = k0_sq * &t_eps_re - &s_re;
+
+    // Cholesky factor T_1 = L Lᵀ. The unweighted Nedelec mass is SPD (a
+    // Gram matrix with ε_r ≡ 1 > 0) on the interior-edge DoF set.
+    let chol_t1 = t1_re.clone().cholesky().ok_or_else(|| {
         yee_core::Error::Numerical(
-            "eigensolver: Nedelec mass matrix T is not SPD on the interior-edge DoF set".into(),
+            "eigensolver: unweighted Nedelec mass T_1 is not SPD on the interior-edge DoF set"
+                .into(),
         )
     })?;
-    let l = chol_t.l();
-    // Compute M = L⁻¹ S L⁻ᵀ via two triangular solves preserving
-    // symmetry. Step 1: solve L Y = S. Step 2: solve L Z = Yᵀ → M = Zᵀ.
-    let y = l.clone().solve_lower_triangular(&s_re).ok_or_else(|| {
+    let l = chol_t1.l();
+    // Compute M = L⁻¹ K L⁻ᵀ via two triangular solves preserving symmetry.
+    // Step 1: solve L Y = K. Step 2: solve L Z = Yᵀ → M = Zᵀ.
+    let y = l.clone().solve_lower_triangular(&k_op).ok_or_else(|| {
         yee_core::Error::Numerical(
-            "eigensolver: L Y = S solve failed (L from Cholesky should be non-singular)".into(),
+            "eigensolver: L Y = K solve failed (L from Cholesky should be non-singular)".into(),
         )
     })?;
     let y_t = y.transpose();
@@ -143,67 +163,83 @@ pub(crate) fn solve_dense(
     let m = z.transpose();
 
     // Symmetrize explicitly to suppress floating-point drift and feed
-    // the symmetric QR path, which is bulletproof for symmetric pencils.
+    // the symmetric QR path, which is bulletproof for symmetric pencils
+    // (here `K = k_0² T_ε − S` is symmetric indefinite).
     let m_sym = 0.5 * (&m + m.transpose());
 
     let eig = SymmetricEigen::new(m_sym);
-    // SymmetricEigen returns real eigenvalues (T::RealField = f64 here).
-    // Filter:
-    //   - reject `k_c² <= 0` (gradient null-space lives here),
-    //   - reject the spurious-mode floor `k_c² < spurious_floor` where
-    //     `spurious_floor = max_eig · 1e-6` catches the
-    //     numerically-non-zero gradient eigenvalues,
-    // then take the **smallest** strictly-positive eigenvalue. Physical
-    // dominant mode = lowest cutoff.
-    let max_eig = eig.eigenvalues.iter().cloned().fold(0.0_f64, f64::max);
-    let spurious_floor = max_eig * 1e-6;
-
-    // Track the (eigenvalue, eigenvector-column-index) of the dominant
-    // physical mode so we can recover its eigenvector after the
-    // standard-form back-transform `x = L⁻ᵀ y`.
-    let mut dominant: Option<(f64, usize)> = None;
-    for (col, &lam) in eig.eigenvalues.iter().enumerate() {
-        if !lam.is_finite() || lam <= spurious_floor {
+    // SymmetricEigen returns real eigenvalues `β²` (T::RealField = f64).
+    // The curl-free gradient null-space satisfies `S x ≈ 0`, so those
+    // spurious modes land at `β² ≈ k_0² ⟨ε_r⟩` (the TOP of the spectrum).
+    // Filter them by their vanishing cutoff Rayleigh quotient
+    // `k_c² := (xᵀ S x)/(xᵀ T_ε x)` — the same physical quantity the old
+    // pencil used as its eigenvalue — then take the **largest** surviving
+    // `β²` (the physical dominant mode = lowest cutoff). The eigenvector
+    // is recovered per-candidate by the standard-form back-transform
+    // `x = L⁻ᵀ y`.
+    let l_t = l.transpose();
+    // Cutoff-Rayleigh floor relative to the largest cutoff seen, mirroring
+    // the old pencil's `k_c² ≤ max_eig · 1e-6` gradient filter.
+    let mut k_c_sq_max = 0.0_f64;
+    let mut cands: Vec<(f64, f64, usize)> = Vec::new(); // (β², k_c², col)
+    for (col, &beta_sq) in eig.eigenvalues.iter().enumerate() {
+        if !beta_sq.is_finite() {
             continue;
         }
+        let y_col = eig.eigenvectors.column(col).clone_owned();
+        let Some(x) = l_t.solve_upper_triangular(&y_col) else {
+            continue;
+        };
+        let s_energy = (x.transpose() * &s_re * &x)[(0, 0)];
+        let t_eps_energy = (x.transpose() * &t_eps_re * &x)[(0, 0)];
+        if t_eps_energy <= 0.0 {
+            continue;
+        }
+        let k_c_sq = s_energy / t_eps_energy;
+        if k_c_sq > k_c_sq_max {
+            k_c_sq_max = k_c_sq;
+        }
+        cands.push((beta_sq, k_c_sq, col));
+    }
+    let spurious_floor = k_c_sq_max * 1e-6;
+
+    // Among modes with a genuine (above-floor) cutoff, pick the largest
+    // β² = lowest cutoff = dominant propagating mode.
+    let mut dominant: Option<(f64, usize)> = None;
+    for &(beta_sq, k_c_sq, col) in &cands {
+        if k_c_sq <= spurious_floor {
+            continue; // curl-free gradient null-space mode
+        }
         dominant = Some(match dominant {
-            None => (lam, col),
+            None => (beta_sq, col),
             Some((curr, curr_col)) => {
-                if lam < curr {
-                    (lam, col)
+                if beta_sq > curr {
+                    (beta_sq, col)
                 } else {
                     (curr, curr_col)
                 }
             }
         });
     }
-    let (k_c_sq, dom_col) = dominant.ok_or_else(|| {
+    let (beta_sq_re, dom_col) = dominant.ok_or_else(|| {
         yee_core::Error::Numerical(
-            "eigensolver: no strictly-positive k_c² eigenvalue above the spurious-mode floor"
+            "eigensolver: no mode with a strictly-positive cutoff above the spurious-mode floor"
                 .into(),
         )
     })?;
 
-    // β² = k_0² − k_c². ε_r is folded into T (and therefore into k_c²);
-    // the relation as written is correct for real, uniform ε_r and
-    // exact for the WR-90 air-filled validation case. Heterogeneous /
-    // lossy ε_r is Phase 1.3.1.2.
-    let omega = std::f64::consts::TAU * freq_hz;
-    let k0 = omega / yee_core::units::C0;
-    let beta_sq_re = k0 * k0 - k_c_sq;
     if beta_sq_re <= 0.0 {
         return Err(yee_core::Error::Numerical(format!(
-            "eigensolver: mode is evanescent at {freq_hz} Hz (k_c² = {k_c_sq}, k_0² = {})",
-            k0 * k0
+            "eigensolver: dominant mode is evanescent at {freq_hz} Hz (β² = {beta_sq_re})"
         )));
     }
 
-    // Recover the eigenvector in the **original** (T-weighted) basis.
-    // SymmetricEigen solves `M y = λ y` with `M = L⁻¹ S L⁻ᵀ`; the
-    // generalized-problem eigenvector satisfies `S x = λ T x` with
-    // `x = L⁻ᵀ y`. So back-transform with one upper-triangular solve.
+    // Recover the eigenvector in the **original** (T_1-weighted) basis.
+    // SymmetricEigen solves `M y = β² y` with `M = L⁻¹ K L⁻ᵀ`; the
+    // generalized-problem eigenvector satisfies `K x = β² T_1 x` with
+    // `x = L⁻ᵀ y`. So back-transform with one upper-triangular solve
+    // (`l_t` already formed above for the candidate eigenvector recovery).
     let y_dom = eig.eigenvectors.column(dom_col).clone_owned();
-    let l_t = l.transpose();
     let x_dom = l_t.solve_upper_triangular(&y_dom).ok_or_else(|| {
         yee_core::Error::Numerical(
             "eigensolver: Lᵀ x = y back-transform failed (L from Cholesky should be non-singular)"
@@ -239,8 +275,9 @@ pub(crate) fn solve_dense(
 
 /// Solved-eigensolution payload returned by [`solve_dense_mixed`].
 pub(crate) struct MixedEigenSolution {
-    /// `β² = k_0² − k_c²` for the dominant quasi-TEM mode at the supplied
-    /// frequency. Real-valued on the lossless path.
+    /// `β²` for the dominant quasi-TEM mode at the supplied frequency, the
+    /// **direct eigenvalue** of `(k_0² B − A) x = β² B_1 x` (Phase 1.3.1.1
+    /// step 5.2). Real-valued on the lossless path.
     pub beta_sq: Complex64,
     /// Transverse `E_t` eigenvector components in the **interior-edge
     /// DoF** ordering of [`AssembledMixed::interior_to_global_edges`]
@@ -252,45 +289,63 @@ pub(crate) struct MixedEigenSolution {
     pub e_z: Vec<Complex64>,
 }
 
-/// Solve the mixed `(E_t, E_z)` block pencil `A x = k_c² B x` densely on
-/// the lossless / real-symmetric path and return `β² = k_0² − k_c²` for
-/// the dominant quasi-TEM mode at `freq_hz`.
+/// Solve the mixed `(E_t, E_z)` β-direct block pencil
+/// `(k_0² B − A) x = β² B_1 x` densely on the lossless / real-symmetric
+/// path and return `β²` for the dominant quasi-TEM mode at `freq_hz`
+/// (Phase 1.3.1.1 step 5.2). `A` is the block-stiffness, `B` the
+/// ε_r-weighted block-mass + coupling, and `B_1` the **unweighted**
+/// block-mass + coupling (see [`AssembledMixed`] for why the `−β²` term
+/// carries the unweighted mass).
 ///
-/// **Mode selection.** The dominant guided mode is the **smallest
-/// strictly-positive** `k_c²` above the spurious floor (equivalently the
-/// **largest** valid `β² = k_0² − k_c²`, i.e. β closest to `k_0√ε_eff`).
-/// Two filters run before the min-search:
+/// **Method (Phase 1.3.1.1 step 5.2) — cutoff-pencil select + β-direct
+/// Rayleigh quotient.** The physical mode is the dominant guided mode of
+/// the cutoff pencil `A x = k_c² B x` (the step-5 pencil, unchanged +
+/// validated), and its propagation constant is the **β-direct Rayleigh
+/// quotient** of that eigenvector:
 ///
-/// * **Spurious gradient null-space** (`k_c² ≈ 0`): rejected by the
-///   same `k_c² ≤ max_eig · 1e-6` floor as [`solve_dense`].
-/// * **Transverse-energy ratio.** The mixed formulation admits modes
-///   whose energy lives almost entirely in the longitudinal `E_z` block
-///   (degenerate quasi-static / nodal-gradient contamination). The
-///   dominant quasi-TEM / quasi-TE mode carries the bulk of its
-///   energy in the transverse block. A candidate is rejected when its
-///   transverse energy fraction `‖e_t‖² / ‖x‖²` (Euclidean) falls below
-///   [`TRANSVERSE_ENERGY_FLOOR`]. On the homogeneous guide the dominant
-///   mode has `E_z = 0` exactly, so its transverse fraction is `1`.
+/// ```text
+///   β² = R(x) = (xᵀ (k_0² B − A) x) / (xᵀ B_1 x)
+/// ```
 ///
-/// **Numerical method.** The Lee-Sun-Cendes block pencil is symmetric
-/// **indefinite** (`B` carries the edge-node coupling and is *not* SPD —
-/// confirmed by the step-5 bring-up bisection, B's spectrum straddles
-/// zero), so the Cholesky-symmetrised reduction used by [`solve_dense`]
-/// does **not** apply. Instead reduce to the standard non-symmetric
-/// eigenproblem `B⁻¹A y = k_c² y` via one LU solve (`B` is nonsingular)
-/// and extract the spectrum with [`nalgebra`]'s real-Schur
-/// `complex_eigenvalues` (returns in milliseconds at the validation
-/// `n ≈ 121`; the historical "non-symmetric QR hang" in the step-3
-/// bring-up was the *asymmetric `T⁻¹S`* product, a different matrix).
-/// The `B⁻¹A` reduction is non-ideal for an indefinite `B` (it discards
-/// symmetry and can be ill-conditioned); acceptable at `n ≈ 121`, but
-/// revisit for a sparse / large-DoF symmetric-indefinite solver.
-/// Eigenvectors are recovered per-candidate by **inverse iteration**
-/// ([`inverse_iterate`]) on the shifted pencil `(A − σ B)` — *not* a
-/// smallest-singular-vector null-space of `A − k_c² B`, which grabbed a
-/// spurious `E_t`-only direction from the Nedelec curl gradient
-/// null-space (the step-5-review recovery bug). `O(n³)` with
-/// `n = n_t + n_z`.
+/// 1. **Select on `A x = k_c² B x`.** Reduce to `B⁻¹A` (one LU; `B`
+///    nonsingular though indefinite) and take `complex_eigenvalues`. The
+///    curl-free gradient null-space sits cleanly at `k_c² ≈ 0` (rejected
+///    by the `k_c² ≤ max|k_c²| · 1e-6` floor) and the **transverse-energy
+///    filter** (`‖e_t‖²/‖x‖² ≥` [`TRANSVERSE_ENERGY_FLOOR`]) removes
+///    E_z-dominated contamination. The dominant guided mode is the
+///    **smallest** valid `k_c²`; its eigenvector (with the genuine E_z
+///    content of an inhomogeneous hybrid mode) is recovered by inverse
+///    iteration on `(A − σ B)` — the step-5 recovery, *not* a
+///    smallest-singular-vector null-space (which grabbed a spurious
+///    `E_t`-only gradient direction).
+/// 2. **Extract β² via the β-direct Rayleigh quotient `R(x)`.** Since
+///    `A x = k_c² B x`, `R(x) = (k_0² − k_c²)·⟨ε_r⟩` with the
+///    mode-resolved `⟨ε_r⟩ = (xᵀ B x)/(xᵀ B_1 x)`. This is **exact** on a
+///    uniformly-filled guide (`B = ε_r B_1` ⇒ `⟨ε_r⟩ = ε_r` and
+///    `R = ε_r k_0² − k_c0²` with `k_c0² = (xᵀA x)/(xᵀB_1 x)` the
+///    unweighted cutoff — the analytic
+///    `β = √(ε_r k_0² − (π/a)²)`, DoD-1), and reduces to `k_0² − k_c²` on
+///    a homogeneous guide (`B_1 ≡ B`, the DoD-V1 canary). The step-5
+///    `β² = k_0² − k_c²` with vacuum `k_0` dropped the `⟨ε_r⟩` factor and
+///    so under-counted any `ε_r ≠ 1` fill.
+///
+/// **Why the Rayleigh quotient rather than the β-direct pencil's direct
+/// eigenvalue (spec §3 option A).** Solving `K x = β² B_1 x` directly was
+/// tried and *drifts off the physical mode*: its dominant eigenvalue near
+/// the physical `β²` belongs to a spurious `E_z ≈ 0` branch (the curl-free
+/// gradient null-space lands at `β² ≈ k_0² ⟨ε_r⟩`, interleaved with the
+/// physical mode, and `(K − σ B_1) ≈ −A` is singular there). The cutoff
+/// pencil cleanly isolates the gradient cluster at `k_c² ≈ 0`, so it
+/// reliably picks the physical hybrid mode — verified by `‖E_z‖/‖E_t‖`
+/// matching the published LSM-to-y reference for the horizontal slab. The
+/// Rayleigh quotient on that correctly-selected eigenvector is the right
+/// β² for the physical mode and is exact on the DoD-1 uniform anchor;
+/// option A's mode-dependence concern is moot because β² is evaluated on
+/// the physically-selected mode, not a generic vector.
+///
+/// `O(n³)` with `n = n_t + n_z`; returns in milliseconds at the
+/// validation `n ≈ 121`. Revisit for a sparse / large-DoF
+/// symmetric-indefinite solver.
 pub(crate) fn solve_dense_mixed(
     asm: &AssembledMixed,
     freq_hz: f64,
@@ -309,12 +364,14 @@ pub(crate) fn solve_dense_mixed(
         .a
         .iter()
         .chain(asm.b.iter())
+        .chain(asm.b1.iter())
         .map(|z| z.im.abs())
         .fold(0.0_f64, f64::max);
     let re_norm = asm
         .a
         .iter()
         .chain(asm.b.iter())
+        .chain(asm.b1.iter())
         .map(|z| z.re.abs())
         .fold(0.0_f64, f64::max);
     if im_norm > 1e-9 * re_norm.max(1.0) {
@@ -325,53 +382,62 @@ pub(crate) fn solve_dense_mixed(
 
     let a_re = DMatrix::<f64>::from_fn(n, n, |i, j| asm.a[(i, j)].re);
     let b_re = DMatrix::<f64>::from_fn(n, n, |i, j| asm.b[(i, j)].re);
+    let b1_re = DMatrix::<f64>::from_fn(n, n, |i, j| asm.b1[(i, j)].re);
 
-    // Reduce to standard form B⁻¹A (B nonsingular even though indefinite).
+    let omega = std::f64::consts::TAU * freq_hz;
+    let k0 = omega / yee_core::units::C0;
+    let k0_sq = k0 * k0;
+    // β-direct LHS operator: K := k_0² B − A. The β-direct generalized
+    // eigenproblem is `K x = β² B_1 x`.
+    let k_op = k0_sq * &b_re - &a_re;
+
+    // ── Stage 1: select the dominant guided mode on the cutoff pencil ──
+    // `A x = k_c² B x` (the step-5 pencil). This is unchanged from step 5
+    // and is fast + validated: its `k_c²` eigenvalue is the physically
+    // meaningful cutoff (curl energy / ε-weighted field energy), so the
+    // gradient null-space sits at `k_c² ≈ 0` (easy to filter) and the
+    // transverse-energy filter removes E_z-dominated contamination.
+    //
+    // Why use the cutoff pencil for SELECTION rather than the β-direct
+    // pencil directly: in the β-direct pencil the curl-free gradient
+    // modes land at `β² ≈ k_0² ⟨ε_r⟩` (the TOP of the spectrum, mixed in
+    // with the physical mode) and their shifted matrix `(K − σ B_1) ≈ −A`
+    // is singular (A's gradient null-space), so a blind inverse-iteration
+    // sweep over every β-direct eigenvalue thrashes on the gradient
+    // cluster. Selecting on the cutoff pencil keeps the gradient cluster
+    // cleanly at `k_c² ≈ 0` and runs inverse iteration only on genuine
+    // candidates.
     let b_lu = b_re.clone().lu();
     let binv_a = b_lu.solve(&a_re).ok_or_else(|| {
         yee_core::Error::Numerical(
             "eigensolver(mixed): block mass matrix B is singular on the interior DoF set".into(),
         )
     })?;
-    let evals = binv_a.complex_eigenvalues();
-
-    // Spurious gradient null-space floor relative to the largest |k_c²|.
-    let max_abs = evals
+    let kc_evals = binv_a.complex_eigenvalues();
+    let max_abs = kc_evals
         .iter()
         .map(|z| z.norm())
         .fold(0.0_f64, f64::max)
         .max(1.0);
     let spurious_floor = max_abs * 1e-6;
 
-    // Walk the spectrum: keep real, strictly-positive eigenvalues above
-    // the floor, recover each eigenvector, apply the transverse-energy
-    // filter, and keep the smallest valid k_c² (dominant guided mode).
-    let mut best: Option<(f64, Vec<Complex64>)> = None;
-    for ev in evals.iter() {
-        // Reject complex (non-physical for the lossless guide) and
-        // non-positive eigenvalues.
+    // Among real, above-floor cutoffs whose eigenvector is
+    // transverse-energy-dominated, pick the SMALLEST k_c² (dominant guided
+    // mode = lowest cutoff). Eigenvector recovered by inverse iteration on
+    // `(A − σ B)` (σ off the cutoff eigenvalue), which is well away from
+    // the gradient null-space and converges fast.
+    let mut best: Option<(f64, Vec<f64>)> = None;
+    for ev in kc_evals.iter() {
         if ev.im.abs() > 1e-6 * ev.re.abs().max(1.0) {
             continue;
         }
         let k_c_sq = ev.re;
         if !k_c_sq.is_finite() || k_c_sq <= spurious_floor {
-            continue;
+            continue; // curl-free gradient null-space
         }
-        // Recover the generalized eigenvector for this k_c² by **inverse
-        // iteration** on the shifted pencil `(A − σ B)`, σ slightly off
-        // the eigenvalue. The naive "smallest right singular vector of
-        // (A − k_c² B)" does NOT work here: `A_tt` (curl-curl) carries
-        // the large Nedelec gradient null-space, so `(A − k_c² B)` has a
-        // forest of tiny singular values whose smallest is a spurious
-        // E_t-only gradient direction (E_z ≡ 0), not the physical mode
-        // — the step-5-review bug. Inverse iteration converges to the
-        // eigenvector of the eigenvalue *closest to σ*, which correctly
-        // picks the physical mode and recovers its genuine E_z content.
         let Some(x) = inverse_iterate(&a_re, &b_re, k_c_sq) else {
             continue;
         };
-
-        // Transverse-energy fraction (Euclidean): ‖e_t‖² / ‖x‖².
         let total: f64 = x.iter().map(|&v| v * v).sum();
         if total <= 0.0 {
             continue;
@@ -380,47 +446,68 @@ pub(crate) fn solve_dense_mixed(
         if trans / total < TRANSVERSE_ENERGY_FLOOR {
             continue;
         }
-
         let take = match &best {
             None => true,
             Some((curr, _)) => k_c_sq < *curr,
         };
         if take {
-            // Fix the global sign deterministically off the transverse
-            // block: largest-magnitude E_t component positive (matches
-            // `solve_dense`).
-            let argmax = (0..n_t)
-                .max_by(|&a, &b| {
-                    x[a].abs()
-                        .partial_cmp(&x[b].abs())
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .unwrap_or(0);
-            let sign = if x[argmax] < 0.0 { -1.0 } else { 1.0 };
-            let vec: Vec<Complex64> = x.iter().map(|&v| Complex64::new(sign * v, 0.0)).collect();
-            best = Some((k_c_sq, vec));
+            best = Some((k_c_sq, x));
         }
     }
-
-    let (k_c_sq, x_dom) = best.ok_or_else(|| {
+    let (_k_c_sq, x_sel) = best.ok_or_else(|| {
         yee_core::Error::Numerical(
             "eigensolver(mixed): no transverse-energy-dominated real k_c² above the spurious floor"
                 .into(),
         )
     })?;
 
-    let omega = std::f64::consts::TAU * freq_hz;
-    let k0 = omega / yee_core::units::C0;
-    let beta_sq_re = k0 * k0 - k_c_sq;
+    // ── Stage 2: β² = the β-direct Rayleigh quotient on the selected mode ──
+    // β² = R(x) = (xᵀ(k_0² B − A)x)/(xᵀ B_1 x) (Phase 1.3.1.1 step 5.2).
+    // Since `A x_sel = k_c² B x_sel`, this is `(k_0² − k_c²)·⟨ε_r⟩` with the
+    // mode-resolved `⟨ε_r⟩ = (xᵀB x)/(xᵀB_1 x)`: exact on a uniform fill
+    // (`⟨ε_r⟩ = ε_r`, the DoD-1 analytic anchor) and `= k_0² − k_c²` on a
+    // homogeneous guide (`B_1 ≡ B`, the DoD-V1 canary). The step-5
+    // `β² = k_0² − k_c²` with vacuum `k_0` dropped the `⟨ε_r⟩` factor.
+    // Evaluating R on the cutoff pencil's correctly-selected hybrid mode
+    // avoids spec §3 option A's drift onto the spurious `E_z≈0` β-direct
+    // branch (see the function docstring).
+    let rayleigh_beta_sq = |x: &[f64]| -> Option<f64> {
+        let xv = DMatrix::<f64>::from_column_slice(n, 1, x);
+        let num = (xv.transpose() * &k_op * &xv)[(0, 0)];
+        let den = (xv.transpose() * &b1_re * &xv)[(0, 0)];
+        (den.abs() > 0.0).then_some(num / den)
+    };
+    let x_dom = x_sel;
+    let beta_sq_re = rayleigh_beta_sq(&x_dom).ok_or_else(|| {
+        yee_core::Error::Numerical(
+            "eigensolver(mixed): β-direct Rayleigh quotient has a zero B_1-norm denominator".into(),
+        )
+    })?;
+
     if beta_sq_re <= 0.0 {
         return Err(yee_core::Error::Numerical(format!(
-            "eigensolver(mixed): mode is evanescent at {freq_hz} Hz (k_c² = {k_c_sq}, k_0² = {})",
-            k0 * k0
+            "eigensolver(mixed): dominant mode is evanescent at {freq_hz} Hz (β² = {beta_sq_re})"
         )));
     }
 
-    let e_t: Vec<Complex64> = x_dom[0..n_t].to_vec();
-    let e_z: Vec<Complex64> = x_dom[n_t..n].to_vec();
+    // Fix the global sign deterministically off the transverse block:
+    // largest-magnitude E_t component positive (matches `solve_dense`).
+    let argmax = (0..n_t)
+        .max_by(|&a, &b| {
+            x_dom[a]
+                .abs()
+                .partial_cmp(&x_dom[b].abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap_or(0);
+    let sign = if x_dom[argmax] < 0.0 { -1.0 } else { 1.0 };
+
+    let e_t: Vec<Complex64> = (0..n_t)
+        .map(|i| Complex64::new(sign * x_dom[i], 0.0))
+        .collect();
+    let e_z: Vec<Complex64> = (n_t..n)
+        .map(|i| Complex64::new(sign * x_dom[i], 0.0))
+        .collect();
 
     Ok(MixedEigenSolution {
         beta_sq: Complex64::new(beta_sq_re, 0.0),
