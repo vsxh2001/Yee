@@ -61,6 +61,44 @@ wrong and are replaced, not preserved.
   `(k₀²T_ε − S)` operator (re-validated).
 * Lossy/heterogeneous complex-ε_r β-extraction remains Phase 1.3.1.2.
 
+## As-built amendment (2026-05-23)
+
+Two refinements during implementation; the merged code (`3b6d899`) is
+authoritative where this differs from the Decision above.
+
+1. **Mixed path is a hybrid, not pure option A.** Option A (solving the
+   β-direct pencil `(k₀²B − A) x = β² B₁ x` directly) was tried and
+   **drifts off the physical mode** onto a spurious `E_z ≈ 0` β-direct
+   branch that interleaves with the gradient cluster at the top of the
+   spectrum (where `(K − σB₁) ≈ −A` is near-singular, so shift-invert
+   thrashes). The shipped mixed path therefore **selects** the dominant
+   mode on the *cutoff* pencil `A x = k_c² B x` (gradient null-space
+   cleanly at `k_c² ≈ 0`) and then **extracts** `β²` as the β-direct
+   Rayleigh quotient on that eigenvector. The transverse `solve_dense`
+   *does* use the clean option-A form (no E_z block, no drift).
+
+2. **§4 gap is closed for the extraction, not yet for the inhomogeneous
+   case.** The uniformly-filled-guide analytic (β=√(ε_r k₀²−(π/a)²),
+   rel 1.5e-4) is a closed-form published benchmark and **passes** —
+   certifying the β-extraction. The *inhomogeneous* slab-loaded gate is
+   **not** at ≤5%: a mesh-stable ~17% residual vs the step-5.1 reference
+   remains, and the reconciliation stays a non-failing diagnostic (the
+   V2′ bracket is retained as the inhomogeneous floor). So the Decision's
+   "§4 gap closed" holds for the extraction anchor only.
+
+3. **The ~17% residual is (a)+(b) inseparable** at first-order elements
+   on the high-contrast (ε_r=10.2) interface: (a) discretization, and
+   (b) a Rayleigh-quotient eigenvector mismatch — the hybrid evaluates
+   `β²` on the *cutoff*-pencil eigenvector, which differs from the true
+   *β-direct* eigenvector for inhomogeneous ε_r (they coincide on
+   uniform fill, hence the exact uniform anchor; reviewed magnitude
+   check: 17% in β ≈ 31% in β² ⇒ ~34° eigenvector angle if (b)
+   dominates — plausible at 10.2:1 contrast). **step-5.3 = the DIRECT
+   β-direct-pencil solve with a sparse shift-and-invert** that targets
+   the physical β² past the spurious cluster — this resolves both (a)
+   and (b); a finer mesh with the same hybrid would plateau at another
+   biased value.
+
 ## References
 
 * Jin, *FEM in EM* 3rd ed. §8.2-8.4.
