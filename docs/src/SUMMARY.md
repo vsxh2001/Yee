@@ -85,3 +85,4 @@
 - [ADR-0051: Phase 1.3.1.1 step 5 mixed longitudinal block](decisions/0051-phase-1-3-1-1-step-5-longitudinal-block.md)
 - [ADR-0052: Phase 1.3.1.1 step 5.1 transcendental reference](decisions/0052-phase-1-3-1-1-step-5-1-transcendental-reference.md)
 - [ADR-0053: Phase 1.3.1.1 step 5.2 dielectric β-extraction fix](decisions/0053-phase-1-3-1-1-step-5-2-dielectric-beta-fix.md)
+- [ADR-0054: Phase 1.3.1.1 step 5.3 direct β-direct sparse shift-invert](decisions/0054-phase-1-3-1-1-step-5-3-direct-sparse-beta.md)
