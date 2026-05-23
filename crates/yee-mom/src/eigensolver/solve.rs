@@ -309,14 +309,17 @@ pub(crate) struct MixedEigenSolution {
 /// solve recovers the **true β-direct eigenvector**, so its β² is exact
 /// for that mode.
 ///
-/// 1. **Physics-informed shift `σ₀`.** Run the cutoff-pencil selection
-///    ([`select_cutoff_mode`] — the step-5.2 Stage 1, unchanged + validated)
-///    to obtain the dominant guided mode's cutoff `k_c²` and its
-///    eigenvector `x_c`. The hybrid β² estimate
-///    `σ₀ = R(x_c) = (x_cᵀ(k_0²B−A)x_c)/(x_cᵀB_1 x_c)` is within ~17 % of
-///    the true physical β² (reviewed) — ample to target the physical
-///    eigenpair, which sits well below the spurious curl-free gradient
-///    cluster at `β² ≈ k_0²⟨ε_r⟩`.
+/// 1. **Physics-informed shift `σ₀`.** Run the dominant-mode selection
+///    ([`select_dominant_mode`] — the cutoff-pencil candidate screen, then
+///    the Phase 1.3.1.1 step 5.6 highest-β-direct-Rayleigh-quotient pick)
+///    to obtain the dominant guided mode's eigenvector `x_c` and its
+///    β-direct Rayleigh quotient
+///    `σ₀ = R(x_c) = (x_cᵀ(k_0²B−A)x_c)/(x_cᵀB_1 x_c)`. Selecting on the
+///    highest `R(x)` (= highest ε_eff) lands the physical dominant mode
+///    even when the enlarged p=2 curl-free cluster contributes spurious
+///    low-`k_c²` transverse-dominated candidates; the shift then targets
+///    that eigenpair, which sits well below the spurious curl-free
+///    gradient cluster at `β² ≈ k_0²⟨ε_r⟩`.
 /// 2. **Sparse shift-and-invert.** Build `(K − σ₀ B_1)` with
 ///    `K = k_0² B − A` as a faer [`SparseColMat`] (mirroring the yee-fem
 ///    `build_shifted` pattern), factor once via `sp_lu`, and inverse-
@@ -381,28 +384,62 @@ pub(crate) fn solve_dense_mixed(
     // eigenproblem is `K x = β² B_1 x`.
     let k_op = k0_sq * &b_re - &a_re;
 
-    // ── Step 1: physics-informed shift σ₀ from the cutoff-pencil mode ──
-    // The cutoff-pencil selection (step-5.2 Stage 1) is fast + validated:
-    // it isolates the gradient null-space at `k_c² ≈ 0` and screens
-    // E_z-dominated contamination, so it reliably returns the dominant
-    // guided mode's eigenvector `x_c`. The hybrid β² estimate `R(x_c)` is
-    // the shift.
-    let x_c = select_cutoff_mode(&a_re, &b_re, n_t)?;
-    let sigma0 = rayleigh_beta_sq(&k_op, &b1_re, n, &x_c).ok_or_else(|| {
+    // ── Step 1: gather propagating cutoff-pencil candidate shifts ──
+    // The cutoff pencil isolates the curl-free gradient null-space at
+    // `k_c² ≈ 0` (floored out), and each surviving candidate's β-direct
+    // Rayleigh quotient `R(x_c)` is a physics-informed shift. At p=2 the
+    // physical dominant mode's cutoff-pencil eigenvector is NOT transverse-
+    // dominated (the enlarged curl-free cluster mixes it with the E_z /
+    // gradient block), so we do NOT pre-filter on the cutoff-pencil
+    // transverse fraction — every propagating candidate is kept as a shift
+    // and the transverse screen is applied to the converged β-direct
+    // eigenvector below. Candidates are ordered by `R(x_c)` descending
+    // (the dominant quasi-TEM mode = slowest wave = highest ε_eff first).
+    let candidates = cutoff_candidates(&a_re, &b_re, &k_op, &b1_re, n)?;
+    if candidates.is_empty() {
+        return Err(yee_core::Error::Numerical(
+            "eigensolver(mixed): no propagating cutoff candidate above the spurious floor".into(),
+        ));
+    }
+
+    // ── Step 2: shift-and-invert from each candidate; keep the highest-β²
+    // transverse-dominated converged β-direct eigenpair (Phase 1.3.1.1 step
+    // 5.6). The β-direct shift-and-invert recovers the TRUE eigenvector for
+    // the mode nearest the shift and screens it for transverse-dominance on
+    // that converged eigenvector; among the modes that pass, the physical
+    // dominant mode is the largest β² (highest ε_eff). This rejects the
+    // p=2 spurious gradient-cluster captures (low ε_eff) that defeated the
+    // smallest-cutoff selection. ──
+    let mut best: Option<(f64, Vec<f64>)> = None; // (β²_true, x_true)
+    for (sigma0, x_c) in &candidates {
+        match beta_direct_shift_invert(&k_op, &b1_re, n, n_t, *sigma0, Some(x_c)) {
+            Ok((beta_sq, x_true)) => {
+                if beta_sq <= 0.0 || !beta_sq.is_finite() {
+                    continue;
+                }
+                let take = match &best {
+                    None => true,
+                    Some((curr, _)) => beta_sq > *curr,
+                };
+                if take {
+                    best = Some((beta_sq, x_true));
+                }
+            }
+            // A candidate whose shift-invert converges to a non-transverse
+            // (spurious E_z / gradient) mode, fails to converge, or is
+            // evanescent is skipped — another candidate targets the
+            // physical mode.
+            Err(_) => continue,
+        }
+    }
+
+    let (beta_sq_re, x_true) = best.ok_or_else(|| {
         yee_core::Error::Numerical(
-            "eigensolver(mixed): cutoff-mode Rayleigh quotient has a zero B_1-norm denominator"
+            "eigensolver(mixed): no candidate shift converged to a transverse-dominated \
+             propagating mode"
                 .into(),
         )
     })?;
-
-    // ── Step 2: sparse shift-and-invert to the TRUE β-direct eigenvector ──
-    let (beta_sq_re, x_true) = beta_direct_shift_invert(&k_op, &b1_re, n, n_t, sigma0, Some(&x_c))?;
-
-    if beta_sq_re <= 0.0 {
-        return Err(yee_core::Error::Numerical(format!(
-            "eigensolver(mixed): dominant mode is evanescent at {freq_hz} Hz (β² = {beta_sq_re})"
-        )));
-    }
 
     Ok(pack_mixed_solution(beta_sq_re, n_t, n, &x_true))
 }
@@ -451,30 +488,42 @@ fn rayleigh_beta_sq(k_op: &DMatrix<f64>, b1_re: &DMatrix<f64>, n: usize, x: &[f6
     (den.abs() > 0.0).then_some(num / den)
 }
 
-/// Select the dominant guided mode of the **cutoff** pencil
-/// `A x = k_c² B x` and return its eigenvector (interior-DoF ordering,
-/// length `n`).
+/// A propagating cutoff-pencil candidate: its β-direct Rayleigh quotient
+/// `β² = R(x_c)` (used both as a physics-informed shift and to order the
+/// candidates) and its cutoff-pencil eigenvector `x_c` (interior-DoF
+/// ordering, length `n`, used to seed the β-direct shift-and-invert).
+type CutoffCandidate = (f64, Vec<f64>);
+
+/// Gather the propagating candidates of the **cutoff** pencil
+/// `A x = k_c² B x`, each recovered by inverse iteration and tagged with
+/// its β-direct Rayleigh quotient `β² = R(x_c)`, sorted by `R(x_c)`
+/// **descending** (highest ε_eff / slowest wave first).
 ///
-/// This is the step-5.2 Stage-1 selection, unchanged and validated: the
-/// cutoff `k_c²` is the physically-meaningful curl-energy / ε-weighted-
-/// field-energy ratio, so the curl-free gradient null-space sits cleanly
-/// at `k_c² ≈ 0` (rejected by the `k_c² ≤ max|k_c²| · 1e-6` floor) and the
-/// transverse-energy filter removes E_z-dominated contamination. The
-/// dominant guided mode is the **smallest** valid `k_c²`; its eigenvector
-/// is recovered by inverse iteration on `(A − σ B)`.
+/// **Why no transverse-energy pre-filter here (Phase 1.3.1.1 step 5.6).**
+/// The step-5.2/5.3 selection rejected candidates whose *cutoff-pencil*
+/// eigenvector was not transverse-energy-dominated (`‖e_t‖²/‖x‖² < `
+/// [`TRANSVERSE_ENERGY_FLOOR`]). At p=2 the curl-free gradient edge
+/// functions `∇(λ_aλ_b)` enlarge the near-null cluster, so the **physical**
+/// dominant mode's *cutoff-pencil* eigenvector mixes heavily with the
+/// E_z / gradient block (its `‖e_t‖²/‖x‖²` drops to ≈0.03 on the ε_r=10.2
+/// slab) even though its **true β-direct eigenvector is fully transverse**
+/// (`‖e_t‖²/‖x‖² ≈ 1.0`). Pre-rejecting on the cutoff-pencil fraction
+/// therefore discards the physical mode's shift and the selection locks
+/// onto a non-dominant (lower-ε_eff) mode. The transverse screen is
+/// instead applied to the **converged β-direct eigenvector** in
+/// [`beta_direct_shift_invert`], where it is reliable; this gather keeps
+/// every real, above-floor, positive-`R` cutoff candidate as a shift.
 ///
-/// **Why the cutoff pencil for shift selection** (Phase 1.3.1.1 step 5.3):
-/// in the β-direct pencil the curl-free gradient modes land at
-/// `β² ≈ k_0² ⟨ε_r⟩` (the TOP of the spectrum, interleaved with the
-/// physical mode), and a *blind* β-direct sweep thrashes on that cluster.
-/// The cutoff pencil keeps the gradient cluster at `k_c² ≈ 0`, so it
-/// cheaply yields a physics-informed shift `σ₀ = R(x_c)` that targets the
-/// physical eigenpair for the subsequent β-direct shift-and-invert.
-fn select_cutoff_mode(
+/// `floor` for the curl-free gradient null-space is the same
+/// `k_c² ≤ max|k_c²| · 1e-6` cutoff the prior selection used; only the
+/// transverse pre-filter is removed.
+fn cutoff_candidates(
     a_re: &DMatrix<f64>,
     b_re: &DMatrix<f64>,
-    n_t: usize,
-) -> Result<Vec<f64>, yee_core::Error> {
+    k_op: &DMatrix<f64>,
+    b1_re: &DMatrix<f64>,
+    n: usize,
+) -> Result<Vec<CutoffCandidate>, yee_core::Error> {
     let b_lu = b_re.clone().lu();
     let binv_a = b_lu.solve(a_re).ok_or_else(|| {
         yee_core::Error::Numerical(
@@ -489,7 +538,7 @@ fn select_cutoff_mode(
         .max(1.0);
     let spurious_floor = max_abs * 1e-6;
 
-    let mut best: Option<(f64, Vec<f64>)> = None;
+    let mut cands: Vec<CutoffCandidate> = Vec::new();
     for ev in kc_evals.iter() {
         if ev.im.abs() > 1e-6 * ev.re.abs().max(1.0) {
             continue;
@@ -505,25 +554,68 @@ fn select_cutoff_mode(
         if total <= 0.0 {
             continue;
         }
+        // β-direct Rayleigh quotient on the cutoff-pencil eigenvector — the
+        // physics-informed shift estimate. Only propagating candidates
+        // (β² > 0) target a physical guided mode.
+        let Some(rq) = rayleigh_beta_sq(k_op, b1_re, n, &x) else {
+            continue;
+        };
+        if rq <= 0.0 || !rq.is_finite() {
+            continue;
+        }
+        cands.push((rq, x));
+    }
+    // Sort by the β-direct Rayleigh quotient descending: the dominant
+    // quasi-TEM mode is the slowest wave (largest β² / highest ε_eff), so
+    // its shift is tried first.
+    cands.sort_by(|p, q| q.0.partial_cmp(&p.0).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(cands)
+}
+
+/// Select the dominant mode of the **cutoff** pencil whose *cutoff-pencil*
+/// eigenvector is transverse-energy-dominated and has the largest β-direct
+/// Rayleigh quotient `β² = R(x_c)`. Returns the eigenvector and its `R(x_c)`.
+///
+/// This is the **dense reference** selection ([`solve_dense_mixed_rq`]),
+/// which intentionally evaluates β² as the Rayleigh quotient *on the
+/// cutoff-pencil eigenvector* (the step-5.2 hybrid). It is exercised only
+/// on the small-`n` homogeneous / uniform-fill anchors, where the
+/// cutoff-pencil and β-direct eigenvectors coincide and the dominant mode
+/// is unambiguously transverse-dominated; the `TRANSVERSE_ENERGY_FLOOR`
+/// pre-filter is therefore reliable here (unlike the p=2 inhomogeneous
+/// production path, which uses [`cutoff_candidates`] + the converged-
+/// eigenvector screen instead — see that function's docstring).
+fn select_dominant_cutoff_rq(
+    a_re: &DMatrix<f64>,
+    b_re: &DMatrix<f64>,
+    k_op: &DMatrix<f64>,
+    b1_re: &DMatrix<f64>,
+    n: usize,
+    n_t: usize,
+) -> Result<(Vec<f64>, f64), yee_core::Error> {
+    let mut best: Option<(f64, Vec<f64>)> = None; // (R(x_c), eigenvector)
+    for (rq, x) in cutoff_candidates(a_re, b_re, k_op, b1_re, n)? {
+        let total: f64 = x.iter().map(|&v| v * v).sum();
         let trans: f64 = (0..n_t).map(|i| x[i] * x[i]).sum();
-        if trans / total < TRANSVERSE_ENERGY_FLOOR {
+        if total <= 0.0 || trans / total < TRANSVERSE_ENERGY_FLOOR {
             continue;
         }
         let take = match &best {
             None => true,
-            Some((curr, _)) => k_c_sq < *curr,
+            Some((curr, _)) => rq > *curr,
         };
         if take {
-            best = Some((k_c_sq, x));
+            best = Some((rq, x));
         }
     }
-    let (_k_c_sq, x_sel) = best.ok_or_else(|| {
+    let (rq, x_sel) = best.ok_or_else(|| {
         yee_core::Error::Numerical(
-            "eigensolver(mixed): no transverse-energy-dominated real k_c² above the spurious floor"
+            "eigensolver(mixed): no transverse-energy-dominated propagating cutoff mode above the \
+             spurious floor"
                 .into(),
         )
     })?;
-    Ok(x_sel)
+    Ok((x_sel, rq))
 }
 
 /// Direct β-direct **sparse shift-and-invert** for the physical mode
@@ -702,12 +794,12 @@ fn solve_dense_mixed_rq(
     let omega = std::f64::consts::TAU * freq_hz;
     let k0 = omega / yee_core::units::C0;
     let k_op = k0 * k0 * &b_re - &a_re;
-    let x_sel = select_cutoff_mode(&a_re, &b_re, n_t)?;
-    let beta_sq_re = rayleigh_beta_sq(&k_op, &b1_re, n, &x_sel).ok_or_else(|| {
-        yee_core::Error::Numerical(
-            "eigensolver(mixed): β-direct Rayleigh quotient has a zero B_1-norm denominator".into(),
-        )
-    })?;
+    // Phase 1.3.1.1 step 5.6: select the transverse-dominated cutoff
+    // candidate with the highest β-direct Rayleigh quotient (= the dominant
+    // quasi-TEM mode); its RQ is β² directly — the dense reference's β² is
+    // the RQ on the cutoff-pencil eigenvector (the documented
+    // step-5.2-hybrid mismatch the production sparse path removes).
+    let (x_sel, beta_sq_re) = select_dominant_cutoff_rq(&a_re, &b_re, &k_op, &b1_re, n, n_t)?;
     if beta_sq_re <= 0.0 {
         return Err(yee_core::Error::Numerical(format!(
             "eigensolver(mixed): dominant mode is evanescent at {freq_hz} Hz (β² = {beta_sq_re})"
