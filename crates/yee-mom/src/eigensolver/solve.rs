@@ -595,6 +595,7 @@ fn beta_direct_shift_invert(
 
     let mut beta_sq = sigma0;
     let mut beta_sq_prev = f64::NAN;
+    let mut converged = false;
     for _ in 0..200 {
         // rhs = B_1 z
         let zm = DMatrix::<f64>::from_column_slice(n, 1, &z);
@@ -625,9 +626,17 @@ fn beta_direct_shift_invert(
         if beta_sq_prev.is_finite()
             && (beta_sq - beta_sq_prev).abs() <= 1e-12 * beta_sq.abs().max(1.0)
         {
+            converged = true;
             break;
         }
         beta_sq_prev = beta_sq;
+    }
+    if !converged {
+        return Err(yee_core::Error::Numerical(
+            "eigensolver(mixed): β-direct inverse iteration did not converge within 200 \
+             iterations (shift σ₀ may be poorly aligned with the physical mode)"
+                .into(),
+        ));
     }
 
     // Screen the converged mode: it must be transverse-energy-dominated.
