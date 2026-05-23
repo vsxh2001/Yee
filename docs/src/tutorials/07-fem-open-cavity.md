@@ -363,6 +363,43 @@ tolerance `< 0.1` is **not** weakened. ADR-0048 (Phase
     handles arbitrary modal content via evanescent absorption
     rather than modal projection.
 
+### Phase 4.fem.eig.3.5.5 — frequency retune to 40 GHz (ADR-0048 Option (a))
+
+Phase 4.fem.eig.3.5.5 executed ADR-0048 Option (a): `FEM_EIG_006_F_HZ`
+was retuned from 30 GHz to **40 GHz**, where `TE_{20}` propagates with
+`β ≈ 554 rad/m` (33% above its `f_c = c / B = 30 GHz` cutoff) instead of
+sitting exactly on it. The cavity, mesh, and 3-mode driver are otherwise
+unchanged, so the multi-mode basis now carries real propagating content
+for the projection step to terminate:
+
+| Configuration                                  | `|S_{11}|`  | dB     |
+|------------------------------------------------|-------------|--------|
+| v3.5.2 CFS-PML (best H4 row)                   | 0.926       | -0.67  |
+| v3.5.3 W1 single-mode TE_{10}                  | 0.925644    | -0.67  |
+| v3.5.4 multi-mode (TE_{10}, TE_{20}, TE_{01}) @ 30 GHz | 0.925637 | -0.67  |
+| **v3.5.5 multi-mode @ 40 GHz (TE_{20} propagating)** | **0.955397** | **-0.40** |
+
+The retune **did not retire** the gate — `|S_{11}|(40 GHz) = 0.955397`
+is marginally *above* the cutoff-degenerate 30 GHz value, so the v3.5.4
+modal degeneracy was not the binding constraint. A one-shot refinement
+probe (transverse mesh `NY 3→9`, `NZ 2→6`, 5184 tets) gave
+`|S_{11}| = 0.913956` (-0.78 dB): a 9× transverse element-count increase
+moved the residual only ~0.04, so the reflection is **not**
+discretisation-limited either (probe reverted, native (16, 3, 2) mesh
+stands).
+
+**Disposition: escape-hatch.** With both modal degeneracy (v3.5.4) and
+discretisation (this probe) excluded, the residual ~0.95 is a genuine
+limitation of the modal-projection wave-port — projecting onto a finite
+`TE_{mn}` basis cannot fully match the field at the truncation face of a
+strongly off-square (100 : 10 : 1) cavity. The `fem_eig_006_magnitude_bounded`
+gate stays `#[ignore]`'d (tolerance `< 0.1` **not** weakened), and ADR-0049
+(`docs/src/decisions/0049-phase-4-fem-eig-3-5-6-absorbing-mode-wave-port.md`)
+queues **Phase 4.fem.eig.3.5.6** to land the Lee-Mittra 1997 absorbing-mode
+wave-port (ADR-0048 Option (b)). `FEM_EIG_006_F_HZ = 40 GHz` is retained as
+the operating point for that work — reverting to 30 GHz would reintroduce
+the cutoff degeneracy.
+
 #### Per-fixture override pattern
 
 Users who want to revert to the v3.5.0 OOOOOOOOO baseline (thinner
