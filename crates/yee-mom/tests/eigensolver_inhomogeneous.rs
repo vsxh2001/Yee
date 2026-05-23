@@ -523,6 +523,210 @@ fn graded_h_convergence_study_hi_contrast() {
     );
 }
 
+#[test]
+fn step_5_7_finer_mesh_hi_contrast_convergence_finding() {
+    // Phase 1.3.1.1 step 5.7 (DoD-2, the PAYOFF — NON-FAILING DOCUMENTED
+    // FINDING). The step-5.7 sparse cutoff shift-invert lifts the dense
+    // O(n³) `complex_eigenvalues` cap that pinned the *whole* cross-section
+    // eigensolver at ≈6×6 (n≈457). With that cap gone, this study drives the
+    // ε_r=10.2 horizontal-slab guide through the FINER first-order meshes the
+    // earlier steps (5.4/5.6) could not afford inline — the long-queued
+    // "finer mesh / sparse selection" lever — and reconciles against the
+    // verified LSM-to-y reference 582.95 rad/m (ε_eff 8.17).
+    //
+    // **RESULT — the ≤5% closure is NOT taken; the residual is DEEPER than
+    // discretization.** The first-order β converges MONOTONICALLY to a flat
+    // plateau ≈485.4 rad/m (rel ≈16.7%) as the mesh refines 8×8 → 24×24
+    // (n far past the old 457 cap), NOT toward 582.95. Decisively, the
+    // SECOND-ORDER (p=2) path — now also affordable on finer meshes via the
+    // same sparse selection, the precise lever step-5.6 queued — converges to
+    // the SAME ≈485.3 plateau (rel ≈16.7%), flat from 8×8 onward (release-mode
+    // sweep, recorded below). So NEITHER h-refinement NOR p-refinement closes
+    // the gap: both element orders agree the numerical dominant propagating
+    // mode sits at ε_eff ≈ 5.79, while the transcendental LSM-to-y reference's
+    // dominant root sits at ε_eff 8.17.
+    //
+    // VERDICT (updates the step-5.4/5.6 "first-order discretization rate"
+    // hypothesis with the now-affordable p=2 + finer-mesh data): the residual
+    // is NOT a discretization-rate limit — converged p=2 reproduces the p=1
+    // plateau. It is a genuinely DEEPER modeling question (the FEM dominant
+    // propagating mode of this guide vs the LSM-to-y transverse-resonance root
+    // the reference computes — a possible mode-identity / reference-formulation
+    // mismatch at this high contrast). DISPOSITION (per ADR-0058): the §4
+    // inhomogeneous published-benchmark closure STAYS the FR-4 gate
+    // (`fr4_loaded_beta_matches_reference`, ≤5%); the ε_r=10.2 reconciliation
+    // remains a NON-FAILING diagnostic, now with the finer-mesh + p=2 evidence
+    // that retires the "needs finer p=2" hypothesis; the deeper
+    // mode-identity / reference question is QUEUED to step-5.8. No gate
+    // weakened. The PAYOFF delivered here is twofold: (1) mesh scaling past the
+    // dense cap (DoD-3), and (2) the conclusive p=2 + finer-mesh finding that
+    // could not be obtained while the dense cap stood.
+    //
+    // Clean-interface meshes only (even ny so b/2 lands on a node).
+    let beta_ref = slab_loaded_beta(B / 2.0, EPS_FILL_HI, FREQ_HZ, 1)
+        .expect("LSM transcendental dominant root for ε_r=10.2");
+    let k0 = std::f64::consts::TAU * FREQ_HZ / C0;
+    let kx = PI / A;
+    let eps_eff = |beta: f64| (beta * beta + kx * kx) / (k0 * k0);
+    eprintln!("step-5.7 finer-mesh ε_r={EPS_FILL_HI} convergence (horizontal slab, d₁=b/2, m=1):");
+    eprintln!(
+        "  published reference (verified LSM-to-y): β_ref = {beta_ref:.4} rad/m (ε_eff {:.4})",
+        eps_eff(beta_ref)
+    );
+
+    // First-order finer-mesh sweep, now affordable inline because the cutoff
+    // selection is sparse (no dense O(n³) eigendecomposition). 16×16 (n≈565)
+    // and 20×20 (n≈881) are both well past the old ≈457 dense cap.
+    let cases: &[(usize, usize)] = &[(8, 8), (12, 12), (16, 16), (20, 20)];
+    let mut betas: Vec<(usize, f64)> = Vec::new();
+    for &(nx, ny) in cases {
+        let mesh = horizontal_slab_mesh(nx, ny);
+        let nv = mesh.vertices.len();
+        let (eps, mu) = loaded_eps_mu_with(EPS_FILL_HI);
+        let mut mode = NumericalCrossSection::new(mesh, eps, mu);
+        mode.solve(FREQ_HZ)
+            .expect("finer-mesh ε_r=10.2 sparse solve");
+        let beta = mode.beta.expect("β cached").re;
+        let rel = (beta - beta_ref).abs() / beta_ref;
+        eprintln!(
+            "  p1 {nx}×{ny} verts={nv}: β = {beta:.4} rad/m (ε_eff {:.4}), rel {rel:.4}",
+            eps_eff(beta)
+        );
+        assert!(
+            beta.is_finite() && beta > 0.0 && eps_eff(beta) > 4.0,
+            "each finer-mesh point must be a physical field-concentrated mode (β {beta}, \
+             ε_eff {:.3})",
+            eps_eff(beta)
+        );
+        betas.push((nx, beta));
+    }
+
+    // Plateau metric over the FINER tail (the two finest meshes, 16×16 →
+    // 20×20): the asymptotic convergence regime. The 8×8 anchor is still
+    // mildly descending (489 → 486), so the coarse-to-fine change overstates
+    // the residual rate; the tail change is the genuine plateau signal.
+    let (_, beta_tail0) = betas[betas.len() - 2];
+    let (_, beta_fine) = *betas.last().expect("≥1 mesh point");
+    let plateau = (beta_fine - beta_tail0).abs() / beta_tail0;
+    let rel_fine = (beta_fine - beta_ref).abs() / beta_ref;
+    eprintln!(
+        "  FINDING (step-5.7): first-order β CONVERGES to a flat plateau \
+         (16×16 → 20×20 tail changes by {plateau:.4}, β_fine {beta_fine:.2}, rel {rel_fine:.4}); \
+         the release-mode sweep extends it to 24×24 ≈485.4 (rel ≈0.167). Crucially, the now-\
+         affordable p=2 path converges to the SAME ≈485.3 plateau (rel ≈0.167) — NEITHER h- \
+         NOR p-refinement closes the gap to β_ref {beta_ref:.1}. The residual is DEEPER than \
+         discretization (the FEM dominant mode at ε_eff ≈5.79 vs the LSM-to-y reference root at \
+         ε_eff 8.17): a mode-identity / reference-formulation question QUEUED to step-5.8. The \
+         §4 closure STAYS the FR-4 gate; ε_r=10.2 remains a non-failing diagnostic. See ADR-0058."
+    );
+
+    // Assertions (DoD-2 document-and-queue branch): (1) the first-order β is
+    // MESH-CONVERGED across the finer sparse-enabled meshes (the plateau is
+    // real, not a coarse transient), and (2) it stays well short of the ≤5%
+    // close — we DOCUMENT the persisting gap, we do NOT assert closure and we
+    // do NOT weaken any gate.
+    assert!(
+        plateau < 2e-3,
+        "first-order β must be mesh-converged in the finer tail (16×16 → 20×20 rel change \
+         {plateau:.4} should be < 0.2%); a non-flat tail would mean the sparse path is not yet \
+         at the discretization plateau"
+    );
+    assert!(
+        rel_fine > 0.05,
+        "the finer-mesh ε_r=10.2 β (rel {rel_fine:.4}) is the DOCUMENTED plateau short of the \
+         ≤5% close — this branch must NOT assert closure (the residual is deeper than \
+         discretization; queued to step-5.8)"
+    );
+}
+
+#[test]
+fn step_5_7_mesh_scaling_past_dense_cap() {
+    // Phase 1.3.1.1 step 5.7 (DoD-3 — the mesh-scaling demo). The dense
+    // O(n³) `complex_eigenvalues` cutoff selection capped the whole
+    // cross-section eigensolver at ≈6×6 (n≈457 interior DoF; the dense path's
+    // documented "minutes-scale by 24×24" wall). The sparse shift-invert lifts
+    // that: this drives a cross-section solve at a mesh whose interior-DoF
+    // count `n` is WELL PAST 457 and asserts it completes (in a reasonable
+    // wall time) with a physical propagating mode.
+    //
+    // A 20×20 horizontal-slab WR-90 has 21×21 = 441 vertices, 800 triangles →
+    // ≈1160 edges. After PEC boundary elimination the interior-DoF count is
+    // n = n_t (interior edges) + n_z (interior verts) ≈ 881 + 361 ≈ 1242 — i.e.
+    // ≈2.7× the old dense cap. (The exact split is crate-internal; the lib
+    // unit test `eigensolver::solve::tests::sparse_cutoff_agrees_with_dense_dominant_beta`
+    // exercises the sparse path's correctness, and the lib `coarse_wr90_te10`
+    // suite pins the assembly DoF counts.)
+    let mesh = horizontal_slab_mesh(20, 20);
+    let n_verts = mesh.vertices.len();
+    let n_tris = mesh.triangles.len();
+    assert!(
+        n_verts >= 441 && n_tris >= 800,
+        "scaling demo mesh must be substantial (verts {n_verts}, tris {n_tris})"
+    );
+    let (eps, mu) = loaded_eps_mu_with(EPS_FILL_HI);
+    let mut mode = NumericalCrossSection::new(mesh, eps, mu);
+    let t = std::time::Instant::now();
+    mode.solve(FREQ_HZ)
+        .expect("sparse cutoff solve at a mesh past the old dense ~457-DoF cap");
+    let dt = t.elapsed();
+    let beta = mode.beta.expect("β cached").re;
+    let k0 = std::f64::consts::TAU * FREQ_HZ / C0;
+    let kx = PI / A;
+    let eps_eff = (beta * beta + kx * kx) / (k0 * k0);
+    eprintln!(
+        "step-5.7 mesh-scaling demo: 20×20 horizontal slab (verts={n_verts}, tris={n_tris}, \
+         interior-DoF n≈1242 ≫ old ~457 cap) solved in {:.2}s → β={beta:.4} rad/m (ε_eff {eps_eff:.4})",
+        dt.as_secs_f64()
+    );
+    assert!(
+        beta.is_finite() && beta > 0.0 && eps_eff > 4.0,
+        "scaling demo must land a physical field-concentrated mode (β {beta}, ε_eff {eps_eff:.3})"
+    );
+    // Wall-time sanity: the dense path was "minutes-scale by 24×24"; the sparse
+    // path solves this larger problem in seconds. Generous bound (CI headroom,
+    // opt-level=1 test profile) — the point is it is NOT minutes.
+    assert!(
+        dt.as_secs_f64() < 60.0,
+        "sparse cutoff solve past the dense cap should be seconds-scale, took {:.1}s",
+        dt.as_secs_f64()
+    );
+}
+
+/// Release-mode extension of [`step_5_7_finer_mesh_hi_contrast_convergence_finding`]:
+/// the full p=1 vs p=2 finer-mesh sweep that produced the step-5.7 verdict.
+/// Ignored by default (the p=2 path is minutes-scale at 16×16+ under the
+/// opt-level=1 test profile); run with `--release --ignored` to reproduce the
+/// recorded numbers. **Non-failing**: prints the convergence table for both
+/// element orders; the binding assertions live in the inline test above.
+#[test]
+#[ignore = "release-mode finer-mesh p=1/p=2 ε_r=10.2 sweep (minutes-scale at opt-level=1)"]
+fn step_5_7_finer_mesh_p1_vs_p2_release_sweep() {
+    let beta_ref = slab_loaded_beta(B / 2.0, EPS_FILL_HI, FREQ_HZ, 1).expect("LSM root");
+    let k0 = std::f64::consts::TAU * FREQ_HZ / C0;
+    let kx = PI / A;
+    let eps_eff = |beta: f64| (beta * beta + kx * kx) / (k0 * k0);
+    eprintln!("ref β={beta_ref:.4} (ε_eff {:.4})", eps_eff(beta_ref));
+    for order in [ElementOrder::First, ElementOrder::Second] {
+        eprintln!("=== order {order:?} ===");
+        for &(nx, ny) in &[(8usize, 8usize), (12, 12), (16, 16), (20, 20), (24, 24)] {
+            let mesh = horizontal_slab_mesh(nx, ny);
+            let nv = mesh.vertices.len();
+            let (eps, mu) = loaded_eps_mu_with(EPS_FILL_HI);
+            let mut mode = NumericalCrossSection::new(mesh, eps, mu).with_element_order(order);
+            let t = std::time::Instant::now();
+            mode.solve(FREQ_HZ).expect("finer-mesh solve");
+            let beta = mode.beta.expect("β cached").re;
+            let rel = (beta - beta_ref).abs() / beta_ref;
+            eprintln!(
+                "  {nx}×{ny} verts={nv}: β={beta:.4} (ε_eff {:.4}) rel={rel:.4} [{:.1}s]",
+                eps_eff(beta),
+                t.elapsed().as_secs_f64()
+            );
+            assert!(beta.is_finite() && beta > 0.0, "physical mode");
+        }
+    }
+}
+
 fn air_eps_mu() -> (HashMap<u32, Complex64>, HashMap<u32, Complex64>) {
     let mut eps = HashMap::new();
     eps.insert(0u32, Complex64::new(1.0, 0.0));
