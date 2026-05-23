@@ -2964,10 +2964,12 @@ pub fn run_fem_eig_003_wr90_stub_abc_with_config(
     }
     drop(placeholder);
 
-    let port = PortDefinition {
-        beta_mode: Box::new(fem_eig_003_beta_te10),
-        modal_e_t: Box::new(fem_eig_003_modal_e_t_te10),
-    };
+    // Phase 4.fem.eig.3.5.4 M1: single-mode constructor preserves
+    // v3.5.3 numerics bit-for-bit (a_inc = Complex64::ONE).
+    let port = PortDefinition::single_mode(
+        Box::new(fem_eig_003_beta_te10),
+        Box::new(fem_eig_003_modal_e_t_te10),
+    );
 
     // ---- 4. Build the CFS-PML solver. Coupled exact-Whitney-1 modal
     // RHS / projection stays on (Phase 4.fem.eig.3 F1+F2 still load-
@@ -3277,14 +3279,16 @@ pub fn run_fem_eig_004_wr90_thruline() -> Result<FemEig004ValidationResult, yee_
     // ---- 4. Two-port definitions — both ports carry the same WR-90
     // TE_{10} modal profile (the two end faces are geometrically
     // identical modulo translation).
-    let port_0 = PortDefinition {
-        beta_mode: Box::new(fem_eig_004_beta_te10),
-        modal_e_t: Box::new(fem_eig_004_modal_e_t_te10),
-    };
-    let port_1 = PortDefinition {
-        beta_mode: Box::new(fem_eig_004_beta_te10),
-        modal_e_t: Box::new(fem_eig_004_modal_e_t_te10),
-    };
+    // Phase 4.fem.eig.3.5.4 M1: single-mode constructor preserves
+    // v3.5.3 numerics bit-for-bit (a_inc = Complex64::ONE).
+    let port_0 = PortDefinition::single_mode(
+        Box::new(fem_eig_004_beta_te10),
+        Box::new(fem_eig_004_modal_e_t_te10),
+    );
+    let port_1 = PortDefinition::single_mode(
+        Box::new(fem_eig_004_beta_te10),
+        Box::new(fem_eig_004_modal_e_t_te10),
+    );
 
     let solver = OpenBoundarySolver::new(
         &mesh,
@@ -3565,18 +3569,20 @@ pub fn run_fem_eig_005_t_junction() -> Result<FemEig005ValidationResult, yee_cor
     }
 
     // ---- 4. Three-port modal definitions ----------------------------
-    let port_0 = PortDefinition {
-        beta_mode: Box::new(fem_eig_005_beta),
-        modal_e_t: Box::new(fem_eig_005_modal_e_t_z_face),
-    };
-    let port_1 = PortDefinition {
-        beta_mode: Box::new(fem_eig_005_beta),
-        modal_e_t: Box::new(fem_eig_005_modal_e_t_z_face),
-    };
-    let port_2 = PortDefinition {
-        beta_mode: Box::new(fem_eig_005_beta),
-        modal_e_t: Box::new(fem_eig_005_modal_e_t_x_face),
-    };
+    // Phase 4.fem.eig.3.5.4 M1: single-mode constructor preserves
+    // v3.5.3 numerics bit-for-bit (a_inc = Complex64::ONE).
+    let port_0 = PortDefinition::single_mode(
+        Box::new(fem_eig_005_beta),
+        Box::new(fem_eig_005_modal_e_t_z_face),
+    );
+    let port_1 = PortDefinition::single_mode(
+        Box::new(fem_eig_005_beta),
+        Box::new(fem_eig_005_modal_e_t_z_face),
+    );
+    let port_2 = PortDefinition::single_mode(
+        Box::new(fem_eig_005_beta),
+        Box::new(fem_eig_005_modal_e_t_x_face),
+    );
 
     let solver = OpenBoundarySolver::new(
         &mesh,
@@ -3735,6 +3741,94 @@ fn fem_eig_006_modal_e_t_te10(p: nalgebra::Vector3<f64>) -> nalgebra::Vector3<f6
     nalgebra::Vector3::new(0.0, 0.0, amp)
 }
 
+/// Phase 4.fem.eig.3.5.4 M3: TE_{20} propagation constant on the
+/// fem-eig-006 high-aspect cavity cross-section.
+///
+/// Frame: the +x face cross-section spans `y ∈ [0, FEM_EIG_006_B_M =
+/// 10 mm]` (broad wall in the existing TE_{10} helper's convention)
+/// and `z ∈ [0, FEM_EIG_006_D_M = 1 mm]` (narrow wall). The TE_{mn}
+/// cutoff for a rectangular waveguide with broad wall `a` and narrow
+/// wall `b` is
+///
+/// ```text
+///     f_c = (c / 2) · sqrt((m/a)² + (n/b)²).
+/// ```
+///
+/// For TE_{20} with `a = FEM_EIG_006_B_M = 10 mm`, `b = FEM_EIG_006_D_M
+/// = 1 mm`, m=2, n=0: `f_c = c / B_M ≈ 30 GHz` — exactly at the 30 GHz
+/// operating point, so `β(30 GHz) ≈ 0` and TE_{20} is **right at
+/// cutoff** in this geometry. The mode contributes its stiffness
+/// block to the global matrix (with `β = 0` the stiffness block is
+/// identically zero per Jin §10.5 eq. 10.69) and zero RHS
+/// (a_inc = 0). See M3 docstring on `run_fem_eig_006_high_aspect_pml`
+/// for the spec §2.2 vs existing-helper geometry-convention
+/// discrepancy.
+fn fem_eig_006_beta_te20(omega: f64) -> f64 {
+    let c0 = yee_core::units::C0;
+    let k0_sq = (omega / c0).powi(2);
+    let kc_sq = (2.0 * std::f64::consts::PI / FEM_EIG_006_B_M).powi(2);
+    let arg = k0_sq - kc_sq;
+    if arg <= 0.0 { 0.0 } else { arg.sqrt() }
+}
+
+/// Phase 4.fem.eig.3.5.4 M3: TE_{20} tangential modal profile on the
+/// fem-eig-006 high-aspect cavity wave-port face.
+///
+/// TE_{20} in the existing-helper convention has m=2, n=0:
+///
+/// ```text
+///     E_z(y, z) ∝ sin(2 π y / a)    (a = FEM_EIG_006_B_M = 10 mm)
+/// ```
+///
+/// — same narrow-wall direction (`+ẑ`) as TE_{10}, but with two
+/// half-wavelengths across the broad wall (`y`) instead of one.
+/// Orthogonal to TE_{10}: `∫ sin(π y/a) sin(2 π y/a) dy = 0`.
+fn fem_eig_006_modal_e_t_te20(p: nalgebra::Vector3<f64>) -> nalgebra::Vector3<f64> {
+    let norm = (2.0 / (FEM_EIG_006_B_M * FEM_EIG_006_D_M)).sqrt();
+    let amp = norm * (2.0 * std::f64::consts::PI * p.y / FEM_EIG_006_B_M).sin();
+    nalgebra::Vector3::new(0.0, 0.0, amp)
+}
+
+/// Phase 4.fem.eig.3.5.4 M3: TE_{01} propagation constant on the
+/// fem-eig-006 high-aspect cavity cross-section.
+///
+/// For TE_{01} with `a = FEM_EIG_006_B_M = 10 mm`, `b = FEM_EIG_006_D_M
+/// = 1 mm`, m=0, n=1: `f_c = c / (2 b) ≈ 150 GHz` — well above the
+/// 30 GHz operating point, so TE_{01} is **deeply evanescent** in
+/// this geometry. `β(30 GHz)` clips to 0 and the mode contributes
+/// only a zero-stiffness, zero-RHS placeholder. See M3 docstring on
+/// `run_fem_eig_006_high_aspect_pml` for the spec §2.2 vs
+/// existing-helper geometry-convention discrepancy.
+fn fem_eig_006_beta_te01(omega: f64) -> f64 {
+    let c0 = yee_core::units::C0;
+    let k0_sq = (omega / c0).powi(2);
+    let kc_sq = (std::f64::consts::PI / FEM_EIG_006_D_M).powi(2);
+    let arg = k0_sq - kc_sq;
+    if arg <= 0.0 { 0.0 } else { arg.sqrt() }
+}
+
+/// Phase 4.fem.eig.3.5.4 M3: TE_{01} tangential modal profile on the
+/// fem-eig-006 high-aspect cavity wave-port face.
+///
+/// TE_{01} in the existing-helper convention has m=0, n=1. The
+/// rectangular-waveguide formula gives (in the (y, z) cross-section
+/// frame, broad wall along y, narrow wall along z)
+///
+/// ```text
+///     E_y(y, z) ∝ sin(π z / b)    (b = FEM_EIG_006_D_M = 1 mm)
+/// ```
+///
+/// E points along the broad-wall direction (`+ŷ`) — orthogonal to
+/// the TE_{10} / TE_{20} `+ẑ` direction. Modal orthogonality between
+/// {TE_{10}, TE_{20}, TE_{01}} is therefore guaranteed by the field-
+/// direction Gram even before invoking the in-plane sinusoid
+/// orthogonality (cross-mode self-inner-product is identically zero).
+fn fem_eig_006_modal_e_t_te01(p: nalgebra::Vector3<f64>) -> nalgebra::Vector3<f64> {
+    let norm = (2.0 / (FEM_EIG_006_B_M * FEM_EIG_006_D_M)).sqrt();
+    let amp = norm * (std::f64::consts::PI * p.z / FEM_EIG_006_D_M).sin();
+    nalgebra::Vector3::new(0.0, amp, 0.0)
+}
+
 /// `fem-eig-006`: high-aspect-ratio cavity wave-port termination
 /// (Phase 4.fem.eig.3.5.3 W1; spec §4.2).
 ///
@@ -3784,7 +3878,7 @@ pub fn run_fem_eig_006_high_aspect_pml() -> Result<FemEig006ValidationResult, ye
 pub fn run_fem_eig_006_high_aspect_pml_with_config(
     pml_config: yee_fem::PmlConfig,
 ) -> Result<FemEig006ValidationResult, yee_core::Error> {
-    use yee_fem::{FaceKind, MaterialDatabase, OpenBoundarySolver, PortDefinition};
+    use yee_fem::{FaceKind, MaterialDatabase, OpenBoundarySolver, PortDefinition, PortMode};
     use yee_mesh::TetMesh3D;
 
     // Phase 4.fem.eig.3.5.3 W1: pml_config is no longer consumed by
@@ -3849,16 +3943,65 @@ pub fn run_fem_eig_006_high_aspect_pml_with_config(
         face_kinds.push(kind);
     }
 
-    // Phase 4.fem.eig.3.5.3 W1: +x port shares TE_{10} modal basis
-    // with the -x driving port (geometric translation along x
-    // preserves the modal shape).
-    let port_0 = PortDefinition {
-        beta_mode: Box::new(fem_eig_006_beta_te10),
-        modal_e_t: Box::new(fem_eig_006_modal_e_t_te10),
-    };
+    // Phase 4.fem.eig.3.5.3 W1: -x driving port stays single-mode
+    // TE_{10} (a_inc = Complex64::ONE).
+    let port_0 = PortDefinition::single_mode(
+        Box::new(fem_eig_006_beta_te10),
+        Box::new(fem_eig_006_modal_e_t_te10),
+    );
+
+    // Phase 4.fem.eig.3.5.4 M3: +x port becomes a 3-mode termination
+    // spanning {TE_{10}, TE_{20}, TE_{01}} per ADR-0047 / Jin §10.6.
+    // The driving mode TE_{10} carries `a_inc = Complex64::ONE`;
+    // higher-order projection-only modes carry `a_inc = Complex64::ZERO`
+    // and contribute only their `+ j β B_port` stiffness blocks to
+    // absorb modal content orthogonal to TE_{10} on the port face.
+    //
+    // **Geometry-convention note:** the spec §2.2 assumed `a = 100 mm`
+    // (the cavity's long axis = propagation direction) and `b = 10 mm`,
+    // expecting TE_{20} to propagate at f_c ≈ 3 GHz and TE_{01} at
+    // f_c ≈ 15 GHz. The existing TE_{10} helper, however, uses
+    // `a = FEM_EIG_006_B_M = 10 mm` (the broad wall of the (y, z)
+    // port cross-section) and `b = FEM_EIG_006_D_M = 1 mm` (the
+    // narrow wall) — propagation is along `+x`, so the cross-section
+    // axes are y and z, not x. Under the existing helper's convention
+    // (which the brief explicitly directs us to match):
+    //
+    //   * TE_{10}: f_c = 15 GHz  → propagating at 30 GHz (driving mode)
+    //   * TE_{20}: f_c = 30 GHz  → **at cutoff** at 30 GHz (β ≈ 0)
+    //   * TE_{01}: f_c ≈ 150 GHz → **evanescent** at 30 GHz (β clipped to 0)
+    //
+    // The multi-mode basis therefore collapses to single-mode TE_{10}
+    // at 30 GHz (the higher-order stiffness blocks vanish identically
+    // when β = 0; see element-layer `assemble_port_face_block`). The
+    // measured |S_{11}| should remain ~0.926. This is surfaced as a
+    // finding in the M3 commit body and the agent report. The
+    // orchestrator's M4 disposition step will decide whether to (a)
+    // keep `#[ignore]` and re-derive the spec geometry convention or
+    // (b) rotate the modal basis (use the spec's `a = 100 mm` /
+    // `b = 10 mm` waveguide convention and rebuild the +x face
+    // classification accordingly).
     let port_1 = PortDefinition {
-        beta_mode: Box::new(fem_eig_006_beta_te10),
-        modal_e_t: Box::new(fem_eig_006_modal_e_t_te10),
+        modes: vec![
+            // Driving mode: TE_{10} (a_inc = ONE).
+            PortMode {
+                beta_mode: Box::new(fem_eig_006_beta_te10),
+                modal_e_t: Box::new(fem_eig_006_modal_e_t_te10),
+                a_inc: Complex64::ONE,
+            },
+            // Outgoing-only projection direction: TE_{20}.
+            PortMode {
+                beta_mode: Box::new(fem_eig_006_beta_te20),
+                modal_e_t: Box::new(fem_eig_006_modal_e_t_te20),
+                a_inc: Complex64::ZERO,
+            },
+            // Outgoing-only projection direction: TE_{01}.
+            PortMode {
+                beta_mode: Box::new(fem_eig_006_beta_te01),
+                modal_e_t: Box::new(fem_eig_006_modal_e_t_te01),
+                a_inc: Complex64::ZERO,
+            },
+        ],
     };
 
     let solver = OpenBoundarySolver::new(

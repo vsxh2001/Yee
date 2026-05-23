@@ -139,10 +139,8 @@ fn build_single_port_solver(mesh: &TetMesh3D) -> OpenBoundarySolver<'_> {
     .unwrap();
     let centroids = placeholder.exterior_face_centroids();
     let kinds = classify_faces(&centroids, FaceKind::Pec, FaceKind::WavePort(0));
-    let port = PortDefinition {
-        beta_mode: Box::new(beta_te10),
-        modal_e_t: Box::new(modal_e_t_te10),
-    };
+    // Phase 4.fem.eig.3.5.4 M1: single-mode constructor (a_inc = ONE).
+    let port = PortDefinition::single_mode(Box::new(beta_te10), Box::new(modal_e_t_te10));
     OpenBoundarySolver::new(mesh, kinds, vec![port], MaterialDatabase::new()).unwrap()
 }
 
@@ -162,14 +160,9 @@ fn build_two_port_thru_line_solver(mesh: &TetMesh3D) -> OpenBoundarySolver<'_> {
     .unwrap();
     let centroids = placeholder.exterior_face_centroids();
     let kinds = classify_faces(&centroids, FaceKind::WavePort(0), FaceKind::WavePort(1));
-    let port_0 = PortDefinition {
-        beta_mode: Box::new(beta_te10),
-        modal_e_t: Box::new(modal_e_t_te10),
-    };
-    let port_1 = PortDefinition {
-        beta_mode: Box::new(beta_te10),
-        modal_e_t: Box::new(modal_e_t_te10),
-    };
+    // Phase 4.fem.eig.3.5.4 M1: single-mode constructor (a_inc = ONE).
+    let port_0 = PortDefinition::single_mode(Box::new(beta_te10), Box::new(modal_e_t_te10));
+    let port_1 = PortDefinition::single_mode(Box::new(beta_te10), Box::new(modal_e_t_te10));
     OpenBoundarySolver::new(mesh, kinds, vec![port_0, port_1], MaterialDatabase::new()).unwrap()
 }
 

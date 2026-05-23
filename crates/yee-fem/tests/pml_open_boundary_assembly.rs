@@ -321,14 +321,17 @@ fn alpha_grading_order_zero_matches_v3_5_1() {
 
     let omega = 2.0 * PI * 10e9;
 
-    // v3.5.1 baseline: default config has `alpha_grading_order = 0`.
-    let cfg_default = PmlConfig::default();
-    assert_eq!(
-        cfg_default.alpha_grading_order, 0,
-        "PmlConfig::default() must carry alpha_grading_order = 0 (v3.5.1 backward-compat)"
-    );
-
-    // Explicit `alpha_grading_order = 0` parametrisation.
+    // SSSSSSSSS Phase 4.fem.eig.3.5.2 S3 retune set the default
+    // `alpha_grading_order` to 1; this test parametrises **both**
+    // configurations explicitly so it remains invariant to future
+    // default retunes. The mathematical claim is:
+    //     α_α(d) = α_max · (1 − d/D)^0 ≡ α_max
+    // collapses to the v3.5.1 constant for `alpha_grading_order = 0`,
+    // regardless of what the current default carries.
+    let cfg_v3_5_1 = PmlConfig {
+        alpha_grading_order: 0,
+        ..PmlConfig::default()
+    };
     let cfg_explicit_zero = PmlConfig {
         alpha_grading_order: 0,
         ..PmlConfig::default()
@@ -341,7 +344,7 @@ fn alpha_grading_order_zero_matches_v3_5_1() {
         MaterialDatabase::new(),
     )
     .expect("solver default")
-    .with_cfs_pml(cfg_default, classes.clone());
+    .with_cfs_pml(cfg_v3_5_1, classes.clone());
 
     let solver_explicit = OpenBoundarySolver::new(
         &extended,

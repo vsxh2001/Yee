@@ -948,15 +948,18 @@ fn solve_open_cavity<'py>(
                      (port ids must be a contiguous range [0, n_ports))"
                 ))
             })?;
-        ports.push(PortDefinition {
-            beta_mode: Box::new(move |omega: f64| -> f64 {
+        // Phase 4.fem.eig.3.5.4 M1: single-mode constructor preserves
+        // v3.5.3 numerics bit-for-bit (a_inc = Complex64::ONE). The
+        // multi-mode Python kwarg shape is queued for v3.5.4.1.
+        ports.push(PortDefinition::single_mode(
+            Box::new(move |omega: f64| -> f64 {
                 let k0_sq = (omega / C0).powi(2);
                 let kc_sq = (PI / a_for_beta).powi(2);
                 let arg = k0_sq - kc_sq;
                 if arg <= 0.0 { 0.0 } else { arg.sqrt() }
             }),
-            modal_e_t: Box::new(move |p: Vector3<f64>| -> Vector3<f64> { profile.evaluate(p) }),
-        });
+            Box::new(move |p: Vector3<f64>| -> Vector3<f64> { profile.evaluate(p) }),
+        ));
     }
 
     // ---- 5. Classify exterior faces by centroid ---------------------

@@ -125,10 +125,8 @@ fn build_solver<'a>(mesh: &'a TetMesh3D, back_kind: FaceKind) -> OpenBoundarySol
 
     // The wave-port descriptor: TE_{10} mode on WR-90, β(ω) clipped to
     // 0 below cutoff, normalised modal profile.
-    let port = PortDefinition {
-        beta_mode: Box::new(beta_te10),
-        modal_e_t: Box::new(modal_e_t_te10),
-    };
+    // Phase 4.fem.eig.3.5.4 M1: single-mode constructor (a_inc = ONE).
+    let port = PortDefinition::single_mode(Box::new(beta_te10), Box::new(modal_e_t_te10));
 
     OpenBoundarySolver::new(mesh, kinds, vec![port], MaterialDatabase::new()).unwrap()
 }
@@ -440,7 +438,9 @@ fn modal_self_inner_product_matches_orthonormalisation() {
             // below.
             let _ = i;
             let centroid = centroids[i];
-            let e_mode = (port.modal_e_t)(centroid);
+            // Phase 4.fem.eig.3.5.4 M1: PortDefinition now carries a
+            // Vec<PortMode>; single-mode call sites access modes[0].
+            let e_mode = (port.modes[0].modal_e_t)(centroid);
             // Recover face area: we need a per-face A_face here. The
             // OpenBoundarySolver does not expose face vertices via a
             // public accessor, so we approximate the face area as
@@ -465,7 +465,9 @@ fn modal_self_inner_product_matches_orthonormalisation() {
             && p == 0
         {
             let centroid = centroids[i];
-            let e_mode = (port.modal_e_t)(centroid);
+            // Phase 4.fem.eig.3.5.4 M1: PortDefinition now carries a
+            // Vec<PortMode>; single-mode call sites access modes[0].
+            let e_mode = (port.modes[0].modal_e_t)(centroid);
             mode_inner += area_per_face * e_mode.dot(&e_mode);
         }
     }
