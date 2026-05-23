@@ -157,6 +157,141 @@ impl EdgeTable {
     }
 }
 
+/// Second-order (p=2) degree-of-freedom map for the mixed `(E_t, E_z)`
+/// cross-section assembly (Phase 1.3.1.1 step 5.5).
+///
+/// At p=2 the transverse `E_t` block has **2 DoFs per interior edge** (the
+/// Whitney + gradient edge functions) plus **2 interior DoFs per triangle**
+/// (the face functions), and the longitudinal `E_z` block has **1 DoF per
+/// interior vertex** plus **1 midpoint DoF per interior edge** (quadratic
+/// nodal). PEC walls eliminate boundary-edge and boundary-vertex DoFs (the
+/// midpoint of a boundary edge lies on the wall, so it is eliminated too).
+///
+/// The transverse DoFs are numbered `0..n_t` and the nodal DoFs `0..n_z`
+/// (offset by `n_t` in the global pencil), matching the
+/// [`super::assembly::AssembledMixed`] block layout the order-agnostic
+/// solver consumes. This struct holds the per-triangle local→global slot
+/// maps the assembler scatters through.
+#[allow(dead_code)] // consumed by `assemble_mixed_p2` (J2) + its tests
+#[derive(Debug, Clone)]
+pub(crate) struct P2DofMap {
+    /// Per-triangle map: the 8 local Nedelec slots → global transverse DoF
+    /// (`None` if PEC-eliminated). Slot layout matches
+    /// [`super::assembly`]'s `p2_nedelec_basis`: `[W₀, G₀, W₁, G₁, W₂, G₂,
+    /// F₀, F₁]` (two per edge `e` at `2e`/`2e+1`, two interior at `6`/`7`).
+    pub tri_t_dofs: Vec<[Option<usize>; 8]>,
+    /// Per-triangle map: the 6 local nodal slots → global nodal DoF (`None`
+    /// if PEC-eliminated). Slot layout matches `p2_nodal_basis`: 3 vertex
+    /// nodes (`0..3`) then 3 edge-midpoint nodes (`3..6`, midpoint of local
+    /// edge `e` at `3+e`).
+    pub tri_z_dofs: Vec<[Option<usize>; 6]>,
+    /// Number of transverse (`E_t`) DoFs (`n_t`).
+    pub n_t: usize,
+    /// Number of longitudinal (`E_z`) DoFs (`n_z`).
+    pub n_z: usize,
+    /// Transverse DoF → a representative global edge index (for the Whitney
+    /// / gradient edge DoFs) or `usize::MAX` (for the interior face DoFs,
+    /// which have no global edge). Used to scatter the `E_t` eigenvector
+    /// back onto the mesh edges for the first-order-compatible field
+    /// reconstruction; interior DoFs are skipped there.
+    pub t_dof_edge: Vec<usize>,
+    /// Longitudinal DoF → global vertex index (vertex nodes) or `usize::MAX`
+    /// (edge-midpoint nodes, which have no single owning vertex).
+    pub z_dof_vert: Vec<usize>,
+}
+
+impl P2DofMap {
+    /// Build the p=2 DoF map from a mesh and its [`EdgeTable`].
+    ///
+    /// Numbering (deterministic, mesh-order-stable):
+    /// * transverse `0..n_t`: all interior-edge DoFs first (Whitney then
+    ///   gradient, per interior edge in global-edge order), then the 2
+    ///   interior face DoFs of each triangle (in triangle order);
+    /// * nodal `0..n_z`: all interior-vertex DoFs first (in vertex order),
+    ///   then all interior-edge midpoint DoFs (in global-edge order).
+    pub fn build(mesh: &TriMesh2D, edge_table: &EdgeTable) -> Self {
+        let n_edges = edge_table.n_edges();
+        // --- transverse edge DoFs: 2 per interior edge ---
+        // edge_whitney_dof[g] / edge_grad_dof[g] = global transverse DoF of
+        // the Whitney / gradient function of global edge g (None if boundary).
+        let mut edge_whitney_dof: Vec<Option<usize>> = vec![None; n_edges];
+        let mut edge_grad_dof: Vec<Option<usize>> = vec![None; n_edges];
+        let mut t_dof_edge: Vec<usize> = Vec::new();
+        for (gid, &is_bnd) in edge_table.is_boundary.iter().enumerate() {
+            if !is_bnd {
+                edge_whitney_dof[gid] = Some(t_dof_edge.len());
+                t_dof_edge.push(gid);
+                edge_grad_dof[gid] = Some(t_dof_edge.len());
+                t_dof_edge.push(gid);
+            }
+        }
+        // --- transverse interior (face) DoFs: 2 per triangle ---
+        let n_tris = mesh.n_tris();
+        let mut tri_face_dofs: Vec<[usize; 2]> = Vec::with_capacity(n_tris);
+        for _ in 0..n_tris {
+            let d0 = t_dof_edge.len();
+            t_dof_edge.push(usize::MAX); // interior face DoF: no global edge
+            let d1 = t_dof_edge.len();
+            t_dof_edge.push(usize::MAX);
+            tri_face_dofs.push([d0, d1]);
+        }
+        let n_t = t_dof_edge.len();
+
+        // --- nodal vertex DoFs: 1 per interior vertex ---
+        let boundary_vertex = edge_table.boundary_vertices(mesh.n_verts());
+        let mut vert_dof: Vec<Option<usize>> = vec![None; mesh.n_verts()];
+        let mut z_dof_vert: Vec<usize> = Vec::new();
+        for (vid, &is_bnd) in boundary_vertex.iter().enumerate() {
+            if !is_bnd {
+                vert_dof[vid] = Some(z_dof_vert.len());
+                z_dof_vert.push(vid);
+            }
+        }
+        // --- nodal edge-midpoint DoFs: 1 per interior edge ---
+        let mut edge_mid_dof: Vec<Option<usize>> = vec![None; n_edges];
+        for (gid, &is_bnd) in edge_table.is_boundary.iter().enumerate() {
+            if !is_bnd {
+                edge_mid_dof[gid] = Some(z_dof_vert.len());
+                z_dof_vert.push(usize::MAX); // midpoint node: no owning vertex
+            }
+        }
+        let n_z = z_dof_vert.len();
+
+        // --- per-triangle local→global slot maps ---
+        let mut tri_t_dofs: Vec<[Option<usize>; 8]> = Vec::with_capacity(n_tris);
+        let mut tri_z_dofs: Vec<[Option<usize>; 6]> = Vec::with_capacity(n_tris);
+        for (t, conn) in edge_table.tri_edges.iter().enumerate() {
+            let mut tdof = [None; 8];
+            for (e, &g) in conn.global_edge.iter().enumerate() {
+                tdof[2 * e] = edge_whitney_dof[g];
+                tdof[2 * e + 1] = edge_grad_dof[g];
+            }
+            tdof[6] = Some(tri_face_dofs[t][0]);
+            tdof[7] = Some(tri_face_dofs[t][1]);
+            tri_t_dofs.push(tdof);
+
+            let tri = mesh.triangles[t];
+            let mut zdof = [None; 6];
+            for (lv, &v) in tri.iter().enumerate() {
+                zdof[lv] = vert_dof[v];
+            }
+            for (e, &g) in conn.global_edge.iter().enumerate() {
+                zdof[3 + e] = edge_mid_dof[g];
+            }
+            tri_z_dofs.push(zdof);
+        }
+
+        Self {
+            tri_t_dofs,
+            tri_z_dofs,
+            n_t,
+            n_z,
+            t_dof_edge,
+            z_dof_vert,
+        }
+    }
+}
+
 /// Build the geometrically-graded `y`-grid lines for a horizontal-slab
 /// cross-section spanning `[0, b]`, clustered toward the interior
 /// dielectric interface `y = d1` (Phase 1.3.1.1 step 5.4).

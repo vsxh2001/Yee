@@ -39,3 +39,39 @@ pub(crate) mod reference;
 pub(crate) mod solve;
 
 pub(crate) use solve::solve_dense_mixed;
+
+/// Finite-element polynomial order for the cross-section mixed
+/// `(E_t, E_z)` assembly.
+///
+/// **First-order is the default** (Whitney-1 Nedelec for `E_t`, linear
+/// nodal-Lagrange for `E_z`) — the path validated by the WR-90 TE10 gate,
+/// the FR-4 inhomogeneous closure, the uniform-fill analytic anchor, and
+/// the ε_r=1 homogeneous canary. It stays bit-for-bit unchanged.
+///
+/// [`ElementOrder::Second`] selects the **second-order** family (Phase
+/// 1.3.1.1 step 5.5): curl-conforming Nedelec-first-kind order-2 for `E_t`
+/// (2 DoF/edge + 2 interior; Jin §9.4 / Webb hierarchal vector bases) and
+/// quadratic nodal-Lagrange for `E_z` (6 nodes/triangle). It is selected
+/// only for the high-contrast inhomogeneous case (ε_r=10.2), where the
+/// first-order convergence rate plateaus short of the verified reference
+/// (step 5.4). The curl is non-constant per triangle at second order, so
+/// every element integral goes through a triangle Gauss rule (see
+/// [`assembly::tri_gauss_deg4`]).
+///
+/// The selector is exercised by the lib-internal step-5.5 J3/J4 anchors
+/// (which call the order-specific assemblers directly). The production
+/// [`crate::ports::NumericalCrossSection::solve`] path (out of the step-5.5
+/// lane) stays on the first-order [`assembly::assemble_mixed`]; wiring the
+/// selector through that public boundary is a follow-up — hence the
+/// `dead_code` allow on the non-test lib build.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum ElementOrder {
+    /// Whitney-1 Nedelec + linear nodal-Lagrange (1 DoF/edge, 1 DoF/vertex).
+    /// The default, validated path.
+    #[default]
+    First,
+    /// Nedelec-first-kind order-2 + quadratic nodal-Lagrange (2 DoF/edge +
+    /// 2 interior for `E_t`; vertex + edge-midpoint nodes for `E_z`).
+    Second,
+}

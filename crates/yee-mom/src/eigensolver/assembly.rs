@@ -272,6 +272,363 @@ fn local_b_ze(geom: &TriGeom, mu_r: Complex64, signs: [f64; 3]) -> [[Complex64; 
     out
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Phase 1.3.1.1 step 5.5 — second-order (p=2) elements.
+//
+// At second order the Nedelec curl is no longer constant on a triangle, so
+// the curl-curl / mass / coupling element integrals cannot use the
+// first-order closed forms. Every p=2 integral instead goes through a 2-D
+// triangle Gauss rule exact for the integrand degree (the p=2 mass / nodal
+// mass integrand is quartic in the barycentric coordinates, so a degree-4
+// rule is required). The basis functions are evaluated point-wise from the
+// barycentric coordinates and their (constant) gradients, exactly as in the
+// `local_b_ze` independent-quadrature unit test, and the same point-wise
+// definitions feed both the production element matrices and the J1
+// independent-quadrature pin.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// A 6-point degree-4 symmetric triangle Gauss rule (Dunavant 1985),
+/// returned as `(λ₀, λ₁, λ₂, weight)` tuples with weights summing to **1**
+/// (the reference-triangle convention — multiply by the physical area to
+/// integrate). Exact for bivariate polynomials up to total degree 4, which
+/// covers every p=2 element integrand: the quartic Nedelec / nodal mass
+/// (`∫ε_r N·N`, `∫ε_r L·L`), the quadratic curl-curl / gradient stiffness,
+/// and the cubic edge-node coupling `∫(1/μ_r)∇L·N`.
+///
+/// Hand-rolled (no `Cargo.toml` dependency, per the step-5.5 lane). The
+/// weights/points are pinned exact-on-monomials in
+/// [`tests::tri_gauss_deg4_integrates_quartics_exactly`].
+pub(crate) fn tri_gauss_deg4() -> [(f64, f64, f64, f64); 6] {
+    // Orbit 1: (a, a, 1−2a), weight w_a, three cyclic permutations.
+    let a = 0.445_948_490_915_965;
+    let wa = 0.223_381_589_678_011;
+    // Orbit 2: (b, b, 1−2b), weight w_b, three cyclic permutations.
+    let b = 0.091_576_213_509_771;
+    let wb = 0.109_951_743_655_322;
+    [
+        (a, a, 1.0 - 2.0 * a, wa),
+        (a, 1.0 - 2.0 * a, a, wa),
+        (1.0 - 2.0 * a, a, a, wa),
+        (b, b, 1.0 - 2.0 * b, wb),
+        (b, 1.0 - 2.0 * b, b, wb),
+        (1.0 - 2.0 * b, b, b, wb),
+    ]
+}
+
+/// The eight second-order Nedelec-first-kind basis vectors of a triangle,
+/// evaluated at a point given by its barycentric coordinates `lam` with
+/// the (constant, per-triangle) barycentric gradients `g[i] = ∇λ_i`.
+///
+/// **Layout (the row/column order of every p=2 `E_t` element block):**
+/// * `0..6` — two functions per local edge `e` (`LOCAL_EDGES[e] = (a, b)`):
+///   - `2e`   : the Whitney / rotational function `W_e = λ_a ∇λ_b − λ_b ∇λ_a`
+///     (the first-order edge function — its tangential trace on edge `e`
+///     is constant);
+///   - `2e+1` : the gradient function `G_e = λ_a ∇λ_b + λ_b ∇λ_a
+///     = ∇(λ_a λ_b)` (the added second-order edge DoF).
+/// * `6..8` — the two interior ("face") functions, each with **zero
+///   tangential trace on all three edges** (so they never couple between
+///   elements and carry no orientation sign):
+///   - `6` : `F₀ = λ₀ (λ₁ ∇λ₂ − λ₂ ∇λ₁)`
+///   - `7` : `F₁ = λ₁ (λ₂ ∇λ₀ − λ₀ ∇λ₂)`
+///
+/// Together these span the Nedelec-first-kind order-2 space (`dim = 8` on a
+/// triangle: 2/edge + 2 interior). Completeness (rank 8) and the
+/// tangential-trace property are pinned in
+/// [`tests::p2_basis_has_full_rank_eight`] and
+/// [`tests::p2_interior_functions_have_zero_tangential_trace`].
+///
+/// The **edge-function orientation sign** (`±1` per edge, from the global
+/// edge-direction reconciliation) multiplies the *whole* edge function
+/// (both `W_e` and `G_e`) the same way the first-order Whitney sign does —
+/// it is applied by the caller during scatter, not here, so this evaluator
+/// is a pure function of geometry. The interior functions take no sign.
+#[inline]
+fn p2_nedelec_basis(lam: [f64; 3], g: [[f64; 2]; 3]) -> [[f64; 2]; 8] {
+    let mut out = [[0.0; 2]; 8];
+    // Edge functions: Whitney + gradient, two per edge.
+    for (e, &[a, b]) in LOCAL_EDGES.iter().enumerate() {
+        let w = [
+            lam[a] * g[b][0] - lam[b] * g[a][0],
+            lam[a] * g[b][1] - lam[b] * g[a][1],
+        ];
+        let grad = [
+            lam[a] * g[b][0] + lam[b] * g[a][0],
+            lam[a] * g[b][1] + lam[b] * g[a][1],
+        ];
+        out[2 * e] = w;
+        out[2 * e + 1] = grad;
+    }
+    // Interior functions F_k = λ_k (λ_{k+1} ∇λ_{k+2} − λ_{k+2} ∇λ_{k+1}),
+    // k = 0, 1 (two independent of the three cyclic candidates).
+    for (slot, k) in [6usize, 7].into_iter().zip([0usize, 1]) {
+        let k1 = (k + 1) % 3;
+        let k2 = (k + 2) % 3;
+        out[slot] = [
+            lam[k] * (lam[k1] * g[k2][0] - lam[k2] * g[k1][0]),
+            lam[k] * (lam[k1] * g[k2][1] - lam[k2] * g[k1][1]),
+        ];
+    }
+    out
+}
+
+/// `∇ × N` (the scalar `ẑ`-component) for each of the eight p=2 Nedelec
+/// basis vectors at barycentric point `lam`, with constant gradients
+/// `g[i] = ∇λ_i`.
+///
+/// For a planar vector field `N = (N_x, N_y)` the curl is the scalar
+/// `∂N_y/∂x − ∂N_x/∂y`. With `λ` linear (`∇λ` constant) the curls follow
+/// from `∇×(φ ∇ψ) = ∇φ × ∇ψ` (a scalar in 2-D, `g_φ × g_ψ ≡ g_φ.x g_ψ.y −
+/// g_φ.y g_ψ.x`):
+/// * `∇×W_e = 2 (∇λ_a × ∇λ_b)` — **constant** (the Whitney curl);
+/// * `∇×G_e = ∇×∇(λ_aλ_b) = 0` — a pure gradient is curl-free;
+/// * `∇×F_k = ∇×(λ_k(λ_{k1}∇λ_{k2} − λ_{k2}∇λ_{k1}))`
+///   `= ∇λ_k×(λ_{k1}∇λ_{k2}−λ_{k2}∇λ_{k1}) + λ_k(∇λ_{k1}×∇λ_{k2} −
+///   ∇λ_{k2}×∇λ_{k1})`, which is **linear** in `λ` (non-constant — the
+///   reason p=2 needs quadrature).
+///
+/// `cross(u, v) = u.x v.y − u.y v.x`.
+#[inline]
+fn p2_nedelec_curl(lam: [f64; 3], g: [[f64; 2]; 3]) -> [f64; 8] {
+    let cross = |u: [f64; 2], v: [f64; 2]| u[0] * v[1] - u[1] * v[0];
+    let mut out = [0.0; 8];
+    for (e, &[a, b]) in LOCAL_EDGES.iter().enumerate() {
+        // ∇×W_e = 2 ∇λ_a × ∇λ_b (constant); ∇×G_e = 0.
+        out[2 * e] = 2.0 * cross(g[a], g[b]);
+        out[2 * e + 1] = 0.0;
+    }
+    for (slot, k) in [6usize, 7].into_iter().zip([0usize, 1]) {
+        let k1 = (k + 1) % 3;
+        let k2 = (k + 2) % 3;
+        // ∇×(λ_k v) where v = λ_{k1}∇λ_{k2} − λ_{k2}∇λ_{k1}:
+        //   = ∇λ_k × v  +  λ_k (∇×v),
+        //   ∇×v = ∇λ_{k1}×∇λ_{k2} − ∇λ_{k2}×∇λ_{k1} = 2 ∇λ_{k1}×∇λ_{k2}.
+        let v = [
+            lam[k1] * g[k2][0] - lam[k2] * g[k1][0],
+            lam[k1] * g[k2][1] - lam[k2] * g[k1][1],
+        ];
+        out[slot] = cross(g[k], v) + lam[k] * 2.0 * cross(g[k1], g[k2]);
+    }
+    out
+}
+
+/// The six quadratic nodal-Lagrange shape functions of a triangle at
+/// barycentric point `lam`.
+///
+/// **Layout (the row/column order of every p=2 `E_z` block):**
+/// * `0..3` — vertex nodes: `L_i = λ_i (2 λ_i − 1)`;
+/// * `3..6` — edge-midpoint nodes, one per local edge `e`
+///   (`LOCAL_EDGES[e] = (a, b)`): `L_{3+e} = 4 λ_a λ_b`.
+///
+/// (Standard P2 nodal basis: `L_node(node_j) = δ` at the 6 nodes.)
+#[inline]
+fn p2_nodal_basis(lam: [f64; 3]) -> [f64; 6] {
+    let mut out = [0.0; 6];
+    for i in 0..3 {
+        out[i] = lam[i] * (2.0 * lam[i] - 1.0);
+    }
+    for (e, &[a, b]) in LOCAL_EDGES.iter().enumerate() {
+        out[3 + e] = 4.0 * lam[a] * lam[b];
+    }
+    out
+}
+
+/// Gradients `∇L` of the six quadratic nodal-Lagrange shape functions at
+/// barycentric point `lam`, with constant `g[i] = ∇λ_i`. Same layout as
+/// [`p2_nodal_basis`]:
+/// * vertex: `∇L_i = (4 λ_i − 1) ∇λ_i`;
+/// * midpoint of edge `(a, b)`: `∇L = 4 (λ_a ∇λ_b + λ_b ∇λ_a)`.
+#[inline]
+fn p2_nodal_grad(lam: [f64; 3], g: [[f64; 2]; 3]) -> [[f64; 2]; 6] {
+    let mut out = [[0.0; 2]; 6];
+    for i in 0..3 {
+        let s = 4.0 * lam[i] - 1.0;
+        out[i] = [s * g[i][0], s * g[i][1]];
+    }
+    for (e, &[a, b]) in LOCAL_EDGES.iter().enumerate() {
+        out[3 + e] = [
+            4.0 * (lam[a] * g[b][0] + lam[b] * g[a][0]),
+            4.0 * (lam[a] * g[b][1] + lam[b] * g[a][1]),
+        ];
+    }
+    out
+}
+
+/// Per-triangle barycentric gradients `∇λ_i = (b_i, c_i)/(2A)` as `[f64; 2]`
+/// vectors, the constant data every p=2 point-wise evaluator needs.
+#[inline]
+fn bary_grads(geom: &TriGeom) -> [[f64; 2]; 3] {
+    let inv = 1.0 / (2.0 * geom.area);
+    [
+        [geom.b[0] * inv, geom.c[0] * inv],
+        [geom.b[1] * inv, geom.c[1] * inv],
+        [geom.b[2] * inv, geom.c[2] * inv],
+    ]
+}
+
+/// Local p=2 Nedelec curl-curl stiffness `A_tt^e[i,j] =
+/// ∫_T (1/μ_r)(∇×N_i)(∇×N_j) dA`, the 8×8 second-order analogue of
+/// [`local_a_ee_curl`]. The curl is linear (non-constant), so the integral
+/// is taken by the degree-4 [`tri_gauss_deg4`] rule (exact for the
+/// quadratic integrand). `signs[e] ∈ {±1}` is the per-edge orientation,
+/// applied to **both** edge DoFs of edge `e` (slots `2e`, `2e+1`); interior
+/// slots `6, 7` take sign `+1`.
+fn local_a_ee_curl_p2(geom: &TriGeom, mu_r: Complex64, signs: [f64; 3]) -> [[Complex64; 8]; 8] {
+    let g = bary_grads(geom);
+    let sgn = p2_edge_signs(signs);
+    let inv_mu = Complex::new(1.0, 0.0) / mu_r;
+    let mut acc = [[0.0f64; 8]; 8];
+    for (l0, l1, l2, w) in tri_gauss_deg4() {
+        let curl = p2_nedelec_curl([l0, l1, l2], g);
+        let wa = w * geom.area;
+        for i in 0..8 {
+            for j in 0..8 {
+                acc[i][j] += wa * sgn[i] * sgn[j] * curl[i] * curl[j];
+            }
+        }
+    }
+    finish_complex8(acc, inv_mu)
+}
+
+/// Local p=2 Nedelec mass `B_tt^e[i,j] = ∫_T ε_r N_i·N_j dA`, the 8×8
+/// second-order analogue of [`local_b_ee_mass`]. The integrand is quartic,
+/// so the degree-4 rule integrates it exactly. Orientation handling matches
+/// [`local_a_ee_curl_p2`].
+fn local_b_ee_mass_p2(geom: &TriGeom, eps_r: Complex64, signs: [f64; 3]) -> [[Complex64; 8]; 8] {
+    let g = bary_grads(geom);
+    let sgn = p2_edge_signs(signs);
+    let mut acc = [[0.0f64; 8]; 8];
+    for (l0, l1, l2, w) in tri_gauss_deg4() {
+        let n = p2_nedelec_basis([l0, l1, l2], g);
+        let wa = w * geom.area;
+        for i in 0..8 {
+            for j in 0..8 {
+                let dot = n[i][0] * n[j][0] + n[i][1] * n[j][1];
+                acc[i][j] += wa * sgn[i] * sgn[j] * dot;
+            }
+        }
+    }
+    finish_complex8(acc, eps_r)
+}
+
+/// Local p=2 nodal gradient-gradient stiffness `A_zz^e[i,j] =
+/// ∫_T (1/μ_r) ∇L_i·∇L_j dA`, the 6×6 second-order analogue of
+/// [`local_a_zz`]. `∇L` is linear; the degree-4 rule is exact.
+fn local_a_zz_p2(geom: &TriGeom, mu_r: Complex64) -> [[Complex64; 6]; 6] {
+    let g = bary_grads(geom);
+    let inv_mu = Complex::new(1.0, 0.0) / mu_r;
+    let mut acc = [[0.0f64; 6]; 6];
+    for (l0, l1, l2, w) in tri_gauss_deg4() {
+        let gl = p2_nodal_grad([l0, l1, l2], g);
+        let wa = w * geom.area;
+        for i in 0..6 {
+            for j in 0..6 {
+                acc[i][j] += wa * (gl[i][0] * gl[j][0] + gl[i][1] * gl[j][1]);
+            }
+        }
+    }
+    finish_complex6(acc, inv_mu)
+}
+
+/// Local p=2 nodal mass `B_zz^e[i,j] = ∫_T ε_r L_i L_j dA`, the 6×6
+/// second-order analogue of [`local_b_zz`]. The integrand is quartic; the
+/// degree-4 rule is exact.
+fn local_b_zz_p2(geom: &TriGeom, eps_r: Complex64) -> [[Complex64; 6]; 6] {
+    let mut acc = [[0.0f64; 6]; 6];
+    for (l0, l1, l2, w) in tri_gauss_deg4() {
+        let l = p2_nodal_basis([l0, l1, l2]);
+        let wa = w * geom.area;
+        for i in 0..6 {
+            for j in 0..6 {
+                acc[i][j] += wa * l[i] * l[j];
+            }
+        }
+    }
+    finish_complex6(acc, eps_r)
+}
+
+/// Local p=2 edge-node coupling `B_ze^e[i_node][j_edge] =
+/// ∫_T (1/μ_r) ∇L_i·N_j dA` (nodal-row / Nedelec-col), the 6×8
+/// second-order analogue of [`local_b_ze`]. Integrand is cubic; the
+/// degree-4 rule is exact. The Nedelec orientation sign multiplies the
+/// edge-function columns (interior columns take `+1`); the nodal rows take
+/// no sign. The `1/μ_r` weight is the curl-curl cross term, matching
+/// [`local_a_zz_p2`] and the first-order [`local_b_ze`].
+fn local_b_ze_p2(geom: &TriGeom, mu_r: Complex64, signs: [f64; 3]) -> [[Complex64; 8]; 6] {
+    let g = bary_grads(geom);
+    let sgn = p2_edge_signs(signs);
+    let inv_mu = Complex::new(1.0, 0.0) / mu_r;
+    let mut acc = [[0.0f64; 8]; 6];
+    for (l0, l1, l2, w) in tri_gauss_deg4() {
+        let gl = p2_nodal_grad([l0, l1, l2], g);
+        let n = p2_nedelec_basis([l0, l1, l2], g);
+        let wa = w * geom.area;
+        for i in 0..6 {
+            for j in 0..8 {
+                let dot = gl[i][0] * n[j][0] + gl[i][1] * n[j][1];
+                acc[i][j] += wa * sgn[j] * dot;
+            }
+        }
+    }
+    let mut out = [[Complex64::new(0.0, 0.0); 8]; 6];
+    for i in 0..6 {
+        for j in 0..8 {
+            out[i][j] = inv_mu * Complex::new(acc[i][j], 0.0);
+        }
+    }
+    out
+}
+
+/// Expand a 3-edge orientation-sign triple into the 8-slot p=2 `E_t` sign
+/// vector — the local→global basis transformation for each DoF slot.
+///
+/// **The two edge DoFs transform differently under edge reversal** (the
+/// step-5.5 risk (b) subtlety):
+/// * the Whitney slot `2e` (`W_e = λ_a∇λ_b − λ_b∇λ_a`) is **odd** under
+///   swapping the edge endpoints `a ↔ b`, so it carries the orientation
+///   sign `signs[e] ∈ {±1}` — exactly as the first-order Whitney DoF does;
+/// * the gradient slot `2e+1` (`G_e = ∇(λ_a λ_b)`) is **even** (`λ_a λ_b`
+///   is symmetric in `a, b`), so its tangential trace on the shared edge is
+///   single-valued *without* any sign flip → sign **`+1` always**,
+///   independent of orientation.
+///
+/// Mixing these up (signing the gradient DoF) would make the global
+/// gradient-edge DoF double-valued and corrupt the assembly; it is caught
+/// by the J3 homogeneous-TE10 anchor (a wrong sign there fails to reproduce
+/// the analytic β). The two interior slots (`6, 7`) take `+1` (interior
+/// functions have zero tangential trace, so no global orientation).
+#[inline]
+fn p2_edge_signs(signs: [f64; 3]) -> [f64; 8] {
+    [signs[0], 1.0, signs[1], 1.0, signs[2], 1.0, 1.0, 1.0]
+}
+
+/// Multiply a real 8×8 accumulator by a complex material weight, producing
+/// the complex element block (lossless path keeps the imaginary part zero).
+#[inline]
+#[allow(clippy::needless_range_loop)]
+fn finish_complex8(acc: [[f64; 8]; 8], weight: Complex64) -> [[Complex64; 8]; 8] {
+    let mut out = [[Complex64::new(0.0, 0.0); 8]; 8];
+    for i in 0..8 {
+        for j in 0..8 {
+            out[i][j] = weight * Complex::new(acc[i][j], 0.0);
+        }
+    }
+    out
+}
+
+/// Multiply a real 6×6 accumulator by a complex material weight.
+#[inline]
+#[allow(clippy::needless_range_loop)]
+fn finish_complex6(acc: [[f64; 6]; 6], weight: Complex64) -> [[Complex64; 6]; 6] {
+    let mut out = [[Complex64::new(0.0, 0.0); 6]; 6];
+    for i in 0..6 {
+        for j in 0..6 {
+            out[i][j] = weight * Complex::new(acc[i][j], 0.0);
+        }
+    }
+    out
+}
+
 /// Result of [`assemble_transverse`]: the generalized eigenproblem
 /// `S e_t = k_c² T e_t` reduced to the interior-edge DoFs by elimination
 /// of the PEC-boundary tangential `E_t` DoFs.
@@ -646,6 +1003,124 @@ pub(crate) fn assemble_mixed(
         b1,
         interior_to_global_edges,
         interior_to_global_verts,
+        n_t,
+        n_z,
+    }
+}
+
+/// Assemble the **second-order (p=2)** mixed `(E_t, E_z)` Lee-Sun-Cendes
+/// block generalized eigenproblem on the supplied mesh (Phase 1.3.1.1 step
+/// 5.5).
+///
+/// Produces the **same** [`AssembledMixed`] `(A, B, B₁)` block structure as
+/// the first-order [`assemble_mixed`] — just a larger pencil (`n_t` = 2 ×
+/// interior-edge + 2 × triangle interior; `n_z` = interior-vertex +
+/// interior-edge-midpoint) — so the order-agnostic
+/// [`super::solve_dense_mixed`] consumes it unchanged. The transverse block
+/// uses the p=2 Nedelec-first-kind order-2 element matrices
+/// ([`local_a_ee_curl_p2`] / [`local_b_ee_mass_p2`]); the longitudinal block
+/// uses quadratic nodal-Lagrange ([`local_a_zz_p2`] / [`local_b_zz_p2`]);
+/// the coupling is the p=2 [`local_b_ze_p2`] (vertex/midpoint-row,
+/// edge/interior-col), carrying the `1/μ_r` weight exactly as at first order.
+///
+/// The DoF bookkeeping (edge 2-DoF orientation, interior face DoFs,
+/// midpoint nodes, PEC elimination) is owned by [`super::mesh::P2DofMap`].
+/// **First-order stays the default** ([`assemble_mixed`]); this path is
+/// selected only via [`super::ElementOrder::Second`] for the high-contrast
+/// inhomogeneous case.
+///
+/// **`interior_to_global_*` caveat.** At p=2 the transverse interior (face)
+/// DoFs have no owning global edge and the nodal midpoint DoFs no owning
+/// vertex; their entries in [`AssembledMixed::interior_to_global_edges`] /
+/// [`AssembledMixed::interior_to_global_verts`] are `usize::MAX` sentinels.
+/// The β² eigenvalue is fully meaningful (the only thing the step-5.5 gates
+/// consume); the first-order edge-scatter field reconstruction in
+/// [`crate::ports::NumericalCrossSection::solve`] is **not** wired for p=2
+/// (that path always calls the first-order [`assemble_mixed`]).
+#[allow(dead_code)] // selected via ElementOrder::Second; consumed by the J3/J4 lib tests
+pub(crate) fn assemble_mixed_p2(
+    mesh: &TriMesh2D,
+    eps_r: &HashMap<MaterialTag, Complex64>,
+    mu_r: &HashMap<MaterialTag, Complex64>,
+    edge_table: &EdgeTable,
+) -> AssembledMixed {
+    let dofs = super::mesh::P2DofMap::build(mesh, edge_table);
+    let n_t = dofs.n_t;
+    let n_z = dofs.n_z;
+    let n = n_t + n_z;
+
+    let zero = Complex64::new(0.0, 0.0);
+    let mut a = DMatrix::from_element(n, n, zero);
+    let mut b = DMatrix::from_element(n, n, zero);
+    let mut b1 = DMatrix::from_element(n, n, zero);
+
+    let default_one = Complex64::new(1.0, 0.0);
+
+    for (tri_idx, conn) in edge_table.tri_edges.iter().enumerate() {
+        let geom = TriGeom::from_mesh(mesh, tri_idx);
+        let tag = mesh.triangle_material[tri_idx];
+        let eps = *eps_r.get(&tag).unwrap_or(&default_one);
+        let mu = *mu_r.get(&tag).unwrap_or(&default_one);
+
+        let a_tt = local_a_ee_curl_p2(&geom, mu, conn.sign);
+        let b_tt = local_b_ee_mass_p2(&geom, eps, conn.sign);
+        let b_tt1 = local_b_ee_mass_p2(&geom, default_one, conn.sign);
+        let a_zz = local_a_zz_p2(&geom, mu);
+        let b_zz = local_b_zz_p2(&geom, eps);
+        let b_zz1 = local_b_zz_p2(&geom, default_one);
+        // B_ze_p2[i_node][j_edge] = ∫(1/μ_r) ∇L_i · N_j (ε-independent).
+        let b_ze = local_b_ze_p2(&geom, mu, conn.sign);
+
+        let tdof = &dofs.tri_t_dofs[tri_idx];
+        let zdof = &dofs.tri_z_dofs[tri_idx];
+
+        // --- transverse-transverse block (8×8) ---
+        for li in 0..8 {
+            let Some(ii) = tdof[li] else { continue };
+            for lj in 0..8 {
+                let Some(jj) = tdof[lj] else { continue };
+                a[(ii, jj)] += a_tt[li][lj];
+                b[(ii, jj)] += b_tt[li][lj];
+                b1[(ii, jj)] += b_tt1[li][lj];
+            }
+        }
+
+        // --- longitudinal-longitudinal block (6×6, vertex/midpoint nodes) ---
+        for li in 0..6 {
+            let Some(ii) = zdof[li] else { continue };
+            let gi = n_t + ii;
+            for lj in 0..6 {
+                let Some(jj) = zdof[lj] else { continue };
+                let gj = n_t + jj;
+                a[(gi, gj)] += a_zz[li][lj];
+                b[(gi, gj)] += b_zz[li][lj];
+                b1[(gi, gj)] += b_zz1[li][lj];
+            }
+        }
+
+        // --- coupling blocks (node ↔ Nedelec); assemble both halves so B
+        // stays symmetric (B_tz = B_ztᵀ), as the solve requires. The coupling
+        // is ε-independent → populates B and B_1 identically. ---
+        for li in 0..6 {
+            let Some(iv) = zdof[li] else { continue };
+            let row_v = n_t + iv;
+            for lj in 0..8 {
+                let Some(je) = tdof[lj] else { continue };
+                let c = b_ze[li][lj];
+                b[(row_v, je)] += c; // B_zt
+                b[(je, row_v)] += c; // B_tz = B_ztᵀ
+                b1[(row_v, je)] += c;
+                b1[(je, row_v)] += c;
+            }
+        }
+    }
+
+    AssembledMixed {
+        a,
+        b,
+        b1,
+        interior_to_global_edges: dofs.t_dof_edge,
+        interior_to_global_verts: dofs.z_dof_vert,
         n_t,
         n_z,
     }
@@ -1049,5 +1524,501 @@ mod tests {
                 assert!(entry.im.abs() < 1e-15, "lossless → real");
             }
         }
+    }
+
+    // ── Phase 1.3.1.1 step 5.5 — p=2 element matrices (J1) ──────────────
+    //
+    // These are the J1 correctness anchors: each p=2 element matrix is pinned
+    // against an INDEPENDENT, higher-order quadrature evaluation of the same
+    // point-wise basis (mirroring the first-order `local_b_ze` pin), plus the
+    // basis is checked for completeness (rank 8) and tangential conformity
+    // (interior functions vanish tangentially on ∂T). A wrong quadrature,
+    // sign, or basis is caught here BEFORE any eigensolve (the J3/J4 ladder).
+
+    /// Generic non-right, non-unit triangle exercising the σ and ℓ factors.
+    fn generic_triangle() -> TriMesh2D {
+        TriMesh2D::new(
+            vec![[0.2, 0.1], [1.3, 0.0], [0.4, 1.1]],
+            vec![[0, 1, 2]],
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    /// An INDEPENDENT degree-5, 7-point symmetric triangle quadrature
+    /// (Dunavant 1985) — a different rule from the degree-4 6-point
+    /// production [`tri_gauss_deg4`] (different points, weights, and count),
+    /// exact to total degree 5 (one above the highest p=2 integrand degree
+    /// of 4). Agreement of a degree-4 production matrix with this degree-5
+    /// reference certifies the production rule rather than re-deriving it.
+    /// Returns `(λ₀, λ₁, λ₂, weight)`, weights summing to 1.
+    fn independent_tri_quad() -> Vec<(f64, f64, f64, f64)> {
+        let w0 = 0.225;
+        let a1 = 0.470_142_064_105_115;
+        let w1 = 0.132_394_152_788_506;
+        let a2 = 0.101_286_507_323_456;
+        let w2 = 0.125_939_180_544_827;
+        vec![
+            (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0, w0),
+            (a1, a1, 1.0 - 2.0 * a1, w1),
+            (a1, 1.0 - 2.0 * a1, a1, w1),
+            (1.0 - 2.0 * a1, a1, a1, w1),
+            (a2, a2, 1.0 - 2.0 * a2, w2),
+            (a2, 1.0 - 2.0 * a2, a2, w2),
+            (1.0 - 2.0 * a2, a2, a2, w2),
+        ]
+    }
+
+    #[test]
+    fn tri_gauss_deg4_integrates_quartics_exactly() {
+        // Pin the hand-rolled degree-4 rule: every barycentric monomial
+        // λ₀^p λ₁^q λ₂^r with p+q+r ≤ 4 integrates to the exact reference-
+        // triangle value ∫ λ₀^p λ₁^q λ₂^r dA / A = p! q! r! · 2 / (p+q+r+2)!
+        // (weights normalised to sum 1, so the area factor drops out).
+        let rule = tri_gauss_deg4();
+        let wsum: f64 = rule.iter().map(|&(_, _, _, w)| w).sum();
+        assert!((wsum - 1.0).abs() < 1e-14, "weights must sum to 1: {wsum}");
+        let fact = [1.0, 1.0, 2.0, 6.0, 24.0, 120.0, 720.0];
+        for p in 0..=4usize {
+            for q in 0..=(4 - p) {
+                let r = 4 - p - q; // test the top total-degree shell (=4)
+                let exact = fact[p] * fact[q] * fact[r] * 2.0 / fact[p + q + r + 2];
+                let approx: f64 = rule
+                    .iter()
+                    .map(|&(l0, l1, l2, w)| {
+                        w * l0.powi(p as i32) * l1.powi(q as i32) * l2.powi(r as i32)
+                    })
+                    .sum();
+                assert!(
+                    (approx - exact).abs() < 1e-13,
+                    "deg-4 rule wrong on λ0^{p}λ1^{q}λ2^{r}: got {approx}, exact {exact}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn p2_basis_has_full_rank_eight() {
+        // Completeness (risk (a)/(b) mitigation): the 8 p=2 Nedelec basis
+        // vectors must be linearly independent (span N₁(order 2), dim 8).
+        // Sample them at many interior points, stack the 2-component values
+        // into a tall (2·npts)×8 matrix, and assert its singular values are
+        // all bounded away from zero (rank 8). A wrong / degenerate interior
+        // pair collapses the rank and is caught here, before any eigensolve.
+        use nalgebra::DMatrix;
+        let mesh = generic_triangle();
+        let geom = TriGeom::from_mesh(&mesh, 0);
+        let g = bary_grads(&geom);
+        // 10 scattered interior barycentric points.
+        let pts = [
+            [0.5, 0.3, 0.2],
+            [0.2, 0.5, 0.3],
+            [0.3, 0.2, 0.5],
+            [0.6, 0.1, 0.3],
+            [0.1, 0.6, 0.3],
+            [0.3, 0.1, 0.6],
+            [0.34, 0.33, 0.33],
+            [0.7, 0.2, 0.1],
+            [0.15, 0.25, 0.6],
+            [0.45, 0.45, 0.1],
+        ];
+        let mut m = DMatrix::<f64>::zeros(2 * pts.len(), 8);
+        for (pi, lam) in pts.iter().enumerate() {
+            let n = p2_nedelec_basis(*lam, g);
+            for (j, nj) in n.iter().enumerate() {
+                m[(2 * pi, j)] = nj[0];
+                m[(2 * pi + 1, j)] = nj[1];
+            }
+        }
+        let svd = m.singular_values();
+        let smin = svd.iter().cloned().fold(f64::INFINITY, f64::min);
+        let smax = svd.iter().cloned().fold(0.0_f64, f64::max);
+        assert!(
+            smin > 1e-9 * smax,
+            "p=2 Nedelec basis is rank-deficient (σ_min/σ_max = {:.3e}); the 8 functions \
+             must be linearly independent (span N₁(2))",
+            smin / smax
+        );
+    }
+
+    #[test]
+    fn p2_interior_functions_have_zero_tangential_trace() {
+        // Conformity (risk (b) mitigation): the two interior ("face")
+        // functions must have ZERO tangential component along all three
+        // edges — that is what makes them purely interior (no inter-element
+        // coupling, no orientation sign). Sample each edge at several
+        // parameter values and assert N·t̂ ≈ 0 for slots 6 and 7. (The edge
+        // functions, by contrast, have nonzero tangential trace on their own
+        // edge — also checked, as a sanity counterpoint.)
+        let mesh = generic_triangle();
+        let v: [[f64; 2]; 3] = [mesh.vertices[0], mesh.vertices[1], mesh.vertices[2]];
+        let geom = TriGeom::from_mesh(&mesh, 0);
+        let g = bary_grads(&geom);
+        for (e, &[a, b]) in LOCAL_EDGES.iter().enumerate() {
+            let ta = [v[b][0] - v[a][0], v[b][1] - v[a][1]];
+            let tlen = (ta[0] * ta[0] + ta[1] * ta[1]).sqrt();
+            let that = [ta[0] / tlen, ta[1] / tlen];
+            let mut edge_trace_max = 0.0_f64;
+            for s in [0.1, 0.25, 0.5, 0.75, 0.9] {
+                // Point on edge e: λ_a = 1−s, λ_b = s, λ_other = 0.
+                let mut lam = [0.0; 3];
+                lam[a] = 1.0 - s;
+                lam[b] = s;
+                let n = p2_nedelec_basis(lam, g);
+                // Interior functions: tangential trace must vanish.
+                for slot in [6usize, 7] {
+                    let tan = n[slot][0] * that[0] + n[slot][1] * that[1];
+                    assert!(
+                        tan.abs() < 1e-12,
+                        "interior function {slot} has nonzero tangential trace {tan} on edge {e}"
+                    );
+                }
+                // The Whitney slot of this edge should NOT vanish tangentially
+                // (sanity: the edge DoFs do carry the tangential field).
+                let w_tan = n[2 * e][0] * that[0] + n[2 * e][1] * that[1];
+                edge_trace_max = edge_trace_max.max(w_tan.abs());
+            }
+            assert!(
+                edge_trace_max > 1e-6,
+                "edge {e} Whitney function has ~zero tangential trace on its own edge — basis bug"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::needless_range_loop)]
+    fn p2_mass_matrix_matches_independent_quadrature() {
+        // J1 PRIMARY PIN (mirrors `local_b_ze_matches_independent_quadrature`
+        // at p=2): every entry of the 8×8 p=2 Nedelec mass `B_tt = ∫ε_r N·N`
+        // must agree with an INDEPENDENT high-order quadrature of the same
+        // point-wise basis (built differently from the production rule). A
+        // quadrature, sign, or scale error changes individual entries and is
+        // caught here. Generic triangle so σ/ℓ are exercised; μ irrelevant.
+        let mesh = generic_triangle();
+        let table = EdgeTable::build(&mesh);
+        let geom = TriGeom::from_mesh(&mesh, 0);
+        let signs = table.tri_edges[0].sign;
+        let sgn = p2_edge_signs(signs);
+        let b = local_b_ee_mass_p2(&geom, Complex64::new(1.0, 0.0), signs);
+        let g = bary_grads(&geom);
+        let quad = independent_tri_quad();
+        for i in 0..8 {
+            for j in 0..8 {
+                let mut acc = 0.0;
+                for &(l0, l1, l2, w) in &quad {
+                    let n = p2_nedelec_basis([l0, l1, l2], g);
+                    let dot = n[i][0] * n[j][0] + n[i][1] * n[j][1];
+                    acc += w * geom.area * sgn[i] * sgn[j] * dot;
+                }
+                assert!(
+                    (b[i][j].re - acc).abs() < 1e-12,
+                    "B_tt^p2[{i}][{j}] = {} disagrees with independent quadrature {acc}",
+                    b[i][j].re
+                );
+                assert!(b[i][j].im.abs() < 1e-15, "lossless → real");
+                assert!(
+                    (b[i][j] - b[j][i]).norm() < 1e-12,
+                    "B_tt^p2 must be symmetric"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[allow(clippy::needless_range_loop)]
+    fn p2_curl_matrix_matches_independent_quadrature() {
+        // J1 pin for the curl-curl stiffness `A_tt = ∫(1/μ)(∇×N)(∇×N)` at p=2
+        // (curl is NON-CONSTANT — the whole reason p=2 needs quadrature).
+        // Pinned against the independent rule + the closed-form constant-curl
+        // sub-block (the 3 Whitney slots have constant curl 2∇λ_a×∇λ_b, the 3
+        // gradient slots have zero curl).
+        let mesh = generic_triangle();
+        let table = EdgeTable::build(&mesh);
+        let geom = TriGeom::from_mesh(&mesh, 0);
+        let signs = table.tri_edges[0].sign;
+        let sgn = p2_edge_signs(signs);
+        let a = local_a_ee_curl_p2(&geom, Complex64::new(1.0, 0.0), signs);
+        let g = bary_grads(&geom);
+        let quad = independent_tri_quad();
+        for i in 0..8 {
+            for j in 0..8 {
+                let mut acc = 0.0;
+                for &(l0, l1, l2, w) in &quad {
+                    let curl = p2_nedelec_curl([l0, l1, l2], g);
+                    acc += w * geom.area * sgn[i] * sgn[j] * curl[i] * curl[j];
+                }
+                assert!(
+                    (a[i][j].re - acc).abs() < 1e-12,
+                    "A_tt^p2[{i}][{j}] = {} disagrees with independent quadrature {acc}",
+                    a[i][j].re
+                );
+                assert!(
+                    (a[i][j] - a[j][i]).norm() < 1e-12,
+                    "A_tt^p2 must be symmetric"
+                );
+            }
+            // The 3 gradient slots (2e+1) are curl-free → zero rows/cols.
+            for e in 0..3 {
+                assert!(
+                    a[2 * e + 1][2 * e + 1].norm() < 1e-12,
+                    "gradient edge function {} must have zero curl-curl self-energy",
+                    2 * e + 1
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[allow(clippy::needless_range_loop)]
+    fn p2_nodal_matrices_match_independent_quadrature() {
+        // J1 pin for the quadratic nodal `A_zz = ∫(1/μ)∇L·∇L` and
+        // `B_zz = ∫ε_r L·L` against the independent rule. Also pins the P2
+        // nodal interpolation property `L_node(node_k) = δ` at the 6 nodes.
+        let mesh = generic_triangle();
+        let geom = TriGeom::from_mesh(&mesh, 0);
+        let azz = local_a_zz_p2(&geom, Complex64::new(1.0, 0.0));
+        let bzz = local_b_zz_p2(&geom, Complex64::new(1.0, 0.0));
+        let g = bary_grads(&geom);
+        let quad = independent_tri_quad();
+        for i in 0..6 {
+            for j in 0..6 {
+                let (mut a_acc, mut b_acc) = (0.0, 0.0);
+                for &(l0, l1, l2, w) in &quad {
+                    let gl = p2_nodal_grad([l0, l1, l2], g);
+                    let l = p2_nodal_basis([l0, l1, l2]);
+                    a_acc += w * geom.area * (gl[i][0] * gl[j][0] + gl[i][1] * gl[j][1]);
+                    b_acc += w * geom.area * l[i] * l[j];
+                }
+                assert!(
+                    (azz[i][j].re - a_acc).abs() < 1e-12,
+                    "A_zz^p2[{i}][{j}] = {} vs independent {a_acc}",
+                    azz[i][j].re
+                );
+                assert!(
+                    (bzz[i][j].re - b_acc).abs() < 1e-12,
+                    "B_zz^p2[{i}][{j}] = {} vs independent {b_acc}",
+                    bzz[i][j].re
+                );
+                assert!((azz[i][j] - azz[j][i]).norm() < 1e-12, "A_zz^p2 symmetric");
+                assert!((bzz[i][j] - bzz[j][i]).norm() < 1e-12, "B_zz^p2 symmetric");
+            }
+            assert!(bzz[i][i].re > 0.0, "B_zz^p2 Gram diagonal positive");
+        }
+        // P2 nodal interpolation: node coordinates are the 3 vertices +
+        // 3 edge midpoints. L_node(node_k) = δ_{node,k}.
+        let node_bary = [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.5, 0.5], // midpoint edge 0 (verts 1,2)
+            [0.5, 0.0, 0.5], // midpoint edge 1 (verts 2,0)
+            [0.5, 0.5, 0.0], // midpoint edge 2 (verts 0,1)
+        ];
+        for (k, nb) in node_bary.iter().enumerate() {
+            let l = p2_nodal_basis(*nb);
+            for (node, lv) in l.iter().enumerate() {
+                let expect = if node == k { 1.0 } else { 0.0 };
+                assert!(
+                    (lv - expect).abs() < 1e-12,
+                    "P2 nodal L_{node}(node {k}) = {lv}, expected {expect}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[allow(clippy::needless_range_loop)]
+    fn p2_coupling_matrix_matches_independent_quadrature() {
+        // J1 pin for the p=2 edge-node coupling `B_ze = ∫(1/μ)∇L_i·N_j`
+        // (6 nodal rows × 8 Nedelec cols) against the independent rule —
+        // the highest-risk block (sign/scale/transpose), the p=2 analogue of
+        // the first-order `local_b_ze` pin.
+        let mesh = generic_triangle();
+        let table = EdgeTable::build(&mesh);
+        let geom = TriGeom::from_mesh(&mesh, 0);
+        let signs = table.tri_edges[0].sign;
+        let sgn = p2_edge_signs(signs);
+        let bze = local_b_ze_p2(&geom, Complex64::new(1.0, 0.0), signs);
+        let g = bary_grads(&geom);
+        let quad = independent_tri_quad();
+        for i in 0..6 {
+            for j in 0..8 {
+                let mut acc = 0.0;
+                for &(l0, l1, l2, w) in &quad {
+                    let gl = p2_nodal_grad([l0, l1, l2], g);
+                    let n = p2_nedelec_basis([l0, l1, l2], g);
+                    acc += w * geom.area * sgn[j] * (gl[i][0] * n[j][0] + gl[i][1] * n[j][1]);
+                }
+                assert!(
+                    (bze[i][j].re - acc).abs() < 1e-12,
+                    "B_ze^p2[{i}][{j}] = {} disagrees with independent quadrature {acc}",
+                    bze[i][j].re
+                );
+                assert!(bze[i][j].im.abs() < 1e-15, "lossless → real");
+            }
+        }
+    }
+
+    // ── Phase 1.3.1.1 step 5.5 — p=2 DoF map + assembly (J2) ────────────
+
+    #[test]
+    fn p2_dof_map_counts_two_tri_unit_square() {
+        // Two-triangle unit square: 5 edges (4 boundary, 1 interior), 4
+        // vertices (all on the perimeter → all boundary), 2 triangles. At
+        // p=2: n_t = 2·(interior edges) + 2·(triangles) = 2·1 + 2·2 = 6;
+        // n_z = (interior verts) + (interior-edge midpoints) = 0 + 1 = 1.
+        let mesh = TriMesh2D::new(
+            vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            vec![[0, 1, 2], [0, 2, 3]],
+            None,
+            None,
+        )
+        .unwrap();
+        let table = EdgeTable::build(&mesh);
+        let dofs = crate::eigensolver::mesh::P2DofMap::build(&mesh, &table);
+        assert_eq!(dofs.n_t, 6, "p=2 transverse DoF count");
+        assert_eq!(dofs.n_z, 1, "p=2 nodal DoF count");
+        assert_eq!(dofs.t_dof_edge.len(), dofs.n_t);
+        assert_eq!(dofs.z_dof_vert.len(), dofs.n_z);
+        // Interior face DoFs (2 per triangle) must always be assigned (never
+        // PEC-eliminated) — every triangle's slots 6,7 are Some.
+        for td in &dofs.tri_t_dofs {
+            assert!(
+                td[6].is_some() && td[7].is_some(),
+                "interior face DoFs always present"
+            );
+        }
+    }
+
+    #[test]
+    fn assemble_mixed_p2_dimensions_and_symmetry() {
+        // p=2 pencil on a 4×4-quad WR-90 mesh: (A, B, B_1) are (n_t+n_z)
+        // square and symmetric (real-symmetric, lossless); on this
+        // homogeneous (air, ε_r≡1) mesh B and B_1 must coincide bit-for-bit
+        // (the matrix-level homogeneous canary — the β-direct pencil reduces
+        // to the cutoff form), exactly mirroring the first-order
+        // `assemble_mixed_dimensions_and_symmetry`.
+        let a = 22.86e-3;
+        let b = 10.16e-3;
+        let mesh = rectangular_mesh(a, b, 4, 4);
+        let mut eps = HashMap::new();
+        eps.insert(0u32, Complex64::new(1.0, 0.0));
+        let mut mu = HashMap::new();
+        mu.insert(0u32, Complex64::new(1.0, 0.0));
+        let table = EdgeTable::build(&mesh);
+        let asm = assemble_mixed_p2(&mesh, &eps, &mu, &table);
+        let n = asm.n_t + asm.n_z;
+        assert_eq!(asm.a.nrows(), n);
+        assert_eq!(asm.b.nrows(), n);
+        assert_eq!(asm.b1.nrows(), n);
+        // p=2 pencil is strictly larger than the first-order one.
+        let asm1 = assemble_mixed(&mesh, &eps, &mu, &table);
+        assert!(
+            asm.n_t > asm1.n_t && asm.n_z > asm1.n_z,
+            "p=2 must add DoFs: p2 (n_t={}, n_z={}) vs p1 (n_t={}, n_z={})",
+            asm.n_t,
+            asm.n_z,
+            asm1.n_t,
+            asm1.n_z
+        );
+        // Symmetry tolerances are relative to the matrix scale (the curl
+        // block reaches ~1/(μ·A)·ℓ² ≈ 1e5 on WR-90, so an absolute 1e-18 is
+        // unphysical). B ≡ B_1 on a homogeneous mesh is an exact (same code
+        // path, ε_r ≡ 1) equality, held to a tight scale-relative bound.
+        let scale_a = asm
+            .a
+            .iter()
+            .map(|z| z.norm())
+            .fold(0.0_f64, f64::max)
+            .max(1.0);
+        let scale_b = asm
+            .b
+            .iter()
+            .map(|z| z.norm())
+            .fold(0.0_f64, f64::max)
+            .max(1.0);
+        for i in 0..n {
+            for j in 0..n {
+                assert!(
+                    (asm.a[(i, j)] - asm.a[(j, i)]).norm() < 1e-10 * scale_a,
+                    "A^p2 symmetric at ({i},{j})"
+                );
+                assert!(
+                    (asm.b[(i, j)] - asm.b[(j, i)]).norm() < 1e-10 * scale_b,
+                    "B^p2 symmetric at ({i},{j})"
+                );
+                assert!(
+                    (asm.b1[(i, j)] - asm.b1[(j, i)]).norm() < 1e-10 * scale_b,
+                    "B_1^p2 symmetric at ({i},{j})"
+                );
+                assert!(
+                    (asm.b[(i, j)] - asm.b1[(i, j)]).norm() < 1e-12 * scale_b,
+                    "homogeneous B and B_1 must coincide at ({i},{j})"
+                );
+            }
+        }
+    }
+
+    // ── Phase 1.3.1.1 step 5.5 — J3 correctness anchor (DoD-4) ──────────
+
+    /// Solve the dominant-mode β² for a homogeneous air-filled WR-90 mesh at
+    /// the given element order, returning β (rad/m). Shared by the J3 anchor.
+    fn solve_homogeneous_beta(nx: usize, ny: usize, order: super::super::ElementOrder) -> f64 {
+        let a = 22.86e-3;
+        let b = 10.16e-3;
+        let freq_hz = 10.0e9;
+        let mesh = rectangular_mesh(a, b, nx, ny);
+        let mut eps = HashMap::new();
+        eps.insert(0u32, Complex64::new(1.0, 0.0));
+        let mut mu = HashMap::new();
+        mu.insert(0u32, Complex64::new(1.0, 0.0));
+        let table = EdgeTable::build(&mesh);
+        let asm = match order {
+            super::super::ElementOrder::First => assemble_mixed(&mesh, &eps, &mu, &table),
+            super::super::ElementOrder::Second => assemble_mixed_p2(&mesh, &eps, &mu, &table),
+        };
+        let sol =
+            crate::eigensolver::solve_dense_mixed(&asm, freq_hz).expect("homogeneous mixed solve");
+        sol.beta_sq.re.max(0.0).sqrt()
+    }
+
+    #[test]
+    fn p2_homogeneous_wr90_te10_at_least_as_accurate_as_p1() {
+        // J3 CORRECTNESS ANCHOR (DoD-4) — the sharp, no-singularity check
+        // that the p=2 element matrices + DoF map + solve are all correct.
+        // On the homogeneous (air-filled) WR-90 the dominant mode is the
+        // analytic TE10 β = √(k₀² − (π/a)²); p=2 must reproduce it AT LEAST
+        // AS ACCURATELY AS p=1 on the same mesh. A wrong p=2 element matrix,
+        // a wrong edge-DoF orientation sign, or a wrong global assembly fails
+        // here — this anchor MUST pass before the high-contrast J4 case.
+        let a = 22.86e-3;
+        let k0 = std::f64::consts::TAU * 10.0e9 / yee_core::units::C0;
+        let kx = std::f64::consts::PI / a;
+        let beta_te10 = (k0 * k0 - kx * kx).sqrt();
+
+        // Same 6×6 mesh the WR-90 gate uses.
+        let beta_p1 = solve_homogeneous_beta(6, 6, super::super::ElementOrder::First);
+        let beta_p2 = solve_homogeneous_beta(6, 6, super::super::ElementOrder::Second);
+        let rel_p1 = (beta_p1 - beta_te10).abs() / beta_te10;
+        let rel_p2 = (beta_p2 - beta_te10).abs() / beta_te10;
+        eprintln!(
+            "J3 homogeneous WR-90 TE10 (6×6): analytic β {beta_te10:.6}, \
+             p1 β {beta_p1:.6} (rel {rel_p1:.3e}), p2 β {beta_p2:.6} (rel {rel_p2:.3e})"
+        );
+        // p=2 must be a valid propagating mode within 1 % (the WR-90 gate's
+        // own tolerance) AND no worse than p=1 on the identical mesh (DoD-4:
+        // "at least as accurately as p=1"). A small numerical slack guards
+        // against a tie being flipped by round-off.
+        assert!(
+            rel_p2 < 0.01,
+            "p=2 homogeneous TE10 β {beta_p2} must match analytic {beta_te10} within 1 % \
+             (rel {rel_p2:.3e})"
+        );
+        assert!(
+            rel_p2 <= rel_p1 + 1e-9,
+            "DoD-4: p=2 TE10 error {rel_p2:.3e} must be ≤ p=1 error {rel_p1:.3e} on the same mesh \
+             — a regression here means the p=2 element matrices / DoF sign / assembly are wrong"
+        );
     }
 }
