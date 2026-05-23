@@ -38,14 +38,17 @@
 //! Element matrices use closed-form integrals over linear triangles
 //! (`∫ λ_p λ_q dA = (A/12)(1 + δ_{pq})`, `∇λ_p · ∇λ_q = (b_p b_q + c_p c_q)/(4A²)`).
 //!
-//! **Mixed-formulation status.** Architecturally the assembly also
-//! produces the longitudinal nodal-Lagrange (`E_z`) element matrices
-//! [`local_a_zz`] and [`local_b_zz`], plus the edge-node coupling
-//! [`local_b_ze`], so a full Bardi-Biró mixed eigensolve can be wired
-//! in once non-trivial dielectric stacks need it. The Phase 1.3.1.1
-//! step 3 dense fallback ([`super::solve_dense`]) uses only the
-//! transverse block, which is exact for the WR-90 TE10 validation
-//! case and bit-stable on homogeneously filled PEC cross-sections.
+//! **Mixed formulation (Phase 1.3.1.1 step 5).** [`assemble_mixed`]
+//! builds the full mixed `(E_t, E_z)` Lee-Sun-Cendes block pencil from
+//! the longitudinal nodal-Lagrange element matrices [`local_a_zz`] /
+//! [`local_b_zz`] and the `1/μ_r`-weighted edge-node coupling
+//! [`local_b_ze`], consumed by [`super::solve_dense_mixed`] for
+//! inhomogeneous (dielectric-loaded / microstrip) cross-sections. The
+//! transverse-only [`assemble_transverse`] / [`super::solve_dense`] are
+//! retained as the homogeneous reference and its regression tests; on a
+//! homogeneous guide the two agree to machine precision (the dominant
+//! mode is purely transverse). See [`AssembledMixed`] for the block
+//! layout and the load-bearing-coupling discussion.
 
 use nalgebra::{Complex, DMatrix};
 use num_complex::Complex64;

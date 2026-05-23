@@ -282,9 +282,15 @@ pub(crate) struct MixedEigenSolution {
 /// `complex_eigenvalues` (returns in milliseconds at the validation
 /// `n ≈ 121`; the historical "non-symmetric QR hang" in the step-3
 /// bring-up was the *asymmetric `T⁻¹S`* product, a different matrix).
-/// Eigenvectors are recovered per-candidate as the smallest right
-/// singular vector of `A − k_c² B` (null-space of the singular pencil at
-/// the eigenvalue) via [`nalgebra::SVD`]. `O(n³)` with `n = n_t + n_z`.
+/// The `B⁻¹A` reduction is non-ideal for an indefinite `B` (it discards
+/// symmetry and can be ill-conditioned); acceptable at `n ≈ 121`, but
+/// revisit for a sparse / large-DoF symmetric-indefinite solver.
+/// Eigenvectors are recovered per-candidate by **inverse iteration**
+/// ([`inverse_iterate`]) on the shifted pencil `(A − σ B)` — *not* a
+/// smallest-singular-vector null-space of `A − k_c² B`, which grabbed a
+/// spurious `E_t`-only direction from the Nedelec curl gradient
+/// null-space (the step-5-review recovery bug). `O(n³)` with
+/// `n = n_t + n_z`.
 pub(crate) fn solve_dense_mixed(
     asm: &AssembledMixed,
     freq_hz: f64,
@@ -443,6 +449,13 @@ pub(crate) fn solve_dense_mixed(
 /// directions in the `E_t`-only subspace, and the global smallest
 /// singular vector picked one of those (`E_z ≡ 0`) instead of the
 /// physical mode.
+///
+/// **Assumes a simple (non-degenerate) eigenvalue.** For a degenerate
+/// `λ` the iteration converges to *some* vector in the eigenspace (an
+/// arbitrary combination of the degenerate modes), not a canonical
+/// basis. The dominant guided mode is well-separated for the validation
+/// cross sections; resolving an explicit degenerate cluster M-orthonormal
+/// is a later step (cf. the FEM-side `LobpcgEigen` degenerate handling).
 fn inverse_iterate(a: &DMatrix<f64>, b: &DMatrix<f64>, lambda: f64) -> Option<Vec<f64>> {
     let n = a.nrows();
     // Relative shift off the eigenvalue. Large enough to keep (A − σB)
@@ -475,14 +488,17 @@ fn inverse_iterate(a: &DMatrix<f64>, b: &DMatrix<f64>, lambda: f64) -> Option<Ve
     Some(z.column(0).iter().copied().collect())
 }
 
-/// Minimum transverse-block `B`-norm energy fraction for a candidate to
-/// count as a physical quasi-TEM / quasi-TE mode in
-/// [`solve_dense_mixed`]. Modes below this carry their energy in the
-/// longitudinal `E_z` / nodal-gradient block and are rejected as
-/// spurious. `0.5` is a wide margin: the homogeneous-guide dominant mode
-/// sits at fraction `1.0` (E_z ≡ 0) and inhomogeneous quasi-TEM modes
-/// remain strongly transverse-dominated for the validation cross
-/// sections.
+/// Minimum transverse-block **Euclidean** energy fraction
+/// `‖e_t‖² / ‖x‖²` for a candidate to count as a physical quasi-TEM /
+/// quasi-TE mode in [`solve_dense_mixed`]. Modes below this carry their
+/// energy in the longitudinal `E_z` / nodal-gradient block and are
+/// rejected as spurious. The fraction is the plain `ℓ²` (Euclidean)
+/// ratio of the eigenvector's components, **not** a `B`-norm: `B` is
+/// indefinite here (it carries the edge-node coupling), so a true
+/// `B`-norm could be negative and is not a meaningful energy. `0.5` is a
+/// wide margin: the homogeneous-guide dominant mode sits at fraction
+/// `1.0` (E_z ≡ 0) and inhomogeneous quasi-TEM modes remain strongly
+/// transverse-dominated for the validation cross sections.
 const TRANSVERSE_ENERGY_FLOOR: f64 = 0.5;
 
 #[cfg(test)]
@@ -596,6 +612,88 @@ mod tests {
         assert!(
             ez_norm < 1e-6 * et_norm.max(1e-30),
             "homogeneous-guide E_z block should be ~zero: ‖E_z‖={ez_norm}, ‖E_t‖={et_norm}"
+        );
+    }
+
+    /// Horizontal-slab WR-90 mesh: lower-y half tagged 1, rest tagged 0.
+    fn horizontal_slab_mesh(a: f64, b: f64, nx: usize, ny: usize) -> TriMesh2D {
+        let mut vertices = Vec::with_capacity((nx + 1) * (ny + 1));
+        for j in 0..=ny {
+            for i in 0..=nx {
+                vertices.push([a * (i as f64) / (nx as f64), b * (j as f64) / (ny as f64)]);
+            }
+        }
+        let idx = |i: usize, j: usize| j * (nx + 1) + i;
+        let mut triangles = Vec::with_capacity(2 * nx * ny);
+        let mut tags = Vec::with_capacity(2 * nx * ny);
+        for j in 0..ny {
+            for i in 0..nx {
+                let v00 = idx(i, j);
+                let v10 = idx(i + 1, j);
+                let v11 = idx(i + 1, j + 1);
+                let v01 = idx(i, j + 1);
+                let yc = b * ((j as f64) + 0.5) / (ny as f64);
+                let tag = if yc < b / 2.0 { 1u32 } else { 0u32 };
+                triangles.push([v00, v10, v11]);
+                tags.push(tag);
+                triangles.push([v00, v11, v01]);
+                tags.push(tag);
+            }
+        }
+        TriMesh2D::new(vertices, triangles, None, Some(tags)).unwrap()
+    }
+
+    #[test]
+    fn zeroing_coupling_changes_hybrid_mode() {
+        // Step-5-review P1-1 load-bearing guard: on a horizontal-slab
+        // (hybrid-mode) guide, zeroing ONLY the off-diagonal coupling
+        // block B_tz (= B_ztᵀ) must measurably change the dominant
+        // eigenpair — proving the coupling participates and pinning that
+        // it is non-trivially placed. (On a homogeneous or vertical-slab
+        // guide this delta is zero because the dominant mode has E_z = 0;
+        // the horizontal slab is exactly where the coupling bites.)
+        let a = 22.86e-3;
+        let b = 10.16e-3;
+        let freq_hz = 10e9;
+        let mesh = horizontal_slab_mesh(a, b, 8, 8);
+        let mut eps = HashMap::new();
+        eps.insert(0u32, Complex64::new(1.0, 0.0));
+        eps.insert(1u32, Complex64::new(10.2, 0.0));
+        let mut mu = HashMap::new();
+        mu.insert(0u32, Complex64::new(1.0, 0.0));
+        mu.insert(1u32, Complex64::new(1.0, 0.0));
+        let table = EdgeTable::build(&mesh);
+
+        let asm = assemble_mixed(&mesh, &eps, &mu, &table);
+        let beta_full = solve_dense_mixed(&asm, freq_hz).unwrap().beta_sq.re.sqrt();
+
+        // Build a coupling-zeroed copy: drop the edge↔vertex blocks of B.
+        let mut asm_nc = assemble_mixed(&mesh, &eps, &mu, &table);
+        let n_t = asm_nc.n_t;
+        let n = n_t + asm_nc.n_z;
+        for i in 0..n_t {
+            for j in n_t..n {
+                asm_nc.b[(i, j)] = Complex64::new(0.0, 0.0);
+                asm_nc.b[(j, i)] = Complex64::new(0.0, 0.0);
+            }
+        }
+        let beta_nc = solve_dense_mixed(&asm_nc, freq_hz)
+            .unwrap()
+            .beta_sq
+            .re
+            .sqrt();
+
+        let rel = (beta_full - beta_nc).abs() / beta_full;
+        eprintln!(
+            "coupling delta (horizontal slab): β with coupling {beta_full:.4}, \
+             β without {beta_nc:.4}, rel Δ {rel:.3e}"
+        );
+        // The coupling shifts β by ~1% here; require a clearly non-zero,
+        // not-floating-point-noise delta.
+        assert!(
+            rel > 1e-4,
+            "zeroing B_tz must change the hybrid-mode β (rel Δ {rel:.3e}); \
+             a zero delta means the coupling block is inert/misplaced"
         );
     }
 }

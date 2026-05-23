@@ -15,20 +15,36 @@
 //!   both paths are reachable; here only the public mixed path is, so the
 //!   external analytic reference is used.)
 //! * **DoD-V2′ (capability, physics inequality + regression):** a
-//!   **dielectric-slab-loaded** WR-90 (lower-x half filled with
-//!   `ε_r = 2.2`). The numerical β is bracketed by the rigorous
+//!   **vertical** dielectric-slab-loaded WR-90 (lower-x half filled with
+//!   `ε_r = 2.2`). The numerical β is **bracketed** by the rigorous
 //!   monotonic physics inequality `β_air < β_loaded < β_fullyloaded`
-//!   (β increases monotonically with dielectric fill fraction) **and**
-//!   regression-tracked. This is the spec §7c escape-hatch fallback: the
-//!   published transcendental dielectric-loaded-guide root is deferred to
-//!   step-5.1 (the closed-form TE_x0 / LSE-LSM dispersion did not yield a
-//!   root matching the mesh-converged numerical β in the bring-up window,
-//!   so the inequality+regression gate ships now and the transcendental
-//!   reference is queued). The spec's literal `k₀ < β < k₀√ε_r,max` band
-//!   does **not** apply to a *closed* (cutoff-bearing) guide — the
-//!   air-filled TE10 β already sits below `k₀` — so the monotonic
-//!   empty/full bracket is used instead, which is the rigorous statement
-//!   for a partial fill.
+//!   (β increases monotonically with dielectric fill fraction) and
+//!   regression-tracked against the mesh-converged numerical value. The
+//!   bracket is a necessary-condition *sanity bound*, **not** a
+//!   validation of the β value itself; the regression value pins drift,
+//!   and an external published reference is the open item (below). This
+//!   is the spec §7c escape-hatch fallback: the published transcendental
+//!   dielectric-loaded-guide root is deferred to **step-5.1** (the
+//!   closed-form TE_x0 / LSE-LSM dispersion did not yield a root matching
+//!   the mesh-converged numerical β in the bring-up window). The spec's
+//!   literal `k₀ < β < k₀√ε_r,max` band does **not** apply to a *closed*
+//!   (cutoff-bearing) guide — the air-filled TE10 β already sits below
+//!   `k₀` — so the monotonic empty/full bracket is used instead.
+//! * **Coupling-block guard (step-5-review P1-1):** a **horizontal**
+//!   dielectric-slab-loaded WR-90 (`ε_r = 10.2`, lower-y half). Unlike a
+//!   vertical slab (whose dominant mode is pure-TE, `E_z ≡ 0`, leaving
+//!   the `B_tz` coupling untouched), a horizontal slab's dominant mode is
+//!   genuinely **hybrid** (`E_z ≠ 0`), so the `1/μ_r` coupling block is
+//!   load-bearing. This case asserts `‖E_z‖/‖E_t‖ > 1e-2` (the
+//!   longitudinal field is actually present) plus the same bracket +
+//!   regression on β — guarding the spec/ADR's highest-risk item (the
+//!   coupling sign/placement), which the homogeneous β canary cannot
+//!   reach because there `E_z = 0`. The element-level coupling
+//!   sign/scale/transpose is independently pinned in
+//!   `eigensolver::assembly::tests::
+//!   local_b_ze_matches_independent_quadrature_sign_and_scale`, and the
+//!   "zero only `B_tz`" load-bearing delta in
+//!   `eigensolver::solve::tests::zeroing_coupling_changes_hybrid_mode`.
 //! * **DoD-V3 (Z_w):** the numerical `Z_w` reduces to the TE form
 //!   `η₀ k₀ / β` within 1 % on the homogeneous guide, and is finite,
 //!   positive-real-dominated, and regression-tracked on the loaded guide.
@@ -41,7 +57,8 @@ use yee_mom::ports::{NumericalCrossSection, RectangularWaveguideTe10};
 const A: f64 = 22.86e-3; // WR-90 long dimension (m)
 const B: f64 = 10.16e-3; // WR-90 short dimension (m)
 const FREQ_HZ: f64 = 10.0e9;
-const EPS_FILL: f64 = 2.2; // dielectric slab relative permittivity
+const EPS_FILL: f64 = 2.2; // vertical-slab dielectric relative permittivity
+const EPS_FILL_HI: f64 = 10.2; // horizontal-slab high-contrast substrate (RT/duroid 6010)
 
 /// Structured `nx × ny` quad-grid WR-90 mesh, air everywhere (tag 0).
 /// Each quad splits along the `(low-x, low-y) → (high-x, high-y)`
@@ -102,6 +119,41 @@ fn vertical_slab_mesh(nx: usize, ny: usize) -> TriMesh2D {
     TriMesh2D::new(vertices, triangles, None, Some(tags)).unwrap()
 }
 
+/// WR-90 mesh with a **horizontal** dielectric slab filling the lower-y
+/// half (`y < b/2`, material tag 1); the rest is air (tag 0). The
+/// triangle's centroid y-coordinate decides its material. A horizontal
+/// slab puts the dielectric interface normal to `ŷ`, where the dominant
+/// mode's `E_y` is the *normal* field component (`D_y` continuous, `E_y`
+/// discontinuous): the mode is genuinely **hybrid** (`E_z ≠ 0`), so the
+/// `1/μ_r` `E_t`/`E_z` coupling block is load-bearing — the case that
+/// exercises the highest-risk part of the assembly.
+fn horizontal_slab_mesh(nx: usize, ny: usize) -> TriMesh2D {
+    let mut vertices = Vec::with_capacity((nx + 1) * (ny + 1));
+    for j in 0..=ny {
+        for i in 0..=nx {
+            vertices.push([A * (i as f64) / (nx as f64), B * (j as f64) / (ny as f64)]);
+        }
+    }
+    let idx = |i: usize, j: usize| j * (nx + 1) + i;
+    let mut triangles = Vec::with_capacity(2 * nx * ny);
+    let mut tags = Vec::with_capacity(2 * nx * ny);
+    for j in 0..ny {
+        for i in 0..nx {
+            let v00 = idx(i, j);
+            let v10 = idx(i + 1, j);
+            let v11 = idx(i + 1, j + 1);
+            let v01 = idx(i, j + 1);
+            let yc = B * ((j as f64) + 0.5) / (ny as f64);
+            let tag = if yc < B / 2.0 { 1u32 } else { 0u32 };
+            triangles.push([v00, v10, v11]);
+            tags.push(tag);
+            triangles.push([v00, v11, v01]);
+            tags.push(tag);
+        }
+    }
+    TriMesh2D::new(vertices, triangles, None, Some(tags)).unwrap()
+}
+
 fn air_eps_mu() -> (HashMap<u32, Complex64>, HashMap<u32, Complex64>) {
     let mut eps = HashMap::new();
     eps.insert(0u32, Complex64::new(1.0, 0.0));
@@ -113,9 +165,13 @@ fn air_eps_mu() -> (HashMap<u32, Complex64>, HashMap<u32, Complex64>) {
 }
 
 fn loaded_eps_mu() -> (HashMap<u32, Complex64>, HashMap<u32, Complex64>) {
+    loaded_eps_mu_with(EPS_FILL)
+}
+
+fn loaded_eps_mu_with(eps_fill: f64) -> (HashMap<u32, Complex64>, HashMap<u32, Complex64>) {
     let mut eps = HashMap::new();
     eps.insert(0u32, Complex64::new(1.0, 0.0));
-    eps.insert(1u32, Complex64::new(EPS_FILL, 0.0));
+    eps.insert(1u32, Complex64::new(eps_fill, 0.0));
     let mut mu = HashMap::new();
     mu.insert(0u32, Complex64::new(1.0, 0.0));
     mu.insert(1u32, Complex64::new(1.0, 0.0));
@@ -250,6 +306,85 @@ fn dod_v2_prime_loaded_beta_bracket_and_regression() {
         rel < 0.02,
         "loaded β {beta_loaded} drifted from regression {beta_reg} (rel {rel:.4}); \
          update the regression value if the formulation changed deliberately"
+    );
+}
+
+#[test]
+fn coupling_block_loadbearing_horizontal_slab_ez_nonzero() {
+    // Step-5-review P1-1 coverage guard for the highest-risk item (the
+    // E_t/E_z coupling block). A HORIZONTAL dielectric slab (interface
+    // ⊥ ŷ) supports a genuinely HYBRID dominant mode (E_z ≠ 0), unlike
+    // the vertical slab whose dominant mode is pure-TE (E_z = 0, coupling
+    // untouched). So this case forces the 1/μ_r coupling block to
+    // participate, and asserts:
+    //   (1) ‖E_z‖/‖E_t‖ > 1e-2 — the longitudinal field is actually
+    //       present (proves the coupling carries E_z into the mode);
+    //   (2) β satisfies the same rigorous monotonic bracket
+    //       β_air < β_loaded < β_fullyloaded;
+    //   (3) β tracks a mesh-converged regression value.
+    // ε_r = 10.2 (a standard high-contrast substrate) is used so the
+    // hybrid E_z content clears the 1e-2 floor with margin.
+    let mesh = horizontal_slab_mesh(8, 8);
+    let (eps, mu) = loaded_eps_mu_with(EPS_FILL_HI);
+    let mut mode = NumericalCrossSection::new(mesh, eps, mu);
+    mode.solve(FREQ_HZ).expect("horizontal-slab mixed solve");
+    let beta_loaded = mode.beta.expect("β cached").re;
+
+    let ez_norm: f64 = mode
+        .mode_profile_ez
+        .as_ref()
+        .expect("E_z cached")
+        .iter()
+        .map(|z| z.norm_sqr())
+        .sum::<f64>()
+        .sqrt();
+    let et_norm: f64 = mode
+        .mode_profile
+        .as_ref()
+        .expect("E_t cached")
+        .iter()
+        .map(|z| z.norm_sqr())
+        .sum::<f64>()
+        .sqrt();
+    let ratio = ez_norm / et_norm.max(1e-30);
+    eprintln!(
+        "coupling guard (horizontal slab ε_r={EPS_FILL_HI}): β {beta_loaded:.4}, \
+         ‖E_z‖/‖E_t‖ = {ratio:.5}"
+    );
+
+    // (1) The longitudinal field must be genuinely present — this is the
+    // coverage the homogeneous canary cannot provide (there E_z ≡ 0).
+    assert!(
+        ratio > 1e-2,
+        "horizontal-slab dominant mode must be hybrid (‖E_z‖/‖E_t‖ > 1e-2); \
+         got {ratio:.5} — the coupling block is not load-bearing, regression"
+    );
+
+    // (2) Monotonic bracket.
+    let beta_air = RectangularWaveguideTe10 {
+        a: A,
+        b: B,
+        eps_r: 1.0,
+    }
+    .beta(FREQ_HZ);
+    let beta_full = RectangularWaveguideTe10 {
+        a: A,
+        b: B,
+        eps_r: EPS_FILL_HI,
+    }
+    .beta(FREQ_HZ);
+    assert!(
+        beta_loaded > beta_air && beta_loaded < beta_full,
+        "loaded β {beta_loaded} must lie in bracket (air {beta_air:.4}, full {beta_full:.4})"
+    );
+
+    // (3) Regression value (8×8-quad horizontal-slab mesh, ε_r = 10.2,
+    // 10 GHz): β ≈ 201.52 rad/m (mesh-converged 8×8 → 12×12 within 0.01 %).
+    let beta_reg = 201.52;
+    let rel = (beta_loaded - beta_reg).abs() / beta_reg;
+    assert!(
+        rel < 0.02,
+        "horizontal-slab β {beta_loaded} drifted from regression {beta_reg} (rel {rel:.4})"
     );
 }
 
