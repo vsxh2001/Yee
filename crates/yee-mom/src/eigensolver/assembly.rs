@@ -755,12 +755,17 @@ mod tests {
         // Not all-zero entry-wise.
         let any_nonzero = bze.iter().flatten().any(|z| z.norm() > 1e-9);
         assert!(any_nonzero, "B_ze should have nonzero entries");
-        // Column sums vanish.
-        for j in 0..3 {
-            let col_sum: Complex64 = (0..3).map(|i| bze[i][j]).sum();
+        // Column sums vanish: Σ_i B_ze[i][j] = 0 for each edge-column j.
+        let mut col_sum = [Complex64::new(0.0, 0.0); 3];
+        for row in &bze {
+            for (j, entry) in row.iter().enumerate() {
+                col_sum[j] += *entry;
+            }
+        }
+        for (j, sum) in col_sum.iter().enumerate() {
             assert!(
-                col_sum.norm() < 1e-12,
-                "B_ze column {j} sum = {col_sum:?} should vanish (partition of unity)"
+                sum.norm() < 1e-12,
+                "B_ze column {j} sum = {sum:?} should vanish (partition of unity)"
             );
         }
     }
