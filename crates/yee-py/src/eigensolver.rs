@@ -186,4 +186,28 @@ impl PyNumericalCrossSection {
             .z_w
             .map(|z| PyComplex::from_doubles(py, z.re, z.im))
     }
+
+    /// Cached dominant-mode **longitudinal** field `E_z` from the most
+    /// recent solve as a `list[complex]` (one amplitude per global mesh
+    /// vertex, in `mesh` vertex order), or `None` before any solve has
+    /// run.
+    ///
+    /// These are the nodal-Lagrange vertex-DoF amplitudes of the
+    /// quasi-TEM dominant mode's longitudinal electric field, scattered
+    /// out from the interior-vertex DoF set with Dirichlet (PEC) boundary
+    /// vertices set to `0`. On a **homogeneous** (air-filled) guide the
+    /// dominant mode is purely transverse, so this is ~zero; on an
+    /// **inhomogeneous** (dielectric-loaded / microstrip) cross-section it
+    /// carries the genuine longitudinal field that couples through the
+    /// dielectric interface. Mirrors the
+    /// [`NumericalCrossSection::mode_profile_ez`] Rust field; real-valued
+    /// on the lossless path but typed `complex` to match `beta` / `z_w`.
+    #[getter]
+    fn mode_profile_ez<'py>(&self, py: Python<'py>) -> Option<Vec<Bound<'py, PyComplex>>> {
+        self.inner.mode_profile_ez.as_ref().map(|ez| {
+            ez.iter()
+                .map(|c| PyComplex::from_doubles(py, c.re, c.im))
+                .collect()
+        })
+    }
 }
