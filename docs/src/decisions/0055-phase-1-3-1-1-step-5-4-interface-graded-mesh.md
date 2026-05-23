@@ -55,6 +55,25 @@ vague "needs higher-order" into a quantified one.
 * `solve.rs` / `assembly.rs` / `reference.rs` untouched (graded `h`
   reuses them); a solver/assembly change would be a separate finding.
 
+## As-built outcome (2026-05-23, merge `95ac64f`)
+
+**Graded `h` PLATEAUS — the cheap path is ruled out.** At ε_r=10.2 the
+best graded mesh (r=1.5) reached β=491.71 vs reference 582.95 (rel
+15.65%), only ~0.5pp better than the uniform plateau (489.03, 16.11%),
+and adding DoF at fixed grading drifts *back* toward ~487 — not toward
+583. So the residual is confirmed the **first-order-element convergence
+rate** at the interface field peak, which `h` cannot fix. No failing
+gate added (the ε_r=10.2 reconciliation stays a non-failing diagnostic);
+FR-4 + uniform + homogeneous gates stand, all values bit-identical
+(additive). **step-5.5 = p-refinement (second-order Nedelec)** is now
+justified by data — but it is a large implementation for a marginal-case
+(high-contrast) payoff, so it is **deprioritized**: the cross-section
+eigensolver is production-validated at FR-4, and the recommended next
+move is to rotate to a higher-breadth ROADMAP track rather than continue
+this chain. CI note: the inline convergence study lifts
+`eigensolver_inhomogeneous` to ~85 s (dense cutoff-pencil selection) — a
+sparse selection / release-example move is a hygiene follow-on.
+
 ## References
 
 * Jin, *FEM in EM* 3rd ed. §9 (h/p refinement, edge elements).
