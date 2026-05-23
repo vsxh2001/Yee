@@ -90,3 +90,4 @@
 - [ADR-0054: Phase 1.3.1.1 step 5.3 direct β-direct sparse shift-invert](decisions/0054-phase-1-3-1-1-step-5-3-direct-sparse-beta.md)
 - [ADR-0055: Phase 1.3.1.1 step 5.4 interface-graded mesh](decisions/0055-phase-1-3-1-1-step-5-4-interface-graded-mesh.md)
 - [ADR-0056: Phase 1.3.1.1 step 5.5 second-order Nedelec elements](decisions/0056-phase-1-3-1-1-step-5-5-second-order-nedelec.md)
+- [ADR-0057: Phase 1.3.1.1 step 5.6 p=2-robust mode selection](decisions/0057-phase-1-3-1-1-step-5-6-p2-robust-mode-selection.md)
