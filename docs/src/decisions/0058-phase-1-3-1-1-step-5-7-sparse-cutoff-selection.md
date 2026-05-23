@@ -60,6 +60,38 @@ range projection) is the escape-hatch if the shift alone is insufficient.
 * The whole cross-section eigensolver scales past the ~457 DoF cap.
 * The breadth-rotation tracks remain documented-as-grind-risky.
 
+## As-built + step-5.8 resolution (2026-05-24, merges `1db2f51`, `157a401`)
+
+**Sparse selection shipped** (merge `1db2f51`): σ-ladder + positive-k_c²
+union (no deflation needed), dense-agreement bit-identical at all
+validation meshes, 20×20 (n≈1242) in ~9 s, lib suite 78s→17s.
+
+**The ε_r=10.2 gap is a MODE-FAMILY mismatch, not a solver defect — the
+cross-section chain closes here.** With the dense cap lifted, p=1 AND
+converged-p=2 β both plateau at ≈485 (ε_eff≈5.79), flat across
+8×8→24×24 — retiring the discretization hypothesis. step-5.8's
+multi-root census (`157a401`) then enumerated the LSM-to-y transcendental
+roots: **{582.95, 216, 161, 158}** — the FEM's β≈485 is **not** an
+LSM-to-y root (≈17% from the nearest), but sits near the **LSE-to-y**
+dominant root (≈465, verified step-5.1). So the FEM's dominant mode is
+~LSE-to-y, while the reference (and the "16.6% gap") compared **LSM-to-y**
+(583) — ADR-0052's LSM-to-y family assignment was made from the step-5.2
+**contaminated** cutoff eigenvector (the one step-5.6 found non-transverse).
+
+**Disposition:** **FR-4 (ε_r=4.4, 1.39%) stands as THE §4 inhomogeneous
+closure.** The ε_r=10.2 high-contrast comparison is a **documented
+mode-family-identity caveat** (FEM dominant ≈ LSE-to-y 465 vs the
+LSM-to-y 583 the reference reports) — not a solver accuracy bug (the FEM
+is mesh-converged, p1≡p2, all element matrices / β-extraction / selection
+reviewer-validated). The cross-section eigensolver (steps 4→5.8) is
+**production-complete**: validated at homogeneous / uniform / FR-4,
+p=2 elements + sparse mesh-scaling + Python bindings, with the
+high-contrast modal-family identity as the one documented open question
+(a future modal-classification study if a high-contrast use case demands
+it — not a continuation of this chain). Review P1-1 (n>260 dense-sparse
+agreement guard, `#[ignore]`'d) + P1-2 (recover_k0_sq invariant) landed
+in `157a401`.
+
 ## References
 
 * Saad (shift-invert). Knyazev 2001 (LOBPCG). Jin §9 (Nedelec null
