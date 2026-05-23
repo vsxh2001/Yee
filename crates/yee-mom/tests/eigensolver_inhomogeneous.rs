@@ -109,7 +109,7 @@ use num_complex::Complex64;
 use std::collections::HashMap;
 use std::f64::consts::PI;
 use yee_mesh::TriMesh2D;
-use yee_mom::ports::{NumericalCrossSection, RectangularWaveguideTe10};
+use yee_mom::ports::{ElementOrder, NumericalCrossSection, RectangularWaveguideTe10};
 
 const A: f64 = 22.86e-3; // WR-90 long dimension (m)
 const B: f64 = 10.16e-3; // WR-90 short dimension (m)
@@ -581,6 +581,68 @@ fn dod1_uniform_fill_beta_matches_analytic() {
         rel < 0.01,
         "uniform-fill β {beta_num} must match analytic {beta_analytic} within 1 % \
          (rel {rel:.4e}); a failure here is the β-extraction bug, not inhomogeneity"
+    );
+}
+
+#[test]
+fn p2_element_order_reachable_end_to_end_through_numerical_cross_section() {
+    // Phase 1.3.1.1 step 5.6 K3 (DoD-4, end-to-end smoke): the validated
+    // second-order (p=2) element family is reachable through the PUBLIC
+    // `NumericalCrossSection` API via `with_element_order(ElementOrder::
+    // Second)`. Before step 5.6 the p=2 assembler was lib-internal (only the
+    // lib tests reached it); now the public solve path can select it.
+    //
+    // On the homogeneous (air-filled) WR-90 the dominant mode is the analytic
+    // TE10 β = √(k₀² − (π/a)²); the p=2 public solve must reproduce it within
+    // 1 % (the WR-90 gate tolerance), proving the order knob is wired through
+    // `solve` correctly. Per the documented p=2 caveat (`with_element_order`),
+    // the second-order path caches β + a closed-form Z_w but leaves the field-
+    // reconstruction caches `None`.
+    let mesh = air_mesh(6, 6);
+    let (eps, mu) = air_eps_mu();
+
+    // Default order is First (non-breaking): same object, first-order solve.
+    let mut p1 = NumericalCrossSection::new(mesh.clone(), eps.clone(), mu.clone());
+    assert_eq!(
+        p1.element_order,
+        ElementOrder::First,
+        "default order is First"
+    );
+    p1.solve(FREQ_HZ).expect("p1 homogeneous solve");
+    assert!(p1.mode_profile.is_some(), "p1 path reconstructs the field");
+
+    // Second order via the builder.
+    let mut p2 = NumericalCrossSection::new(mesh, eps, mu).with_element_order(ElementOrder::Second);
+    assert_eq!(p2.element_order, ElementOrder::Second);
+    p2.solve(FREQ_HZ)
+        .expect("p2 homogeneous solve (end-to-end)");
+
+    let beta_p2 = p2.beta.expect("p2 β cached").re;
+    let beta_analytic = RectangularWaveguideTe10 {
+        a: A,
+        b: B,
+        eps_r: 1.0,
+    }
+    .beta(FREQ_HZ);
+    let rel = (beta_p2 - beta_analytic).abs() / beta_analytic;
+    eprintln!(
+        "K3 p=2 end-to-end (homogeneous WR-90): β {beta_p2:.6}, analytic TE10 {beta_analytic:.6}, \
+         rel {rel:.3e}"
+    );
+    assert!(
+        rel < 0.01,
+        "p=2 public-path β {beta_p2} must match analytic TE10 {beta_analytic} within 1 % \
+         (rel {rel:.4}) — the ElementOrder::Second wiring is correct"
+    );
+    // p=2 caveat: β + Z_w cached, field reconstruction intentionally skipped.
+    assert!(p2.beta.is_some() && p2.z_w.is_some(), "p2 caches β and Z_w");
+    assert!(
+        p2.z_w.expect("z_w").re.is_finite() && p2.z_w.expect("z_w").re > 0.0,
+        "p2 Z_w must be finite positive"
+    );
+    assert!(
+        p2.mode_profile.is_none() && p2.mode_profile_ez.is_none(),
+        "p=2 field reconstruction is not wired (documented caveat): mode profiles stay None"
     );
 }
 

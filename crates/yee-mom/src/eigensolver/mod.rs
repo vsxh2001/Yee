@@ -55,18 +55,17 @@ pub(crate) use solve::solve_dense_mixed;
 /// only for the high-contrast inhomogeneous case (ε_r=10.2), where the
 /// first-order convergence rate plateaus short of the verified reference
 /// (step 5.4). The curl is non-constant per triangle at second order, so
-/// every element integral goes through a triangle Gauss rule (see
-/// [`assembly::tri_gauss_deg4`]).
+/// every element integral goes through a (degree-4, 6-point) triangle
+/// Gauss rule (`assembly::tri_gauss_deg4`, crate-internal).
 ///
 /// The selector is exercised by the lib-internal step-5.5 J3/J4 anchors
-/// (which call the order-specific assemblers directly). The production
-/// [`crate::ports::NumericalCrossSection::solve`] path (out of the step-5.5
-/// lane) stays on the first-order [`assembly::assemble_mixed`]; wiring the
-/// selector through that public boundary is a follow-up — hence the
-/// `dead_code` allow on the non-test lib build.
-#[allow(dead_code)]
+/// (which call the order-specific assemblers directly) and, from Phase
+/// 1.3.1.1 step 5.6, wired through the public
+/// [`crate::ports::NumericalCrossSection`] boundary (re-exported as
+/// [`crate::ports::ElementOrder`]) so the validated p=2 path is reachable
+/// end-to-end; first-order stays the default there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub(crate) enum ElementOrder {
+pub enum ElementOrder {
     /// Whitney-1 Nedelec + linear nodal-Lagrange (1 DoF/edge, 1 DoF/vertex).
     /// The default, validated path.
     #[default]
