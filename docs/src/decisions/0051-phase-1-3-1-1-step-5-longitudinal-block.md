@@ -28,8 +28,11 @@ Three design questions:
 ## Decision
 
 1. **Full mixed `(E_t, E_z)` block formulation** — assemble the staged
-   longitudinal blocks into `A x = β² B x` with `x = [E_t; E_z]`,
-   reusing the existing element matrices. No new approximation layer.
+   longitudinal blocks into a block generalized eigenproblem with
+   `x = [E_t; E_z]`, reusing the existing element matrices. No new
+   approximation layer. (As-built: `k_c²`-parameterized and
+   symmetric-**indefinite** — see the As-built amendment below; the
+   `A x = β² B x` form written here is the design-time prose.)
 2. **Numerical Z_w** — voltage line-integral + power, reducing to the
    TE form on the homogeneous guide as a regression guard.
 3. **Validation:** published transcendental dielectric-slab-loaded-guide
@@ -70,10 +73,52 @@ septum Case B.
   (the transverse field form is unchanged; its value shifts on
   inhomogeneous guides — the intended effect).
 * Highest implementation risk is the block sign/placement convention of
-  the staged element matrices; the homogeneous-guide β regression
-  (DoD-V1) is the canary.
+  the staged element matrices. (As-built: the homogeneous-guide β
+  regression DoD-V1 does **not** guard the coupling-block sign — the
+  coupling decouples globally there; a dedicated horizontal-slab
+  `E_z ≠ 0` case guards it. See the As-built amendment.)
 * Sparse mixed solve, CPW multi-conductor Z₀ matrix, and the yee-py E_z
   binding are out of scope (later steps).
+
+## As-built amendment (2026-05-23)
+
+Three decisions were refined during implementation; the code is
+authoritative where this section and the design prose above differ.
+
+1. **Pencil is `k_c²`-parameterized and symmetric-indefinite.** The
+   staged longitudinal element matrices (`local_a_zz`, `local_b_zz`,
+   `local_b_ze`) carry no `k₀²` term, so the assembled pencil is
+   `A x = k_c² B x` (with `β² = k₀² − k_c²`), matching
+   `assemble_transverse`, **not** the `A x = β² B x` of the Decision
+   prose. The block `B = [[B_tt, B_tz],[B_zt, B_zz]]` is symmetric
+   **indefinite** (the off-diagonal coupling straddles zero even though
+   `B_tt`, `B_zz` are individually SPD), so Cholesky / symmetric-
+   generalized solvers are invalid. `solve_dense_mixed` forms `B⁻¹A`
+   and uses a non-symmetric real-Schur eigensolve with SVD null-space
+   eigenvector recovery — acceptable at the `n ≈ 121` validation scale;
+   a symmetric-indefinite / LDLᵀ path is the right move when the sparse
+   solve lands.
+
+2. **Decoupling on a homogeneous guide is a *global* property, not
+   entry-wise.** `local_b_ze` does **not** vanish entry-wise for
+   uniform `ε_r` (only its column sums vanish, `Σ∇L_i = 0`); the
+   transverse mode decouples because `B_zt e_t = 0` for the
+   divergence-free mode. Consequence: the DoD-V1 homogeneous canary
+   leaves `B_tz` multiplying a zero `E_z` block, so it does **not**
+   exercise the coupling-block sign. A **horizontal-slab** (`y = const`
+   interface) case with the dominant mode carrying `E_z ≠ 0`
+   (`‖E_z‖/‖E_t‖ > 1e-2`), plus a zero-`B_tz` perturbation guard, is
+   what pins the coupling sign.
+
+3. **Validation shipped on DoD-V2′, not the published transcendental.**
+   The closed-form dielectric-loaded-guide transcendental reference
+   produced no corroborating root in the bring-up window, so the gate
+   ships as the rigorous monotonic bracket `β_air < β_loaded < β_full`
+   + regression + mesh-convergence (DoD-V2′), with the published
+   transcendental reference **queued as step-5.1**. Note the Decision's
+   literal band `k₀ < β < k₀√ε_r,max` is wrong for a *closed*
+   cutoff-bearing guide (the air-TE10 β already sits below `k₀`); the
+   monotonic empty/full bracket is the correct partial-fill statement.
 
 ## References
 

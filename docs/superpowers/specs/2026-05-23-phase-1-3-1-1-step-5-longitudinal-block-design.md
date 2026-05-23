@@ -44,6 +44,16 @@ passes today. The longitudinal block only changes the answer on an
 
 ## 3. The mixed formulation
 
+> **As-built note (2026-05-23):** the `β²`-eigenvalue form below is the
+> design-time prose. The implementation is `k_c²`-parameterized
+> (`A x = k_c² B x`, `β² = k₀² − k_c²`) to match `assemble_transverse`,
+> and the block `B` is symmetric **indefinite** (solved via a
+> non-symmetric `B⁻¹A` Schur path, not Cholesky). The homogeneous
+> decoupling is a *global* property (`B_zt e_t = 0`), not the entry-wise
+> vanishing implied below — so the coupling block is guarded by a
+> horizontal-slab `E_z ≠ 0` test, not the homogeneous canary. See
+> ADR-0051 §"As-built amendment" for the authoritative record.
+
 After separating `e^{-jβz}`, the inhomogeneous-guide vector
 eigenproblem in the `(E_t, E_z)` unknowns is the standard
 Lee-Sun-Cendes / Jin (*FEM in EM* 3rd ed. §8.4) block generalized
