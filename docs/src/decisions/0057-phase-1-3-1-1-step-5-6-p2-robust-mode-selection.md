@@ -60,6 +60,32 @@ wiring makes the validated p=2 path usable end-to-end.
 * The dense cutoff selection's `O(n³)` cost (the p=2 CI burden) is a
   perf follow-on (sparse selection); not blocking the closure.
 
+## As-built outcome (2026-05-24, merge `f75fc87` + P1 fixes `853a8f8`)
+
+The Decision's "max ε_eff on the cutoff-pencil eigenvector" was **refined
+during implementation** (reviewer-confirmed): at p=2 the *physical* mode's
+*cutoff-pencil* eigenvector is itself gradient-contaminated
+(‖e_t‖²/‖x‖²≈0.03), so the existing cutoff-pencil transverse **pre-filter
+discarded the physical mode's shift**. The shipped rule **drops that
+pre-filter**, shift-inverts from every propagating cutoff candidate, and
+screens the **converged** β-direct eigenvector (reliable there), keeping
+the highest-β². This **fixed the selection** (ε_r=10.2 ε_eff recovered
+4.77→5.807; wrong-mode capture eliminated; p1/FR-4/homogeneous
+bit-identical). Carry-ins landed: P1-1 p=2 uniform-fill anchor (rel
+3.7e-6); `ElementOrder::Second` reachable via
+`NumericalCrossSection::with_element_order`.
+
+**ε_r=10.2 ≤5% still NOT reached (documented finding, no gate weakened):**
+with both the eigenvector mismatch (5.3) and the wrong-mode capture (5.6)
+removed, p=2 lands the *same* β≈486/ε_eff≈5.8 plateau as p1 (~16.6% vs
+8.17) — p=2's higher-order convergence advantage does not manifest until
+finer meshes than the **dense `O(n³)` cutoff-pencil `complex_eigenvalues`
+selection** affords (caps ~6×6). → **step-5.7 = a SPARSE cutoff
+selection**, which is foundational (the dense cap limits the *whole*
+cross-section eigensolver's mesh size, not just ε_r=10.2). Two
+review P1s landed as observability/doc follow-ups (`853a8f8`): candidate
+diagnostics in the no-mode error; a p=2-`Z_w`-homogeneous-only docstring.
+
 ## References
 
 * Jin §9 (spurious modes / edge-element null space). Boffi-Brezzi-
