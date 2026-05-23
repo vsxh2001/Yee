@@ -2021,4 +2021,196 @@ mod tests {
              — a regression here means the p=2 element matrices / DoF sign / assembly are wrong"
         );
     }
+
+    /// Uniform horizontal-slab WR-90 mesh: dielectric (tag 1) in 0≤y<b/2,
+    /// air (tag 0) above. Interface node sits exactly at b/2 for even ny.
+    fn slab_mesh(nx: usize, ny: usize) -> TriMesh2D {
+        let a = 22.86e-3;
+        let b = 10.16e-3;
+        let mut vertices = Vec::with_capacity((nx + 1) * (ny + 1));
+        for j in 0..=ny {
+            for i in 0..=nx {
+                vertices.push([a * (i as f64) / (nx as f64), b * (j as f64) / (ny as f64)]);
+            }
+        }
+        let idx = |i: usize, j: usize| j * (nx + 1) + i;
+        let mut triangles = Vec::with_capacity(2 * nx * ny);
+        let mut tags = Vec::with_capacity(2 * nx * ny);
+        for j in 0..ny {
+            let yc = b * ((j as f64) + 0.5) / (ny as f64);
+            let tag = if yc < b / 2.0 { 1u32 } else { 0u32 };
+            for i in 0..nx {
+                let v00 = idx(i, j);
+                let v10 = idx(i + 1, j);
+                let v11 = idx(i + 1, j + 1);
+                let v01 = idx(i, j + 1);
+                triangles.push([v00, v10, v11]);
+                tags.push(tag);
+                triangles.push([v00, v11, v01]);
+                tags.push(tag);
+            }
+        }
+        TriMesh2D::new(vertices, triangles, None, Some(tags)).unwrap()
+    }
+
+    fn solve_slab_beta(
+        nx: usize,
+        ny: usize,
+        eps_fill: f64,
+        order: super::super::ElementOrder,
+    ) -> f64 {
+        let mesh = slab_mesh(nx, ny);
+        let mut eps = HashMap::new();
+        eps.insert(0u32, Complex64::new(1.0, 0.0));
+        eps.insert(1u32, Complex64::new(eps_fill, 0.0));
+        let mut mu = HashMap::new();
+        mu.insert(0u32, Complex64::new(1.0, 0.0));
+        mu.insert(1u32, Complex64::new(1.0, 0.0));
+        let table = EdgeTable::build(&mesh);
+        let asm = match order {
+            super::super::ElementOrder::First => assemble_mixed(&mesh, &eps, &mu, &table),
+            super::super::ElementOrder::Second => assemble_mixed_p2(&mesh, &eps, &mu, &table),
+        };
+        let sol = crate::eigensolver::solve_dense_mixed(&asm, 10.0e9).expect("slab mixed solve");
+        sol.beta_sq.re.max(0.0).sqrt()
+    }
+
+    #[test]
+    fn p2_hi_contrast_convergence_study_documented_finding() {
+        // Phase 1.3.1.1 step 5.5 J4 (DoD-1/2, NON-FAILING DOCUMENTED FINDING).
+        // The ≤5 % §4 high-contrast closure gate is NOT added — p=2 does NOT
+        // reach it through the EXISTING (step-5.3) dense cutoff-pencil mode
+        // selection, and the escape-hatch is explicit: a solver change is a
+        // FINDING, not a fix (do NOT edit solve.rs to force a match; do NOT
+        // weaken any gate). This test records the evidence.
+        //
+        // ── FINDING ─────────────────────────────────────────────────────────
+        // The p=2 element matrices are PROVEN correct independently of this
+        // study: each is pinned against an independent degree-5 quadrature
+        // (the J1 `p2_*_matches_independent_quadrature` tests), the basis is
+        // full-rank-8 + tangentially conforming, and — decisively — p=2
+        // reproduces the analytic homogeneous-WR-90 TE10 β at least as
+        // accurately as p=1 (the J3 `p2_homogeneous_wr90_te10_*` anchor). So
+        // the elements, DoF map, edge-DoF signs, and global assembly are
+        // RIGHT.
+        //
+        // At the ε_r=10.2 HIGH CONTRAST, however, the numerical β does NOT
+        // converge toward the verified reference 582.95 (ε_eff 8.17). The
+        // p=2 β lands ≈437-440 rad/m with ε_eff ≈ 4.8 — *below* the
+        // area-average ε_r=5.6 and far below the dominant LSM mode's 8.17 —
+        // and it is consistently *worse* than the p=1 result on the same
+        // mesh. An ε_eff that low is the signature of a WRONG-MODE capture:
+        // the solver is not landing the dominant field-concentrated mode.
+        //
+        // ── ROOT CAUSE (out of the step-5.5 lane → finding, not fix) ─────────
+        // The production solve (`solve::solve_dense_mixed`) selects its
+        // physics shift from a DENSE cutoff-pencil eigendecomposition
+        // (`select_cutoff_mode`, O(n³)) that takes the SMALLEST
+        // transverse-energy-dominated k_c². At p=2 the curl-free space is much
+        // larger — the gradient edge functions G_e = ∇(λ_aλ_b) are curl-free,
+        // joining the nodal-gradient null-space — so the cutoff spectrum is
+        // far denser near zero and interleaved with several low-k_c²
+        // transverse-dominated modes. The selection + inverse-iteration then
+        // locks onto a NON-dominant mode (lower ε_eff), and the subsequent
+        // β-direct shift-invert refines *that* wrong eigenpair. On the
+        // HOMOGENEOUS guide this does not happen (J3 passes) because the
+        // dominant TE10 is cleanly separated; the failure is specific to the
+        // dense inhomogeneous p=2 spectrum. This is a SOLVER / mode-selection
+        // limitation (`solve.rs`, OUT OF the step-5.5 lane), exposed — not
+        // caused — by the correct higher-order elements.
+        //
+        // ── DISPOSITION ─────────────────────────────────────────────────────
+        // Queued to step-5.6: a mode-selection / shift strategy robust to the
+        // dense p=2 curl-free cluster (e.g. seed the β-direct shift-invert
+        // directly from the physical β estimate / a TEM-like initial vector
+        // and screen by ε_eff, rather than from the smallest cutoff k_c²;
+        // and/or a sparse cutoff selection so finer p=2 meshes — where the
+        // higher-order convergence would actually show — become affordable
+        // (the dense O(n³) selection caps p=2 at ≈6×6, n≈457, ~40s; ≥8×8 is
+        // minutes-scale)). The p=2 element family itself is a reusable,
+        // VALIDATED capability (J1+J3) regardless of this solver gap.
+        //
+        // Cheap meshes only (4×4..6×6) so routine `cargo test` stays bounded;
+        // the dense cutoff selection is the binding cost.
+        let k0 = std::f64::consts::TAU * 10.0e9 / yee_core::units::C0;
+        let kx = std::f64::consts::PI / 22.86e-3;
+        let eps_eff = |b: f64| (b * b + kx * kx) / (k0 * k0);
+        let beta_ref = crate::eigensolver::reference::slab_loaded_beta(
+            22.86e-3,
+            10.16e-3,
+            10.16e-3 / 2.0,
+            10.2,
+            10.0e9,
+            1,
+        )
+        .expect("LSM transcendental dominant root for ε_r=10.2");
+        eprintln!(
+            "step-5.5 p=2 high-contrast convergence study (horizontal slab ε_r=10.2, d₁=b/2, m=1):"
+        );
+        eprintln!(
+            "  published reference (verified LSM-to-y): β_ref = {beta_ref:.4} rad/m \
+             (ε_eff = {:.3})",
+            eps_eff(beta_ref)
+        );
+
+        let mut best_p2_rel = f64::INFINITY;
+        let mut max_p2_eps_eff = 0.0_f64;
+        for &(nx, ny) in &[(4usize, 4usize), (5, 5), (6, 6)] {
+            let b1 = solve_slab_beta(nx, ny, 10.2, super::super::ElementOrder::First);
+            let b2 = solve_slab_beta(nx, ny, 10.2, super::super::ElementOrder::Second);
+            let n = {
+                let m = slab_mesh(nx, ny);
+                let tb = EdgeTable::build(&m);
+                let d = crate::eigensolver::mesh::P2DofMap::build(&m, &tb);
+                d.n_t + d.n_z
+            };
+            let rel1 = (b1 - beta_ref).abs() / beta_ref;
+            let rel2 = (b2 - beta_ref).abs() / beta_ref;
+            eprintln!(
+                "  {nx}×{ny}: p1 β={b1:.3} (ε_eff {:.3}, rel {rel1:.4}) | \
+                 p2 β={b2:.3} (ε_eff {:.3}, rel {rel2:.4}, n={n})",
+                eps_eff(b1),
+                eps_eff(b2),
+            );
+            // Every p=2 point must be a finite positive propagating mode
+            // (the elements/solve are not producing garbage).
+            assert!(
+                b2.is_finite() && b2 > 0.0,
+                "p=2 β must be a finite positive propagating mode, got {b2}"
+            );
+            best_p2_rel = best_p2_rel.min(rel2);
+            max_p2_eps_eff = max_p2_eps_eff.max(eps_eff(b2));
+        }
+        eprintln!(
+            "  FINDING (step-5.5): the p=2 ELEMENTS are correct (J1 independent-quadrature pins + \
+             J3 homogeneous-TE10 anchor both pass), but at ε_r=10.2 the EXISTING dense \
+             cutoff-pencil mode-selection (solve.rs, out of lane) locks onto a non-dominant \
+             mode (ε_eff ≈ {max_p2_eps_eff:.2} ≪ the dominant 8.17), so β does NOT reach the \
+             reference. The §4 high-contrast closure stays the FR-4 gate; the ε_r=10.2 \
+             reconciliation remains a NON-FAILING diagnostic. QUEUED to step-5.6 (p=2-robust \
+             mode selection / sparse cutoff selection). Do NOT weaken any gate; the solver \
+             change is a finding, not a fix."
+        );
+
+        // Document the finding as an ASSERTION (so a future fix that closes
+        // ≤5 % trips this and prompts adding the real gate), NOT a success
+        // claim: p=2 stays short of ≤5 % AND the captured mode's ε_eff is the
+        // wrong-mode signature (well below the dominant 8.17). If a step-5.6
+        // solver fix makes p=2 converge, BOTH conditions flip and this test
+        // must be replaced by the `loaded_beta_hi_contrast_p2_matches_reference`
+        // failing gate.
+        assert!(
+            best_p2_rel > 0.05,
+            "DOCUMENTED FINDING TRIPPED: p=2 now reaches ≤5 % (best rel {best_p2_rel:.4}) — the \
+             mode-selection gap appears closed. Replace this diagnostic with the \
+             `loaded_beta_hi_contrast_p2_matches_reference` FAILING gate (§4 high-contrast \
+             closure) per the step-5.5 DoD."
+        );
+        assert!(
+            max_p2_eps_eff < 6.5,
+            "DOCUMENTED FINDING CHANGED: p=2 captured-mode ε_eff {max_p2_eps_eff:.3} rose toward \
+             the dominant 8.17 — the wrong-mode capture may be resolving. Re-evaluate the \
+             step-5.6 disposition."
+        );
+    }
 }
