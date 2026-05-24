@@ -134,9 +134,10 @@ const N_STEPS: usize = 30_000;
 /// (nx/4, ny/2, nz/4) for strong coupling (sin²(π/4) ≈ 0.5 of peak) while
 /// being off-centre so higher modes also see the source.
 ///
-/// E_y staggering: ey[i, j, k] lives at (i+0.5)·dx, j·dy, (k+0.5)·dz.
-/// Index (NX/4, NY/2, NZ/4) = (5, 5, 5) maps to x = 5.5·dx = 0.055 m,
-/// z = 5.5·dx = 0.055 m.  sin(π·0.055/0.2) ≈ sin(0.275π) ≈ 0.757.
+/// E_y staggering: ey[i, j, k] lives at (i·dx, (j+0.5)·dy, k·dz)
+/// (integer i,k; half-integer j — E_y lives on y-parallel edges).
+/// Index (NX/4, NY/2, NZ/4) = (5, 5, 5) maps to x = 5·dx = 0.050 m,
+/// z = 5·dx = 0.050 m.  sin(π·0.050/0.2) = sin(0.25π) ≈ 0.707.
 const SRC_I: usize = NX / 4; // 5
 const SRC_J: usize = NY / 2; // 5
 const SRC_K: usize = NZ / 4; // 5
@@ -144,8 +145,8 @@ const SRC_K: usize = NZ / 4; // 5
 /// Probe cell for E_y, away from the source and at a strong antinode.
 ///
 /// Index (NX*3/4, NY/2, NZ*3/4) = (15, 5, 15).
-/// x = 15.5·dx = 0.155 m, z = 15.5·dx = 0.155 m.
-/// sin(π·0.155/0.2) ≈ sin(0.775π) ≈ 0.757.
+/// x = 15·dx = 0.150 m, z = 15·dx = 0.150 m.
+/// sin(π·0.150/0.2) = sin(0.75π) ≈ 0.707.
 /// Source and probe are symmetric about the centre; TE₁₀₁ drives both in phase.
 const PRB_I: usize = NX * 3 / 4; // 15
 const PRB_J: usize = NY / 2; // 5

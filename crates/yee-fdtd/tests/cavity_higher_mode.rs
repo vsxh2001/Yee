@@ -44,7 +44,7 @@
 //! TE₂₀₁:  1.5614 GHz  *** TARGET — sole peak in [1.40, 1.72] GHz ***
 //! TE₁₀₂:  1.9751 GHz  (well above band ceiling 1.72 GHz)
 //! TE₃₀₁:  2.0949 GHz
-//! TE₁₁₀:  3.7991 GHz  (n=1 family, pushed high by small b)
+//! TM₁₁₀:  3.7991 GHz  (n=1 family, pushed high by small b; p=0 ⇒ TM, not TE)
 //! ```
 //!
 //! The scan band `[1.40, 1.72] GHz` brackets TE₂₀₁ by ±(10–18)% and
@@ -133,7 +133,7 @@ use yee_fdtd::{FdtdSolver, WalkingSkeletonSolver, YeeGrid};
 // only the counts differ from the fdtd-201 geometry.
 //
 // b is kept narrow (ny = 4 → b = 0.04 m) so that all n≥1 modes
-// (TE₁₁₀, TE₁₁₁, TE₀₁₁, …) are pushed above 3.7 GHz, leaving the
+// (TM₁₁₀, TE₁₁₁, TE₀₁₁, …) are pushed above 3.7 GHz, leaving the
 // scan band [1.40, 1.72] GHz occupied by TE₂₀₁ alone.
 //
 // Note: YeeGrid::vacuum(nx, ny, nz, dx) creates `nx×ny×nz` primary cells.
@@ -166,26 +166,29 @@ const N_STEPS: usize = 30_000;
 /// TE₂₀₁ has E_y ∝ sin(2π·x/a) · sin(π·z/d).
 ///
 /// The antinode nearest x = a/4 = 0.06 m:
-/// - E_y staggering: ey[i,j,k] at (i+0.5)·dx, j·dy, (k+0.5)·dz.
-/// - Index i=6: x = 6.5·dx = 0.065 m;  sin(2π·0.065/0.24) ≈ 0.991.
+/// - E_y staggering: ey[i,j,k] sits at (i·dx, (j+0.5)·dy, k·dz)
+///   (integer i,k; half-integer j — E_y lives on y-parallel edges).
+/// - Index i=6: x = 6·dx = 0.060 m (= a/4);  sin(2π·0.060/0.24) = 1.000.
 ///
 /// The antinode at z = d/2 = 0.08 m:
-/// - Index k=7: z = 7.5·dx = 0.075 m;  sin(π·0.075/0.16) ≈ 0.995.
+/// - Index k=7: z = 7·dx = 0.070 m;  sin(π·0.070/0.16) ≈ 0.981.
 ///
-/// Index j=2 places the source in the interior (ny=4; j=0,3 are PEC faces).
-const SRC_I: usize = NX / 4; // 6  ← x = 6.5·dx = 0.065 m ≈ a/4 (0.060 m); sin(2πx/a) ≈ 0.991
+/// Index j=2 places the source in the interior. E_y is NORMAL to the
+/// y = 0 / y = b walls, so `apply_pec` does not clamp it there (any j is
+/// valid); TE₂₀₁ is uniform in y anyway since n = 0.
+const SRC_I: usize = NX / 4; // 6  ← x = 6·dx = 0.060 m = a/4; sin(2πx/a) = 1.000
 const SRC_J: usize = NY / 2; // 2
-const SRC_K: usize = NZ / 2 - 1; // 7  ← z = 7.5·dx = 0.075 m ≈ d/2 (0.080 m); sin(πz/d) ≈ 0.995
+const SRC_K: usize = NZ / 2 - 1; // 7  ← z = 7·dx = 0.070 m ≈ d/2 (0.080 m); sin(πz/d) ≈ 0.981
 
 /// Probe cell for E_y at the symmetric antinode (3a/4, b/2, d/2).
 ///
-/// - Index i=17: x = 17.5·dx = 0.175 m;  sin(2π·0.175/0.24) ≈ −0.991.
+/// - Index i=17: x = 17·dx = 0.170 m;  sin(2π·0.170/0.24) ≈ −0.966.
 ///   (Opposite sign to source; TE₂₀₁ drives both in phase for the standing wave.)
 /// - Index k=7: same z as source (z ≈ d/2 antinode).
 ///
 /// Source and probe are at symmetric antinodes of TE₂₀₁; TE₁₀₁ (antinode
 /// at x = a/2) still couples to both but is excluded by the scan band.
-const PRB_I: usize = NX * 3 / 4 - 1; // 17  ← x = 17.5·dx = 0.175 m ≈ 3a/4 (0.180 m); sin(2πx/a) ≈ -0.991
+const PRB_I: usize = NX * 3 / 4 - 1; // 17  ← x = 17·dx = 0.170 m ≈ 3a/4 (0.180 m); sin(2πx/a) ≈ -0.966
 const PRB_J: usize = NY / 2; // 2
 const PRB_K: usize = NZ / 2 - 1; // 7
 
