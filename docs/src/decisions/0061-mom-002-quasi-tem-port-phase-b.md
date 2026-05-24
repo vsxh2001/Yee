@@ -81,3 +81,27 @@ bounded-experiment rule.
   arm, `e_tangential_at`), `crates/yee-mom/src/eigensolver/solve.rs`
   (`solve_dense_mixed_quasi_tem`), `crates/yee-mom/tests/mom_002_numerical_waveport.rs`.
 * Phase-B spec + plan (2026-05-24).
+
+## Outcome (2026-05-24, merge `966d853`)
+
+**Both parts delivered.** Part A: `NumericalCrossSection::with_quasi_tem()`
++ `solve` dispatch shipped; the closed-guide path is reviewer-verified
+byte-identical when the flag is unset; quasi-TEM + Second-order returns
+`Unimplemented`. Part B: the diagnostic runs end-to-end —
+`|Z_in| = 378.1 Ω` (verified in `--release`, 266.95 s), **closer to
+`Z_0 ≈ 51 Ω` than the 674 Ω delta-gap baseline** (7.41× vs 13.22×; the
+quasi-TEM port roughly halves the port-excitation error).
+
+**Recommendation: residual-not-(only)-the-port + frame-mapping-glue-needed.**
+The cross-section `ε_eff = 2.105` (vs Hammerstad-Jensen 3.33) reveals
+*why* the gap only halves: the diagnostic builds the cross-section in the
+MoM `(x, y)` longitudinal-sampling frame, **not** the physical microstrip
+transverse plane, so the mode it finds is not the line's true quasi-TEM.
+The principled next increment is a **2-D-cross-section → 2.5-D-RWG frame
+mapping** (project the physical transverse-plane mode onto the MoM port
+edges in the correct coordinate frame), tracked as a follow-on. The
+mom-002 Greens kernel is *not* the bottleneck — it was independently
+re-confirmed shipped (multi-image DCIM + Sommerfeld surface-wave, within
+1.83% of HJ); the remaining accuracy is port-side. The diagnostic is
+`#[ignore]`'d from default CI (post-eigensolve Sommerfeld fill ≈ 267 s
+release / hours debug); run it with `--release -- --ignored --nocapture`.
