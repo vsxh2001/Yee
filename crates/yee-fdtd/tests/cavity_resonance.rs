@@ -113,8 +113,8 @@ const DX: f64 = 0.010; // metres
 const PHYS_A: f64 = NX as f64 * DX; // 0.20 m  (x)
 const PHYS_B: f64 = NY as f64 * DX; // 0.10 m  (y)
 const PHYS_D: f64 = NZ as f64 * DX; // 0.20 m  (z)
-// (PHYS_B kept for documentation clarity; not used in the frequency formula)
-const _PHYS_B: f64 = PHYS_B;
+// (PHYS_B is reported in the diagnostic line but does not enter the
+// TE₁₀₁ frequency formula, which depends only on a and d.)
 
 // --------------------------------------------------------------------------
 // Run parameters
@@ -224,7 +224,9 @@ fn te101_resonance_matches_analytic_within_two_point_five_percent() {
 
         // H update.
         solver.update_h_only();
-        // PEC outer-face clamp on H (no CPML in the vanilla solver).
+        // Outer-wall boundary: `apply_pec` zeroes tangential E on the six
+        // outer faces (it clamps E, not H) — the H-half-step boundary,
+        // matching `apply_cpml_h`'s no-CPML fall-through path.
         #[allow(deprecated)]
         boundary::apply_pec(solver.grid_mut());
 
