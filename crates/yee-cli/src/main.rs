@@ -99,6 +99,14 @@ enum Command {
     /// PNG). The plot kind is selected with `--format` (or its legacy alias
     /// `--kind`) — `db`, `smith`, `phase`, or `both` (emits two files with
     /// `-db` / `-smith` suffixes inserted before the extension).
+    ///
+    /// ## Multi-trace overlay
+    ///
+    /// Pass `--entry <ij>` one or more times (e.g. `--entry 11 --entry 21`) to
+    /// overlay multiple S-matrix entries in one dB or phase plot. Use `--all`
+    /// to overlay every entry of a multi-port file. Indices are 1-based and
+    /// match the Touchstone convention. `--format smith` and `--format both`
+    /// are not supported with `--entry`/`--all`.
     Plot {
         /// Input Touchstone path (.s1p, .s2p, etc.).
         input: PathBuf,
@@ -118,8 +126,19 @@ enum Command {
         #[arg(long)]
         title: Option<String>,
         /// Which port (index into the S-matrix, 0-based). Default 0 (S₁₁).
+        /// Ignored when --entry or --all is supplied.
         #[arg(long, default_value_t = 0)]
         port: usize,
+        /// S-matrix entry to include in a multi-trace overlay (1-based, e.g.
+        /// `11` for S₁₁, `21` for S₂₁). Repeat to overlay multiple entries.
+        /// When present, activates the multi-trace path (`plot_sparams_db` /
+        /// `plot_sparams_phase`). Incompatible with `--format smith` / `--format both`.
+        #[arg(long = "entry", value_name = "IJ")]
+        entries: Vec<String>,
+        /// Overlay every S-matrix entry of a multi-port file. Activates the
+        /// multi-trace path. Incompatible with `--format smith` / `--format both`.
+        #[arg(long)]
+        all: bool,
     },
     /// Generate a shell completion script on stdout.
     ///
@@ -338,6 +357,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
             height,
             title,
             port,
+            entries,
+            all,
         } => plot::run_plot(plot::PlotArgs {
             input,
             kind: format,
@@ -346,6 +367,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
             height,
             title,
             port,
+            entries,
+            all_entries: all,
         }),
         Command::Completions { shell } => {
             let mut cmd = Cli::command();
