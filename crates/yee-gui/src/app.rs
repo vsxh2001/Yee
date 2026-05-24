@@ -2,7 +2,7 @@
 //!
 //! The shell hosts four tabs inside an `egui_dock::DockArea`:
 //!
-//! - `S11Db`       — `20·log10|S11|` vs frequency
+//! - `S11Db`       — `20·log10|S| (dB)` vs frequency (multi-trace overlay)
 //! - `Smith`       — `S11` trajectory on a Smith-chart canvas (unit circle reference)
 //! - `Mesh3D`      — wgpu-rendered 3D triangle mesh (Phase 1.gui.1)
 //! - `Validation`  — yee-validation aggregator runner + sortable result table
@@ -11,8 +11,16 @@
 //! (wireframe toggle, camera readout). The menu bar provides
 //! `File → Open Touchstone…` (native `rfd` picker) and `File → Quit`.
 //! Files may also be pre-loaded via the `--file` CLI flag at startup.
+//!
+//! ## Multi-trace overlay
+//!
+//! The dB panel now supports overlaying multiple S-parameter traces. When a
+//! multi-port file is loaded, a "Show all entries" checkbox appears above the
+//! plot; when checked, all n×n S-matrix entries are overlaid with a legend.
+//! The default (unchecked) keeps the pre-existing single-trace (S11)
+//! behaviour for back-compat and 1-port files.
 
-use crate::plots::{show_s11_db_plot, show_smith_chart};
+use crate::plots::{Selection, build_sparam_series, show_smith_chart, show_sparams_db_plot};
 use crate::validation::ValidationPanel;
 use crate::viewport::{MeshCallback, ViewportState, thin_cylinder};
 use egui_dock::{DockArea, DockState, NodeIndex, Style};
@@ -21,7 +29,9 @@ use yee_io::touchstone::{self, File as TsFile};
 /// Tabs hosted in the central dock area.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabKind {
-    /// `20·log10|S11|` line plot vs frequency.
+    /// S-parameter magnitude (dB) line plots vs frequency. Supports
+    /// multi-trace overlay (all entries with a legend) via a UI checkbox for
+    /// multi-port files; defaults to single-trace S11 for back-compat.
     S11Db,
     /// Smith-chart visualisation of `S11` in the complex plane.
     Smith,
@@ -34,7 +44,7 @@ pub enum TabKind {
 impl TabKind {
     fn title(self) -> &'static str {
         match self {
-            TabKind::S11Db => "S11 magnitude (dB)",
+            TabKind::S11Db => "S-parameters (dB)",
             TabKind::Smith => "Smith chart",
             TabKind::Mesh3D => "Mesh 3D",
             TabKind::Validation => "Validation",
@@ -54,6 +64,10 @@ pub struct YeeApp {
     viewport_state: ViewportState,
     /// Validation aggregator panel (background runner + sortable table).
     validation_panel: ValidationPanel,
+    /// When `true`, the dB panel overlays **all** n×n S-matrix entries with a
+    /// legend. When `false` (default), only S11 is shown (pre-existing
+    /// single-trace behaviour).
+    show_all_entries: bool,
 }
 
 impl YeeApp {
@@ -92,6 +106,8 @@ impl YeeApp {
             dock,
             viewport_state,
             validation_panel: ValidationPanel::default(),
+            // Default: single-trace S11 (pre-existing UX; back-compat).
+            show_all_entries: false,
         };
         if let Some(path) = initial_file {
             app.load_touchstone(&path);
@@ -220,6 +236,7 @@ impl eframe::App for YeeApp {
                 file: self.file.as_ref(),
                 viewport_state: &mut self.viewport_state,
                 validation_panel: &mut self.validation_panel,
+                show_all_entries: &mut self.show_all_entries,
             };
             DockArea::new(&mut self.dock)
                 .style(Style::from_egui(ui.style().as_ref()))
@@ -231,10 +248,16 @@ impl eframe::App for YeeApp {
 /// `egui_dock` tab viewer. Borrows the loaded file (for the plot tabs), the
 /// viewport state (for the Mesh 3D tab) and the validation panel (for the
 /// Validation tab) so each tab can render its content.
+///
+/// `show_all_entries` controls the dB-panel overlay mode: when `true`, all
+/// n×n S-matrix entries are overlaid with a legend; when `false` (default),
+/// only S11 is shown.
 struct TabViewer<'a> {
     file: Option<&'a TsFile>,
     viewport_state: &'a mut ViewportState,
     validation_panel: &'a mut ValidationPanel,
+    /// Shared with [`YeeApp::show_all_entries`]; toggled by the UI checkbox.
+    show_all_entries: &'a mut bool,
 }
 
 impl<'a> egui_dock::TabViewer for TabViewer<'a> {
@@ -256,7 +279,21 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
                     // S11 lives at row-major slot 0 for any port count.
                     let s11: Vec<num_complex::Complex64> = f.data.iter().map(|m| m[0]).collect();
                     match tab {
-                        TabKind::S11Db => show_s11_db_plot(ui, &f.freq_hz, &s11),
+                        TabKind::S11Db => {
+                            // Multi-trace overlay: show a "Show all entries"
+                            // checkbox for multi-port files, then render the
+                            // selected traces with a legend.
+                            if f.n_ports > 1 {
+                                ui.checkbox(self.show_all_entries, "Show all entries");
+                            }
+                            let selection = if *self.show_all_entries && f.n_ports > 1 {
+                                Selection::All
+                            } else {
+                                Selection::Diagonal(0)
+                            };
+                            let series = build_sparam_series(f, &selection);
+                            show_sparams_db_plot(ui, &series);
+                        }
                         TabKind::Smith => show_smith_chart(ui, &s11),
                         TabKind::Mesh3D | TabKind::Validation => unreachable!(),
                     }
