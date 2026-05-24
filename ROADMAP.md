@@ -27,6 +27,7 @@ Conventions used below:
 - Phase 1.mesh.0/1 (Gmsh + KiCad import)
 - Phase 1.plotting.0 (yee-plotters)
 - **Phase 1.plotting.1 multi-trace S-parameter overlay (ADR-0063, merge `185335c`)**: `yee-plotters` `plot_sparams_db`/`plot_sparams_phase` + `SparamTrace` overlay N labelled traces (legend + 8-colour wrapping palette, y-range autoscaled across all traces); `yee plot` gains `--entry <ij>` (repeatable, 1-based) + `--all` for off-diagonal (S21) / multi-port overlays, default single-`--port` diagonal path byte-unchanged. Frontend feature (plotter unit + CLI tests, not a §4 gate); single-trace fns + Cargo.toml unchanged, no new dep. GUI (egui_plot) overlay + Smith constant-R/X arcs are documented follow-ons.
+- **Phase 1.gui.4 GUI multi-trace overlay (ADR-0065, merge `ab1425d`)**: completes the plotting.1 arc in the desktop app. `yee-gui` `build_sparam_series` (pure, unit-tested — `Selection` Diagonal/Entries/All, row-major `S<ij>` labels) + `show_sparams_db_plot` (egui_plot overlay + `Legend`); a "Show all entries" checkbox (shown only for `n_ports>1`) overlays every S-entry, default single-`S11` trace byte-unchanged. yee-gui lane only, no new dep, no egui bump. Smith-chart multi-trace + constant-R/X arcs remain follow-ons.
 - Phase 1.validation.0/1/2 (aggregator + JSON Report + PNG artifacts via CI upload)
 - Phase 1.bench yee-bench (criterion benches: MoM solve, FDTD step, GMRES vs LU, GP fit, BO, TF/SF, lumped)
 - Phase 1.cli.1 `yee validate`, `yee bench`
