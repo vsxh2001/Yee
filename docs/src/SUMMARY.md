@@ -98,3 +98,4 @@
 - [ADR-0062: fdtd-201 rectangular-cavity resonance gate](decisions/0062-fdtd-201-cavity-resonance-gate.md)
 - [ADR-0063: multi-trace S-parameter plotting](decisions/0063-multi-trace-sparam-plotting.md)
 - [ADR-0064: mom-002 numerical-port frame-mapping ill-posed (stop)](decisions/0064-mom-002-numerical-port-ill-posed.md)
+- [ADR-0065: GUI multi-trace S-parameter overlay](decisions/0065-gui-multi-trace-overlay.md)
