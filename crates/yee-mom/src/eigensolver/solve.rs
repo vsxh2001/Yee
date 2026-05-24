@@ -496,6 +496,21 @@ pub(crate) fn solve_dense_mixed(
 /// `B` to the unweighted `B_1` over the transverse block (no geometry
 /// input), identically to [`sparse_cutoff_eigenpairs`].
 ///
+/// **Validity assumptions (reviewed; hold for the validated FR-4
+/// microstrip, may not for arbitrary inputs):**
+/// * **Seed overlap.** The uniform-`E_t` seed assumes the quasi-TEM
+///   mode's dominant `E_t` component is not near-orthogonal to the
+///   uniform direction. The validated structured mesh has both x- and
+///   y-oriented edges, so the all-ones seed has both components; a mesh
+///   with predominantly single-orientation edges near the strip could
+///   need a per-geometry seed (the seed would then project too weakly
+///   onto the dominant-`E_y` quasi-TEM field).
+/// * **ε_eff ≫ 1.** The σ-ladder's `1.02·k₀²` lower bound assumes the
+///   quasi-TEM mode is well separated from the free-space cutoff
+///   (`ε_eff ≫ 1`), true for FR-4 and similar substrates. A near-vacuum
+///   fill (`ε_eff ≈ 1`) would put the quasi-TEM below the lowest rung
+///   and the ladder would miss it.
+///
 /// **Disposition.** Validated against the Hammerstad-Jensen open-line
 /// `ε_eff` for a canonical shielded microstrip in
 /// `tests/eigensolver_microstrip_quasi_tem.rs` (loose tol — the shielding
