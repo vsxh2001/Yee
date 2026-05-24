@@ -10,7 +10,7 @@ Phase 2 deliverable. Phase 0/1: no live cases. Below is the planned suite.
 | `fdtd-007 (f_res, ±2%)` | Phase 2.fdtd.7.z uniform-fine slot — `f_res` | Maloney-Smith 1993 Fig. 9 (~8.9 GHz, TBD) | `\|df\|/f_ref ≤ 0.02` (test `#[ignore]`'d — measured 5.30 GHz, see status note) |
 | `fdtd-007 (\|S_11\|, ±1 dB)` | Phase 2.fdtd.7.z uniform-fine slot — `\|S_11(f_res)\|` | Maloney-Smith 1993 Fig. 9 (~−22 dB, TBD) | `\|dS_11\| ≤ 1 dB` (test `#[ignore]`'d — measured −6.4 dB, see status note) |
 | `fdtd-007 (subgrid sanity, 0.3% / 0.3 dB)` | subgridded vs globally-uniform `dx = 0.5 mm` reference, 5 spot frequencies | internal comparator | max `\|df\|/f ≤ 0.003` AND max `\|dS_11\| ≤ 0.3 dB` (test `#[ignore]`'d — subgridded variant retired by Track UUUUUUUU pending F2 inward-coupling restoration) |
-| `fdtd-201` | Rectangular cavity TE/TM Q-factor | Analytical | ±0.5% |
+| `fdtd-201` | Rectangular PEC cavity TE₁₀₁ resonant frequency | Analytic Pozar §6.3 | **LIVE** — extracted f₁₀₁ lands within one DFT bin of analytic (offset **−0.063 %**) on 20×10×20 grid / 30 000 steps (E_y probe, 400-bin DFT scan); the extraction resolution is ≈0.2 % (scan-bin ≈0.21 % / Rayleigh 1/(N·dt) ≈0.18 %), so −0.063 % is the nearest-bin offset, not a demonstrated accuracy floor. Gate asserts **±2.5 %** (grid-dispersion floor on 10 mm cells). Strict ±0.5 % refinement path: halve `dx` to 5 mm (~56 cells/λ) and double N to 60 000. Q-factor extraction (damped-mode fitting) deferred to fdtd-201.1. |
 | `fdtd-202` | Pyramidal horn antenna pattern | Measured / Balanis | ±1 dB main beam |
 | `fdtd-203` | Dipole over dielectric half-space NTFF | Sommerfeld reference | analytic match |
 | `fdtd-204` | Cross-validation vs openEMS | openEMS on identical grid | numerical-noise level |
