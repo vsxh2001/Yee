@@ -430,7 +430,7 @@ impl NumericalCrossSection {
     /// path does not define a quasi-TEM variant (out of scope — the p=2
     /// knob exists for closed-guide β / dispersion studies, not for
     /// microstrip excitation). If both `.with_element_order(Second)` and
-    /// `.with_quasi_tem()` are called, `solve` returns an `Unsupported`
+    /// `.with_quasi_tem()` are called, `solve` returns an `Unimplemented`
     /// error rather than silently using the wrong solver.
     ///
     /// Use this when the cross-section carries a quasi-TEM mode (microstrip,

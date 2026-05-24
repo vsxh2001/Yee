@@ -210,7 +210,18 @@ fn shielded_microstrip_cross_section(nx: usize, ny: usize) -> TriMesh2D {
     TriMesh2D::new(vertices, triangles, None, Some(tags)).unwrap()
 }
 
+// IGNORED from the default `cargo test` run. With the quasi-TEM solve now
+// succeeding (Phase B), this test proceeds past the eigensolve into the full
+// 1312-DoF mom-002 Sommerfeld impedance fill — ~267 s in `--release` and
+// HOURS in a debug build, which would hang the default (debug) CI
+// `cargo test --workspace`. (Before Phase B it bailed early at the eigensolve
+// failure, so it was fast in debug; that is no longer the case.) Run it
+// explicitly with:
+//   cargo test -p yee-mom --test mom_002_numerical_waveport --release -- --ignored --nocapture
+// The quasi-TEM solve path itself is smoke-tested fast in CI by
+// `ports::tests::with_quasi_tem_builder_sets_flag_and_solve_succeeds`.
 #[test]
+#[ignore = "slow (~267s release / hours debug): full mom-002 Sommerfeld fill; run with --release --ignored"]
 fn mom_002_numerical_waveport_comparison() {
     // ── Phase A.1–A.2: build + solve the shielded-microstrip cross-section. ──
     // Mesh density matches the validated `eigensolver_wr90` / FR-4 gate
@@ -274,12 +285,12 @@ fn mom_002_numerical_waveport_comparison() {
                 "[A.2] FINDING (quasi-TEM-solve-failed): shielded-microstrip \
                  cross-section solve with `.with_quasi_tem()` returned: {e}. \
                  The quasi-TEM path (Phase 1.3.1.2 / ADR-0060) did not \
-                 converge on the coarse 8×8 grid. The cross-section is \
-                 modeled without the strip-as-hole PEC (a full-slab layout), \
-                 which reduces the conductor-field interaction that seeds the \
-                 quasi-TEM mode. Increasing the mesh density or using the \
-                 strip-as-hole PEC construction from \
-                 `eigensolver_microstrip_quasi_tem.rs` would resolve this. \
+                 converge on the coarse 8×8 grid. The cross-section already \
+                 uses the strip-as-hole PEC construction; a failure here would \
+                 stem from the coarse 8×8 grid or the electrically-small box \
+                 under-resolving the quasi-TEM field. Increasing the mesh \
+                 density (the validated gate `eigensolver_microstrip_quasi_tem.rs` \
+                 uses 20×10) would resolve this. \
                  Experiment stops; kernel/Greens NOT re-opened, eigensolver \
                  NOT touched. See test docstring + ADR-0059/ADR-0060."
             );
