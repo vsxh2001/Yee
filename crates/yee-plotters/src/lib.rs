@@ -9,15 +9,19 @@
 //!
 //! ## Public surface
 //!
-//! Three entry points, one per plot type:
+//! Five entry points:
 //!
-//! * [`plot_s11_db`] — `|S₁₁|` in decibels vs. frequency.
-//! * [`plot_s11_phase`] — `arg(S₁₁)` in degrees vs. frequency.
+//! * [`plot_s11_db`] — `|S₁₁|` in decibels vs. frequency (single trace).
+//! * [`plot_s11_phase`] — `arg(S₁₁)` in degrees vs. frequency (single trace).
 //! * [`plot_smith_chart`] — `S₁₁` on the complex unit disk (Smith-style).
+//! * [`plot_sparams_db`] — overlay multiple S-parameter traces in dB vs.
+//!   frequency, each labelled and colour-coded with a legend.
+//! * [`plot_sparams_phase`] — overlay multiple S-parameter traces (phase in
+//!   degrees) with a legend.
 //!
-//! All three share a [`PlotConfig`] (size, title, output [`PlotFormat`]) and
-//! dispatch to either a `BitMapBackend` (PNG) or an `SVGBackend` (SVG)
-//! depending on `config.format`.
+//! All share a [`PlotConfig`] (size, title, output [`PlotFormat`]) and dispatch
+//! to either a `BitMapBackend` (PNG) or an `SVGBackend` (SVG) depending on
+//! `config.format`.
 
 use std::path::Path;
 
@@ -71,6 +75,20 @@ pub enum Error {
     /// Rendering error bubbled up from a `plotters` backend.
     #[error("render error: {0}")]
     Render(String),
+}
+
+/// A single named S-parameter trace for use with [`plot_sparams_db`] and
+/// [`plot_sparams_phase`].
+///
+/// `label` appears in the legend (e.g. `"S11"`, `"S21"`).
+/// `values` must have the same length as the `freq_hz` slice passed to the
+/// plot function.
+#[derive(Debug, Clone)]
+pub struct SparamTrace {
+    /// Human-readable label shown in the plot legend (e.g. `"S11"`, `"S21"`).
+    pub label: String,
+    /// Complex S-parameter samples, one per frequency point.
+    pub values: Vec<Complex64>,
 }
 
 /// Map a `plotters` `DrawingAreaErrorKind` into our [`Error`] type.
@@ -263,9 +281,181 @@ pub fn plot_smith_chart(
     }
 }
 
+/// Overlay multiple S-parameter traces as magnitude-dB lines with a legend.
+///
+/// Each [`SparamTrace`] in `traces` is drawn as a separate labelled line in a
+/// distinct colour from a small fixed palette (up to 8 colours; traces beyond
+/// the palette cycle back to the first colour). A legend entry is added for
+/// each trace so the output is self-documenting.
+///
+/// * X-axis: `"frequency (GHz)"`.
+/// * Y-axis: `"|S| (dB)"`. The y-range covers all traces with a 5% pad.
+///
+/// `freq_hz` must have the same length as every `trace.values` slice.
+///
+/// # Errors
+///
+/// Returns [`Error::Render`] if the `plotters` backend fails.
+pub fn plot_sparams_db(
+    freq_hz: &[f64],
+    traces: &[SparamTrace],
+    out_path: &Path,
+    config: &PlotConfig,
+) -> Result<(), Error> {
+    for t in traces {
+        assert_eq!(
+            freq_hz.len(),
+            t.values.len(),
+            "freq_hz and trace '{}' must have equal length",
+            t.label
+        );
+    }
+
+    let xs_ghz: Vec<f64> = freq_hz.iter().map(|f| f * 1.0e-9).collect();
+    let all_db: Vec<Vec<f64>> = traces
+        .iter()
+        .map(|t| t.values.iter().map(|z| db_clamped(*z)).collect())
+        .collect();
+
+    let (x_min, x_max) = finite_range(&xs_ghz, 0.0, 1.0);
+    let (y_min, y_max) = multi_trace_y_range(&all_db, MIN_DB, 0.0);
+
+    match config.format {
+        PlotFormat::Png => {
+            let root = BitMapBackend::new(out_path, (config.width_px, config.height_px))
+                .into_drawing_area();
+            draw_multi_trace(
+                &root,
+                &config.title,
+                "frequency (GHz)",
+                "|S| (dB)",
+                &xs_ghz,
+                traces,
+                &all_db,
+                x_min,
+                x_max,
+                y_min,
+                y_max,
+            )
+        }
+        PlotFormat::Svg => {
+            let root =
+                SVGBackend::new(out_path, (config.width_px, config.height_px)).into_drawing_area();
+            draw_multi_trace(
+                &root,
+                &config.title,
+                "frequency (GHz)",
+                "|S| (dB)",
+                &xs_ghz,
+                traces,
+                &all_db,
+                x_min,
+                x_max,
+                y_min,
+                y_max,
+            )
+        }
+    }
+}
+
+/// Overlay multiple S-parameter traces as phase-in-degrees lines with a legend.
+///
+/// Each [`SparamTrace`] in `traces` is drawn as a separate labelled line in a
+/// distinct colour. The y-axis is fixed to `[-180, 180]` degrees (the natural
+/// range of `Complex64::arg().to_degrees()`). A legend entry is added for each
+/// trace.
+///
+/// * X-axis: `"frequency (GHz)"`.
+/// * Y-axis: `"phase (deg)"`, fixed to `[-180, 180]`.
+///
+/// `freq_hz` must have the same length as every `trace.values` slice.
+///
+/// # Errors
+///
+/// Returns [`Error::Render`] if the `plotters` backend fails.
+pub fn plot_sparams_phase(
+    freq_hz: &[f64],
+    traces: &[SparamTrace],
+    out_path: &Path,
+    config: &PlotConfig,
+) -> Result<(), Error> {
+    for t in traces {
+        assert_eq!(
+            freq_hz.len(),
+            t.values.len(),
+            "freq_hz and trace '{}' must have equal length",
+            t.label
+        );
+    }
+
+    let xs_ghz: Vec<f64> = freq_hz.iter().map(|f| f * 1.0e-9).collect();
+    let all_deg: Vec<Vec<f64>> = traces
+        .iter()
+        .map(|t| t.values.iter().map(|z| phase_degrees(*z)).collect())
+        .collect();
+
+    let (x_min, x_max) = finite_range(&xs_ghz, 0.0, 1.0);
+    let (y_min, y_max) = (-180.0_f64, 180.0_f64);
+
+    match config.format {
+        PlotFormat::Png => {
+            let root = BitMapBackend::new(out_path, (config.width_px, config.height_px))
+                .into_drawing_area();
+            draw_multi_trace(
+                &root,
+                &config.title,
+                "frequency (GHz)",
+                "phase (deg)",
+                &xs_ghz,
+                traces,
+                &all_deg,
+                x_min,
+                x_max,
+                y_min,
+                y_max,
+            )
+        }
+        PlotFormat::Svg => {
+            let root =
+                SVGBackend::new(out_path, (config.width_px, config.height_px)).into_drawing_area();
+            draw_multi_trace(
+                &root,
+                &config.title,
+                "frequency (GHz)",
+                "phase (deg)",
+                &xs_ghz,
+                traces,
+                &all_deg,
+                x_min,
+                x_max,
+                y_min,
+                y_max,
+            )
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Backend-agnostic drawing helpers
 // ---------------------------------------------------------------------------
+
+/// Fixed colour palette for multi-trace plots.
+///
+/// Up to 8 distinct colours; traces beyond index 7 wrap around. All colours
+/// are chosen for reasonable contrast on a white background.
+fn trace_colour(idx: usize) -> RGBColor {
+    const PALETTE: &[RGBColor] = &[
+        RGBColor(0xE6, 0x19, 0x4B), // red
+        RGBColor(0x43, 0x63, 0xD8), // blue
+        RGBColor(0x3C, 0xB4, 0x4B), // green
+        RGBColor(0xFF, 0x7F, 0x00), // orange
+        RGBColor(0x91, 0x1E, 0xB4), // purple
+        RGBColor(0x42, 0xD4, 0xF4), // cyan
+        RGBColor(0xF0, 0x32, 0xE6), // magenta
+        RGBColor(0x80, 0x80, 0x00), // olive
+    ];
+    PALETTE[idx % PALETTE.len()]
+}
 
 /// Render an `(xs, ys)` line plot into `root` with explicit axis ranges.
 ///
@@ -308,6 +498,71 @@ where
     let series: Vec<(f64, f64)> = xs.iter().copied().zip(ys.iter().copied()).collect();
     chart
         .draw_series(LineSeries::new(series, RED.stroke_width(2)))
+        .map_err(map_render_err)?;
+
+    root.present().map_err(map_render_err)?;
+    Ok(())
+}
+
+/// Render multiple overlaid traces with a legend into `root`.
+///
+/// Each trace in `traces` is drawn as a coloured line using [`trace_colour`];
+/// a legend entry (coloured swatch + label) is appended to each series.
+#[allow(clippy::too_many_arguments)]
+fn draw_multi_trace<DB>(
+    root: &DrawingArea<DB, plotters::coord::Shift>,
+    title: &str,
+    x_label: &str,
+    y_label: &str,
+    xs: &[f64],
+    traces: &[SparamTrace],
+    all_ys: &[Vec<f64>],
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+) -> Result<(), Error>
+where
+    DB: DrawingBackend,
+    DB::ErrorType: 'static,
+{
+    root.fill(&WHITE).map_err(map_render_err)?;
+
+    let mut chart = ChartBuilder::on(root)
+        .caption(title, ("sans-serif", 24).into_font())
+        .margin(10)
+        .x_label_area_size(40)
+        .y_label_area_size(60)
+        // Reserve right margin for the legend so it does not overlap the chart.
+        .right_y_label_area_size(80)
+        .build_cartesian_2d(x_min..x_max, y_min..y_max)
+        .map_err(map_render_err)?;
+
+    chart
+        .configure_mesh()
+        .x_desc(x_label)
+        .y_desc(y_label)
+        .draw()
+        .map_err(map_render_err)?;
+
+    for (i, (trace, ys)) in traces.iter().zip(all_ys.iter()).enumerate() {
+        let colour = trace_colour(i);
+        let series_data: Vec<(f64, f64)> = xs.iter().copied().zip(ys.iter().copied()).collect();
+        let label = trace.label.clone();
+        chart
+            .draw_series(LineSeries::new(series_data, colour.stroke_width(2)))
+            .map_err(map_render_err)?
+            .label(label)
+            .legend(move |(x, y)| {
+                PathElement::new(vec![(x, y), (x + 20, y)], colour.stroke_width(2))
+            });
+    }
+
+    chart
+        .configure_series_labels()
+        .background_style(WHITE.mix(0.8))
+        .border_style(BLACK)
+        .draw()
         .map_err(map_render_err)?;
 
     root.present().map_err(map_render_err)?;
@@ -409,6 +664,19 @@ fn finite_range(xs: &[f64], default_min: f64, default_max: f64) -> (f64, f64) {
     (min, max)
 }
 
+/// Compute a padded `(min, max)` y-range that covers all traces.
+///
+/// Iterates over every value in every `ys` sub-slice, finds the global
+/// finite min/max, and applies a 5% pad (minimum 1 dB) so traces don't
+/// sit on the frame. Falls back to `(default_min, default_max)` when no
+/// finite values are found.
+fn multi_trace_y_range(all_ys: &[Vec<f64>], default_min: f64, default_max: f64) -> (f64, f64) {
+    let flat: Vec<f64> = all_ys.iter().flatten().copied().collect();
+    let (y_min_raw, y_max_raw) = finite_range(&flat, default_min, default_max);
+    let y_pad = ((y_max_raw - y_min_raw).abs() * 0.05).max(1.0);
+    (y_min_raw - y_pad, y_max_raw + y_pad)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -501,5 +769,100 @@ mod tests {
         // Sanity: |0.5+0j| → 20·log10(0.5) ≈ -6.0206 dB (well above MIN_DB).
         let db = db_clamped(Complex64::new(0.5, 0.0));
         assert!((db - (-6.020_599_913_279_624)).abs() < 1e-9, "db = {db}");
+    }
+
+    // --- Multi-trace tests ---------------------------------------------------
+
+    /// Build two synthetic traces: S11 (same as `synthetic_sweep`) and a
+    /// flat S21 at −10 dB.
+    fn two_trace_input() -> (Vec<f64>, Vec<SparamTrace>) {
+        let (freq, s11) = synthetic_sweep();
+        let n = freq.len();
+        let s21: Vec<Complex64> = (0..n)
+            .map(|_| Complex64::from_polar(0.316_227_766, 0.0)) // −10 dB
+            .collect();
+        let traces = vec![
+            SparamTrace {
+                label: "S11".to_string(),
+                values: s11,
+            },
+            SparamTrace {
+                label: "S21".to_string(),
+                values: s21,
+            },
+        ];
+        (freq, traces)
+    }
+
+    /// `plot_sparams_db` with two traces → SVG exists, is non-trivial, and
+    /// contains both legend labels.
+    #[test]
+    fn test_plot_sparams_db_writes_svg_with_legend() {
+        let (freq, traces) = two_trace_input();
+        let tmp = NamedTempFile::with_suffix(".svg").expect("tempfile");
+        let cfg = PlotConfig {
+            width_px: 800,
+            height_px: 600,
+            title: "S11+S21 dB overlay test".to_string(),
+            format: PlotFormat::Svg,
+        };
+        plot_sparams_db(&freq, &traces, tmp.path(), &cfg).expect("plot_sparams_db");
+
+        let body = fs::read_to_string(tmp.path()).expect("read svg");
+        assert!(body.contains("<svg"), "SVG missing <svg tag");
+        assert!(body.len() > 512, "SVG body too short: {} bytes", body.len());
+        // Both legend labels should appear in the SVG text nodes.
+        assert!(
+            body.contains("S11"),
+            "SVG should contain legend label 'S11'"
+        );
+        assert!(
+            body.contains("S21"),
+            "SVG should contain legend label 'S21'"
+        );
+    }
+
+    /// `plot_sparams_db` with two traces → PNG exists and is non-trivial in
+    /// size (bitmap content check — no string assertions for PNG).
+    #[test]
+    fn test_plot_sparams_db_writes_png() {
+        let (freq, traces) = two_trace_input();
+        let tmp = NamedTempFile::with_suffix(".png").expect("tempfile");
+        let cfg = PlotConfig {
+            width_px: 800,
+            height_px: 600,
+            title: "S11+S21 dB PNG test".to_string(),
+            format: PlotFormat::Png,
+        };
+        plot_sparams_db(&freq, &traces, tmp.path(), &cfg).expect("plot_sparams_db PNG");
+        let len = fs::metadata(tmp.path()).expect("metadata").len();
+        assert!(len > 1024, "PNG file is too small: {len} bytes");
+    }
+
+    /// `plot_sparams_phase` with two traces → SVG exists, is non-trivial, and
+    /// contains both legend labels.
+    #[test]
+    fn test_plot_sparams_phase_writes_svg_with_legend() {
+        let (freq, traces) = two_trace_input();
+        let tmp = NamedTempFile::with_suffix(".svg").expect("tempfile");
+        let cfg = PlotConfig {
+            width_px: 800,
+            height_px: 600,
+            title: "S11+S21 phase overlay test".to_string(),
+            format: PlotFormat::Svg,
+        };
+        plot_sparams_phase(&freq, &traces, tmp.path(), &cfg).expect("plot_sparams_phase");
+
+        let body = fs::read_to_string(tmp.path()).expect("read svg");
+        assert!(body.contains("<svg"), "SVG missing <svg tag");
+        assert!(body.len() > 512, "SVG body too short: {} bytes", body.len());
+        assert!(
+            body.contains("S11"),
+            "SVG should contain legend label 'S11'"
+        );
+        assert!(
+            body.contains("S21"),
+            "SVG should contain legend label 'S21'"
+        );
     }
 }
