@@ -751,4 +751,50 @@ pub mod __internal {
         }
         Ok(port.port_voltage() / i_port)
     }
+
+    /// Phase 1.3.1.2 quasi-TEM mode-selection test surface. Assemble the
+    /// mixed `(E_t, E_z)` cross-section pencil on a 2-D `TriMesh2D` (the
+    /// `pub(crate)` `assemble_mixed` + `EdgeTable`), run the **quasi-TEM**
+    /// β-direct selection ([`crate::eigensolver::solve_dense_mixed_quasi_tem`],
+    /// the TEM-targeted shift-invert ladder distinct from the closed-guide
+    /// [`crate::eigensolver::solve_dense_mixed`]), and return the dominant
+    /// quasi-TEM `(β, transverse-energy-fraction)` for HJ-`ε_eff` validation.
+    ///
+    /// Exposed here (not through [`crate::ports::NumericalCrossSection`]) so
+    /// the Phase 1.3.1.2 work is confined to the eigensolver + test surface:
+    /// the public `NumericalCrossSection::solve` keeps its closed-guide path
+    /// bit-identical; adopting the quasi-TEM path into the production
+    /// excitation is a follow-on. **Not stable API.**
+    ///
+    /// Returns `(beta, t_frac)`: `beta` is the dominant quasi-TEM propagation
+    /// constant (`ε_eff = (β/k₀)²`); `t_frac = ‖e_t‖²/‖x‖²` is the converged
+    /// eigenvector's transverse-energy fraction (≈1 for a genuine quasi-TEM).
+    pub fn quasi_tem_beta_for_test(
+        mesh: &yee_mesh::TriMesh2D,
+        eps_r: &std::collections::HashMap<yee_mesh::MaterialTag, Complex64>,
+        mu_r: &std::collections::HashMap<yee_mesh::MaterialTag, Complex64>,
+        freq_hz: f64,
+    ) -> Result<(Complex64, f64), Error> {
+        use crate::eigensolver::assembly::assemble_mixed;
+        use crate::eigensolver::mesh::EdgeTable;
+        use crate::eigensolver::solve_dense_mixed_quasi_tem;
+
+        let table = EdgeTable::build(mesh);
+        let asm = assemble_mixed(mesh, eps_r, mu_r, &table);
+        let sol = solve_dense_mixed_quasi_tem(&asm, freq_hz)?;
+        let beta_sq = sol.beta_sq;
+        let beta = if beta_sq.im.abs() < 1e-9 * beta_sq.re.abs() {
+            Complex64::new(beta_sq.re.max(0.0).sqrt(), 0.0)
+        } else {
+            beta_sq.sqrt()
+        };
+        let et2: f64 = sol.e_t.iter().map(|z| z.norm_sqr()).sum();
+        let ez2: f64 = sol.e_z.iter().map(|z| z.norm_sqr()).sum();
+        let t_frac = if et2 + ez2 > 0.0 {
+            et2 / (et2 + ez2)
+        } else {
+            0.0
+        };
+        Ok((beta, t_frac))
+    }
 }
