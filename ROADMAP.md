@@ -49,6 +49,7 @@ Conventions used below:
 - Phase 2.fdtd.7.y C2 compensating-source M (Option β; degenerates to 0 — Track ZZZZZZZ merge `be71a76`)
 - Phase 2.fdtd.7.y C5 Mur ABC on fine outer E_t (Option α; retires 500-step divergence — Track BBBBBBBB merge `a6283ae`)
 - **Phase 2.fdtd.7.y C6 un-ghosted J variant — retires Q5 strict 0.5%-of-peak gate at 0.0000% rel err** (Track DDDDDDDD merge `47c461c`; trade-off: fine grid permanently passive in source-on-coarse mode; Q6 long-time energy drift still `#[ignore]`'d)
+- **Phase 2.fdtd `fdtd-201` rectangular-cavity TE₁₀₁ resonance gate — LIVE** (ADR-0062, merge `155ed38`): first Phase-2 FDTD validation milestone shipped. Time-domain PEC cavity (a=d=0.20 m, b=0.10 m) → off-centre Gaussian E_y pulse → 400-bin single-bin-DFT scan extracts f₁₀₁ within one DFT bin of analytic Pozar §6.3 (offset −0.063 %, extraction resolution ~0.2 %); gate asserts ±2.5 % grid-dispersion floor, strict ±0.5 % refined-mesh path documented. Tests + README only (no `src/`), `#[ignore]`-gated, no new dependency. Sidesteps the deferred FDTD quagmires (Q6 energy-balance, fdtd-007).
 - Phase 3.gp.0/1 (GP regression + ML hyperparameter fit)
 - Phase 3.bo.0/1 (Expected-Improvement BO, NSGA-II multi-objective)
 - Phase 3.al.0 (variance-acquisition active learning)
