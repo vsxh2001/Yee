@@ -85,6 +85,38 @@
 use std::f64::consts::PI;
 use yee_core::units::C0;
 
+/// Hammerstad-Jensen effective permittivity `ε_eff` of an **open** microstrip
+/// line (Phase 1.3.1.2 quasi-TEM reference).
+///
+/// Closed form (the standard quasi-static `w/h ≥ 1` branch — Balanis,
+/// *Antenna Theory* 3rd ed. Eq. 14-1; Pozar, *Microwave Engineering* 4th ed.
+/// §3.8; Hammerstad & Jensen 1980):
+///
+/// ```text
+///   ε_eff = (ε_r + 1)/2 + (ε_r − 1)/2 · (1 + 12 h / w)^(−1/2)
+/// ```
+///
+/// with `w` the strip width and `h` the substrate height. This is the same
+/// expression `yee-design`'s Balanis calculator uses
+/// (`estimate.rs`, Balanis 14-1), reproduced here so the cross-section
+/// eigensolver's quasi-TEM validation has a self-contained closed-form
+/// benchmark without a cross-crate dependency.
+///
+/// `ε_eff` lies strictly between air (`1`) and the substrate (`ε_r`): the
+/// quasi-TEM field is split between the dielectric and the air above the
+/// strip. This is the **open-line** value; a shielding box (as in a
+/// closed-domain modal solve) perturbs it — the validation tolerance is
+/// loose accordingly and the box is sized large to minimise the shift.
+///
+/// Distinct from the slab-loaded transverse-resonance transcendental
+/// ([`slab_loaded_beta`], the cutoff-bearing closed-guide reference) — this
+/// is the **open quasi-TEM** microstrip reference. It does not touch the
+/// verified transcendental.
+pub(crate) fn microstrip_eps_eff_hj(eps_r: f64, w: f64, h: f64) -> f64 {
+    debug_assert!(eps_r >= 1.0 && w > 0.0 && h > 0.0);
+    (eps_r + 1.0) * 0.5 + (eps_r - 1.0) * 0.5 * (1.0 + 12.0 * h / w).powf(-0.5)
+}
+
 /// Which longitudinal-section family (w.r.t. the y stratification axis) a
 /// [`slab_loaded_beta`] solve targets.
 ///
@@ -584,6 +616,35 @@ mod tests {
         assert!(
             r.is_finite(),
             "residual must be finite with an imaginary k_y"
+        );
+    }
+
+    #[test]
+    fn microstrip_hj_eps_eff_canonical_values() {
+        // The Hammerstad-Jensen open-line ε_eff must (a) sit strictly between
+        // air (1) and the substrate ε_r, and (b) reproduce the documented
+        // 50Ω FR-4 value. For ε_r = 4.4, w/h = 1.9 (the canonical ~50Ω FR-4
+        // microstrip) Balanis 14-1 gives ε_eff ≈ 3.33 — the same value
+        // yee-design's Balanis calculator produces. This anchors the closed
+        // form the quasi-TEM eigensolve validates against.
+        let eps_r = 4.4;
+        let h = 1.6e-3;
+        let w = 1.9 * h;
+        let ee = microstrip_eps_eff_hj(eps_r, w, h);
+        assert!(
+            ee > 1.0 && ee < eps_r,
+            "ε_eff {ee} must lie strictly between air (1) and ε_r ({eps_r})"
+        );
+        assert!(
+            (ee - 3.329).abs() < 0.02,
+            "ε_eff {ee} for ε_r=4.4, w/h=1.9 should be ≈3.33 (Balanis 14-1 / HJ)"
+        );
+        // Wider strip → more field in the dielectric → higher ε_eff (monotone).
+        let ee_wide = microstrip_eps_eff_hj(eps_r, 3.0 * h, h);
+        assert!(
+            ee_wide > ee,
+            "a wider strip (w/h=3) must give a higher ε_eff than w/h=1.9 \
+             (more field in the dielectric): {ee_wide} vs {ee}"
         );
     }
 }

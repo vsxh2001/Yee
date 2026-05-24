@@ -449,6 +449,161 @@ pub(crate) fn solve_dense_mixed(
     Ok(pack_mixed_solution(beta_sq_re, n_t, n, &x_true))
 }
 
+/// Solve the mixed `(E_t, E_z)` β-direct pencil for the dominant
+/// **quasi-TEM** mode of an open / shielded microstrip cross-section
+/// (Phase 1.3.1.2).
+///
+/// **Why a separate entry-point from [`solve_dense_mixed`].** A microstrip
+/// quasi-TEM mode has **`k_c² ≈ 0`** (no low-frequency cutoff; it propagates
+/// to DC) yet is transverse-energy-dominated and propagating
+/// (`β² = ε_eff k₀² > 0`, large). The closed-guide selection
+/// ([`solve_dense_mixed`]) gathers candidates from the **cutoff pencil**
+/// `A x = k_c² B x` and **floors out** the `k_c² ≈ 0` cluster (the curl-free
+/// gradient null space) — which discards the quasi-TEM mode along with the
+/// gradient nulls, since the two are *indistinguishable by `k_c²` alone*
+/// (both ≈ 0). The closed-guide path is therefore correct only for
+/// cutoff-bearing guides (WR-90, the FR-4 slab); it returns the box's
+/// air-region mode (`ε_eff ≈ 1`) on a microstrip, not the quasi-TEM (see
+/// ADR-0059 / ADR-0060). This routine is the quasi-TEM capability that the
+/// experiment surfaced as missing — kept distinct so the closed-guide
+/// selection stays **bit-identical** (the WR-90 / FR-4 / homogeneous gates
+/// guard it; a prior attempt that relaxed the *shared* floor regressed —
+/// and even hung — those gates, the reason the escape-hatch mandates a
+/// separate path).
+///
+/// **Method — TEM-targeted β-direct shift-invert ladder.** The quasi-TEM
+/// mode is the **transverse-dominated** eigenpair of `K x = β² B_1 x`
+/// (`K = k₀² B − A`) with the **largest `β²` below the curl-free gradient
+/// cluster** at `β² ≈ k₀² ⟨ε_r⟩`. A naive shift-invert near `β² = 0` or at
+/// the contaminated cutoff-pencil Rayleigh quotient is null-dominated and
+/// does not converge (verified). Instead we sweep a **σ ladder spanning the
+/// physical `ε_eff` window `(k₀², k₀²·ε_r,max]`** (a propagating quasi-TEM
+/// mode has `1 < ε_eff = β²/k₀² ≤ ε_r,max`), each rung seeded with a
+/// **TEM-like uniform-`E_t`, zero-`E_z`** vector (the quasi-TEM field is
+/// transverse and curl-poor, so a uniform `E_t` overlaps it strongly while
+/// being nearly orthogonal to the high-cutoff `E_z` / gradient modes). Each
+/// rung runs [`beta_direct_shift_invert`], which recovers the **true
+/// β-direct eigenvector nearest σ** and **screens it for transverse
+/// dominance on the converged eigenvector** (the step-5.6-proven
+/// discriminator: the genuine quasi-TEM passes with `‖e_t‖²/‖x‖² ≈ 1`; the
+/// gradient nulls / `E_z` modes fail). Among the rungs that converge to a
+/// transverse mode we keep the **highest `β²`** survivor — the dominant
+/// quasi-TEM (slowest wave, highest `ε_eff`). This mirrors step-5.7's
+/// σ-ladder idea, retargeted from the cutoff pencil to the β-direct pencil
+/// at the TEM scale.
+///
+/// `ε_r,max` is recovered from the diagonal ratio of the ε_r-weighted mass
+/// `B` to the unweighted `B_1` over the transverse block (no geometry
+/// input), identically to [`sparse_cutoff_eigenpairs`].
+///
+/// **Validity assumptions (reviewed; hold for the validated FR-4
+/// microstrip, may not for arbitrary inputs):**
+/// * **Seed overlap.** The uniform-`E_t` seed assumes the quasi-TEM
+///   mode's dominant `E_t` component is not near-orthogonal to the
+///   uniform direction. The validated structured mesh has both x- and
+///   y-oriented edges, so the all-ones seed has both components; a mesh
+///   with predominantly single-orientation edges near the strip could
+///   need a per-geometry seed (the seed would then project too weakly
+///   onto the dominant-`E_y` quasi-TEM field).
+/// * **ε_eff ≫ 1.** The σ-ladder's `1.02·k₀²` lower bound assumes the
+///   quasi-TEM mode is well separated from the free-space cutoff
+///   (`ε_eff ≫ 1`), true for FR-4 and similar substrates. A near-vacuum
+///   fill (`ε_eff ≈ 1`) would put the quasi-TEM below the lowest rung
+///   and the ladder would miss it.
+///
+/// **Disposition.** Validated against the Hammerstad-Jensen open-line
+/// `ε_eff` for a canonical shielded microstrip in
+/// `tests/eigensolver_microstrip_quasi_tem.rs` (loose tol — the shielding
+/// box perturbs the open value). The closed-guide gates are untouched.
+pub(crate) fn solve_dense_mixed_quasi_tem(
+    asm: &AssembledMixed,
+    freq_hz: f64,
+) -> Result<MixedEigenSolution, yee_core::Error> {
+    let n_t = asm.n_t;
+    let n = n_t + asm.n_z;
+    if n == 0 || n_t == 0 {
+        return Err(yee_core::Error::Numerical(
+            "eigensolver(quasi-TEM): empty DoF set (no interior edges?)".into(),
+        ));
+    }
+    let (a_re, b_re, b1_re) = mixed_real_blocks(asm)?;
+    let omega = std::f64::consts::TAU * freq_hz;
+    let k0 = omega / yee_core::units::C0;
+    let k0_sq = k0 * k0;
+    let k_op = k0_sq * &b_re - &a_re;
+
+    // ε_r,max from the diagonal mass ratio B_ii / B1_ii over the transverse
+    // block (B = ε_r·mass on the diagonal, B_1 = unweighted). Floor at 1.0
+    // (vacuum) so the window is never degenerate. Identical recovery to the
+    // sparse cutoff path.
+    let mut eps_max = 1.0_f64;
+    for i in 0..n {
+        let d1 = b1_re[(i, i)];
+        if d1.abs() > 0.0 {
+            let ratio = b_re[(i, i)] / d1;
+            if ratio.is_finite() && ratio > eps_max {
+                eps_max = ratio;
+            }
+        }
+    }
+
+    // TEM-like seed: uniform E_t over the transverse block, zero E_z. This
+    // overlaps the curl-poor quasi-TEM field strongly and is nearly
+    // orthogonal to the high-cutoff E_z / gradient modes, so the
+    // inverse iteration locks onto the quasi-TEM rather than a spurious
+    // neighbour.
+    let mut tem_seed = vec![0.0_f64; n];
+    for s in tem_seed.iter_mut().take(n_t) {
+        *s = 1.0;
+    }
+
+    // σ ladder spanning the physical ε_eff window (k₀², k₀²·ε_r,max]. A
+    // propagating quasi-TEM mode has 1 < ε_eff ≤ ε_r,max, so σ = frac·ε_max·k₀²
+    // brackets it for fractions covering that window. The low rungs
+    // (near ε_eff = 1) tend not to converge (null-dominated, the air mode sits
+    // there); the rungs at/above the field-concentration ε_eff lock onto the
+    // quasi-TEM. We sweep generously and keep the highest-β² transverse
+    // survivor regardless of which rung found it.
+    const LADDER_FRACS: &[f64] = &[0.35, 0.5, 0.65, 0.8, 0.92, 1.0];
+    let mut best: Option<(f64, Vec<f64>)> = None; // (β²_true, x_true)
+    let n_rungs = LADDER_FRACS.len();
+    let mut n_converged = 0usize;
+    for &frac in LADDER_FRACS {
+        // σ in the physical window, kept strictly above k₀² (a quasi-TEM mode
+        // is slower than free space in the dielectric — ε_eff > 1).
+        let sigma = (frac * eps_max * k0_sq).max(1.02 * k0_sq);
+        match beta_direct_shift_invert(&k_op, &b1_re, n, n_t, sigma, Some(&tem_seed)) {
+            Ok((beta_sq, x_true)) => {
+                if beta_sq <= 0.0 || !beta_sq.is_finite() {
+                    continue;
+                }
+                n_converged += 1;
+                let take = match &best {
+                    None => true,
+                    Some((curr, _)) => beta_sq > *curr,
+                };
+                if take {
+                    best = Some((beta_sq, x_true));
+                }
+            }
+            // A rung whose shift sits on an eigenvalue (singular (K − σB_1)),
+            // converges to a non-transverse mode, or fails to converge is
+            // skipped — another rung targets the quasi-TEM.
+            Err(_) => continue,
+        }
+    }
+
+    let (beta_sq_re, x_true) = best.ok_or_else(|| {
+        yee_core::Error::Numerical(format!(
+            "eigensolver(quasi-TEM): no σ rung converged to a transverse-dominated \
+             propagating mode in the ε_eff window (1, {eps_max:.3}] \
+             ({n_converged}/{n_rungs} rungs yielded a valid mode)"
+        ))
+    })?;
+
+    Ok(pack_mixed_solution(beta_sq_re, n_t, n, &x_true))
+}
+
 /// Real-valued mixed-pencil blocks `(A, B, B_1)` extracted from the
 /// (future-proof complex) [`AssembledMixed`] on the lossless path.
 type RealBlocks = (DMatrix<f64>, DMatrix<f64>, DMatrix<f64>);
@@ -1334,6 +1489,162 @@ mod tests {
     };
     use std::collections::HashMap;
     use yee_mesh::TriMesh2D;
+
+    /// Geometry of a shielded-microstrip cross-section fixture (bundled to
+    /// keep [`shielded_microstrip_holed`] under clippy's argument limit).
+    pub(super) struct MicrostripBox {
+        /// Shield box width (x extent, m).
+        pub wb: f64,
+        /// Shield box height (y extent, m).
+        pub hb: f64,
+        /// Substrate height (`y < h_sub` is dielectric, m).
+        pub h_sub: f64,
+        /// Signal-strip width (m).
+        pub w_strip: f64,
+        /// Signal-strip thickness (m); the strip hole spans `[h_sub, h_sub+t]`.
+        pub t_strip: f64,
+        /// Grid columns / rows.
+        pub nx: usize,
+        pub ny: usize,
+        /// Substrate relative permittivity.
+        pub eps_r: f64,
+    }
+
+    /// Build a **shielded-microstrip** cross-section as a structured
+    /// `nx × ny` grid spanning `[0, wb] × [0, hb]` with a rectangular
+    /// **strip-conductor hole** centred in x at the top of the substrate.
+    /// The hole cells are not meshed, so their border edges lie in exactly
+    /// one triangle and are flagged mesh-boundary = PEC by [`EdgeTable`] —
+    /// i.e. the strip becomes a **second PEC conductor** inside the outer
+    /// PEC box (the shield + ground). A two-conductor cross-section is what
+    /// supports a quasi-TEM mode (`k_c² ≈ 0`); a single-conductor box does
+    /// not. The substrate (`y < h_sub`, tag 1, `ε_r`) and air (tag 0)
+    /// partition the box. Returns the mesh + the ε_r / μ_r material maps.
+    pub(super) fn shielded_microstrip_holed(
+        g: &MicrostripBox,
+    ) -> (TriMesh2D, HashMap<u32, Complex64>, HashMap<u32, Complex64>) {
+        let MicrostripBox {
+            wb,
+            hb,
+            h_sub,
+            w_strip,
+            t_strip,
+            nx,
+            ny,
+            eps_r,
+        } = *g;
+        let xs: Vec<f64> = (0..=nx).map(|i| wb * (i as f64) / (nx as f64)).collect();
+        let ys: Vec<f64> = (0..=ny).map(|j| hb * (j as f64) / (ny as f64)).collect();
+        let xc = wb / 2.0;
+        let (sx0, sx1) = (xc - w_strip / 2.0, xc + w_strip / 2.0);
+        let (sy0, sy1) = (h_sub, h_sub + t_strip);
+        let in_strip = |cx: f64, cy: f64| {
+            cx > sx0 - 1e-12 && cx < sx1 + 1e-12 && cy > sy0 - 1e-12 && cy < sy1 + 1e-12
+        };
+        let mut vertices = Vec::with_capacity((nx + 1) * (ny + 1));
+        for &y in &ys {
+            for &x in &xs {
+                vertices.push([x, y]);
+            }
+        }
+        let idx = |i: usize, j: usize| j * (nx + 1) + i;
+        let mut triangles = Vec::new();
+        let mut tags = Vec::new();
+        for j in 0..ny {
+            let yc = 0.5 * (ys[j] + ys[j + 1]);
+            for i in 0..nx {
+                let xcell = 0.5 * (xs[i] + xs[i + 1]);
+                if in_strip(xcell, yc) {
+                    continue; // hole = strip conductor
+                }
+                let v00 = idx(i, j);
+                let v10 = idx(i + 1, j);
+                let v11 = idx(i + 1, j + 1);
+                let v01 = idx(i, j + 1);
+                let tag = if yc < h_sub { 1u32 } else { 0u32 };
+                triangles.push([v00, v10, v11]);
+                tags.push(tag);
+                triangles.push([v00, v11, v01]);
+                tags.push(tag);
+            }
+        }
+        let mesh = TriMesh2D::new(vertices, triangles, None, Some(tags)).unwrap();
+        let mut eps = HashMap::new();
+        eps.insert(0u32, Complex64::new(1.0, 0.0));
+        eps.insert(1u32, Complex64::new(eps_r, 0.0));
+        let mut mu = HashMap::new();
+        mu.insert(0u32, Complex64::new(1.0, 0.0));
+        mu.insert(1u32, Complex64::new(1.0, 0.0));
+        (mesh, eps, mu)
+    }
+
+    #[test]
+    fn quasi_tem_surfaces_transverse_mode_on_shielded_microstrip() {
+        // Phase 1.3.1.2 Q1 (DoD-1): the quasi-TEM selection path
+        // `solve_dense_mixed_quasi_tem` must surface a transverse-dominated
+        // PROPAGATING mode (k_c²≈0, β>0, ε_eff well above air) on a shielded
+        // FR-4 microstrip — where the closed-guide `solve_dense_mixed` returns
+        // only the box air-region mode (ε_eff≈1). Canonical 50Ω FR-4 line:
+        // ε_r=4.4, w/h=1.9; low frequency (2 GHz) so the box waveguide modes
+        // are below cutoff and the quasi-TEM is the dominant propagating mode.
+        let eps_r = 4.4;
+        let h_sub = 1.6e-3;
+        let w_strip = 1.9 * h_sub;
+        let hb = 7.0 * h_sub;
+        let (nx, ny) = (20usize, 10usize);
+        let freq_hz = 2.0e9;
+        let (mesh, eps, mu) = shielded_microstrip_holed(&MicrostripBox {
+            wb: 8.0 * w_strip,
+            hb,
+            h_sub,
+            w_strip,
+            t_strip: hb / (ny as f64),
+            nx,
+            ny,
+            eps_r,
+        });
+        let table = EdgeTable::build(&mesh);
+        let asm = assemble_mixed(&mesh, &eps, &mu, &table);
+
+        let k0 = std::f64::consts::TAU * freq_hz / yee_core::units::C0;
+
+        // Quasi-TEM path surfaces the transverse-dominated mode.
+        let sol = solve_dense_mixed_quasi_tem(&asm, freq_hz)
+            .expect("quasi-TEM path must surface a transverse-dominated propagating mode");
+        let beta = sol.beta_sq.re.max(0.0).sqrt();
+        let eps_eff = (beta / k0).powi(2);
+        let et2: f64 = sol.e_t.iter().map(|z| z.norm_sqr()).sum();
+        let ez2: f64 = sol.e_z.iter().map(|z| z.norm_sqr()).sum();
+        let tfrac = et2 / (et2 + ez2);
+        eprintln!(
+            "Q1 shielded microstrip: β={beta:.4} rad/m, ε_eff={eps_eff:.4}, t-frac={tfrac:.4} \
+             (k0={k0:.4})"
+        );
+        assert!(
+            sol.beta_sq.re > 0.0 && beta.is_finite(),
+            "quasi-TEM β² must be positive-finite (got {})",
+            sol.beta_sq.re
+        );
+        assert!(
+            tfrac >= TRANSVERSE_ENERGY_FLOOR,
+            "quasi-TEM mode must be transverse-energy-dominated (t-frac {tfrac:.4})"
+        );
+        assert!(
+            eps_eff > 1.5,
+            "quasi-TEM ε_eff {eps_eff:.4} must be well above air (field partly in the FR-4)"
+        );
+
+        // Contrast: the closed-guide path returns the air-region mode (≈k₀),
+        // NOT the quasi-TEM — the capability gap this path closes.
+        let closed = solve_dense_mixed(&asm, freq_hz).expect("closed-guide path solves");
+        let eps_eff_closed = (closed.beta_sq.re.max(0.0).sqrt() / k0).powi(2);
+        eprintln!("Q1 closed-guide path ε_eff={eps_eff_closed:.4} (expected ≈1, the air mode)");
+        assert!(
+            eps_eff > eps_eff_closed + 0.5,
+            "quasi-TEM ε_eff {eps_eff:.4} must exceed the closed-guide air-mode ε_eff \
+             {eps_eff_closed:.4} — the two select different physical modes"
+        );
+    }
 
     /// Build a structured `nx × ny` quad-grid of CCW triangles spanning
     /// `[0, a] × [0, b]`. Each quad cell is split along the

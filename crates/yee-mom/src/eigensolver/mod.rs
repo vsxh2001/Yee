@@ -38,7 +38,7 @@ pub(crate) mod mesh;
 pub(crate) mod reference;
 pub(crate) mod solve;
 
-pub(crate) use solve::solve_dense_mixed;
+pub(crate) use solve::{solve_dense_mixed, solve_dense_mixed_quasi_tem};
 
 /// Finite-element polynomial order for the cross-section mixed
 /// `(E_t, E_z)` assembly.
