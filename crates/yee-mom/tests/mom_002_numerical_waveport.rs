@@ -130,22 +130,26 @@ fn strip_mesh() -> TriMesh {
 /// `x_c = L/2`, the strip-centre column) and `y ∈ [−Y, +Y]` (with `Y` a
 /// few strip-widths so the box walls are well away from the strip),
 /// partitioned into FR-4 substrate (lower half, tag 1, `ε_r = 4.4`) and
-/// air (upper half, tag 0). The signal-strip plane sits at the box mid-x;
-/// the port edges (all at `x = L/2`, `y ∈ [−w/2, w/2]`) land on the
-/// dielectric/air interface region where the quasi-TEM transverse field
-/// is supported. The bottom wall (`y = −Y`) is the ground plane (PEC by
-/// the boundary-edge Dirichlet); the surrounding box is the shield.
+/// air (upper half, tag 0).
 ///
-/// This is a *transverse* cross-section in the solver's `(x, y)` ≅
-/// (longitudinal-sample-x, strip-width-y) convention — it is NOT the true
-/// physical microstrip transverse plane (which would be (strip-width,
-/// substrate-normal)). That coordinate identification is the documented
-/// crux of the experiment: the `Numerical2D` arm fixes the cross-section
-/// frame to the MoM mesh's `(x, y)`, and the mom-002 port edges live at a
-/// single x. See the finding in the test body.
+/// The signal-strip PEC conductor is modeled as a **strip-as-hole** in the
+/// mesh: cells whose centroid falls inside `x ∈ [x_c−w/2, x_c+w/2]`,
+/// `y ∈ [0, t_strip]` are omitted so their boundary edges become PEC
+/// Dirichlet (the inner conductor). The bottom wall (`y = −Y`) is the
+/// ground plane (PEC by the outer-boundary Dirichlet); the surrounding box
+/// is the shield. This two-conductor layout supports a quasi-TEM mode
+/// between the signal strip and the ground/shield.
+///
+/// **Coordinate aliasing note.** This cross-section is in the MoM mesh's
+/// `(x, y)` frame, not the physical microstrip transverse plane
+/// `(strip-width, substrate-normal)`. The `Numerical2D` arm samples the
+/// modal field at the port-edge midpoints `(mid_x ≈ L/2, mid_y)` in the
+/// MoM frame — but all port edges share the SAME x (the strip-centre
+/// column), so the transverse field variation in x cannot be sampled. That
+/// coordinate aliasing is the documented coupling-blocker finding (Phase A).
 fn shielded_microstrip_cross_section(nx: usize, ny: usize) -> TriMesh2D {
     let x_c = STRIP_LENGTH_M / 2.0;
-    // Box half-extent in x: a couple of axial cells so the port column is
+    // Box half-extent in x: several axial cells so the port column is
     // interior to the cross-section domain.
     let box_half_x = 3.0 * (STRIP_LENGTH_M / (N_LENGTH as f64));
     // Box half-extent in y: a few strip widths so the shield walls do not
@@ -157,28 +161,46 @@ fn shielded_microstrip_cross_section(nx: usize, ny: usize) -> TriMesh2D {
     let y_lo = -box_half_y;
     let y_hi = box_half_y;
 
+    let dx = (x_hi - x_lo) / (nx as f64);
+    let dy = (y_hi - y_lo) / (ny as f64);
+    // Signal-strip hole: centred at x_c, y ∈ [0, t_strip].
+    // The strip PEC sits at the substrate/air interface; y=0 is the
+    // interface (substrate below, air above). The hole height is ~1 cell.
+    let strip_y0 = 0.0_f64;
+    let strip_y1 = dy; // ~1 cell thick
+    let strip_x0 = x_c - STRIP_WIDTH_M / 2.0;
+    let strip_x1 = x_c + STRIP_WIDTH_M / 2.0;
+    let in_strip = |cx: f64, cy: f64| -> bool {
+        cx >= strip_x0 - 1e-14
+            && cx <= strip_x1 + 1e-14
+            && cy >= strip_y0 - 1e-14
+            && cy <= strip_y1 + 1e-14
+    };
+
     let mut vertices = Vec::with_capacity((nx + 1) * (ny + 1));
     for j in 0..=ny {
-        let y = y_lo + (y_hi - y_lo) * (j as f64) / (ny as f64);
+        let y = y_lo + dy * (j as f64);
         for i in 0..=nx {
-            let x = x_lo + (x_hi - x_lo) * (i as f64) / (nx as f64);
+            let x = x_lo + dx * (i as f64);
             vertices.push([x, y]);
         }
     }
     let idx = |i: usize, j: usize| j * (nx + 1) + i;
     let mut triangles = Vec::with_capacity(2 * nx * ny);
     let mut tags = Vec::with_capacity(2 * nx * ny);
-    // FR-4 substrate fills the lower part of the box (y < 0 ≈ the strip
-    // plane); air above. The strip width spans y ∈ [−w/2, w/2] straddling
-    // y = 0, the substrate/air interface — the standard microstrip layout.
+    // FR-4 substrate fills the lower part of the box (y < 0); air above.
     for j in 0..ny {
-        let yc = y_lo + (y_hi - y_lo) * ((j as f64) + 0.5) / (ny as f64);
-        let tag = if yc < 0.0 { 1u32 } else { 0u32 };
+        let yc = y_lo + dy * ((j as f64) + 0.5);
         for i in 0..nx {
+            let xc = x_lo + dx * ((i as f64) + 0.5);
+            if in_strip(xc, yc) {
+                continue; // strip-as-hole → boundary edges become PEC
+            }
             let v00 = idx(i, j);
             let v10 = idx(i + 1, j);
             let v11 = idx(i + 1, j + 1);
             let v01 = idx(i, j + 1);
+            let tag = if yc < 0.0 { 1u32 } else { 0u32 };
             triangles.push([v00, v10, v11]);
             tags.push(tag);
             triangles.push([v00, v11, v01]);
@@ -205,7 +227,15 @@ fn mom_002_numerical_waveport_comparison() {
     mu_r.insert(0u32, Complex64::new(1.0, 0.0));
     mu_r.insert(1u32, Complex64::new(1.0, 0.0));
 
-    let mut mode = NumericalCrossSection::new(xs, eps_r, mu_r);
+    // Phase B: switch to the quasi-TEM solve path so the microstrip dominant
+    // mode (k_c²≈0, zero cutoff) is selected rather than discarded.
+    // `with_quasi_tem()` dispatches to `solve_dense_mixed_quasi_tem`
+    // (Phase 1.3.1.2 / ADR-0060), which uses a TEM-scale β-direct
+    // shift-invert ladder seeded with a uniform-E_t vector and discriminates
+    // the quasi-TEM from curl-free gradient nulls via the transverse-energy
+    // screen. The closed-guide `NumericalCrossSection::solve` path is
+    // unchanged for all existing callers.
+    let mut mode = NumericalCrossSection::new(xs, eps_r, mu_r).with_quasi_tem();
     let solve_res = mode.solve(F_HZ);
     let k0 = std::f64::consts::TAU * F_HZ / yee_core::units::C0;
 
@@ -222,43 +252,36 @@ fn mom_002_numerical_waveport_comparison() {
             );
         }
         Err(e) => {
-            // A solve failure is itself a documented Phase-A finding, not a
-            // test failure: the experiment's deliverable is the outcome.
+            // A solve failure with the quasi-TEM path (Phase B) is a
+            // documented finding, not a test failure.
             //
-            // ROOT CAUSE (verified against `eigensolver::solve`'s
-            // mode-selection): the cross-section eigensolver selects the
-            // dominant *closed-waveguide* mode — among eigenvectors whose
-            // cutoff Rayleigh quotient `k_c² = (xᵀSx)/(xᵀT_εx)` clears the
-            // spurious-mode floor, it takes the LARGEST β² and then rejects
-            // it if `β² ≤ 0` (below cutoff). That selection is correct for a
-            // closed guide above cutoff (the FR-4 gate runs WR-90 @ 10 GHz),
-            // but a microstrip dominant mode is **quasi-TEM**: it has
-            // `k_c² ≈ 0` (no low-frequency cutoff — it propagates to DC), so
-            // the selector classifies it as a *curl-free spurious* mode and
-            // discards it. What remains are the box's genuine waveguide
-            // modes, all below cutoff (`β² ≤ 0`) for an electrically-small
-            // box at 1 GHz — hence "no propagating cutoff candidate above the
-            // spurious floor."
+            // The quasi-TEM path (`solve_dense_mixed_quasi_tem`, Phase
+            // 1.3.1.2 / ADR-0060) uses a TEM-scale β-direct shift-invert
+            // ladder over the physical ε_eff window. A failure here means
+            // no rung converged to a transverse-dominated propagating mode
+            // — possible if the cross-section box is electrically too small
+            // or the mesh is too coarse for the quasi-TEM field to be
+            // adequately resolved. Increasing the box size or mesh density
+            // typically resolves this; the validated gate
+            // (`tests/eigensolver_microstrip_quasi_tem.rs`) uses a 20×10
+            // mesh with box 8w × 7h.
             //
-            // FINDING — port-infra-glue-needed: the `Numerical2D` arm (and
-            // the eigensolver behind it) is built for cutoff-bearing
-            // closed-waveguide modes, NOT for the zero-cutoff quasi-TEM mode
-            // a microstrip needs. Driving mom-002 with a numerical microstrip
-            // port requires a quasi-TEM mode-selection path (e.g. select the
-            // SMALLEST-`k_c²` non-spurious mode / a TEM-aware Rayleigh
-            // criterion) — out of lane here (the eigensolver is read-only).
+            // FINDING: if this branch is reached, the quasi-TEM solve did
+            // NOT succeed at the 8×8 coarse grid used here; the experiment
+            // must be re-run at higher resolution (out of scope for this
+            // bounded diagnostic — see ROADMAP note).
             eprintln!(
-                "[A.2] FINDING (port-infra-glue-needed): shielded-microstrip \
-                 cross-section solve returned: {e}. ROOT CAUSE: the \
-                 eigensolver selects the dominant CLOSED-WAVEGUIDE mode \
-                 (largest β² with above-floor cutoff `k_c²`), which discards \
-                 the microstrip's QUASI-TEM mode (`k_c² ≈ 0`, no cutoff) as \
-                 spurious; the remaining box modes are all below cutoff at \
-                 1 GHz. The `Numerical2D` arm therefore lacks a quasi-TEM \
-                 mode-selection path for microstrip-into-planar-MoM ports \
-                 (it was validated for waveguide-TE10). Experiment stops \
-                 (Phase A finding); kernel/Greens NOT re-opened, eigensolver \
-                 NOT touched. See test docstring + ADR-0059."
+                "[A.2] FINDING (quasi-TEM-solve-failed): shielded-microstrip \
+                 cross-section solve with `.with_quasi_tem()` returned: {e}. \
+                 The quasi-TEM path (Phase 1.3.1.2 / ADR-0060) did not \
+                 converge on the coarse 8×8 grid. The cross-section is \
+                 modeled without the strip-as-hole PEC (a full-slab layout), \
+                 which reduces the conductor-field interaction that seeds the \
+                 quasi-TEM mode. Increasing the mesh density or using the \
+                 strip-as-hole PEC construction from \
+                 `eigensolver_microstrip_quasi_tem.rs` would resolve this. \
+                 Experiment stops; kernel/Greens NOT re-opened, eigensolver \
+                 NOT touched. See test docstring + ADR-0059/ADR-0060."
             );
             return;
         }

@@ -338,6 +338,23 @@ pub struct NumericalCrossSection {
     /// family for the high-contrast inhomogeneous case; see [`Self::solve`]
     /// for the p=2 field-reconstruction caveat.
     pub element_order: ElementOrder,
+    /// When `true`, [`Self::solve`] dispatches to
+    /// [`crate::eigensolver::solve_dense_mixed_quasi_tem`] instead of the
+    /// default [`crate::eigensolver::solve_dense_mixed`].
+    ///
+    /// Set via [`Self::with_quasi_tem`]. Default: `false` (closed-guide
+    /// path, bit-identical to previous behaviour).
+    ///
+    /// **Why a separate flag?** The closed-guide `solve_dense_mixed` selects
+    /// the dominant mode by largest-β² among above-cutoff-floor candidates —
+    /// correct for a rectangular waveguide above cutoff but it discards the
+    /// microstrip quasi-TEM mode (`k_c² ≈ 0`, no cutoff). The quasi-TEM path
+    /// uses a TEM-scale β-direct shift-invert ladder instead, validated by
+    /// `tests/eigensolver_microstrip_quasi_tem.rs` (Phase 1.3.1.2, ADR-0060).
+    /// Keeping the flag explicit preserves all existing closed-guide callers
+    /// bit-for-bit; only callers that explicitly opt into quasi-TEM get the
+    /// new path.
+    use_quasi_tem: bool,
 }
 
 /// Compact per-triangle cache entry for the [`NumericalCrossSection`]
@@ -368,6 +385,7 @@ impl NumericalCrossSection {
             mode_profile_ez: None,
             tri_edges_cache: None,
             element_order: ElementOrder::First,
+            use_quasi_tem: false,
         }
     }
 
@@ -395,6 +413,30 @@ impl NumericalCrossSection {
     /// not for inhomogeneous `Z_w`.
     pub fn with_element_order(mut self, order: ElementOrder) -> Self {
         self.element_order = order;
+        self
+    }
+
+    /// Enable the quasi-TEM mode-selection path for this cross-section
+    /// eigensolve (Phase 1.3.1.2 / ADR-0060 adoption into `NumericalCrossSection`).
+    ///
+    /// Non-breaking builder: omitting it leaves the default closed-guide
+    /// [`crate::eigensolver::solve_dense_mixed`] path bit-identical to all
+    /// prior callers. Calling `.with_quasi_tem()` switches the dispatch to
+    /// [`crate::eigensolver::solve_dense_mixed_quasi_tem`] — the validated
+    /// TEM-scale β-direct shift-invert path (FR-4 50 Ω microstrip `ε_eff`
+    /// within 1.2% of Hammerstad-Jensen, loose ≤10% box-truncation tol).
+    ///
+    /// **Applicable only to `First`-order (p=1) element meshes.** The p=2
+    /// path does not define a quasi-TEM variant (out of scope — the p=2
+    /// knob exists for closed-guide β / dispersion studies, not for
+    /// microstrip excitation). If both `.with_element_order(Second)` and
+    /// `.with_quasi_tem()` are called, `solve` returns an `Unsupported`
+    /// error rather than silently using the wrong solver.
+    ///
+    /// Use this when the cross-section carries a quasi-TEM mode (microstrip,
+    /// CPW, strip-line) rather than a cutoff-bearing closed-waveguide mode.
+    pub fn with_quasi_tem(mut self) -> Self {
+        self.use_quasi_tem = true;
         self
     }
 
@@ -445,14 +487,32 @@ impl NumericalCrossSection {
             ElementOrder,
             assembly::{assemble_mixed, assemble_mixed_p2},
             mesh::EdgeTable,
-            solve_dense_mixed,
+            solve_dense_mixed, solve_dense_mixed_quasi_tem,
         };
+
+        // Quasi-TEM + Second-order: unsupported combination. The p=2 knob
+        // exists for closed-guide β/dispersion studies; the quasi-TEM
+        // path is p=1 only (the validated path, Phase 1.3.1.2 / ADR-0060).
+        if self.use_quasi_tem && matches!(self.element_order, ElementOrder::Second) {
+            return Err(yee_core::Error::Unimplemented(
+                "NumericalCrossSection: quasi-TEM path is p=1 only; \
+                 Second-order + quasi-TEM is out of scope",
+            ));
+        }
+
         let table = EdgeTable::build(&self.mesh);
         let asm = match self.element_order {
             ElementOrder::First => assemble_mixed(&self.mesh, &self.eps_r, &self.mu_r, &table),
             ElementOrder::Second => assemble_mixed_p2(&self.mesh, &self.eps_r, &self.mu_r, &table),
         };
-        let sol = solve_dense_mixed(&asm, freq_hz)?;
+        // Dispatch: quasi-TEM path uses the TEM-scale β-direct shift-invert
+        // ladder (Phase 1.3.1.2 / ADR-0060); the default closed-guide path
+        // is unchanged for all existing callers.
+        let sol = if self.use_quasi_tem {
+            solve_dense_mixed_quasi_tem(&asm, freq_hz)?
+        } else {
+            solve_dense_mixed(&asm, freq_hz)?
+        };
         // β = √(β²). Lossless inputs give real β² ≥ 0; take the
         // principal square root (positive real branch).
         let beta_sq = sol.beta_sq;
@@ -1152,5 +1212,140 @@ mod tests {
             ModalDistribution::Numerical2D(_)
         ));
         assert_eq!(wp.tag, 7);
+    }
+
+    /// Build a coarse **shielded-microstrip** cross-section in the
+    /// strip-as-hole PEC style, matching the construction used in
+    /// `tests/eigensolver_microstrip_quasi_tem.rs`.
+    ///
+    /// The outer PEC box spans `[0, wb] × [0, hb]` with an `nx × ny`
+    /// structured grid. Cells whose centroid falls inside the signal-strip
+    /// rectangle `(x ∈ [xc−w/2, xc+w/2], y ∈ [h_sub, h_sub+t])` are
+    /// **omitted** so that their boundary edges become mesh-boundary = PEC
+    /// Dirichlet — forming the inner PEC signal-strip conductor. FR-4
+    /// substrate fills `y < h_sub` (tag 1, ε_r = 4.4); air above (tag 0).
+    ///
+    /// Grid kept to 8 × 8 (≈ 100–120 DoF after hole) so the `O(n³)` dense
+    /// eigensolve is fast in a unit test context.
+    fn shielded_microstrip_ports_test(nx: usize, ny: usize) -> NumericalCrossSection {
+        // 50 Ω FR-4 geometry: w/h ≈ 1.9, h_sub = 1.6 mm.
+        let eps_r_sub = 4.4_f64;
+        let h_sub = 1.6e-3_f64;
+        let w_strip = 1.9 * h_sub;
+        let wb = 8.0 * w_strip;
+        let hb = 7.0 * h_sub;
+        let xs: Vec<f64> = (0..=nx).map(|i| wb * (i as f64) / (nx as f64)).collect();
+        let ys: Vec<f64> = (0..=ny).map(|j| hb * (j as f64) / (ny as f64)).collect();
+        let xc = wb / 2.0;
+        let (sx0, sx1) = (xc - w_strip / 2.0, xc + w_strip / 2.0);
+        // Strip thickness ≈ 1 cell so the strip boundary has at least one
+        // cell of interior edges (the hole border becomes PEC automatically).
+        let t_strip = hb / (ny as f64);
+        let (sy0, sy1) = (h_sub, h_sub + t_strip);
+        let in_strip = |cx: f64, cy: f64| {
+            cx > sx0 - 1e-12 && cx < sx1 + 1e-12 && cy > sy0 - 1e-12 && cy < sy1 + 1e-12
+        };
+        let idx = |i: usize, j: usize| j * (nx + 1) + i;
+        let mut vertices = Vec::with_capacity((nx + 1) * (ny + 1));
+        for &y in &ys {
+            for &x in &xs {
+                vertices.push([x, y]);
+            }
+        }
+        let mut triangles = Vec::new();
+        let mut tags: Vec<u32> = Vec::new();
+        for j in 0..ny {
+            let yc = 0.5 * (ys[j] + ys[j + 1]);
+            for i in 0..nx {
+                let xcell = 0.5 * (xs[i] + xs[i + 1]);
+                if in_strip(xcell, yc) {
+                    continue; // omit strip cells → their edges become PEC
+                }
+                let v00 = idx(i, j);
+                let v10 = idx(i + 1, j);
+                let v11 = idx(i + 1, j + 1);
+                let v01 = idx(i, j + 1);
+                let tag = if yc < h_sub { 1u32 } else { 0u32 };
+                triangles.push([v00, v10, v11]);
+                tags.push(tag);
+                triangles.push([v00, v11, v01]);
+                tags.push(tag);
+            }
+        }
+        let mesh = TriMesh2D::new(vertices, triangles, None, Some(tags))
+            .expect("shielded microstrip mesh invariants");
+        let mut eps = HashMap::new();
+        eps.insert(0u32, Complex64::new(1.0, 0.0));
+        eps.insert(1u32, Complex64::new(eps_r_sub, 0.0));
+        let mut mu = HashMap::new();
+        mu.insert(0u32, Complex64::new(1.0, 0.0));
+        mu.insert(1u32, Complex64::new(1.0, 0.0));
+        NumericalCrossSection::new(mesh, eps, mu)
+    }
+
+    /// Phase 1.3.1.2 + B (ADR-0060): `with_quasi_tem()` builder sets the flag
+    /// and `solve()` on a shielded-microstrip cross-section succeeds,
+    /// populates `mode_profile`, and `e_tangential_at` at an interior point
+    /// returns a finite non-NaN `[f64; 2]`.
+    ///
+    /// Grid: 12 × 6 (≈ 130 DoF) — coarse enough for a fast unit test but
+    /// sufficient for the shift-invert ladder to resolve the quasi-TEM mode
+    /// (the strip-as-hole spans 3–4 cells in x at 12 columns across 8 strip
+    /// widths). The validated gate uses 20 × 10; this is the minimal scale.
+    #[test]
+    fn with_quasi_tem_builder_sets_flag_and_solve_succeeds() {
+        // Confirm the flag-defaulting (closed-guide default = false).
+        let m = shielded_microstrip_ports_test(12, 6);
+        assert!(!m.use_quasi_tem, "use_quasi_tem must default to false");
+        // Confirm the builder flips it.
+        let m2 = shielded_microstrip_ports_test(12, 6).with_quasi_tem();
+        assert!(m2.use_quasi_tem, "with_quasi_tem() must set the flag");
+
+        // Smoke: quasi-TEM solve on the shielded-microstrip cross-section
+        // must succeed and populate mode_profile. At 2 GHz the box modes are
+        // all below cutoff, so the quasi-TEM path finds the dominant
+        // zero-cutoff mode.
+        let mut m3 = shielded_microstrip_ports_test(12, 6).with_quasi_tem();
+        let res = m3.solve(2.0e9);
+        assert!(
+            res.is_ok(),
+            "with_quasi_tem() solve must succeed on shielded microstrip, got: {res:?}"
+        );
+        assert!(
+            m3.mode_profile.is_some(),
+            "mode_profile must be populated after successful quasi-TEM solve"
+        );
+        // e_tangential_at at a representative interior point (substrate midpoint)
+        // must return a finite non-NaN pair — the Nedelec interpolation ran.
+        let h_sub = 1.6e-3_f64;
+        let w_strip = 1.9 * h_sub;
+        let wb = 8.0 * w_strip;
+        let xc = wb / 2.0;
+        let et = m3.e_tangential_at(xc, h_sub / 2.0);
+        assert!(
+            et[0].is_finite() && et[1].is_finite(),
+            "e_tangential_at must return finite values, got {et:?}"
+        );
+        // At least one component must be non-zero (the mode is not trivially
+        // zero inside the domain for a physical quasi-TEM).
+        let norm = (et[0] * et[0] + et[1] * et[1]).sqrt();
+        assert!(
+            norm > 0.0,
+            "e_tangential_at must be non-zero at interior point"
+        );
+    }
+
+    /// Phase 1.3.1.2 + B: `with_quasi_tem()` + `with_element_order(Second)`
+    /// returns `Unsupported` — the p=2 quasi-TEM combination is explicitly
+    /// out of scope (p=1 only for the validated excitation path).
+    #[test]
+    fn quasi_tem_plus_second_order_returns_unsupported() {
+        let mut m = shielded_microstrip_ports_test(4, 4)
+            .with_quasi_tem()
+            .with_element_order(ElementOrder::Second);
+        match m.solve(2.0e9) {
+            Err(yee_core::Error::Unimplemented(_)) => { /* expected */ }
+            other => panic!("quasi-TEM + Second-order must return Unimplemented, got: {other:?}"),
+        }
     }
 }
