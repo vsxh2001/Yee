@@ -99,3 +99,4 @@
 - [ADR-0063: multi-trace S-parameter plotting](decisions/0063-multi-trace-sparam-plotting.md)
 - [ADR-0064: mom-002 numerical-port frame-mapping ill-posed (stop)](decisions/0064-mom-002-numerical-port-ill-posed.md)
 - [ADR-0065: GUI multi-trace S-parameter overlay](decisions/0065-gui-multi-trace-overlay.md)
+- [ADR-0066: fdtd-201.x higher-order cavity mode gate](decisions/0066-fdtd-201x-higher-cavity-mode.md)
