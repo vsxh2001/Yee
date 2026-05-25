@@ -4,10 +4,10 @@
 //!
 //! Phase 0 wires the following subcommands:
 //!
-//! - `yee validate <mom|fdtd|all> [--json]` — runs the `yee-validation`
-//!   aggregator (real mom-001 NEC-4 gate; Phase-deferred FDTD cases report
-//!   `Skipped`). Filters by target prefix (`mom-*`, FDTD-family) and
-//!   exits 1 if any included case failed.
+//! - `yee validate <mom|fdtd|fem|all> [--json]` — runs the `yee-validation`
+//!   aggregator (real mom-001 NEC-4 gate; FEM-eig-001/002/004/005 gates;
+//!   Phase-deferred FDTD cases report `Skipped`). Filters by target prefix
+//!   (`mom-*`, FDTD-family, `fem-*`) and exits 1 if any included case failed.
 //! - `yee mesh <path>` — constructs a `yee_mesh::Session`. Without the
 //!   `gmsh` feature this exits with code 2 and a guidance message.
 //! - `yee export <input> --format <touchstone|hdf5> <output>` — reads/writes
@@ -57,8 +57,9 @@ enum Command {
     ///
     /// Invokes the `yee-validation` aggregator and filters by `target`
     /// prefix. `mom` includes `mom-*` cases; `fdtd` includes
-    /// `cpml-*` / `ntff-*` / `dispersive-*` / `fdtd-*`; `all` runs
-    /// the full report. Default output is a human-readable table; pass
+    /// `cpml-*` / `ntff-*` / `dispersive-*` / `fdtd-*`; `fem` includes
+    /// `fem-eig-*` cases (FEM eigenmode suite); `all` runs the full
+    /// report. Default output is a human-readable table; pass
     /// `--json` to emit the serialized [`yee_validation::Report`].
     ///
     /// Exit code is non-zero iff any *included* case has status
@@ -319,6 +320,8 @@ enum ValidateTarget {
     Mom,
     /// Finite-difference time-domain solver (Phase 2).
     Fdtd,
+    /// Finite-element method eigenmode suite (Phase 4).
+    Fem,
     /// Run every available solver's validation suite.
     All,
 }
@@ -642,7 +645,8 @@ fn run_mesh(_input: &std::path::Path) -> ExitCode {
 /// Lives at the top of the validate-handler module so the prefix list is
 /// in one place and matches the brief: `mom-*` for [`ValidateTarget::Mom`];
 /// `cpml-*` / `ntff-*` / `dispersive-*` / `fdtd-*` for
-/// [`ValidateTarget::Fdtd`]; everything for [`ValidateTarget::All`].
+/// [`ValidateTarget::Fdtd`]; `fem-*` for [`ValidateTarget::Fem`];
+/// everything for [`ValidateTarget::All`].
 fn case_matches_target(case_id: &str, target: ValidateTarget) -> bool {
     match target {
         ValidateTarget::All => true,
@@ -653,6 +657,7 @@ fn case_matches_target(case_id: &str, target: ValidateTarget) -> bool {
                 || case_id.starts_with("dispersive-")
                 || case_id.starts_with("fdtd-")
         }
+        ValidateTarget::Fem => case_id.starts_with("fem-"),
     }
 }
 
@@ -779,9 +784,18 @@ mod tests {
     }
 
     #[test]
+    fn target_filter_fem_matches_fem_prefix() {
+        assert!(case_matches_target("fem-eig-001", ValidateTarget::Fem));
+        assert!(case_matches_target("fem-eig-006", ValidateTarget::Fem));
+        assert!(!case_matches_target("mom-001", ValidateTarget::Fem));
+        assert!(!case_matches_target("cpml-001", ValidateTarget::Fem));
+    }
+
+    #[test]
     fn target_filter_all_matches_everything() {
         assert!(case_matches_target("mom-001", ValidateTarget::All));
         assert!(case_matches_target("cpml-001", ValidateTarget::All));
+        assert!(case_matches_target("fem-eig-001", ValidateTarget::All));
         assert!(case_matches_target("anything-else", ValidateTarget::All));
     }
 }

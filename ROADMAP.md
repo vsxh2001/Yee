@@ -8,7 +8,7 @@ Conventions used below:
 - ✅ **Validation** — benchmark cases that must pass before the phase is called "done"
 - ⚠️ **Risks / dependencies** — what could derail this phase
 
-## Status snapshot (2026-05-19)
+## Status snapshot (2026-05-25)
 
 **Shipped:**
 - Phase 0 walking skeleton (`phase-0-done` tag)
@@ -29,6 +29,7 @@ Conventions used below:
 - **Phase 1.plotting.1 multi-trace S-parameter overlay (ADR-0063, merge `185335c`)**: `yee-plotters` `plot_sparams_db`/`plot_sparams_phase` + `SparamTrace` overlay N labelled traces (legend + 8-colour wrapping palette, y-range autoscaled across all traces); `yee plot` gains `--entry <ij>` (repeatable, 1-based) + `--all` for off-diagonal (S21) / multi-port overlays, default single-`--port` diagonal path byte-unchanged. Frontend feature (plotter unit + CLI tests, not a §4 gate); single-trace fns + Cargo.toml unchanged, no new dep. GUI (egui_plot) overlay + Smith constant-R/X arcs are documented follow-ons.
 - **Phase 1.gui.4 GUI multi-trace overlay (ADR-0065, merge `ab1425d`)**: completes the plotting.1 arc in the desktop app. `yee-gui` `build_sparam_series` (pure, unit-tested — `Selection` Diagonal/Entries/All, row-major `S<ij>` labels) + `show_sparams_db_plot` (egui_plot overlay + `Legend`); a "Show all entries" checkbox (shown only for `n_ports>1`) overlays every S-entry, default single-`S11` trace byte-unchanged. yee-gui lane only, no new dep, no egui bump. Smith-chart multi-trace + constant-R/X arcs remain follow-ons.
 - Phase 1.validation.0/1/2 (aggregator + JSON Report + PNG artifacts via CI upload)
+- **Phase 1.validation.3 FEM-eig aggregator wiring + `yee validate fem` (ADR-0067, merge `9fe8418`)**: registers fem-eig-001/002/004/005 in `Report::run_all()` (fast default path); fem-eig-003 Skipped (wall-time ~31 min); fem-eig-006 Skipped (gate open, |S11|≈0.955 pending Phase 4.fem.eig.3.5.6). `ValidateTarget::Fem` + `fem-*` arm added to `yee-cli`. De-stales `validation/README.md`: NEC-4 87+j41 Ω only (forbidden Balanis ref removed); mom-002 tripwire corrected 1 kΩ→100 kΩ; FEM case table added; fictional phase-dir claims dropped. No new dep; no yee-fem/yee-fdtd touch.
 - Phase 1.bench yee-bench (criterion benches: MoM solve, FDTD step, GMRES vs LU, GP fit, BO, TF/SF, lumped)
 - Phase 1.cli.1 `yee validate`, `yee bench`
 - Phase 1.examples.0/2/4 (Rust examples, BO notebook, NSGA-II + AL notebooks)
@@ -182,13 +183,18 @@ Conventions used below:
 - Phase 2.fdtd.7 Q7 fdtd-007 Maloney-Smith production gate
 - Phase 4.fem.eig.1+ — dispersive ε_r(ω), real waveguide ports, absorbing boundaries — designs not yet drafted
 
-**Outstanding validation gates:**
+**Outstanding validation gates (`yee validate all` truth as of 2026-05-25):**
 - mom-001 dipole — **GATE PASSES** (NEC-4 87+j41 Ω)
-- mom-002 microstrip Z₀ — gate passes within ±5% tripwire band at `|Z_in| = 674 Ω` on L=82mm reframed mesh (per ADR-0036); 10 forensic tracks confirmed kernel is correct within 1.83% of HJ ε_eff; remaining residual is delta-gap port-excitation modeling (Track WWWWWWW in flight)
-- mom-003 2.4 GHz patch — loose tolerance pending re-run through `GreensSpec::MicrostripSommerfeld`
-- fem-eig-001 WR-90 rectangular cavity — **GATE PASSES** (TE_{101} 0.09% rel err, mode-10 RMS 0.37%)
+- mom-002 microstrip Z₀ — gate passes within tripwire band (`|Z_in|`=674 Ω ≤ 100 kΩ, L=82mm, ADR-0036); kernel exonerated within 1.83% of HJ ε_eff; port-excitation residual noted
+- mom-003 2.4 GHz patch — loose tolerance, passes
+- fem-eig-001 WR-90 rectangular cavity — **GATE PASSES** (TE_{101} 0.09% rel err, mode-10 RMS 0.37%; registered in `run_all`)
+- fem-eig-002 lossy SiO₂ cavity — **GATE PASSES** (Re(f) 1.3e-3, Im(f) 2.96e-3; registered in `run_all`)
+- fem-eig-003 WR-90 stub + CFS-PML — Skipped in `run_all` (wall-time ~31 min; strict gate passes via `--include-ignored`)
+- fem-eig-004 WR-90 thru-line — **GATE PASSES** (|S21| -0.045 dB, reciprocity 2e-15; registered in `run_all`)
+- fem-eig-005 T-junction — **GATE PASSES** (passivity + reciprocity; registered in `run_all`)
+- fem-eig-006 high-aspect wave-port — Skipped in `run_all` (gate open, |S11|≈0.955; queued Phase 4.fem.eig.3.5.6)
 - fdtd-007 Maloney-Smith oblique TF/SF — forward gate for Phase 2.fdtd.7 subgridding (gated on Q6 + Q7)
-- nl-001 10-prompt sweep — **GATE PASSES on sub-gates A+B+C** (schema, round-trip, offline); D-gate (solver ±5% f) `#[ignore]`'d pending real MultilayerGreens per Phase 1.1.1 deferred-tolerance policy
+- nl-001 10-prompt sweep — **GATE PASSES on sub-gates A+B+C** (schema, round-trip, offline); D-gate `#[ignore]`'d pending real MultilayerGreens
 
 ---
 
