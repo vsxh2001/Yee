@@ -4133,6 +4133,12 @@ pub fn run_fem_eig_006_high_aspect_pml_with_config(
     // (b) rotate the modal basis (use the spec's `a = 100 mm` /
     // `b = 10 mm` waveguide convention and rebuild the +x face
     // classification accordingly).
+    // Phase 4.fem.eig.3.5.6 (ADR-0070): enable Lee-Mittra first-order
+    // absorbing-mode complement on the terminating port. This replaces
+    // the scalar jβ_m B_face stiffness with K = jk₀ B_face + Σ_m j(β_m−k₀)
+    // R_m, imposing mode-specific impedance matching for modes in the
+    // {TE₁₀, TE₂₀, TE₀₁} basis and a first-order ABC for all other modal
+    // content. The RHS (a_inc × 2jβ_m × ∫N_i·e_t dS) is unchanged.
     let port_1 = PortDefinition {
         modes: vec![
             // Driving mode: TE_{10} (a_inc = ONE).
@@ -4154,6 +4160,7 @@ pub fn run_fem_eig_006_high_aspect_pml_with_config(
                 a_inc: Complex64::ZERO,
             },
         ],
+        absorbing_complement: true,
     };
 
     let solver = OpenBoundarySolver::new(
