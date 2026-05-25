@@ -634,6 +634,7 @@ fn smith_r_circle_pts(r: f64, n: usize) -> Vec<(f64, f64)> {
 /// Full circle: centre = `(1, 1/x)`, radius = `1/|x|`.
 /// Only points satisfying `re² + im² ≤ 1.0 + 1e-9` are returned.
 fn smith_x_arc_pts(x: f64, n: usize) -> Vec<(f64, f64)> {
+    debug_assert!(x != 0.0, "smith_x_arc_pts: x must be non-zero");
     let centre_im = 1.0 / x;
     let radius = 1.0 / x.abs();
     (0..n)
@@ -1028,6 +1029,21 @@ mod tests {
             assert!(
                 (dist - 0.5).abs() < 1e-9,
                 "point ({re}, {im}) is not on r=1 circle (dist={dist})"
+            );
+        }
+    }
+
+    /// Every point of `smith_x_arc_pts(1.0, 256)` lies on the circle with
+    /// centre (1.0, 1.0) and radius 1.0 — verifies the constant-X arc formula.
+    #[test]
+    fn smith_x_arc_pts_on_circle() {
+        let pts = smith_x_arc_pts(1.0, 256);
+        assert!(!pts.is_empty(), "expected non-empty arc for x=1.0");
+        for (re, im) in &pts {
+            let dist = ((re - 1.0).powi(2) + (im - 1.0).powi(2)).sqrt();
+            assert!(
+                (dist - 1.0).abs() < 1e-9,
+                "point ({re}, {im}) not on circle: dist={dist}"
             );
         }
     }
