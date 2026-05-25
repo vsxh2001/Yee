@@ -103,3 +103,4 @@
 - [ADR-0067: validation aggregator FEM-eig wiring + `yee validate fem`](decisions/0067-validation-aggregator-fem-wiring.md)
 - [ADR-0068: Smith chart constant-R/X arc overlays + GUI multi-trace](decisions/0068-smith-chart-constant-rx-arcs.md)
 - [ADR-0069: Phase 1.plotting.3 CLI Smith chart multi-trace](decisions/0069-phase-1-plotting-3-smith-cli-multi-trace.md)
+- [ADR-0070: Phase 4.fem.eig.3.5.6 Lee-Mittra absorbing-mode wave-port](decisions/0070-phase-4-fem-eig-3-5-6-absorbing-mode-wave-port.md)

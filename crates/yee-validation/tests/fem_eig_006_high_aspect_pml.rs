@@ -77,28 +77,39 @@ fn fem_eig_006_no_nan_inf() {
 /// the 0.1 gate — the reflection is **not** discretisation-limited. The
 /// bump was reverted; the native (16, 3, 2) mesh stands.
 ///
-/// **Disposition: escape-hatch (gate stays `#[ignore]`'d).** With both
-/// modal degeneracy (v3.5.4) and discretisation (this probe) excluded,
-/// the residual is a genuine limitation of the modal-projection
-/// wave-port: projecting onto a finite TE_{mn} basis cannot fully match
-/// the field at the truncation face of a strongly off-square cavity.
-/// Per ADR-0048 the next step is Option (b) — the Lee-Mittra 1997
-/// absorbing-mode wave-port — queued for Phase 4.fem.eig.3.5.6 in
-/// ADR-0049. Tolerance `< 0.1` is **not** weakened.
+/// **Phase 4.fem.eig.3.5.6 Lee-Mittra absorbing-mode complement
+/// (ADR-0070, escape-hatch).** The Lee-Mittra first-order absorbing BC
+/// was applied to port_1 (the +x terminating face), replacing the
+/// scalar `j(β₁₀+β₂₀) B_face` stiffness with `jk₀ B_face + Σ_m
+/// j(β_m−k₀) R_m`. Measured result: `|S_{11}|(40 GHz) = 0.955500
+/// (-0.40 dB)` — **essentially unchanged** from the v3.5.5 baseline
+/// (0.01% change; well outside the < 0.1 gate). The Lee-Mittra
+/// first-order complement does not improve absorption for this
+/// high-aspect cavity geometry. Root-cause hypothesis: the {TE₁₀,
+/// TE₂₀, TE₀₁} modal basis provides insufficient coverage of the
+/// face impedance — both β₁₀ ≈ 776 and β₂₀ ≈ 554 rad/m are below
+/// k₀ ≈ 838 rad/m so the corrections `j(β_m−k₀) R_m` reduce the
+/// stiffness (negative imaginary shift), and the rank-1 projection R_m
+/// covers only a small fraction of the face Gram B_face for the
+/// actual TE mode shapes on this low-element-count mesh. Higher-order
+/// absorbing BC (Lee-Mittra 1997 §V rational-function extension) or a
+/// different port formulation (aperture integral, T-matrix) is needed.
+/// Gate tolerance `< 0.1` is **not** weakened.
 ///
 /// History: v3.5.3 W1 single-mode TE_{10} `|S_{11}|(30 GHz) = 0.925644`;
 /// v3.5.4 multi-mode `0.925637` (cutoff-degenerate, ADR-0048);
-/// v3.5.5 retune to 40 GHz `0.955397` (this record, ADR-0049).
+/// v3.5.5 retune to 40 GHz `0.955397` (ADR-0049);
+/// v3.5.6 Lee-Mittra absorbing complement `0.955500` (ADR-0070, this record).
 #[test]
-#[ignore = "fem-eig-006 strict magnitude bound (Phase 4.fem.eig.3.5.5 frequency retune, ADR-0048 \
-            Option (a)): FEM_EIG_006_F_HZ retuned 30→40 GHz so TE_{20} propagates (β≈554 rad/m, \
-            33% above its c/B=30 GHz cutoff). |S_11|(40 GHz) = 0.955397 (-0.40 dB) on native \
-            (16,3,2) cavity, 576 tets — did NOT retire (marginally above the 30 GHz value 0.926). \
-            One-shot refinement probe (NY 3→9, NZ 2→6, 5184 tets) gave 0.913956 (-0.78 dB): a 9× \
-            transverse refinement moved |S_11| only ~0.04, so the residual is NOT \
-            discretisation-limited (probe reverted). Escape-hatch: residual is a genuine \
-            modal-projection wave-port limitation; queued for Phase 4.fem.eig.3.5.6 \
-            absorbing-mode wave-port per Lee-Mittra 1997 (ADR-0048 Option (b), ADR-0049). \
+#[ignore = "fem-eig-006 strict magnitude bound (Phase 4.fem.eig.3.5.6 Lee-Mittra absorbing-mode \
+            complement, ADR-0070): Lee-Mittra first-order complement applied to port_1 — \
+            K = jk₀ B_face + Σ_m j(β_m−k₀) R_m. Measured |S_11|(40 GHz) = 0.955500 (-0.40 dB) \
+            on native (16,3,2) cavity, 576 tets — essentially unchanged from v3.5.5 baseline \
+            0.955397 (0.01% change). First-order Lee-Mittra does NOT retire the gate for this \
+            high-aspect geometry: β₁₀≈776 and β₂₀≈554 rad/m < k₀≈838 rad/m; negative \
+            j(β_m−k₀) corrections reduce stiffness but rank-1 R_m projects onto a small \
+            fraction of B_face for the low-element-count mesh. Higher-order absorbing BC \
+            (Lee-Mittra §V rational-function extension) queued for Phase 4.fem.eig.3.5.7. \
             Tolerance < 0.1 not weakened."]
 fn fem_eig_006_magnitude_bounded() {
     let result = run_fem_eig_006_high_aspect_pml().expect("fem-eig-006 driver");
