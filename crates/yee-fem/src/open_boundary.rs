@@ -173,8 +173,10 @@ use nalgebra::SMatrix;
 use crate::assembly::FemEigenAssembly;
 use crate::element::{
     LOCAL_EDGES, assemble_abc_face_block, assemble_abc2_face_block, assemble_port_face_block,
-    assemble_port_face_block_gauss_pts, assemble_port_face_rhs_gauss_pts, assemble_port_modal_rhs,
-    assemble_tet_element_complex, assemble_tet_element_complex_anisotropic,
+    assemble_port_face_block_gauss_pts, assemble_port_face_block_projected,
+    assemble_port_face_block_projected_gauss_pts, assemble_port_face_rhs_gauss_pts,
+    assemble_port_modal_rhs, assemble_tet_element_complex,
+    assemble_tet_element_complex_anisotropic,
 };
 use crate::material::MaterialDatabase;
 
@@ -654,6 +656,29 @@ pub struct PortDefinition {
     /// single-mode case (collapsed via [`Self::single_mode`])
     /// reproduces the v3.5.3 numerics bit-for-bit.
     pub modes: Vec<PortMode>,
+    /// Enable the Lee-Mittra first-order absorbing-mode complement
+    /// (Phase 4.fem.eig.3.5.6, ADR-0070). Default `false` → backward-
+    /// compatible scalar wave-port stiffness.
+    ///
+    /// When `true`, `scatter_port_face_gauss` replaces the per-mode
+    /// scalar `jβ_m B_face` accumulation with the Lee-Mittra formula:
+    ///
+    /// ```text
+    /// K = jk₀ B_face + Σ_m j(β_m − k₀) R_m
+    /// ```
+    ///
+    /// where `R_m[i,j] = Σ_g w_g [(n̂×N_i)·e_t_m] [(e_t_m·n̂×N_j)]`
+    /// is the rank-1 modal-projection block for mode m. This imposes
+    /// mode-specific impedance matching for modes in the basis and a
+    /// first-order ABC (`k₀`) for modal content in the complement.
+    ///
+    /// The RHS accumulation (`a_inc × 2jβ_m × ∫N_i·e_t dS`) is
+    /// **unchanged** — only the stiffness block changes.
+    ///
+    /// See also: Lee, M.-F. and R. Mittra, *IEEE Trans. MTT* 45(7),
+    /// 1997, §IV; spec
+    /// `docs/superpowers/specs/2026-05-25-phase-4-fem-eig-3-5-6-absorbing-mode-wave-port-design.md`.
+    pub absorbing_complement: bool,
 }
 
 impl PortDefinition {
@@ -675,6 +700,8 @@ impl PortDefinition {
     /// vec![PortMode { ... }, ...] }` explicitly with per-mode
     /// `a_inc` (typically `Complex64::ONE` for the driving mode and
     /// `Complex64::ZERO` for higher-order projection directions).
+    ///
+    /// `absorbing_complement` is `false` by default — backward-compat.
     pub fn single_mode(
         beta_mode: Box<dyn Fn(f64) -> f64 + Send + Sync>,
         modal_e_t: Box<dyn Fn(Vector3<f64>) -> Vector3<f64> + Send + Sync>,
@@ -685,7 +712,19 @@ impl PortDefinition {
                 modal_e_t,
                 a_inc: Complex64::ONE,
             }],
+            absorbing_complement: false,
         }
+    }
+
+    /// Enable the Lee-Mittra first-order absorbing-mode complement on
+    /// this port (Phase 4.fem.eig.3.5.6, ADR-0070).
+    ///
+    /// Builder method — call after constructing the `PortDefinition`.
+    /// Sets [`Self::absorbing_complement`] to `true` and returns
+    /// `self` for chaining.
+    pub fn with_absorbing_complement(mut self) -> Self {
+        self.absorbing_complement = true;
+        self
     }
 }
 
@@ -2107,6 +2146,76 @@ impl<'m> OpenBoundarySolver<'m> {
     ) {
         let face_vertices = face.world_vertices(self.mesh);
 
+        if port.absorbing_complement {
+            // Lee-Mittra first-order absorbing-mode BC — centroid-
+            // approximation path (Phase 4.fem.eig.3.5.6, ADR-0070, spec §3.4):
+            //
+            //   K = jk₀ B_face + Σ_m j(β_m − k₀) R_m  (centroid variant)
+            let k0 = omega / C0;
+            let k_full = assemble_abc_face_block(face_vertices, face.normal, k0, 1.0);
+
+            let centroid = face.centroid(self.mesh);
+            let mut k_lee = k_full;
+            for mode in &port.modes {
+                let beta = (mode.beta_mode)(omega);
+                let beta_eff = beta - k0;
+                let e_t_c = (mode.modal_e_t)(centroid);
+                let r_m = assemble_port_face_block_projected(
+                    face_vertices,
+                    face.normal,
+                    beta_eff,
+                    e_t_c,
+                    1.0,
+                );
+                k_lee += r_m;
+            }
+
+            // Scatter Lee-Mittra stiffness block with PEC-precedence guard.
+            for i in 0..3 {
+                let gi = face.global_edges[i];
+                if self.pec_global_edges.contains(&gi) {
+                    continue;
+                }
+                let Some(ii) = interior_dof_of_edge[gi] else {
+                    continue;
+                };
+                let si = face.signs[i];
+                for j in 0..3 {
+                    let gj = face.global_edges[j];
+                    if self.pec_global_edges.contains(&gj) {
+                        continue;
+                    }
+                    let Some(jj) = interior_dof_of_edge[gj] else {
+                        continue;
+                    };
+                    let sj = face.signs[j];
+                    let sign = Complex64::new(si * sj, 0.0);
+                    triplets.push(Triplet::new(ii, jj, sign * k_lee[(i, j)]));
+                }
+            }
+
+            // RHS: unchanged — same a_inc × 2jβ_m × ∫N_i·e_t dS per-mode loop.
+            for mode in &port.modes {
+                let beta = (mode.beta_mode)(omega);
+                let e_t = (mode.modal_e_t)(centroid);
+                let rhs_block = assemble_port_modal_rhs(face_vertices, face.normal, beta, e_t);
+                for i in 0..3 {
+                    let gi = face.global_edges[i];
+                    if self.pec_global_edges.contains(&gi) {
+                        continue;
+                    }
+                    let Some(ii) = interior_dof_of_edge[gi] else {
+                        continue;
+                    };
+                    let si = face.signs[i];
+                    let sign = Complex64::new(si, 0.0);
+                    rhs[ii] += mode.a_inc * sign * rhs_block[i];
+                }
+            }
+            return;
+        }
+
+        // Existing scalar wave-port path (backward-compat, absorbing_complement=false).
         for mode in &port.modes {
             let beta = (mode.beta_mode)(omega);
             let centroid = face.centroid(self.mesh);
@@ -2181,6 +2290,99 @@ impl<'m> OpenBoundarySolver<'m> {
     ) {
         let face_vertices = face.world_vertices(self.mesh);
 
+        if port.absorbing_complement {
+            // Lee-Mittra first-order absorbing-mode BC (Phase 4.fem.eig.3.5.6,
+            // ADR-0070, spec §3.2):
+            //
+            //   K = jk₀ B_face + Σ_m j(β_m − k₀) R_m
+            //
+            // Step A: jk₀ × full face Gram matrix (scalar ABC term).
+            let k0 = omega / C0;
+            let k_full = assemble_port_face_block_gauss_pts(
+                face_vertices,
+                face.normal,
+                Complex64::new(k0, 0.0),
+                1.0,
+            );
+
+            // Step B: add rank-1 modal-projection corrections Σ_m j(β_m−k₀) R_m.
+            let mut k_lee = k_full;
+            for mode in &port.modes {
+                let beta = (mode.beta_mode)(omega);
+                let beta_eff = beta - k0;
+                let mut e_t_gauss = [Vector3::<f64>::zeros(); 3];
+                for (g, bary) in TRI_GAUSS_3PT_BARY.iter().enumerate() {
+                    let p_g = bary[0] * face_vertices[0]
+                        + bary[1] * face_vertices[1]
+                        + bary[2] * face_vertices[2];
+                    e_t_gauss[g] = (mode.modal_e_t)(p_g);
+                }
+                let r_m = assemble_port_face_block_projected_gauss_pts(
+                    face_vertices,
+                    face.normal,
+                    beta_eff,
+                    e_t_gauss,
+                    1.0,
+                );
+                k_lee += r_m;
+            }
+
+            // Scatter Lee-Mittra stiffness block into triplets with PEC-
+            // precedence guard and per-edge orientation sign.
+            for i in 0..3 {
+                let gi = face.global_edges[i];
+                if self.pec_global_edges.contains(&gi) {
+                    continue;
+                }
+                let Some(ii) = interior_dof_of_edge[gi] else {
+                    continue;
+                };
+                let si = face.signs[i];
+                for j in 0..3 {
+                    let gj = face.global_edges[j];
+                    if self.pec_global_edges.contains(&gj) {
+                        continue;
+                    }
+                    let Some(jj) = interior_dof_of_edge[gj] else {
+                        continue;
+                    };
+                    let sj = face.signs[j];
+                    let sign = Complex64::new(si * sj, 0.0);
+                    triplets.push(Triplet::new(ii, jj, sign * k_lee[(i, j)]));
+                }
+            }
+
+            // RHS: unchanged — same a_inc × 2jβ_m × ∫N_i·e_t dS per-mode
+            // loop as the existing scalar path.
+            for mode in &port.modes {
+                let beta = (mode.beta_mode)(omega);
+                let beta_c = Complex64::new(beta, 0.0);
+                let mut e_t_gauss = [Vector3::<f64>::zeros(); 3];
+                for (g, bary) in TRI_GAUSS_3PT_BARY.iter().enumerate() {
+                    let p_g = bary[0] * face_vertices[0]
+                        + bary[1] * face_vertices[1]
+                        + bary[2] * face_vertices[2];
+                    e_t_gauss[g] = (mode.modal_e_t)(p_g);
+                }
+                let rhs_block =
+                    assemble_port_face_rhs_gauss_pts(face_vertices, face.normal, beta_c, e_t_gauss);
+                for i in 0..3 {
+                    let gi = face.global_edges[i];
+                    if self.pec_global_edges.contains(&gi) {
+                        continue;
+                    }
+                    let Some(ii) = interior_dof_of_edge[gi] else {
+                        continue;
+                    };
+                    let si = face.signs[i];
+                    let sign = Complex64::new(si, 0.0);
+                    rhs[ii] += mode.a_inc * sign * rhs_block[i];
+                }
+            }
+            return;
+        }
+
+        // Existing scalar wave-port path (backward-compat, absorbing_complement=false).
         for mode in &port.modes {
             let beta = (mode.beta_mode)(omega);
             let beta_c = Complex64::new(beta, 0.0);
@@ -3044,6 +3246,26 @@ mod tests {
             table.faces.len(),
             6,
             "two tets sharing one face should produce 6 exterior faces"
+        );
+    }
+
+    #[test]
+    fn port_definition_default_absorbing_complement_is_false() {
+        // Phase 4.fem.eig.3.5.6 (ADR-0070): `single_mode` leaves
+        // `absorbing_complement = false` for backward-compat.
+        let port = PortDefinition::single_mode(
+            Box::new(|_omega: f64| 0.0),
+            Box::new(|_p: nalgebra::Vector3<f64>| nalgebra::Vector3::zeros()),
+        );
+        assert!(
+            !port.absorbing_complement,
+            "PortDefinition::single_mode must default absorbing_complement=false"
+        );
+        // Builder method flips the flag.
+        let port2 = port.with_absorbing_complement();
+        assert!(
+            port2.absorbing_complement,
+            "with_absorbing_complement() must set absorbing_complement=true"
         );
     }
 

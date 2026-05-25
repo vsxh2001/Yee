@@ -60,23 +60,40 @@ Implement the Lee-Mittra first-order absorbing-mode port as `PortDefinition::wit
 4. New branch in `scatter_port_face_gauss` and `scatter_port_face` when absorbing_complement=true.
 5. fem-eig-006 port_1 gains `absorbing_complement: true`.
 
-## Measurement (to be filled after implementation)
+## Measurement
 
 | Configuration | `|S₁₁|(40 GHz)` |
 |---|---|
 | v3.5.5 multi-mode TE₁₀+TE₂₀+TE₀₁ (baseline) | 0.955397 |
-| v3.5.6 with Lee-Mittra absorbing complement | TBD |
+| v3.5.6 with Lee-Mittra absorbing complement | 0.955500 |
+
+**Gate result: ESCAPE-HATCH.** The Lee-Mittra first-order absorbing complement
+did NOT retire `fem_eig_006_magnitude_bounded`. Change: +0.01% (essentially
+unchanged). The `#[ignore]` attribute is kept; gate tolerance `< 0.1` is not
+weakened.
+
+**Root-cause hypothesis.** At 40 GHz, β₁₀ ≈ 776 rad/m and β₂₀ ≈ 554 rad/m
+are both below k₀ ≈ 838 rad/m, so the corrections `j(β_m−k₀) R_m` are
+negative-imaginary (they reduce the stiffness). The rank-1 projection R_m
+covers only a small fraction of the face Gram B_face for the actual TE mode
+shapes on this low-element-count (16×3×2) mesh. For this geometry, the
+first-order complement provides insufficient differential absorption between
+the modal and complement subspaces.
+
+**Next step (Phase 4.fem.eig.3.5.7).** The Lee-Mittra §V rational-function
+higher-order extension, or a different port formulation (aperture integral,
+T-matrix de-embedding), is needed to retire this gate.
 
 ## Consequences
 
-- `fem_eig_006_magnitude_bounded` is un-ignored if `|S₁₁| < 0.1`; kept `#[ignore]`
-  with updated measurement if not.
-- `PortDefinition::absorbing_complement = false` by default → all existing port
-  definitions unchanged; all existing gates must remain green.
-- The new `assemble_port_face_block_projected_gauss_pts` is a reusable higher-order
-  absorbing BC primitive for future Phase 4 ports.
-- If the gate does not close, the finding and new measurement are recorded here;
-  the next step (Phase 4.fem.eig.3.5.7) would investigate higher-order absorbing BC.
+- `fem_eig_006_magnitude_bounded` remains `#[ignore]`'d with updated
+  measurement (0.955500) and root-cause notes.
+- `PortDefinition::absorbing_complement = false` by default → all existing
+  port definitions unchanged; all existing gates remain green (backward-compat).
+- The new `assemble_port_face_block_projected_gauss_pts` is a reusable
+  higher-order absorbing BC primitive for future Phase 4 ports (the element
+  function is correct; the limitation is the port formulation, not the kernel).
+- Phase 4.fem.eig.3.5.7 should investigate higher-order absorbing BC.
 
 ## References
 
