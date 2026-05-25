@@ -732,6 +732,7 @@ impl std::fmt::Debug for PortDefinition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PortDefinition")
             .field("modes", &self.modes)
+            .field("absorbing_complement", &self.absorbing_complement)
             .finish()
     }
 }
