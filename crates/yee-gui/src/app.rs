@@ -20,7 +20,9 @@
 //! The default (unchecked) keeps the pre-existing single-trace (S11)
 //! behaviour for back-compat and 1-port files.
 
-use crate::plots::{Selection, build_sparam_series, show_smith_chart, show_sparams_db_plot};
+use crate::plots::{
+    Selection, build_smith_series, build_sparam_series, show_smith_chart, show_sparams_db_plot,
+};
 use crate::validation::ValidationPanel;
 use crate::viewport::{MeshCallback, ViewportState, thin_cylinder};
 use egui_dock::{DockArea, DockState, NodeIndex, Style};
@@ -276,8 +278,6 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
                     });
                 }
                 Some(f) => {
-                    // S11 lives at row-major slot 0 for any port count.
-                    let s11: Vec<num_complex::Complex64> = f.data.iter().map(|m| m[0]).collect();
                     match tab {
                         TabKind::S11Db => {
                             // Multi-trace overlay: show a "Show all entries"
@@ -294,7 +294,18 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
                             let series = build_sparam_series(f, &selection);
                             show_sparams_db_plot(ui, &series);
                         }
-                        TabKind::Smith => show_smith_chart(ui, &s11),
+                        TabKind::Smith => {
+                            if f.n_ports > 1 {
+                                ui.checkbox(self.show_all_entries, "Show all entries");
+                            }
+                            let selection = if *self.show_all_entries && f.n_ports > 1 {
+                                Selection::All
+                            } else {
+                                Selection::Diagonal(0)
+                            };
+                            let series = build_smith_series(f, &selection);
+                            show_smith_chart(ui, &series);
+                        }
                         TabKind::Mesh3D | TabKind::Validation => unreachable!(),
                     }
                 }

@@ -137,6 +137,60 @@ pub fn build_sparam_series(file: &TsFile, selection: &Selection) -> Vec<SparamSe
         .collect()
 }
 
+/// A single labelled S-parameter trace in the complex Γ-plane.
+///
+/// Each element of `points` is `[Re(S), Im(S)]` at one frequency sample.
+#[derive(Debug, Clone)]
+pub struct SmithSeries {
+    /// Legend label, e.g. `"S11"` or `"S22"`.
+    pub label: String,
+    /// Plot points: each is `[Re(S_ij), Im(S_ij)]`.
+    pub points: Vec<[f64; 2]>,
+}
+
+/// Build labelled Smith-chart series from a loaded Touchstone file.
+///
+/// Mirrors [`build_sparam_series`], but stores raw `[Re, Im]` rather
+/// than `[freq_ghz, dB]` pairs.
+pub fn build_smith_series(file: &TsFile, selection: &Selection) -> Vec<SmithSeries> {
+    let n = file.n_ports;
+
+    // Expand the selection into (row, col) index pairs (0-based).
+    let pairs: Vec<(usize, usize)> = match selection {
+        Selection::Diagonal(i) => {
+            if *i < n {
+                vec![(*i, *i)]
+            } else {
+                vec![]
+            }
+        }
+        Selection::Entries(pairs) => pairs
+            .iter()
+            .filter(|&&(r, c)| r < n && c < n)
+            .copied()
+            .collect(),
+        Selection::All => (0..n).flat_map(|r| (0..n).map(move |c| (r, c))).collect(),
+    };
+
+    pairs
+        .into_iter()
+        .map(|(r, c)| {
+            let flat_idx = r * n + c;
+            let points: Vec<[f64; 2]> = file
+                .data
+                .iter()
+                .map(|s_matrix| {
+                    let z = s_matrix[flat_idx];
+                    [z.re, z.im]
+                })
+                .collect();
+            // 1-based label to match Touchstone / CLI convention.
+            let label = format!("S{}{}", r + 1, c + 1);
+            SmithSeries { label, points }
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // egui drawing helpers
 // ---------------------------------------------------------------------------
@@ -156,6 +210,46 @@ pub fn unit_circle_points(n: usize) -> Vec<[f64; 2]> {
     // Close the loop.
     pts.push(pts[0]);
     pts
+}
+
+/// Constant-R circle on the Smith chart in the Γ-plane.
+///
+/// Returns `n + 1` points forming a closed circle with centre
+/// `(r/(r+1), 0)` and radius `1/(r+1)`.  All points lie on or
+/// inside the unit disk for any `r ≥ 0`.
+pub fn smith_r_circle_points(r: f64, n: usize) -> Vec<[f64; 2]> {
+    let centre_re = r / (r + 1.0);
+    let radius = 1.0 / (r + 1.0);
+    let mut pts = Vec::with_capacity(n + 1);
+    for i in 0..n {
+        let theta = (i as f64) * std::f64::consts::TAU / (n as f64);
+        pts.push([centre_re + radius * theta.cos(), radius * theta.sin()]);
+    }
+    // Close the loop.
+    pts.push(pts[0]);
+    pts
+}
+
+/// Constant-X arc on the Smith chart, clipped to the unit disk.
+///
+/// The full constant-X circle has centre `(1, 1/x)` and radius `1/|x|`.
+/// Only points satisfying `re² + im² ≤ 1.0 + 1e-9` are returned.
+/// Panics if `x == 0.0`.
+pub fn smith_x_arc_points(x: f64, n: usize) -> Vec<[f64; 2]> {
+    assert!(x != 0.0, "smith_x_arc_points: x must be non-zero");
+    let centre_re = 1.0_f64;
+    let centre_im = 1.0 / x;
+    let radius = 1.0 / x.abs();
+    (0..n)
+        .map(|i| {
+            let theta = (i as f64) * std::f64::consts::TAU / (n as f64);
+            [
+                centre_re + radius * theta.cos(),
+                centre_im + radius * theta.sin(),
+            ]
+        })
+        .filter(|&[re, im]| re * re + im * im <= 1.0 + 1e-9)
+        .collect()
 }
 
 /// Overlay multiple S-parameter traces (pre-built by [`build_sparam_series`])
@@ -207,20 +301,47 @@ pub fn show_s11_db_plot(ui: &mut egui::Ui, freq_hz: &[f64], s11: &[Complex64]) {
         });
 }
 
-/// Plot the `S11` trajectory on a Smith-chart-style canvas: the unit circle
-/// is drawn for reference, and the data points are plotted in the complex
-/// plane with a locked 1:1 aspect ratio.
-pub fn show_smith_chart(ui: &mut egui::Ui, s11: &[Complex64]) {
-    let unit: PlotPoints = unit_circle_points(256).into_iter().collect();
-    let traj: PlotPoints = s11.iter().map(|z| [z.re, z.im]).collect();
+/// Plot S-parameter trajectories on a Smith-chart canvas.
+///
+/// Draws (in order):
+/// 1. The unit circle `|Γ| = 1` as a reference boundary.
+/// 2. Constant-R circles for `r ∈ [0.2, 0.5, 1.0, 2.0, 5.0]`.
+/// 3. Constant-X arcs for `x ∈ [±0.2, ±0.5, ±1.0, ±2.0, ±5.0]`.
+/// 4. One coloured line per [`SmithSeries`] in `series`.
+///
+/// The plot uses a locked 1:1 data aspect ratio so circles appear round, and
+/// an `egui_plot` legend so trace labels are visible.
+pub fn show_smith_chart(ui: &mut egui::Ui, series: &[SmithSeries]) {
+    const R_VALUES: &[f64] = &[0.2, 0.5, 1.0, 2.0, 5.0];
+    const X_VALUES: &[f64] = &[0.2, 0.5, 1.0, 2.0, 5.0, -0.2, -0.5, -1.0, -2.0, -5.0];
 
     Plot::new("smith_chart")
         .data_aspect(1.0)
         .x_axis_label("Re")
         .y_axis_label("Im")
+        .legend(Legend::default())
         .show(ui, |plot_ui| {
-            plot_ui.line(Line::new("|Γ| = 1", unit));
-            plot_ui.line(Line::new("S11(f)", traj));
+            // 1. Unit circle.
+            let unit: PlotPoints = unit_circle_points(256).into_iter().collect();
+            plot_ui.line(Line::new("|Γ|=1", unit));
+
+            // 2. Constant-R circles.
+            for &r in R_VALUES {
+                let pts: PlotPoints = smith_r_circle_points(r, 128).into_iter().collect();
+                plot_ui.line(Line::new(format!("r={r}"), pts));
+            }
+
+            // 3. Constant-X arcs.
+            for &x in X_VALUES {
+                let pts: PlotPoints = smith_x_arc_points(x, 256).into_iter().collect();
+                plot_ui.line(Line::new(format!("x={x}"), pts));
+            }
+
+            // 4. Data traces.
+            for s in series {
+                let pts: PlotPoints = s.points.iter().copied().collect();
+                plot_ui.line(Line::new(s.label.clone(), pts));
+            }
         });
 }
 
@@ -402,6 +523,106 @@ mod tests {
                 "point {k}: y={y}, expected {expected_db}"
             );
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // smith_r_circle_points
+    // -------------------------------------------------------------------------
+
+    /// `smith_r_circle_points(1.0, 64)` returns exactly 65 points (n + 1),
+    /// the loop is closed (first == last), and every point lies on the circle
+    /// with centre (0.5, 0) and radius 0.5.
+    #[test]
+    fn smith_r_circle_returns_correct_n_plus_1_points() {
+        let pts = smith_r_circle_points(1.0, 64);
+        assert_eq!(pts.len(), 65, "expected n+1 = 65 points");
+        assert_eq!(pts.first().unwrap(), pts.last().unwrap(), "loop not closed");
+        let centre = [0.5_f64, 0.0_f64];
+        let radius = 0.5_f64;
+        for &[re, im] in &pts {
+            let dist = ((re - centre[0]).powi(2) + (im - centre[1]).powi(2)).sqrt();
+            assert!(
+                (dist - radius).abs() < 1e-9,
+                "point ({re},{im}) not on circle: dist={dist}"
+            );
+        }
+    }
+
+    /// Every point of a constant-R circle must lie inside the unit disk.
+    #[test]
+    fn smith_r_circle_contained_in_unit_disk() {
+        let pts = smith_r_circle_points(0.5, 128);
+        for &[re, im] in &pts {
+            let mag2 = re * re + im * im;
+            assert!(
+                mag2 <= 1.0 + 1e-9,
+                "point ({re},{im}) outside unit disk: |Γ|²={mag2}"
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // smith_x_arc_points
+    // -------------------------------------------------------------------------
+
+    /// Every point returned by `smith_x_arc_points(1.0, 256)` must lie on the
+    /// circle with centre (1, 1) and radius 1.
+    #[test]
+    fn smith_x_arc_points_on_circle() {
+        let pts = smith_x_arc_points(1.0, 256);
+        assert!(!pts.is_empty(), "expected non-empty arc for x=1");
+        let centre = [1.0_f64, 1.0_f64];
+        let radius = 1.0_f64;
+        for &[re, im] in &pts {
+            let dist = ((re - centre[0]).powi(2) + (im - centre[1]).powi(2)).sqrt();
+            assert!(
+                (dist - radius).abs() < 1e-9,
+                "point ({re},{im}) not on circle: dist={dist}"
+            );
+        }
+    }
+
+    /// Every point returned by `smith_x_arc_points` must be inside the unit disk.
+    #[test]
+    fn smith_x_arc_points_inside_unit_disk() {
+        let pts = smith_x_arc_points(0.2, 512);
+        for &[re, im] in &pts {
+            let mag2 = re * re + im * im;
+            assert!(
+                mag2 <= 1.0 + 1e-9,
+                "point ({re},{im}) outside unit disk: |Γ|²={mag2}"
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // build_smith_series
+    // -------------------------------------------------------------------------
+
+    /// `Selection::All` on a 2-port file → 4 series labelled S11/S12/S21/S22,
+    /// each with 5 points; the first series first point is (Re=0.5, Im=0.0).
+    #[test]
+    fn build_smith_series_all_two_port() {
+        let file = two_port_file();
+        let series = build_smith_series(&file, &Selection::All);
+        assert_eq!(series.len(), 4, "expected 4 series for 2-port All");
+
+        let labels: Vec<&str> = series.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(labels, vec!["S11", "S12", "S21", "S22"]);
+
+        for s in &series {
+            assert_eq!(
+                s.points.len(),
+                file.freq_hz.len(),
+                "series '{}' has wrong point count",
+                s.label
+            );
+        }
+
+        // S11 = 0.5+0j → first point is [0.5, 0.0].
+        let &[re, im] = &series[0].points[0];
+        assert!((re - 0.5).abs() < 1e-12, "S11 Re: expected 0.5, got {re}");
+        assert!(im.abs() < 1e-12, "S11 Im: expected 0.0, got {im}");
     }
 
     /// `Selection::All` on a 1-port file → exactly 1 series labelled `S11`.
