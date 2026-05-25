@@ -625,9 +625,10 @@ mod tests {
         assert!(im.abs() < 1e-12, "S11 Im: expected 0.0, got {im}");
     }
 
-    /// `Selection::All` on a 1-port file → exactly 1 series labelled `S11`.
+    /// `build_smith_series` on a 1-port file with `Selection::All` → 1 series
+    /// labelled `"S11"` with `[Re, Im]` points (not `[freq_ghz, dB]`).
     #[test]
-    fn series_all_one_port_produces_one_series() {
+    fn build_smith_series_one_port_produces_one_series_with_re_im_points() {
         let n_pts = 3usize;
         let file = TsFile {
             n_ports: 1,
@@ -635,11 +636,16 @@ mod tests {
             freq_unit: FreqUnit::GHz,
             format: Format::RealImag,
             freq_hz: (1..=n_pts).map(|i| i as f64 * 1.0e9).collect(),
-            data: (0..n_pts).map(|_| vec![Complex64::new(0.5, 0.0)]).collect(),
+            data: (0..n_pts).map(|_| vec![Complex64::new(0.5, 0.3)]).collect(),
             comments: vec![],
         };
-        let series = build_sparam_series(&file, &Selection::All);
+        let series = build_smith_series(&file, &Selection::All);
         assert_eq!(series.len(), 1);
         assert_eq!(series[0].label, "S11");
+        assert_eq!(series[0].points.len(), n_pts);
+        // Each point must be [Re, Im], not [freq_ghz, dB].
+        let &[re, im] = &series[0].points[0];
+        assert!((re - 0.5).abs() < 1e-12, "Re: expected 0.5, got {re}");
+        assert!((im - 0.3).abs() < 1e-12, "Im: expected 0.3, got {im}");
     }
 }
