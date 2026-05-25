@@ -102,3 +102,4 @@
 - [ADR-0066: fdtd-201.x higher-order cavity mode gate](decisions/0066-fdtd-201x-higher-cavity-mode.md)
 - [ADR-0067: validation aggregator FEM-eig wiring + `yee validate fem`](decisions/0067-validation-aggregator-fem-wiring.md)
 - [ADR-0068: Smith chart constant-R/X arc overlays + GUI multi-trace](decisions/0068-smith-chart-constant-rx-arcs.md)
+- [ADR-0069: Phase 1.plotting.3 CLI Smith chart multi-trace](decisions/0069-phase-1-plotting-3-smith-cli-multi-trace.md)
