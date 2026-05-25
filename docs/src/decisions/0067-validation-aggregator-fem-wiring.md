@@ -1,7 +1,8 @@
 # ADR-0067 — register the shipped FEM-eig gates in the validation aggregator + `yee validate fem`
 
-**Status:** Accepted
+**Status:** Implemented
 **Date:** 2026-05-24
+**Implemented:** 2026-05-25 (merge `9fe8418`)
 **Context Phase:** 1.validation (aggregator truth-up)
 
 ## Context
