@@ -229,4 +229,4 @@ These are the things that will bite you if you skip them. Update this section wh
 
 ---
 
-*Last updated: 2026-05-25, base SHA `78bc63a` (Phase 1.gui.5/1.plotting.2 Smith chart constant-R/X arc overlays + multi-trace, ADR-0068). Update this file whenever a decision is made twice or a gotcha bites twice.*
+*Last updated: 2026-05-25, base SHA `ca05f62` (Phase 1.plotting.3 CLI Smith chart multi-trace, ADR-0069). Update this file whenever a decision is made twice or a gotcha bites twice.*
