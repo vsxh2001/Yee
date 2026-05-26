@@ -80,13 +80,13 @@ print(f"rel_err    = {result.rel_err:.4e}")
 print(f"passed     = {result.passed}")
 ```
 
-Expected output (tolerances ±5 %):
+Expected output (exact values depend on floating-point constants; typical run):
 
 ```
 f₁₀₁       = 1.0607 GHz
-Q_analytic = 20.0001
-Q_measured = 19.9924
-rel_err    = 3.8e-04
+Q_analytic = 19.9350     # 2π · f₁₀₁ · ε₀ / σ₀
+Q_measured = 19.9293     # log-linear ring-down fit
+rel_err    = 2.9e-04
 passed     = True
 ```
 

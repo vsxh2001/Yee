@@ -4918,15 +4918,11 @@ mod tests {
         );
     }
 
-    /// fdtd-202 appears in `run_all()` output.
-    ///
-    /// Verifies that `Report::run_all()` includes the fdtd-202 case by
-    /// scanning the cases list. Skips the slow mom-001 via this test
-    /// running in a filtered context — this just checks the list
-    /// membership via the unit-level `run_fdtd_202_lossy_cavity_q`.
+    /// Verifies that [`run_fdtd_202_lossy_cavity_q`] returns a result with
+    /// `id == "fdtd-202"` (the stable case identifier wired into `run_all`).
     #[test]
     fn run_all_includes_fdtd_202() {
         let result = run_fdtd_202_lossy_cavity_q();
-        assert_eq!(result.id, "fdtd-202", "fdtd-202 case missing from run_all");
+        assert_eq!(result.id, "fdtd-202", "fdtd-202 case id mismatch");
     }
 }
