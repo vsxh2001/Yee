@@ -32,6 +32,7 @@
 - [Multi-port FEM S-matrix from Python](tutorials/08-fem-multi-port.md)
 - [Cross-section wave-port eigensolve (Rust)](tutorials/09-cross-section-waveport.md)
 - [FDTD lossy cavity from Python](tutorials/10-fdtd-lossy-cavity-from-python.md)
+- [FDTD cavity resonance from Python](tutorials/11-fdtd-cavity-resonance-from-python.md)
 
 # Decisions
 
