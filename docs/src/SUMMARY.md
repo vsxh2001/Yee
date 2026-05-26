@@ -107,3 +107,4 @@
 - [ADR-0070: Phase 4.fem.eig.3.5.6 Lee-Mittra absorbing-mode wave-port](decisions/0070-phase-4-fem-eig-3-5-6-absorbing-mode-wave-port.md)
 - [ADR-0071: fdtd-202 lossy-cavity Q-factor validation gate](decisions/0071-fdtd-202-cavity-q-factor.md)
 - [ADR-0072: Phase 2.fdtd.py.0 Python cavity-Q driver + fdtd-202 aggregator](decisions/0072-phase-2-fdtd-py-0-cavity-q-python.md)
+- [ADR-0073: Phase 2.fdtd.py.1 FDTD cavity-resonance Python driver + fdtd-201/201.x aggregator](decisions/0073-phase-2-fdtd-py-1-cavity-resonance-python.md)
