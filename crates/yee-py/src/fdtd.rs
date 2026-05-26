@@ -328,6 +328,181 @@ impl PyCavityQResult {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 2.fdtd.py.1 — cavity resonance frequency driver
+// ---------------------------------------------------------------------------
+
+/// Analytic TE₁₀₁ resonant frequency for a rectangular `nx × nz` cavity at
+/// cell size `dx` (Pozar §6.3):
+///
+/// ```text
+/// f₁₀₁ = (c/2) · √((1/a)² + (1/d)²)
+/// ```
+fn cr_analytic_f101(nx: usize, nz: usize, dx: f64) -> f64 {
+    const C0: f64 = 299_792_458.0;
+    let a = nx as f64 * dx;
+    let d = nz as f64 * dx;
+    0.5 * C0 * ((1.0 / (a * a)) + (1.0 / (d * d))).sqrt()
+}
+
+/// Result of a rectangular PEC cavity resonance simulation (fdtd-201 gate).
+///
+/// Returned by [`run_cavity_resonance`]. All scalar fields are exposed as
+/// Python read-only properties via `#[pyo3(get)]`. The full probe time series
+/// is available through [`PyCavityResonanceResult::probe_array`].
+#[pyclass(name = "CavityResonanceResult", module = "yee._yee")]
+pub struct PyCavityResonanceResult {
+    /// Peak frequency extracted from the DFT magnitude scan (Hz).
+    #[pyo3(get)]
+    pub f_extracted_hz: f64,
+    /// Analytic TE₁₀₁ resonant frequency from Pozar §6.3 (Hz).
+    #[pyo3(get)]
+    pub f_analytic_hz: f64,
+    /// `|f_extracted_hz − f_analytic_hz| / f_analytic_hz`.
+    #[pyo3(get)]
+    pub rel_err: f64,
+    /// `true` iff `rel_err < 0.025` (fdtd-201 gate: ±2.5 %).
+    #[pyo3(get)]
+    pub passed: bool,
+    /// Full probe time series (n_steps samples). Not directly exposed as a
+    /// Python attribute; access via [`Self::probe_array`].
+    pub probe_vec: Vec<f64>,
+}
+
+#[pymethods]
+impl PyCavityResonanceResult {
+    /// Return the full probe time series as a 1-D numpy `float64` array.
+    ///
+    /// The array has length `n_steps` (the value passed to
+    /// [`run_cavity_resonance`]). Sample `i` corresponds to the E_y probe
+    /// value recorded at time step `i` of the simulation.
+    pub fn probe_array<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.probe_vec.clone().into_pyarray(py)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "CavityResonanceResult(f_extracted_hz={:.6e}, f_analytic_hz={:.6e}, \
+             rel_err={:.4e}, passed={})",
+            self.f_extracted_hz, self.f_analytic_hz, self.rel_err, self.passed,
+        )
+    }
+}
+
+/// Run a rectangular PEC cavity simulation and extract the TE₁₀₁ resonant
+/// frequency via a broadband DFT scan.
+///
+/// Builds a vacuum grid of `nx × ny × nz` cells at cell size `dx` metres,
+/// injects a broadband Gaussian pulse into E_y, runs for `n_steps` time steps
+/// with PEC boundary conditions, and scans `n_freq_bins` candidate frequencies
+/// in `[0.65·f_ref, 1.50·f_ref]` (where `f_ref` is the analytic TE₁₀₁
+/// frequency) to find the spectral peak. Returns the frequency of maximum DFT
+/// magnitude alongside the analytic reference and the relative error.
+///
+/// # Arguments
+///
+/// * `nx` — cells in x (default 20)
+/// * `ny` — cells in y (default 10)
+/// * `nz` — cells in z (default 20)
+/// * `dx` — cell size in metres (default 0.01 = 10 mm)
+/// * `n_steps` — number of FDTD time steps (default 30 000)
+/// * `n_freq_bins` — number of DFT candidate frequencies (default 400)
+///
+/// # Returns
+///
+/// A [`CavityResonanceResult`] with `.f_extracted_hz`, `.f_analytic_hz`,
+/// `.rel_err`, `.passed`, and `.probe_array()`.
+#[pyfunction]
+#[pyo3(signature = (
+    nx = 20,
+    ny = 10,
+    nz = 20,
+    dx = 0.01,
+    n_steps = 30_000usize,
+    n_freq_bins = 400usize,
+))]
+pub fn run_cavity_resonance(
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    dx: f64,
+    n_steps: usize,
+    n_freq_bins: usize,
+) -> PyCavityResonanceResult {
+    use yee_fdtd::boundary;
+    use yee_fdtd::{FdtdSolver, WalkingSkeletonSolver};
+
+    let grid = YeeGrid::vacuum(nx, ny, nz, dx);
+    let dt = grid.dt;
+    let mut solver = WalkingSkeletonSolver::new(grid);
+
+    // Source: (nx/4, ny/2, nz/4) in ey — off-centre for TE₁₀₁ coupling.
+    let src_i = nx / 4;
+    let src_j = ny / 2;
+    let src_k = nz / 4;
+    // Probe: (3*nx/4, ny/2, 3*nz/4) — opposite quarter, reduces source
+    // near-field bias.
+    let prb_i = nx * 3 / 4;
+    let prb_j = ny / 2;
+    let prb_k = nz * 3 / 4;
+
+    // Gaussian parameters: t0 = 12·dt, σ_t = 4·dt.
+    let t0 = 12.0 * dt;
+    let sigma_t = 4.0 * dt;
+
+    let mut probe_series: Vec<f64> = Vec::with_capacity(n_steps);
+
+    for _ in 0..n_steps {
+        let t = solver.current_time();
+        solver.update_h_only();
+        #[allow(deprecated)]
+        boundary::apply_pec(solver.grid_mut());
+        {
+            let arg = (t - t0) / sigma_t;
+            solver.grid_mut().ey[(src_i, src_j, src_k)] += (-arg * arg).exp();
+        }
+        solver.update_e_only();
+        solver.apply_cpml_e();
+        solver.advance_clock();
+        probe_series.push(solver.grid().ey[(prb_i, prb_j, prb_k)]);
+    }
+
+    // DFT scan: n_freq_bins candidates in [0.65·f_ref, 1.50·f_ref].
+    let f_ref = cr_analytic_f101(nx, nz, dx);
+    let f_lo = 0.65 * f_ref;
+    let f_hi = 1.50 * f_ref;
+    let df_scan = (f_hi - f_lo) / (n_freq_bins - 1) as f64;
+
+    let mut peak_power = 0.0_f64;
+    let mut peak_freq = f_lo;
+
+    for bin in 0..n_freq_bins {
+        let f_candidate = f_lo + bin as f64 * df_scan;
+        let omega = 2.0 * PI * f_candidate;
+        let mut re_acc = 0.0_f64;
+        let mut im_acc = 0.0_f64;
+        for (n, &x) in probe_series.iter().enumerate() {
+            let phase = omega * n as f64 * dt;
+            re_acc += x * phase.cos();
+            im_acc -= x * phase.sin();
+        }
+        let power = re_acc * re_acc + im_acc * im_acc;
+        if power > peak_power {
+            peak_power = power;
+            peak_freq = f_candidate;
+        }
+    }
+
+    let rel_err = (peak_freq - f_ref).abs() / f_ref;
+    PyCavityResonanceResult {
+        f_extracted_hz: peak_freq,
+        f_analytic_hz: f_ref,
+        rel_err,
+        passed: rel_err < 0.025,
+        probe_vec: probe_series,
+    }
+}
+
 /// Run a lossy rectangular PEC cavity simulation and return the Q-factor.
 ///
 /// Builds a vacuum grid of `nx × ny × nz` cells at cell size `dx` metres,

@@ -143,3 +143,51 @@ def test_cavity_q_repr_smoke():
     r = repr(run_cavity_q())
     assert "CavityQResult" in r
     assert "q_measured" in r
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.fdtd.py.1 — fdtd-201 cavity resonance frequency
+# ---------------------------------------------------------------------------
+
+
+def test_cavity_resonance_passes_gate():
+    """fdtd-201: DFT scan extracts TE₁₀₁ frequency within ±2.5% of analytic."""
+    from yee import CavityResonanceResult, run_cavity_resonance
+
+    result = run_cavity_resonance(n_steps=15_000)
+    assert isinstance(result, CavityResonanceResult)
+    assert result.passed, (
+        f"fdtd-201 gate failed: f_extracted={result.f_extracted_hz:.6e} Hz, "
+        f"f_analytic={result.f_analytic_hz:.6e} Hz, rel_err={result.rel_err:.4e}"
+    )
+    assert result.rel_err < 0.025, (
+        f"rel_err={result.rel_err:.4e} exceeds 2.5% tolerance"
+    )
+
+
+def test_cavity_resonance_fields_and_probe_array():
+    """Field types, f_analytic_hz > 0, probe_array shape and dtype."""
+    import numpy as np
+
+    from yee import run_cavity_resonance
+
+    result = run_cavity_resonance(n_steps=15_000)
+    assert result.f_analytic_hz > 0.0, (
+        f"f_analytic_hz should be positive, got {result.f_analytic_hz}"
+    )
+    assert result.f_extracted_hz > 0.0, (
+        f"f_extracted_hz should be positive, got {result.f_extracted_hz}"
+    )
+    arr = result.probe_array()
+    assert isinstance(arr, np.ndarray)
+    assert arr.shape == (15_000,)
+    assert arr.dtype == np.float64
+
+
+def test_cavity_resonance_repr_smoke():
+    """__repr__ contains 'CavityResonanceResult' and 'f_extracted_hz'."""
+    from yee import run_cavity_resonance
+
+    r = repr(run_cavity_resonance(n_steps=100))
+    assert "CavityResonanceResult" in r
+    assert "f_extracted_hz" in r
