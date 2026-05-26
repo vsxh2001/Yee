@@ -31,6 +31,7 @@
 - [Open-boundary FEM driven sweep from Python](tutorials/07-fem-open-cavity.md)
 - [Multi-port FEM S-matrix from Python](tutorials/08-fem-multi-port.md)
 - [Cross-section wave-port eigensolve (Rust)](tutorials/09-cross-section-waveport.md)
+- [FDTD lossy cavity from Python](tutorials/10-fdtd-lossy-cavity-from-python.md)
 
 # Decisions
 
@@ -105,3 +106,4 @@
 - [ADR-0069: Phase 1.plotting.3 CLI Smith chart multi-trace](decisions/0069-phase-1-plotting-3-smith-cli-multi-trace.md)
 - [ADR-0070: Phase 4.fem.eig.3.5.6 Lee-Mittra absorbing-mode wave-port](decisions/0070-phase-4-fem-eig-3-5-6-absorbing-mode-wave-port.md)
 - [ADR-0071: fdtd-202 lossy-cavity Q-factor validation gate](decisions/0071-fdtd-202-cavity-q-factor.md)
+- [ADR-0072: Phase 2.fdtd.py.0 Python cavity-Q driver + fdtd-202 aggregator](decisions/0072-phase-2-fdtd-py-0-cavity-q-python.md)
