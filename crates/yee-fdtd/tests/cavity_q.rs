@@ -92,9 +92,9 @@ const N_SRC: usize = 200;
 
 /// Number of ring-down steps recorded for Q extraction.
 ///
-/// At dt ≈ 17.3 ps, 3000 steps ≈ 52 ns ≈ 8.7 τ (where τ = 2ε₀/σ ≈ 6 ns).
-/// Using the last 2/3 of the window places the fit at 2.9–8.7 τ, well into
-/// the single-mode ring-down.
+/// At dt ≈ 17.3 ps, 6000 steps ≈ 104 ns ≈ 17.4 τ (where τ = 2ε₀/σ ≈ 6 ns).
+/// Using the last 2/3 of the window places the fit at 5.8–17.4 τ, well into
+/// the single-mode ring-down where higher modes (TE₁₀₃ etc.) are negligible.
 const N_RING: usize = 6_000;
 
 // ---------------------------------------------------------------------------
