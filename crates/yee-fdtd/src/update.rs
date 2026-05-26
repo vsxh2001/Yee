@@ -105,6 +105,26 @@ pub fn update_h(grid: &mut YeeGrid) {
     }
 }
 
+/// Compute the lossy CA/CB coefficients for the Yee E-update (Taflove §3.7).
+///
+/// Given the local relative permittivity `eps_r`, conductivity `sigma` (S/m),
+/// and time step `dt`, returns `(CA, CB)` such that:
+///
+/// ```text
+/// E^{n+1} = CA · E^n + CB · curl_H
+/// ```
+///
+/// When σ = 0 this reduces to CA = 1, CB = dt/(ε₀ε_r), which is identical
+/// to the existing lossless update.  For σ > 0 the time-averaging is
+/// equivalent to the average-E Crank–Nicolson treatment in Taflove eq. 3.56.
+#[inline]
+fn ca_cb(eps_r: f64, sigma: f64, dt: f64) -> (f64, f64) {
+    let denom = 2.0 * EPS0 * eps_r + sigma * dt;
+    let ca = (2.0 * EPS0 * eps_r - sigma * dt) / denom;
+    let cb = 2.0 * dt / denom;
+    (ca, cb)
+}
+
 /// Advance every electric-field component by one time step.
 ///
 /// Reads the current `H` field and writes the new `E` field in place.
@@ -117,18 +137,28 @@ pub fn update_h(grid: &mut YeeGrid) {
 /// three E components in cell `(i, j, k)` see the same ε_r, matching the
 /// dispersive-material convention in [`crate::dispersive`]). Otherwise
 /// the scalar `grid.eps_r` is used.
+///
+/// When `grid.sigma_cells` is `Some`, the lossy Taflove §3.7 CA/CB
+/// formulation is applied per cell.  When `None`, the standard lossless
+/// `E += coeff * curl_H` form is used — identical to the pre-sigma
+/// behaviour.
 pub fn update_e(grid: &mut YeeGrid) {
     let dt = grid.dt;
     let dx = grid.dx;
     let dy = grid.dy;
     let dz = grid.dz;
     let coeff_scalar = dt / (EPS0 * grid.eps_r);
+    // CA/CB scalar fallback for σ = 0, uniform ε_r (pre-sigma behaviour).
+    let (ca_scalar, cb_scalar) = ca_cb(grid.eps_r, 0.0, dt);
+    let _ = ca_scalar; // used only when sigma_cells is Some but eps_r_cells is None
+    let _ = cb_scalar;
 
     let nx = grid.nx;
     let ny = grid.ny;
     let nz = grid.nz;
 
     let eps_r_cells = grid.eps_r_cells.as_ref();
+    let sigma_cells = grid.sigma_cells.as_ref();
 
     // ---- E_x: shape [nx, ny+1, nz+1] ----
     // Interior j ∈ [1, ny), k ∈ [1, nz); j == 0, ny and k == 0, nz are PEC faces.
@@ -137,11 +167,24 @@ pub fn update_e(grid: &mut YeeGrid) {
             for k in 1..nz {
                 let dhz_dy = (grid.hz[(i, j, k)] - grid.hz[(i, j - 1, k)]) / dy;
                 let dhy_dz = (grid.hy[(i, j, k)] - grid.hy[(i, j, k - 1)]) / dz;
-                let coeff = match eps_r_cells {
-                    None => coeff_scalar,
-                    Some(e) => dt / (EPS0 * e[(i, j, k)]),
-                };
-                grid.ex[(i, j, k)] += coeff * (dhz_dy - dhy_dz);
+                let curl_h = dhz_dy - dhy_dz;
+                match sigma_cells {
+                    None => {
+                        let coeff = match eps_r_cells {
+                            None => coeff_scalar,
+                            Some(e) => dt / (EPS0 * e[(i, j, k)]),
+                        };
+                        grid.ex[(i, j, k)] += coeff * curl_h;
+                    }
+                    Some(s) => {
+                        let eps_r = match eps_r_cells {
+                            None => grid.eps_r,
+                            Some(e) => e[(i, j, k)],
+                        };
+                        let (ca, cb) = ca_cb(eps_r, s[(i, j, k)], dt);
+                        grid.ex[(i, j, k)] = ca * grid.ex[(i, j, k)] + cb * curl_h;
+                    }
+                }
             }
         }
     }
@@ -153,11 +196,24 @@ pub fn update_e(grid: &mut YeeGrid) {
             for k in 1..nz {
                 let dhx_dz = (grid.hx[(i, j, k)] - grid.hx[(i, j, k - 1)]) / dz;
                 let dhz_dx = (grid.hz[(i, j, k)] - grid.hz[(i - 1, j, k)]) / dx;
-                let coeff = match eps_r_cells {
-                    None => coeff_scalar,
-                    Some(e) => dt / (EPS0 * e[(i, j, k)]),
-                };
-                grid.ey[(i, j, k)] += coeff * (dhx_dz - dhz_dx);
+                let curl_h = dhx_dz - dhz_dx;
+                match sigma_cells {
+                    None => {
+                        let coeff = match eps_r_cells {
+                            None => coeff_scalar,
+                            Some(e) => dt / (EPS0 * e[(i, j, k)]),
+                        };
+                        grid.ey[(i, j, k)] += coeff * curl_h;
+                    }
+                    Some(s) => {
+                        let eps_r = match eps_r_cells {
+                            None => grid.eps_r,
+                            Some(e) => e[(i, j, k)],
+                        };
+                        let (ca, cb) = ca_cb(eps_r, s[(i, j, k)], dt);
+                        grid.ey[(i, j, k)] = ca * grid.ey[(i, j, k)] + cb * curl_h;
+                    }
+                }
             }
         }
     }
@@ -169,11 +225,24 @@ pub fn update_e(grid: &mut YeeGrid) {
             for k in 0..nz {
                 let dhy_dx = (grid.hy[(i, j, k)] - grid.hy[(i - 1, j, k)]) / dx;
                 let dhx_dy = (grid.hx[(i, j, k)] - grid.hx[(i, j - 1, k)]) / dy;
-                let coeff = match eps_r_cells {
-                    None => coeff_scalar,
-                    Some(e) => dt / (EPS0 * e[(i, j, k)]),
-                };
-                grid.ez[(i, j, k)] += coeff * (dhy_dx - dhx_dy);
+                let curl_h = dhy_dx - dhx_dy;
+                match sigma_cells {
+                    None => {
+                        let coeff = match eps_r_cells {
+                            None => coeff_scalar,
+                            Some(e) => dt / (EPS0 * e[(i, j, k)]),
+                        };
+                        grid.ez[(i, j, k)] += coeff * curl_h;
+                    }
+                    Some(s) => {
+                        let eps_r = match eps_r_cells {
+                            None => grid.eps_r,
+                            Some(e) => e[(i, j, k)],
+                        };
+                        let (ca, cb) = ca_cb(eps_r, s[(i, j, k)], dt);
+                        grid.ez[(i, j, k)] = ca * grid.ez[(i, j, k)] + cb * curl_h;
+                    }
+                }
             }
         }
     }
