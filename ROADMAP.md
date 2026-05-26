@@ -8,7 +8,7 @@ Conventions used below:
 - ✅ **Validation** — benchmark cases that must pass before the phase is called "done"
 - ⚠️ **Risks / dependencies** — what could derail this phase
 
-## Status snapshot (2026-05-26)
+## Status snapshot (2026-05-26, updated)
 
 **Shipped:**
 - Phase 0 walking skeleton (`phase-0-done` tag)
@@ -56,7 +56,8 @@ Conventions used below:
 - **Phase 2.fdtd.7.y C6 un-ghosted J variant — retires Q5 strict 0.5%-of-peak gate at 0.0000% rel err** (Track DDDDDDDD merge `47c461c`; trade-off: fine grid permanently passive in source-on-coarse mode; Q6 long-time energy drift still `#[ignore]`'d)
 - **Phase 2.fdtd `fdtd-201` rectangular-cavity TE₁₀₁ resonance gate — LIVE** (ADR-0062, merge `155ed38`): first Phase-2 FDTD validation milestone shipped. Time-domain PEC cavity (a=d=0.20 m, b=0.10 m) → off-centre Gaussian E_y pulse → 400-bin single-bin-DFT scan extracts f₁₀₁ within one DFT bin of analytic Pozar §6.3 (offset −0.063 %, extraction resolution ~0.2 %); gate asserts ±2.5 % grid-dispersion floor, strict ±0.5 % refined-mesh path documented. Tests + README only (no `src/`), `#[ignore]`-gated, no new dependency. Sidesteps the deferred FDTD quagmires (Q6 energy-balance, fdtd-007).
 - **Phase 2.fdtd `fdtd-201.x` higher-order cavity TE₂₀₁ resonance gate — LIVE** (ADR-0066, merge `94462ba`): sibling to fdtd-201 validating mode *selectivity* + higher-freq grid dispersion. Box 24×4×16 @ dx=10 mm (a=0.24, b=0.04, d=0.16 m): a≠d breaks the TE₂₀₁/TE₁₀₂ degeneracy + the narrow b pushes all n≥1 modes ≥3.86 GHz, so TE₂₀₁ (1.5614 GHz) is the sole resonance in the [1.40, 1.72] GHz scan band (reviewer-verified isolation). Extracted within one DFT bin of analytic Pozar §6.3 (offset −0.117 %); ±2.5 % gate, ±0.5 % refinement path documented. Tests + README only, `#[ignore]`-gated, no new dep. Clones the fdtd-201 harness.
-- **Phase 2.fdtd.8 `fdtd-202` lossy-cavity Q-factor gate — LIVE** (ADR-0071, Track Q merge `HEAD`): first Phase-2 FDTD gate to exercise the lossy E-update (Taflove §3.7 CA/CB, per-cell σ). PEC cavity 20×10×20 @ dx=10 mm uniformly filled with σ=2.96e-3 S/m → Q_analytic=20 at f₁₀₁=1.06 GHz. TE₁₀₁ ring-down fit gives Q_measured=19.93 (rel err 0.04 %, gate ±5 %). Runs in 0.38 s (3200 steps, NOT `#[ignore]`-gated). Adds `sigma_cells: Option<Array3<f64>>` + `set_sigma_box` + `with_sigma_cells` to `YeeGrid`; `update_e` branches on presence. Hi-Q companion (Q=200, 30 000 steps, `#[ignore]`) for regression coverage. No new dependency.
+- **Phase 2.fdtd.8 `fdtd-202` lossy-cavity Q-factor gate — LIVE** (ADR-0071, Track Q merge `8f1a548`): first Phase-2 FDTD gate to exercise the lossy E-update (Taflove §3.7 CA/CB, per-cell σ). PEC cavity 20×10×20 @ dx=10 mm uniformly filled with σ=2.96e-3 S/m → Q_analytic≈19.93 at f₁₀₁=1.06 GHz. TE₁₀₁ ring-down fit gives Q_measured=19.93 (rel err 0.04 %, gate ±5 %). Runs in 0.38 s (3200 steps, NOT `#[ignore]`-gated). Adds `sigma_cells: Option<Array3<f64>>` + `set_sigma_box` + `with_sigma_cells` to `YeeGrid`; `update_e` branches on presence. Hi-Q companion (Q=200, 30 000 steps, `#[ignore]`) for regression coverage. No new dependency.
+- **Phase 2.fdtd.py.0 Python cavity-Q driver + fdtd-202 aggregator — SHIPPED** (ADR-0072, Track P merge `HEAD`): exposes the fdtd-202 lossy-cavity Q-factor measurement to Python via `run_cavity_q()` / `CavityQResult` in `yee-py`; registers fdtd-202 as the first Phase-2 FDTD gate in `Report::run_all()` (first non-Skipped FDTD gate in `yee validate all`). Python call: `from yee import run_cavity_q; r = run_cavity_q(); print(r.q_measured)`. Gate: rel_err < 5 % vs analytic Q = 2π·f₁₀₁·ε₀/σ₀; 0.38 s debug, not `#[ignore]`-gated. Validation unit tests 2/2. Tutorial `10-fdtd-lossy-cavity-from-python.md`. No new dependency; no yee-fdtd core changes.
 - Phase 3.gp.0/1 (GP regression + ML hyperparameter fit)
 - Phase 3.bo.0/1 (Expected-Improvement BO, NSGA-II multi-objective)
 - Phase 3.al.0 (variance-acquisition active learning)
@@ -190,10 +191,11 @@ Conventions used below:
 - Phase 2.fdtd.7 Q7 fdtd-007 Maloney-Smith production gate
 - Phase 4.fem.eig.1+ — dispersive ε_r(ω), real waveguide ports, absorbing boundaries — designs not yet drafted
 
-**Outstanding validation gates (`yee validate all` truth as of 2026-05-25):**
+**Outstanding validation gates (`yee validate all` truth as of 2026-05-26):**
 - mom-001 dipole — **GATE PASSES** (NEC-4 87+j41 Ω)
 - mom-002 microstrip Z₀ — gate passes within tripwire band (`|Z_in|`=674 Ω ≤ 100 kΩ, L=82mm, ADR-0036); kernel exonerated within 1.83% of HJ ε_eff; port-excitation residual noted
 - mom-003 2.4 GHz patch — loose tolerance, passes
+- **fdtd-202 lossy-cavity Q-factor — GATE PASSES** (rel err 0.04 %, gate ±5 %; registered in `run_all`; first Phase-2 FDTD gate in the aggregator; 0.38 s debug, not `#[ignore]`-gated)
 - fem-eig-001 WR-90 rectangular cavity — **GATE PASSES** (TE_{101} 0.09% rel err, mode-10 RMS 0.37%; registered in `run_all`)
 - fem-eig-002 lossy SiO₂ cavity — **GATE PASSES** (Re(f) 1.3e-3, Im(f) 2.96e-3; registered in `run_all`)
 - fem-eig-003 WR-90 stub + CFS-PML — Skipped in `run_all` (wall-time ~31 min; strict gate passes via `--include-ignored`)

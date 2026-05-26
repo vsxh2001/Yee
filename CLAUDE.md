@@ -230,4 +230,4 @@ These are the things that will bite you if you skip them. Update this section wh
 
 ---
 
-*Last updated: 2026-05-26, base SHA `8f1a548` (Phase 2.fdtd.8 fdtd-202 shipped — per-cell σ CA/CB lossy E-update + Q-factor ring-down gate at Q=20 ±5%, 0.38 s no-ignore, ADR-0071; WORKTREE-CWD gotcha documented; session started with detached HEAD 24 commits ahead of main — fast-forward merged before dispatch). Update this file whenever a decision is made twice or a gotcha bites twice.*
+*Last updated: 2026-05-26, post Phase 2.fdtd.py.0 (ADR-0072): `run_cavity_q()` / `CavityQResult` Python driver shipped in yee-py; fdtd-202 now registered in `Report::run_all()` as the first Phase-2 FDTD gate in `yee validate all`; tutorial 10 added. Session also corrected a stale local `main` branch (was 8 commits behind origin/main at start; rebased scoping commit before pushing). Update this file whenever a decision is made twice or a gotcha bites twice.*
