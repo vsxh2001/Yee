@@ -154,7 +154,7 @@ def test_cavity_resonance_passes_gate():
     """fdtd-201: DFT scan extracts TE₁₀₁ frequency within ±2.5% of analytic."""
     from yee import CavityResonanceResult, run_cavity_resonance
 
-    result = run_cavity_resonance(n_steps=15_000)
+    result = run_cavity_resonance(n_steps=30_000)
     assert isinstance(result, CavityResonanceResult)
     assert result.passed, (
         f"fdtd-201 gate failed: f_extracted={result.f_extracted_hz:.6e} Hz, "
