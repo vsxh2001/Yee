@@ -230,4 +230,4 @@ These are the things that will bite you if you skip them. Update this section wh
 
 ---
 
-*Last updated: 2026-05-25, base SHA `77cd0d9` + merge (Phase 4.fem.eig.3.5.6 shipped — Lee-Mittra absorbing-mode wave-port escape-hatch; fem-eig-006 status + Phase 4.fem.eig.3.5.7 queued; Phase 1.plotting.3 CLI Smith multi-trace wired; debug-mode test-suite timing + fem_eig_003 SIGKILL gotchas documented). Update this file whenever a decision is made twice or a gotcha bites twice.*
+*Last updated: 2026-05-26, base SHA `8f1a548` (Phase 2.fdtd.8 fdtd-202 shipped — per-cell σ CA/CB lossy E-update + Q-factor ring-down gate at Q=20 ±5%, 0.38 s no-ignore, ADR-0071; WORKTREE-CWD gotcha documented; session started with detached HEAD 24 commits ahead of main — fast-forward merged before dispatch). Update this file whenever a decision is made twice or a gotcha bites twice.*
