@@ -136,6 +136,8 @@ impl Report {
             run_cpml_001(),
             run_ntff_001(),
             run_dispersive_001(),
+            run_fdtd_201_cavity_resonance(),
+            run_fdtd_201x_cavity_higher_mode(),
             run_fdtd_202_lossy_cavity_q(),
             run_fem_eig_001(),
             run_fem_eig_002(),
@@ -1423,6 +1425,39 @@ fn fdtd202_run() -> (f64, f64) {
     let q_measured = PI * f101 * tau;
     let q_analytic = fdtd202_q_analytic(FDTD202_NX, FDTD202_NZ, FDTD202_DX, FDTD202_SIGMA);
     (q_measured, q_analytic)
+}
+
+/// fdtd-201 runs 30 000 steps on a 20×10×20 grid (~5–15 s release).
+/// Wall-time-gated: registered Skipped so the default `yee validate all`
+/// stays fast. Run the gate via
+/// `cargo test -p yee-fdtd --test cavity_resonance --release -- --ignored`.
+fn run_fdtd_201_cavity_resonance() -> CaseResult {
+    CaseResult {
+        id: "fdtd-201".into(),
+        description: "Rectangular PEC cavity TE₁₀₁ resonant frequency (FDTD DFT scan)".into(),
+        status: CaseStatus::Skipped,
+        notes: "wall-time-gated (~5–15 s release on 20×10×20 grid / 30 000 steps); \
+                run via `cargo test -p yee-fdtd --test cavity_resonance --release -- \
+                --ignored --nocapture`"
+            .into(),
+        wall_time_seconds: 0.0,
+        plot_paths: Vec::new(),
+    }
+}
+
+/// fdtd-201.x: TE₂₀₁ higher-order mode gate (sibling to fdtd-201).
+fn run_fdtd_201x_cavity_higher_mode() -> CaseResult {
+    CaseResult {
+        id: "fdtd-201-x".into(),
+        description: "Rectangular PEC cavity TE₂₀₁ higher-mode resonant frequency (FDTD)".into(),
+        status: CaseStatus::Skipped,
+        notes: "wall-time-gated (~5–15 s release on 24×4×16 grid / 40 000 steps); \
+                run via `cargo test -p yee-fdtd --test cavity_higher_mode --release -- \
+                --ignored --nocapture`"
+            .into(),
+        wall_time_seconds: 0.0,
+        plot_paths: Vec::new(),
+    }
 }
 
 /// fdtd-202: lossy-cavity Q-factor ring-down gate.
