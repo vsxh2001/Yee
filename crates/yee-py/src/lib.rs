@@ -35,6 +35,8 @@ fn _yee(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<fdtd::PyFdtdDriverConfig>()?;
     m.add_class::<fdtd::PyFdtdDriver>()?;
     m.add_class::<fdtd::PyRadiationPattern>()?;
+    m.add_class::<fdtd::PyCavityQResult>()?;
+    m.add_function(wrap_pyfunction!(fdtd::run_cavity_q, m)?)?;
     m.add_class::<bo::PyBoConfig>()?;
     m.add_class::<bo::PyBoResult>()?;
     m.add_function(wrap_pyfunction!(bo::minimize, m)?)?;
