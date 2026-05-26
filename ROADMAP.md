@@ -8,7 +8,7 @@ Conventions used below:
 - ✅ **Validation** — benchmark cases that must pass before the phase is called "done"
 - ⚠️ **Risks / dependencies** — what could derail this phase
 
-## Status snapshot (2026-05-19)
+## Status snapshot (2026-05-26)
 
 **Shipped:**
 - Phase 0 walking skeleton (`phase-0-done` tag)
@@ -28,7 +28,10 @@ Conventions used below:
 - Phase 1.plotting.0 (yee-plotters)
 - **Phase 1.plotting.1 multi-trace S-parameter overlay (ADR-0063, merge `185335c`)**: `yee-plotters` `plot_sparams_db`/`plot_sparams_phase` + `SparamTrace` overlay N labelled traces (legend + 8-colour wrapping palette, y-range autoscaled across all traces); `yee plot` gains `--entry <ij>` (repeatable, 1-based) + `--all` for off-diagonal (S21) / multi-port overlays, default single-`--port` diagonal path byte-unchanged. Frontend feature (plotter unit + CLI tests, not a §4 gate); single-trace fns + Cargo.toml unchanged, no new dep. GUI (egui_plot) overlay + Smith constant-R/X arcs are documented follow-ons.
 - **Phase 1.gui.4 GUI multi-trace overlay (ADR-0065, merge `ab1425d`)**: completes the plotting.1 arc in the desktop app. `yee-gui` `build_sparam_series` (pure, unit-tested — `Selection` Diagonal/Entries/All, row-major `S<ij>` labels) + `show_sparams_db_plot` (egui_plot overlay + `Legend`); a "Show all entries" checkbox (shown only for `n_ports>1`) overlays every S-entry, default single-`S11` trace byte-unchanged. yee-gui lane only, no new dep, no egui bump. Smith-chart multi-trace + constant-R/X arcs remain follow-ons.
+- **Phase 1.gui.5 Smith chart constant-R/X arc overlays + multi-trace (ADR-0068, merge `78bc63a`)**: `yee-gui` gains `SmithSeries` + `build_smith_series` (pure, unit-tested — mirrors `build_sparam_series` with `[Re,Im]` points) + rewritten `show_smith_chart(series: &[SmithSeries])` that draws unit circle, constant-R circles (r∈{0.2,0.5,1,2,5}), constant-X arcs (x∈{±0.2,±0.5,±1,±2,±5}), data traces, and `Legend`; Smith tab gains "Show all entries" checkbox (n_ports>1 only). `yee-plotters` gains `SmithTrace` + `plot_smith_chart_multi` + private helpers `smith_r_circle_pts`/`smith_x_arc_pts` (unit-disk clipping, debug_assert x≠0); axis labels updated to Re Γ/Im Γ; back-compat `plot_smith_chart` wrapper unchanged. No new dep. Deferred: arc labels, VSWR circles, admittance chart, CLI multi-trace.
+- **Phase 1.plotting.3 CLI Smith chart multi-trace (ADR-0069, merge `ca05f62`)**: closes the ADR-0068 CLI deferral. `yee plot --format smith --entry 11 --entry 21` and `--all` now call `plot_smith_chart_multi` (constant-R/X arc grid comes for free). `--format both --entry/--all` emits two suffixed files (`out-db.<ext>` + `out-smith.<ext>`), mirroring single-trace Both. Single-trace `--port` path byte-unchanged. Integration tests: `plot_entry_with_smith_errors_cleanly` flipped to success + 3 new tests. No new dep; no yee-plotters change.
 - Phase 1.validation.0/1/2 (aggregator + JSON Report + PNG artifacts via CI upload)
+- **Phase 1.validation.3 FEM-eig aggregator wiring + `yee validate fem` (ADR-0067, merge `9fe8418`)**: registers fem-eig-001/002/004/005 in `Report::run_all()` (fast default path); fem-eig-003 Skipped (wall-time ~31 min); fem-eig-006 Skipped (gate open, |S11|≈0.955 pending Phase 4.fem.eig.3.5.6). `ValidateTarget::Fem` + `fem-*` arm added to `yee-cli`. De-stales `validation/README.md`: NEC-4 87+j41 Ω only (forbidden Balanis ref removed); mom-002 tripwire corrected 1 kΩ→100 kΩ; FEM case table added; fictional phase-dir claims dropped. No new dep; no yee-fem/yee-fdtd touch.
 - Phase 1.bench yee-bench (criterion benches: MoM solve, FDTD step, GMRES vs LU, GP fit, BO, TF/SF, lumped)
 - Phase 1.cli.1 `yee validate`, `yee bench`
 - Phase 1.examples.0/2/4 (Rust examples, BO notebook, NSGA-II + AL notebooks)
@@ -53,6 +56,7 @@ Conventions used below:
 - **Phase 2.fdtd.7.y C6 un-ghosted J variant — retires Q5 strict 0.5%-of-peak gate at 0.0000% rel err** (Track DDDDDDDD merge `47c461c`; trade-off: fine grid permanently passive in source-on-coarse mode; Q6 long-time energy drift still `#[ignore]`'d)
 - **Phase 2.fdtd `fdtd-201` rectangular-cavity TE₁₀₁ resonance gate — LIVE** (ADR-0062, merge `155ed38`): first Phase-2 FDTD validation milestone shipped. Time-domain PEC cavity (a=d=0.20 m, b=0.10 m) → off-centre Gaussian E_y pulse → 400-bin single-bin-DFT scan extracts f₁₀₁ within one DFT bin of analytic Pozar §6.3 (offset −0.063 %, extraction resolution ~0.2 %); gate asserts ±2.5 % grid-dispersion floor, strict ±0.5 % refined-mesh path documented. Tests + README only (no `src/`), `#[ignore]`-gated, no new dependency. Sidesteps the deferred FDTD quagmires (Q6 energy-balance, fdtd-007).
 - **Phase 2.fdtd `fdtd-201.x` higher-order cavity TE₂₀₁ resonance gate — LIVE** (ADR-0066, merge `94462ba`): sibling to fdtd-201 validating mode *selectivity* + higher-freq grid dispersion. Box 24×4×16 @ dx=10 mm (a=0.24, b=0.04, d=0.16 m): a≠d breaks the TE₂₀₁/TE₁₀₂ degeneracy + the narrow b pushes all n≥1 modes ≥3.86 GHz, so TE₂₀₁ (1.5614 GHz) is the sole resonance in the [1.40, 1.72] GHz scan band (reviewer-verified isolation). Extracted within one DFT bin of analytic Pozar §6.3 (offset −0.117 %); ±2.5 % gate, ±0.5 % refinement path documented. Tests + README only, `#[ignore]`-gated, no new dep. Clones the fdtd-201 harness.
+- **Phase 2.fdtd.8 `fdtd-202` lossy-cavity Q-factor gate — LIVE** (ADR-0071, Track Q merge `HEAD`): first Phase-2 FDTD gate to exercise the lossy E-update (Taflove §3.7 CA/CB, per-cell σ). PEC cavity 20×10×20 @ dx=10 mm uniformly filled with σ=2.96e-3 S/m → Q_analytic=20 at f₁₀₁=1.06 GHz. TE₁₀₁ ring-down fit gives Q_measured=19.93 (rel err 0.04 %, gate ±5 %). Runs in 0.38 s (3200 steps, NOT `#[ignore]`-gated). Adds `sigma_cells: Option<Array3<f64>>` + `set_sigma_box` + `with_sigma_cells` to `YeeGrid`; `update_e` branches on presence. Hi-Q companion (Q=200, 30 000 steps, `#[ignore]`) for regression coverage. No new dependency.
 - Phase 3.gp.0/1 (GP regression + ML hyperparameter fit)
 - Phase 3.bo.0/1 (Expected-Improvement BO, NSGA-II multi-objective)
 - Phase 3.al.0 (variance-acquisition active learning)
@@ -147,6 +151,10 @@ Conventions used below:
   - YYYYYYYYY N1-N3: `FEM_EIG_006_F_HZ` 30→40 GHz + cutoff-table doc-comment (N1); gate disposition (N2); tutorial v3.5.5 subsection + ROADMAP refresh + ADR-0049 (N3)
   - Measurement: `|S_11|(40 GHz) = 0.955397 (-0.40 dB)` on native (16,3,2) cavity, 576 tets — did NOT retire (marginally above the cutoff-degenerate 30 GHz value 0.926, so v3.5.4 modal degeneracy was not the binding constraint). One-shot refinement probe (NY 3→9, NZ 2→6, 5184 tets) gave `0.913956 (-0.78 dB)`: a 9× transverse refinement moved |S_11| only ~0.04, excluding discretisation as the cause (probe reverted, native mesh stands).
   - `fem_eig_006_magnitude_bounded` stays `#[ignore]`'d with tolerance `< 0.1` unchanged (escape-hatch). With modal degeneracy (v3.5.4) and discretisation (this probe) both excluded, the residual ~0.95 is a genuine modal-projection wave-port limitation. ADR-0049 queues Phase 4.fem.eig.3.5.6 to land the Lee-Mittra 1997 absorbing-mode wave-port (ADR-0048 Option (b)); `FEM_EIG_006_F_HZ = 40 GHz` retained as the operating point for that work. fem-eig-006 line remains OPEN. fem-eig-003 strict band `[-71.53, -55.58] dB` retire from v3.5.2 unaffected.
+- **Phase 4.fem.eig.3.5.6 Lee-Mittra first-order absorbing-mode wave-port (ADR-0070; shipped with escape-hatch 2026-05-25)**:
+  - Design (`8f39f71`): spec + plan + ADR-0070 — `K = jk₀ B_face + Σ_m j(β_m−k₀) R_m`; new element-layer functions `assemble_port_face_block_projected_gauss_pts` (exact Whitney-1, 3-pt Gauss) + `assemble_port_face_block_projected` (centroid path); `PortDefinition::absorbing_complement: bool` + `with_absorbing_complement()` builder (default `false` → backward-compat); fem-eig-006 port_1 gains `absorbing_complement: true`; spec `docs/superpowers/specs/2026-05-25-phase-4-fem-eig-3-5-6-absorbing-mode-wave-port-design.md`, plan `docs/superpowers/plans/2026-05-25-phase-4-fem-eig-3-5-6-absorbing-mode-wave-port.md`
+  - Measurement: `|S_11|(40 GHz) = 0.955500 (-0.40 dB)` — essentially **unchanged** from v3.5.5 baseline 0.955397 (0.01% change). First-order Lee-Mittra does NOT retire the gate: β₁₀ ≈ 776 and β₂₀ ≈ 554 rad/m are both below k₀ ≈ 838 rad/m, so the j(β_m−k₀) corrections are negative and small; the rank-1 projection R_m covers a small fraction of B_face on the 16×3×2 mesh.
+  - `fem_eig_006_magnitude_bounded` stays `#[ignore]`'d with tolerance `< 0.1` unchanged (escape-hatch). All existing gates green. New reusable asset: `PortDefinition::with_absorbing_complement()` (Lee-Mittra port infrastructure in-tree). Phase 4.fem.eig.3.5.7 (higher-order absorbing BC — Lee-Mittra §V rational-function extension or alternative port formulation) queued.
 - mom-002 root-cause chain end-to-end (10 forensic tracks + 3 kernel fixes + 3 ADRs):
   - EEEEEE prefactor / JJJJJJ extent / PPPPPP GPOF / SSSSSS contour / TTTTTT residue sign / XXXXXX ψ_p / YYYYYY MPIE / CCCCCCC port-mesh / MMMMMMM ε_eff / NNNNNNN R1 retract / DDDDDDD DCIM-TM / TTTTTTT port spatial / QQQQQQQ β eigen (kernel exonerated at 1.83% from HJ)
   - ADR-0036 mom-002 validation reframe (sub-wavelength strip)
@@ -182,13 +190,18 @@ Conventions used below:
 - Phase 2.fdtd.7 Q7 fdtd-007 Maloney-Smith production gate
 - Phase 4.fem.eig.1+ — dispersive ε_r(ω), real waveguide ports, absorbing boundaries — designs not yet drafted
 
-**Outstanding validation gates:**
+**Outstanding validation gates (`yee validate all` truth as of 2026-05-25):**
 - mom-001 dipole — **GATE PASSES** (NEC-4 87+j41 Ω)
-- mom-002 microstrip Z₀ — gate passes within ±5% tripwire band at `|Z_in| = 674 Ω` on L=82mm reframed mesh (per ADR-0036); 10 forensic tracks confirmed kernel is correct within 1.83% of HJ ε_eff; remaining residual is delta-gap port-excitation modeling (Track WWWWWWW in flight)
-- mom-003 2.4 GHz patch — loose tolerance pending re-run through `GreensSpec::MicrostripSommerfeld`
-- fem-eig-001 WR-90 rectangular cavity — **GATE PASSES** (TE_{101} 0.09% rel err, mode-10 RMS 0.37%)
+- mom-002 microstrip Z₀ — gate passes within tripwire band (`|Z_in|`=674 Ω ≤ 100 kΩ, L=82mm, ADR-0036); kernel exonerated within 1.83% of HJ ε_eff; port-excitation residual noted
+- mom-003 2.4 GHz patch — loose tolerance, passes
+- fem-eig-001 WR-90 rectangular cavity — **GATE PASSES** (TE_{101} 0.09% rel err, mode-10 RMS 0.37%; registered in `run_all`)
+- fem-eig-002 lossy SiO₂ cavity — **GATE PASSES** (Re(f) 1.3e-3, Im(f) 2.96e-3; registered in `run_all`)
+- fem-eig-003 WR-90 stub + CFS-PML — Skipped in `run_all` (wall-time ~31 min; strict gate passes via `--include-ignored`)
+- fem-eig-004 WR-90 thru-line — **GATE PASSES** (|S21| -0.045 dB, reciprocity 2e-15; registered in `run_all`)
+- fem-eig-005 T-junction — **GATE PASSES** (passivity + reciprocity; registered in `run_all`)
+- fem-eig-006 high-aspect wave-port — Skipped in `run_all` (gate open, |S11|≈0.955500 after Phase 4.fem.eig.3.5.6 Lee-Mittra complement; < 0.1 gate not closed; queued Phase 4.fem.eig.3.5.7)
 - fdtd-007 Maloney-Smith oblique TF/SF — forward gate for Phase 2.fdtd.7 subgridding (gated on Q6 + Q7)
-- nl-001 10-prompt sweep — **GATE PASSES on sub-gates A+B+C** (schema, round-trip, offline); D-gate (solver ±5% f) `#[ignore]`'d pending real MultilayerGreens per Phase 1.1.1 deferred-tolerance policy
+- nl-001 10-prompt sweep — **GATE PASSES on sub-gates A+B+C** (schema, round-trip, offline); D-gate `#[ignore]`'d pending real MultilayerGreens
 
 ---
 
