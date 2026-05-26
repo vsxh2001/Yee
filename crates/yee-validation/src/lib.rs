@@ -124,9 +124,10 @@ impl Report {
     /// Run all known validation cases and return a structured report.
     ///
     /// `mom-001` runs the real 24x176 thin-cylinder dipole solve
-    /// (~7-8 min wall time in `--release`). The remaining cases are
-    /// Phase deferrals; see the crate-level documentation for the
-    /// full status of each.
+    /// (~7-8 min wall time in `--release`). `fdtd-202` runs the
+    /// lossy-cavity Q-factor ring-down gate (~0.4 s, not `#[ignore]`-gated).
+    /// The remaining FDTD cases are Phase deferrals; see the crate-level
+    /// documentation for the full status of each.
     pub fn run_all() -> Report {
         let cases = vec![
             run_mom_001(),
@@ -135,6 +136,7 @@ impl Report {
             run_cpml_001(),
             run_ntff_001(),
             run_dispersive_001(),
+            run_fdtd_202_lossy_cavity_q(),
             run_fem_eig_001(),
             run_fem_eig_002(),
             run_fem_eig_003(),
@@ -1302,6 +1304,158 @@ fn run_dispersive_001() -> CaseResult {
              aggregator integration deferred to Phase 1.validation.2"
             .into(),
         wall_time_seconds: 0.0,
+        plot_paths: Vec::new(),
+    }
+}
+
+// ---------------------------------------------------------------------
+// fdtd-202: lossy-cavity Q-factor gate (Phase 2.fdtd.8 / 2.fdtd.py.0)
+//
+// Physics helpers duplicated from `crates/yee-fdtd/tests/cavity_q.rs`.
+// Per design §D2, we duplicate rather than pub-leaking from the test
+// module. If a `yee_fdtd::analysis` module is added later, this moves.
+// ---------------------------------------------------------------------
+
+/// ε₀ (F/m) — matches the value used in `cavity_q.rs`.
+const FDTD202_EPS0: f64 = 8.854_187_817e-12;
+/// Speed of light in vacuum (m/s).
+const FDTD202_C0: f64 = 299_792_458.0;
+
+/// Cavity geometry (matches `cavity_q.rs` NX/NY/NZ/DX constants).
+const FDTD202_NX: usize = 20;
+const FDTD202_NY: usize = 10;
+const FDTD202_NZ: usize = 20;
+const FDTD202_DX: f64 = 0.010; // metres
+/// Conductivity giving Q_analytic ≈ 20.
+const FDTD202_SIGMA: f64 = 2.96e-3; // S/m
+/// Source-injection steps (broadband pulse).
+const FDTD202_N_SRC: usize = 200;
+/// Ring-down recording steps (at dt ≈ 17.3 ps → ~104 ns ≈ 17 τ).
+const FDTD202_N_RING: usize = 6_000;
+
+fn fdtd202_f101(nx: usize, nz: usize, dx: f64) -> f64 {
+    let a = nx as f64 * dx;
+    let d = nz as f64 * dx;
+    0.5 * FDTD202_C0 * ((1.0 / (a * a)) + (1.0 / (d * d))).sqrt()
+}
+
+fn fdtd202_q_analytic(nx: usize, nz: usize, dx: f64, sigma: f64) -> f64 {
+    use std::f64::consts::PI;
+    2.0 * PI * fdtd202_f101(nx, nz, dx) * FDTD202_EPS0 / sigma
+}
+
+#[inline]
+fn fdtd202_gaussian(t: f64, t0: f64, sigma_t: f64) -> f64 {
+    let arg = (t - t0) / sigma_t;
+    (-arg * arg).exp()
+}
+
+fn fdtd202_fit_log_decay(series: &[f64], dt: f64, t_start: f64) -> f64 {
+    let n = series.len() as f64;
+    let ts: Vec<f64> = (0..series.len()).map(|i| t_start + i as f64 * dt).collect();
+    let ys: Vec<f64> = series.iter().map(|&v| v.abs().max(1e-30).ln()).collect();
+    let t_mean = ts.iter().sum::<f64>() / n;
+    let y_mean = ys.iter().sum::<f64>() / n;
+    let num: f64 = ts
+        .iter()
+        .zip(ys.iter())
+        .map(|(&t, &y)| (t - t_mean) * (y - y_mean))
+        .sum();
+    let den: f64 = ts.iter().map(|&t| (t - t_mean).powi(2)).sum();
+    -1.0 / (num / den)
+}
+
+fn fdtd202_run() -> (f64, f64) {
+    use std::f64::consts::PI;
+    use yee_fdtd::boundary;
+    use yee_fdtd::{FdtdSolver, WalkingSkeletonSolver, YeeGrid};
+
+    let mut grid = YeeGrid::vacuum(FDTD202_NX, FDTD202_NY, FDTD202_NZ, FDTD202_DX);
+    grid.set_sigma_box(
+        0,
+        FDTD202_NX + 1,
+        0,
+        FDTD202_NY + 1,
+        0,
+        FDTD202_NZ + 1,
+        FDTD202_SIGMA,
+    );
+    let dt = grid.dt;
+    let mut solver = WalkingSkeletonSolver::new(grid);
+
+    let src_i = FDTD202_NX / 4;
+    let src_j = FDTD202_NY / 2;
+    let src_k = FDTD202_NZ / 4;
+    let prb_i = FDTD202_NX * 3 / 4;
+    let prb_j = FDTD202_NY / 2;
+    let prb_k = FDTD202_NZ * 3 / 4;
+
+    let t0 = 12.0 * dt;
+    let sigma_t = 4.0 * dt;
+
+    for _ in 0..FDTD202_N_SRC {
+        let t = solver.current_time();
+        solver.update_h_only();
+        #[allow(deprecated)]
+        boundary::apply_pec(solver.grid_mut());
+        solver.grid_mut().ey[(src_i, src_j, src_k)] += fdtd202_gaussian(t, t0, sigma_t);
+        solver.update_e_only();
+        solver.apply_cpml_e();
+        solver.advance_clock();
+    }
+
+    let mut probe = Vec::with_capacity(FDTD202_N_RING);
+    for _ in 0..FDTD202_N_RING {
+        solver.update_h_only();
+        #[allow(deprecated)]
+        boundary::apply_pec(solver.grid_mut());
+        solver.update_e_only();
+        solver.apply_cpml_e();
+        solver.advance_clock();
+        probe.push(solver.grid().ey[(prb_i, prb_j, prb_k)]);
+    }
+
+    let skip = FDTD202_N_RING / 3;
+    let window = &probe[skip..];
+    let t_start = (FDTD202_N_SRC + skip) as f64 * dt;
+    let tau = fdtd202_fit_log_decay(window, dt, t_start);
+    let f101 = fdtd202_f101(FDTD202_NX, FDTD202_NZ, FDTD202_DX);
+    let q_measured = PI * f101 * tau;
+    let q_analytic = fdtd202_q_analytic(FDTD202_NX, FDTD202_NZ, FDTD202_DX, FDTD202_SIGMA);
+    (q_measured, q_analytic)
+}
+
+/// fdtd-202: lossy-cavity Q-factor ring-down gate.
+///
+/// Runs the CA/CB Yee E-update (Taflove §3.7) with σ₀ = 2.96e-3 S/m
+/// and asserts `|Q_measured − Q_analytic| / Q_analytic < 5 %`.
+/// Wall-time: ~0.4 s (6 200 steps, NOT `#[ignore]`-gated).
+fn run_fdtd_202_lossy_cavity_q() -> CaseResult {
+    let t0 = Instant::now();
+    let (q_measured, q_analytic) = fdtd202_run();
+    let wall_time_seconds = t0.elapsed().as_secs_f64();
+    let rel_err = (q_measured - q_analytic).abs() / q_analytic;
+    let status = if rel_err < 0.05 {
+        CaseStatus::Passed
+    } else {
+        CaseStatus::Failed
+    };
+    let notes = format!(
+        "Q_measured={:.4}, Q_analytic={:.4}, rel_err={:.4e} \
+         (gate ±5 %; σ₀={:.2e} S/m, f₁₀₁={:.4} GHz)",
+        q_measured,
+        q_analytic,
+        rel_err,
+        FDTD202_SIGMA,
+        fdtd202_f101(FDTD202_NX, FDTD202_NZ, FDTD202_DX) * 1e-9,
+    );
+    CaseResult {
+        id: "fdtd-202".into(),
+        description: "Lossy-cavity Q-factor ring-down (CA/CB, σ₀ = 2.96e-3 S/m → Q ≈ 20, ±5 %)"
+            .into(),
+        status,
+        notes,
+        wall_time_seconds,
         plot_paths: Vec::new(),
     }
 }
@@ -4737,5 +4891,38 @@ mod tests {
         for (nz, z, m) in &rows {
             eprintln!("{:>2} | {:>11.3} | {:>11.3} | {:>8.3}", nz, z.re, z.im, m);
         }
+    }
+
+    /// fdtd-202: lossy-cavity Q-factor ring-down gate via the aggregator.
+    ///
+    /// Calls `run_fdtd_202_lossy_cavity_q()` directly and asserts:
+    /// - the case `id` is `"fdtd-202"`
+    /// - the status is [`CaseStatus::Passed`]
+    /// - `Q_measured` embedded in the notes is present
+    ///
+    /// Wall-time: ~0.4 s (6 200 steps, NOT `#[ignore]`-gated).
+    #[test]
+    fn fdtd_202_lossy_cavity_q_passes() {
+        let result = run_fdtd_202_lossy_cavity_q();
+        assert_eq!(result.id, "fdtd-202");
+        assert_eq!(
+            result.status,
+            CaseStatus::Passed,
+            "fdtd-202 gate failed: {}",
+            result.notes
+        );
+        assert!(
+            result.notes.contains("Q_measured"),
+            "notes should contain Q_measured, got: {}",
+            result.notes
+        );
+    }
+
+    /// Verifies that [`run_fdtd_202_lossy_cavity_q`] returns a result with
+    /// `id == "fdtd-202"` (the stable case identifier wired into `run_all`).
+    #[test]
+    fn run_all_includes_fdtd_202() {
+        let result = run_fdtd_202_lossy_cavity_q();
+        assert_eq!(result.id, "fdtd-202", "fdtd-202 case id mismatch");
     }
 }

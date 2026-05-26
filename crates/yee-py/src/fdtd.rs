@@ -5,12 +5,17 @@
 //! can run a short-dipole radiation-pattern simulation end-to-end and
 //! receive numpy arrays for the θ-cut.
 //!
+//! Also exposes [`run_cavity_q`] / [`PyCavityQResult`] for the fdtd-202
+//! lossy-cavity Q-factor ring-down gate (Phase 2.fdtd.py.0).
+//!
 //! The Python wrapper holds only the configuration plus the grid
 //! parameters (`nx`, `ny`, `nz`, `dx`); the underlying Rust
 //! [`yee_fdtd::FdtdDriver`] is constructed fresh inside every
 //! [`PyFdtdDriver::run`] call because the Rust `run` method consumes
 //! `self`. As a result a `PyFdtdDriver` can be `.run()` multiple times,
 //! each call returning an independent [`PyRadiationPattern`].
+
+use std::f64::consts::PI;
 
 use numpy::{IntoPyArray, PyArray1};
 use pyo3::prelude::*;
@@ -208,5 +213,230 @@ impl PyFdtdDriver {
                 e_theta_phi0: pat.e_theta_phi0,
             }
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2.fdtd.py.0 — lossy-cavity Q-factor driver
+// ---------------------------------------------------------------------------
+
+/// ε₀ in SI units (F/m). Mirrors the constant used by the fdtd-202 gate in
+/// `crates/yee-fdtd/tests/cavity_q.rs`.
+const CQ_EPS0: f64 = 8.854_187_817e-12;
+
+/// Speed of light in vacuum (m/s).
+const CQ_C0: f64 = 299_792_458.0;
+
+/// Analytic TE₁₀₁ resonant frequency for a square `nx × nz` cavity at cell
+/// size `dx` (Pozar §6.3):
+///
+/// ```text
+/// f₁₀₁ = (c/2) · √((1/a)² + (1/d)²)
+/// ```
+fn cq_f101(nx: usize, nz: usize, dx: f64) -> f64 {
+    let a = nx as f64 * dx;
+    let d = nz as f64 * dx;
+    0.5 * CQ_C0 * ((1.0 / (a * a)) + (1.0 / (d * d))).sqrt()
+}
+
+/// Analytic Q-factor for a uniformly lossy PEC cavity (Taflove §3.7):
+///
+/// ```text
+/// Q = 2π · f₁₀₁ · ε₀ / σ
+/// ```
+fn cq_q_analytic(nx: usize, nz: usize, dx: f64, sigma: f64) -> f64 {
+    2.0 * PI * cq_f101(nx, nz, dx) * CQ_EPS0 / sigma
+}
+
+/// Gaussian pulse amplitude at time `t` centred at `t0` with width `sigma_t`.
+#[inline]
+fn cq_gaussian(t: f64, t0: f64, sigma_t: f64) -> f64 {
+    let arg = (t - t0) / sigma_t;
+    (-arg * arg).exp()
+}
+
+/// Fit an exponential decay to `series` and return the decay time constant τ.
+///
+/// Uses log-linear least-squares regression:
+///
+/// ```text
+/// log|y[n]| = A + slope · t[n],   slope = −1/τ
+/// ```
+fn cq_fit_log_decay(series: &[f64], dt: f64, t_start: f64) -> f64 {
+    let n = series.len() as f64;
+    let ts: Vec<f64> = (0..series.len()).map(|i| t_start + i as f64 * dt).collect();
+    let ys: Vec<f64> = series.iter().map(|&v| v.abs().max(1e-30).ln()).collect();
+
+    let t_mean = ts.iter().sum::<f64>() / n;
+    let y_mean = ys.iter().sum::<f64>() / n;
+
+    let num: f64 = ts
+        .iter()
+        .zip(ys.iter())
+        .map(|(&t, &y)| (t - t_mean) * (y - y_mean))
+        .sum();
+    let den: f64 = ts.iter().map(|&t| (t - t_mean).powi(2)).sum();
+
+    // slope is negative (decay); τ = −1/slope.
+    -1.0 / (num / den)
+}
+
+/// Result of a lossy-cavity Q-factor simulation (fdtd-202 gate).
+///
+/// Returned by [`run_cavity_q`]. All scalar fields are exposed as Python
+/// read-only properties via `#[pyo3(get)]`. The ring-down time series is
+/// available through [`PyCavityQResult::probe_array`].
+#[pyclass(name = "CavityQResult", module = "yee._yee")]
+pub struct PyCavityQResult {
+    /// Q extracted from the log-linear ring-down fit.
+    #[pyo3(get)]
+    pub q_measured: f64,
+    /// Analytic Q = 2π · f₁₀₁ · ε₀ / σ.
+    #[pyo3(get)]
+    pub q_analytic: f64,
+    /// Analytic TE₁₀₁ resonant frequency (Hz).
+    #[pyo3(get)]
+    pub f101_hz: f64,
+    /// |q_measured − q_analytic| / q_analytic.
+    #[pyo3(get)]
+    pub rel_err: f64,
+    /// `true` iff `rel_err < 0.05` (fdtd-202 gate: ±5 %).
+    #[pyo3(get)]
+    pub passed: bool,
+    /// Internal ring-down probe time series (n_ring samples). Not directly
+    /// exposed as a Python attribute; access via [`Self::probe_array`].
+    pub probe_vec: Vec<f64>,
+}
+
+#[pymethods]
+impl PyCavityQResult {
+    /// Return the ring-down probe time series as a 1-D numpy `float64` array.
+    ///
+    /// The array has length `n_ring` (the value passed to [`run_cavity_q`]).
+    /// Sample `i` corresponds to the E_y probe value recorded at time step
+    /// `n_src + i` during the free ring-down phase.
+    pub fn probe_array<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.probe_vec.clone().into_pyarray(py)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "CavityQResult(q_measured={:.4}, q_analytic={:.4}, \
+             rel_err={:.4e}, passed={})",
+            self.q_measured, self.q_analytic, self.rel_err, self.passed,
+        )
+    }
+}
+
+/// Run a lossy rectangular PEC cavity simulation and return the Q-factor.
+///
+/// Builds a vacuum grid of `nx × ny × nz` cells at cell size `dx` metres,
+/// fills it uniformly with electric conductivity `sigma` S/m (via the
+/// CA/CB Yee E-update, Taflove §3.7), injects a broadband Gaussian pulse
+/// into E_y for `n_src` steps, records the ring-down for `n_ring` steps,
+/// fits an exponential decay to the last 2/3 of the ring-down, and
+/// extracts Q = π · f₁₀₁ · τ.
+///
+/// # Arguments
+///
+/// * `nx` — cells in x (default 20)
+/// * `ny` — cells in y (default 10)
+/// * `nz` — cells in z (default 20)
+/// * `dx` — cell size in metres (default 0.01 = 10 mm)
+/// * `sigma` — uniform electric conductivity in S/m (default 2.96e-3,
+///   giving Q ≈ 20)
+/// * `n_src` — number of source-injection steps (default 200)
+/// * `n_ring` — number of ring-down steps to record (default 6000)
+///
+/// # Returns
+///
+/// A [`CavityQResult`] with `.q_measured`, `.q_analytic`, `.f101_hz`,
+/// `.rel_err`, `.passed`, and `.probe_array()`.
+#[pyfunction]
+#[pyo3(signature = (
+    nx = 20,
+    ny = 10,
+    nz = 20,
+    dx = 0.01,
+    sigma = 2.96e-3_f64,
+    n_src = 200,
+    n_ring = 6000,
+))]
+pub fn run_cavity_q(
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    dx: f64,
+    sigma: f64,
+    n_src: usize,
+    n_ring: usize,
+) -> PyCavityQResult {
+    use yee_fdtd::boundary;
+    use yee_fdtd::{FdtdSolver, WalkingSkeletonSolver};
+
+    // Build a vacuum grid and attach uniform conductivity over the full domain.
+    // set_sigma_box uses inclusive-exclusive indexing; NX+1 etc. covers the
+    // full [nx+1, ny+1, nz+1] staggered extent.
+    let mut grid = YeeGrid::vacuum(nx, ny, nz, dx);
+    grid.set_sigma_box(0, nx + 1, 0, ny + 1, 0, nz + 1, sigma);
+    let dt = grid.dt;
+    let mut solver = WalkingSkeletonSolver::new(grid);
+
+    // Source: off-centre for TE₁₀₁ coupling (sin(π/4) ≈ 0.707).
+    let src_i = nx / 4;
+    let src_j = ny / 2;
+    let src_k = nz / 4;
+
+    // Probe: opposite quarter to reduce source near-field bias.
+    let prb_i = nx * 3 / 4;
+    let prb_j = ny / 2;
+    let prb_k = nz * 3 / 4;
+
+    // Gaussian parameters: t0 = 12·dt, σ_t = 4·dt.
+    let t0 = 12.0 * dt;
+    let sigma_t = 4.0 * dt;
+
+    // Phase 1: inject Gaussian pulse into E_y for n_src steps.
+    for _ in 0..n_src {
+        let t = solver.current_time();
+        solver.update_h_only();
+        #[allow(deprecated)]
+        boundary::apply_pec(solver.grid_mut());
+        solver.grid_mut().ey[(src_i, src_j, src_k)] += cq_gaussian(t, t0, sigma_t);
+        solver.update_e_only();
+        solver.apply_cpml_e();
+        solver.advance_clock();
+    }
+
+    // Phase 2: ring-down, record E_y probe.
+    let mut probe = Vec::with_capacity(n_ring);
+    for _ in 0..n_ring {
+        solver.update_h_only();
+        #[allow(deprecated)]
+        boundary::apply_pec(solver.grid_mut());
+        solver.update_e_only();
+        solver.apply_cpml_e();
+        solver.advance_clock();
+        probe.push(solver.grid().ey[(prb_i, prb_j, prb_k)]);
+    }
+
+    // Fit log-decay to the last 2/3 of the ring-down window.
+    let skip = n_ring / 3;
+    let window = &probe[skip..];
+    let t_start = (n_src + skip) as f64 * dt;
+    let tau = cq_fit_log_decay(window, dt, t_start);
+
+    let f101 = cq_f101(nx, nz, dx);
+    let q_measured = PI * f101 * tau;
+    let q_analytic = cq_q_analytic(nx, nz, dx, sigma);
+    let rel_err = (q_measured - q_analytic).abs() / q_analytic;
+
+    PyCavityQResult {
+        q_measured,
+        q_analytic,
+        f101_hz: f101,
+        rel_err,
+        passed: rel_err < 0.05,
+        probe_vec: probe,
     }
 }

@@ -101,3 +101,45 @@ def test_driver_run_returns_normalized_pattern_small_grid():
         np.asarray(pattern.theta_deg),
         np.asarray(pattern2.theta_deg),
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.fdtd.py.0 — fdtd-202 lossy-cavity Q-factor
+# ---------------------------------------------------------------------------
+
+
+def test_cavity_q_default_passes():
+    """fdtd-202: default σ₀=2.96e-3 S/m gives Q≈20, rel_err<5%."""
+    from yee import CavityQResult, run_cavity_q
+
+    result = run_cavity_q()
+    assert isinstance(result, CavityQResult)
+    assert result.passed, (
+        f"fdtd-202 gate failed: q_measured={result.q_measured:.4f} "
+        f"q_analytic={result.q_analytic:.4f} rel_err={result.rel_err:.4f}"
+    )
+    assert abs(result.q_analytic - 20.0) < 1.0, (
+        f"analytic Q should be ~20, got {result.q_analytic}"
+    )
+
+
+def test_cavity_q_probe_array_shape():
+    """probe_array() returns numpy float64 array of length n_ring."""
+    import numpy as np
+
+    from yee import run_cavity_q
+
+    result = run_cavity_q(n_ring=100)
+    arr = result.probe_array()
+    assert isinstance(arr, np.ndarray)
+    assert arr.shape == (100,)
+    assert arr.dtype == np.float64
+
+
+def test_cavity_q_repr_smoke():
+    """__repr__ contains CavityQResult and q_measured."""
+    from yee import run_cavity_q
+
+    r = repr(run_cavity_q())
+    assert "CavityQResult" in r
+    assert "q_measured" in r
