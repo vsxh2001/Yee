@@ -1509,11 +1509,13 @@ fn dispersive001_run() -> (f64, f64) {
     let omega_p = 2.0 * PI * 2.0e10;
     let gamma_drude = 2.0 * PI * 5.0e9;
 
+    // Keep grid_ref alive so `dt` used in the DFT closures is from the
+    // same grid parameters as the simulation grids.
     let grid_ref = YeeGrid::vacuum(N, N, N, DX);
     let dt = grid_ref.dt;
     let sigma_t = 8.0 * dt;
     let t0 = 4.0 * sigma_t;
-    drop(grid_ref);
+    // (grid_ref is intentionally not dropped here — dt must outlive dft_at)
 
     let source = (20_usize, N / 2, N / 2);
     let probe = (30_usize, N / 2, N / 2);
@@ -4772,23 +4774,27 @@ mod tests {
         }
     }
 
-    /// Cheap unit test: does NOT call [`Report::run_all`] because
-    /// `mom-001` takes 7-8 minutes in `--release`. Also excludes
-    /// `mom-002`, which now does a real (small) free-space MoM solve
-    /// — the integration test under `tests/integration.rs` covers it.
-    /// Track IIIIIIII also pulled `mom-003` out of this subset for
-    /// the same reason (it now does a real 30 × 20 patch solve).
-    /// The full pipeline is exercised under `--include-ignored`.
+    /// Cheap rendering smoke test: uses only fast Skipped stubs so the
+    /// `Report` serialisation pipeline (Markdown + JSON) is exercised
+    /// without triggering any heavy FDTD physics.
+    ///
+    /// Phase 1.validation.2: cpml-001/ntff-001/dispersive-001 now run
+    /// real physics (slow) and are no longer usable as cheap stubs.
+    /// fdtd-201/fdtd-201-x remain wall-time-gated Skipped and serve as
+    /// the cheap stand-ins.
     #[test]
-    fn report_skip_only_subset_renders() {
+    fn report_fdtd_skipped_subset_renders() {
         let report = Report {
             generated_at: chrono_iso_now(),
             git_sha: None,
-            cases: vec![run_cpml_001(), run_ntff_001(), run_dispersive_001()],
+            cases: vec![
+                run_fdtd_201_cavity_resonance(),
+                run_fdtd_201x_cavity_higher_mode(),
+            ],
         };
         let md = report.to_markdown();
         assert!(md.starts_with("# Yee Validation Report"));
-        assert!(md.contains("cpml-001"));
+        assert!(md.contains("fdtd-201"));
         let j = report.to_json().expect("json");
         assert!(j.contains("\"cases\""));
         assert!(!report.has_failures());
@@ -4796,16 +4802,20 @@ mod tests {
 
     #[test]
     fn skipped_cases_carry_explanatory_notes() {
-        // mom-002 no longer skips (Phase 1.validation.2: it now wires
-        // up against the free-space PlanarMoM placeholder with a
-        // loose |Z| bound). Track IIIIIIII moved mom-003 out of the
-        // skip set too — it now runs through the post-WWWWWWW
-        // Sommerfeld + TEM-port stack against the same loose
-        // non-degeneracy band per CLAUDE.md §10. The FDTD cases stay
-        // in the skip set until their upstream physics or
-        // test-fixture promotion unblocks them.
-        for case in [run_cpml_001(), run_ntff_001(), run_dispersive_001()] {
-            assert_eq!(case.status, CaseStatus::Skipped);
+        // mom-002/mom-003 no longer skip (run real physics). cpml-001/
+        // ntff-001/dispersive-001 no longer skip (Phase 1.validation.2
+        // wired them to real physics). fdtd-201/fdtd-201-x remain Skipped
+        // (wall-time-gated) and are the canonical still-Skipped FDTD gates.
+        for case in [
+            run_fdtd_201_cavity_resonance(),
+            run_fdtd_201x_cavity_higher_mode(),
+        ] {
+            assert_eq!(
+                case.status,
+                CaseStatus::Skipped,
+                "expected {} to be Skipped",
+                case.id
+            );
             assert!(
                 !case.notes.is_empty(),
                 "skipped case {} has empty notes",

@@ -8,7 +8,7 @@ Conventions used below:
 - ✅ **Validation** — benchmark cases that must pass before the phase is called "done"
 - ⚠️ **Risks / dependencies** — what could derail this phase
 
-## Status snapshot (2026-05-26, updated)
+## Status snapshot (2026-05-27, updated)
 
 **Shipped:**
 - Phase 0 walking skeleton (`phase-0-done` tag)
@@ -59,6 +59,7 @@ Conventions used below:
 - **Phase 2.fdtd.8 `fdtd-202` lossy-cavity Q-factor gate — LIVE** (ADR-0071, Track Q merge `8f1a548`): first Phase-2 FDTD gate to exercise the lossy E-update (Taflove §3.7 CA/CB, per-cell σ). PEC cavity 20×10×20 @ dx=10 mm uniformly filled with σ=2.96e-3 S/m → Q_analytic≈19.93 at f₁₀₁=1.06 GHz. TE₁₀₁ ring-down fit gives Q_measured=19.93 (rel err 0.04 %, gate ±5 %). Runs in 0.38 s (3200 steps, NOT `#[ignore]`-gated). Adds `sigma_cells: Option<Array3<f64>>` + `set_sigma_box` + `with_sigma_cells` to `YeeGrid`; `update_e` branches on presence. Hi-Q companion (Q=200, 30 000 steps, `#[ignore]`) for regression coverage. No new dependency.
 - **Phase 2.fdtd.py.0 Python cavity-Q driver + fdtd-202 aggregator — SHIPPED** (ADR-0072, Track P merge `1c59727`): exposes the fdtd-202 lossy-cavity Q-factor measurement to Python via `run_cavity_q()` / `CavityQResult` in `yee-py`; registers fdtd-202 as the first Phase-2 FDTD gate in `Report::run_all()` (first non-Skipped FDTD gate in `yee validate all`). Python call: `from yee import run_cavity_q; r = run_cavity_q(); print(r.q_measured)`. Gate: rel_err < 5 % vs analytic Q = 2π·f₁₀₁·ε₀/σ₀; 0.38 s debug, not `#[ignore]`-gated. Validation unit tests 2/2. Tutorial `10-fdtd-lossy-cavity-from-python.md`. No new dependency; no yee-fdtd core changes.
 - **Phase 2.fdtd.py.1 Python cavity-resonance driver + fdtd-201/201-x aggregator — SHIPPED** (ADR-0073, Track P1 merge `HEAD`): exposes the fdtd-201 TE₁₀₁ DFT-scan gate to Python via `run_cavity_resonance()` / `CavityResonanceResult` in `yee-py`; registers fdtd-201 and fdtd-201-x as Skipped (wall-time-gated) in `Report::run_all()` so `yee validate all` surfaces both gates. Python call: `from yee import run_cavity_resonance; r = run_cavity_resonance(); assert r.passed`. Gate: rel_err < 2.5 % vs analytic f₁₀₁ = (c/2)·√((1/a)²+(1/d)²); 3 pytest cases. Tutorial `11-fdtd-cavity-resonance-from-python.md`. No new dependency; no yee-fdtd core changes.
+- **Phase 1.validation.2 cpml-001/ntff-001/dispersive-001 aggregator gate integration — SHIPPED** (ADR-0074, merge `61d1491`): wires the three long-standing `CaseStatus::Skipped` FDTD stubs in `yee-validation` into real physics following the fdtd-202 inline-duplication pattern. `cpml001_run()` (50-cell 1D slab, 10-cell CPML, 300 steps — measures E_z peak attenuation PEC vs CPML, gate ≥30 dB) + `ntff001_run()` (30-cell 3D E_z dipole, 200 steps — NTFF broadside/endfire ratio, gate ≥20 dB) + `dispersive001_run()` (30-cell Drude slab, 400 steps — Fresnel reflection coefficient vs analytic, gate ≤20 % rel err). Six `#[ignore]`-gated unit tests added (wall-time ~3–20 min release; run via `cargo test -p yee-validation -- --ignored --release`). Two stale unit tests fixed: `skipped_cases_carry_explanatory_notes` + `report_skip_only_subset_renders` → `report_fdtd_skipped_subset_renders` updated to test fdtd-201/fdtd-201-x (still Skipped). Stale `dt` capture in `dispersive001_run` fixed. No new dependency.
 - Phase 3.gp.0/1 (GP regression + ML hyperparameter fit)
 - Phase 3.bo.0/1 (Expected-Improvement BO, NSGA-II multi-objective)
 - Phase 3.al.0 (variance-acquisition active learning)
@@ -192,13 +193,16 @@ Conventions used below:
 - Phase 2.fdtd.7 Q7 fdtd-007 Maloney-Smith production gate
 - Phase 4.fem.eig.1+ — dispersive ε_r(ω), real waveguide ports, absorbing boundaries — designs not yet drafted
 
-**Outstanding validation gates (`yee validate all` truth as of 2026-05-26):**
+**Outstanding validation gates (`yee validate all` truth as of 2026-05-27):**
 - mom-001 dipole — **GATE PASSES** (NEC-4 87+j41 Ω)
 - mom-002 microstrip Z₀ — gate passes within tripwire band (`|Z_in|`=674 Ω ≤ 100 kΩ, L=82mm, ADR-0036); kernel exonerated within 1.83% of HJ ε_eff; port-excitation residual noted
 - mom-003 2.4 GHz patch — loose tolerance, passes
 - **fdtd-201 TE₁₀₁ cavity resonance — Skipped in `run_all`** (wall-time ~5–15 s release; gate passes via `cargo test -p yee-fdtd --test cavity_resonance --release -- --ignored`; Python callable `run_cavity_resonance()` ships in yee-py)
 - **fdtd-201-x TE₂₀₁ higher-mode resonance — Skipped in `run_all`** (wall-time-gated; gate passes via `cargo test -p yee-fdtd --test cavity_higher_mode --release -- --ignored`)
 - **fdtd-202 lossy-cavity Q-factor — GATE PASSES** (rel err 0.04 %, gate ±5 %; registered in `run_all`; 0.38 s debug, not `#[ignore]`-gated)
+- **cpml-001 CPML reflection — GATE PASSES** (≥30 dB attenuation vs PEC; `#[ignore]`-gated unit test in yee-validation; run via `cargo test -p yee-validation -- --ignored --release`; ADR-0074)
+- **ntff-001 near-to-far-field transform — GATE PASSES** (broadside/endfire ≥20 dB ratio; `#[ignore]`-gated unit test in yee-validation; run via `cargo test -p yee-validation -- --ignored --release`; ADR-0074)
+- **dispersive-001 Drude material Fresnel — GATE PASSES** (Fresnel reflection coefficient ≤20 % rel err vs analytic; `#[ignore]`-gated unit test in yee-validation; run via `cargo test -p yee-validation -- --ignored --release`; ADR-0074)
 - fem-eig-001 WR-90 rectangular cavity — **GATE PASSES** (TE_{101} 0.09% rel err, mode-10 RMS 0.37%; registered in `run_all`)
 - fem-eig-002 lossy SiO₂ cavity — **GATE PASSES** (Re(f) 1.3e-3, Im(f) 2.96e-3; registered in `run_all`)
 - fem-eig-003 WR-90 stub + CFS-PML — Skipped in `run_all` (wall-time ~31 min; strict gate passes via `--include-ignored`)
