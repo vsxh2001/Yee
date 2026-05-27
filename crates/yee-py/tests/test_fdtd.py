@@ -191,3 +191,38 @@ def test_cavity_resonance_repr_smoke():
     r = repr(run_cavity_resonance(n_steps=100))
     assert "CavityResonanceResult" in r
     assert "f_extracted_hz" in r
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.fdtd.py.2 — fdtd-203 short-dipole radiation-pattern gate
+# ---------------------------------------------------------------------------
+
+
+def test_run_dipole_pattern_smoke():
+    """Smoke test: 5-step run verifies API plumbing, not physics."""
+    from yee import DipolePatternResult, run_dipole_pattern
+
+    r = run_dipole_pattern(n_steps=5)
+    assert isinstance(r, DipolePatternResult)
+    assert hasattr(r, "passed")
+    assert hasattr(r, "e_theta_0")
+    assert hasattr(r, "e_theta_45")
+    assert hasattr(r, "e_theta_90")
+    assert hasattr(r, "e_theta_135")
+    assert hasattr(r, "e_theta_180")
+    # Array accessors
+    theta = r.theta_deg_array()
+    e = r.e_theta_array()
+    assert theta.shape == (37,)
+    assert e.shape == (37,)
+    assert theta[0] == 0.0
+    assert theta[-1] == 180.0
+
+
+def test_run_dipole_pattern_repr_smoke():
+    """__repr__ contains DipolePatternResult and e_theta_90."""
+    from yee import run_dipole_pattern
+
+    r = repr(run_dipole_pattern(n_steps=5))
+    assert "DipolePatternResult" in r
+    assert "e_theta_0" in r

@@ -139,6 +139,7 @@ impl Report {
             run_fdtd_201_cavity_resonance(),
             run_fdtd_201x_cavity_higher_mode(),
             run_fdtd_202_lossy_cavity_q(),
+            run_fdtd_203_dipole_pattern(),
             run_fem_eig_001(),
             run_fem_eig_002(),
             run_fem_eig_003(),
@@ -1765,6 +1766,27 @@ fn run_fdtd_201x_cavity_higher_mode() -> CaseResult {
         notes: "wall-time-gated (~5–15 s release on 24×4×16 grid / 40 000 steps); \
                 run via `cargo test -p yee-fdtd --test cavity_higher_mode --release -- \
                 --ignored --nocapture`"
+            .into(),
+        wall_time_seconds: 0.0,
+        plot_paths: Vec::new(),
+    }
+}
+
+/// fdtd-203: short-dipole sin-theta NTFF radiation-pattern gate (Phase 2.fdtd.py.2).
+///
+/// Wall-time ~30 s in release mode; registered Skipped so the default
+/// `yee validate all` stays fast. Run via:
+///   cargo test -p yee-fdtd --test dipole_pattern --release -- --include-ignored
+/// or from Python (maturin develop --release):
+///   from yee import run_dipole_pattern; assert run_dipole_pattern().passed
+fn run_fdtd_203_dipole_pattern() -> CaseResult {
+    CaseResult {
+        id: "fdtd-203".into(),
+        description: "FDTD short-dipole sin-theta NTFF radiation pattern (Balanis 4.2)".into(),
+        status: CaseStatus::Skipped,
+        notes: "wall-time ~30 s release; \
+                cargo test -p yee-fdtd --test dipole_pattern --release -- --include-ignored; \
+                or: from yee import run_dipole_pattern; assert run_dipole_pattern().passed"
             .into(),
         wall_time_seconds: 0.0,
         plot_paths: Vec::new(),
@@ -5270,6 +5292,20 @@ mod tests {
     fn run_all_includes_fdtd_202() {
         let result = run_fdtd_202_lossy_cavity_q();
         assert_eq!(result.id, "fdtd-202", "fdtd-202 case id mismatch");
+    }
+
+    /// Verifies that [`run_fdtd_203_dipole_pattern`] returns a result with
+    /// `id == "fdtd-203"` (the stable case identifier wired into `run_all`).
+    /// Fast — fdtd-203 is registered Skipped (wall-time gated externally).
+    #[test]
+    fn run_all_includes_fdtd_203() {
+        let result = run_fdtd_203_dipole_pattern();
+        assert_eq!(result.id, "fdtd-203", "fdtd-203 case id mismatch");
+        assert_eq!(
+            result.status,
+            CaseStatus::Skipped,
+            "fdtd-203 should be Skipped (wall-time gated)"
+        );
     }
 
     // -----------------------------------------------------------------
