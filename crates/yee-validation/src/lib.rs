@@ -1772,27 +1772,6 @@ fn run_fdtd_201x_cavity_higher_mode() -> CaseResult {
     }
 }
 
-/// fdtd-203: short-dipole sin-theta NTFF radiation-pattern gate (Phase 2.fdtd.py.2).
-///
-/// Wall-time ~30 s in release mode; registered Skipped so the default
-/// `yee validate all` stays fast. Run via:
-///   cargo test -p yee-fdtd --test dipole_pattern --release -- --include-ignored
-/// or from Python (maturin develop --release):
-///   from yee import run_dipole_pattern; assert run_dipole_pattern().passed
-fn run_fdtd_203_dipole_pattern() -> CaseResult {
-    CaseResult {
-        id: "fdtd-203".into(),
-        description: "FDTD short-dipole sin-theta NTFF radiation pattern (Balanis 4.2)".into(),
-        status: CaseStatus::Skipped,
-        notes: "wall-time ~30 s release; \
-                cargo test -p yee-fdtd --test dipole_pattern --release -- --include-ignored; \
-                or: from yee import run_dipole_pattern; assert run_dipole_pattern().passed"
-            .into(),
-        wall_time_seconds: 0.0,
-        plot_paths: Vec::new(),
-    }
-}
-
 /// fdtd-202: lossy-cavity Q-factor ring-down gate.
 ///
 /// Runs the CA/CB Yee E-update (Taflove §3.7) with σ₀ = 2.96e-3 S/m
@@ -1824,6 +1803,27 @@ fn run_fdtd_202_lossy_cavity_q() -> CaseResult {
         status,
         notes,
         wall_time_seconds,
+        plot_paths: Vec::new(),
+    }
+}
+
+/// fdtd-203: short-dipole sin-theta NTFF radiation-pattern gate (Phase 2.fdtd.py.2).
+///
+/// Wall-time ~30 s in release mode; registered Skipped so the default
+/// `yee validate all` stays fast. Run via:
+///   cargo test -p yee-fdtd --test dipole_pattern --release -- --include-ignored
+/// or from Python (maturin develop --release):
+///   from yee import run_dipole_pattern; assert run_dipole_pattern().passed
+fn run_fdtd_203_dipole_pattern() -> CaseResult {
+    CaseResult {
+        id: "fdtd-203".into(),
+        description: "FDTD short-dipole sin-theta NTFF radiation pattern (Balanis 4.2)".into(),
+        status: CaseStatus::Skipped,
+        notes: "wall-time ~30 s release; \
+                cargo test -p yee-fdtd --test dipole_pattern --release -- --include-ignored; \
+                or: from yee import run_dipole_pattern; assert run_dipole_pattern().passed"
+            .into(),
+        wall_time_seconds: 0.0,
         plot_paths: Vec::new(),
     }
 }

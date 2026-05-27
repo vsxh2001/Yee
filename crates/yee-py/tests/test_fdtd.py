@@ -220,7 +220,7 @@ def test_run_dipole_pattern_smoke():
 
 
 def test_run_dipole_pattern_repr_smoke():
-    """__repr__ contains DipolePatternResult and e_theta_90."""
+    """__repr__ contains DipolePatternResult and e_theta_0."""
     from yee import run_dipole_pattern
 
     r = repr(run_dipole_pattern(n_steps=5))
