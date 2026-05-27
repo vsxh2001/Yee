@@ -6,7 +6,11 @@
 //! receive numpy arrays for the θ-cut.
 //!
 //! Also exposes [`run_cavity_q`] / [`PyCavityQResult`] for the fdtd-202
-//! lossy-cavity Q-factor ring-down gate (Phase 2.fdtd.py.0).
+//! lossy-cavity Q-factor ring-down gate (Phase 2.fdtd.py.0),
+//! [`run_cavity_resonance`] / [`PyCavityResonanceResult`] for the fdtd-201
+//! TE₁₀₁ resonance gate (Phase 2.fdtd.py.1), and
+//! [`run_dipole_pattern`] / [`PyDipolePatternResult`] for the fdtd-203
+//! short-dipole sin-θ NTFF radiation-pattern gate (Phase 2.fdtd.py.2).
 //!
 //! The Python wrapper holds only the configuration plus the grid
 //! parameters (`nx`, `ny`, `nz`, `dx`); the underlying Rust
