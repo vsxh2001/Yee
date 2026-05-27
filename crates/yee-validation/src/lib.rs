@@ -1271,41 +1271,352 @@ fn run_mom_003() -> CaseResult {
     }
 }
 
+// ---------------------------------------------------------------------
+// cpml-001: CPML ≥ 30 dB attenuation vs PEC
+//
+// Physics helpers duplicated from `crates/yee-fdtd/tests/cpml_reflection.rs`.
+// Per design §D2 we duplicate rather than pub-leaking from the test module.
+// ---------------------------------------------------------------------
+
+/// Run a single 50³ simulation, inject Gaussian on E_z at `source`, record
+/// E_z at `probe` for `n_steps` steps, and return the trace.
+///
+/// Mirrors `run_trace` in `cpml_reflection.rs`.
+fn cpml001_run_trace(
+    mut solver: yee_fdtd::WalkingSkeletonSolver,
+    n_steps: usize,
+    source: (usize, usize, usize),
+    probe: (usize, usize, usize),
+    t0: f64,
+    sigma: f64,
+) -> Vec<f64> {
+    let mut trace = Vec::with_capacity(n_steps);
+    for _ in 0..n_steps {
+        solver.step_with_source(source.0, source.1, source.2, t0, sigma);
+        trace.push(solver.grid().ez[probe]);
+    }
+    trace
+}
+
+/// Execute the two-run CPML vs PEC comparison and return the dB reduction
+/// (positive = CPML is better than PEC).
+///
+/// Gate: reduction ≥ 30 dB.
+fn cpml001_run() -> f64 {
+    use yee_fdtd::{CpmlParams, WalkingSkeletonSolver, YeeGrid};
+
+    const N: usize = 50;
+    const DX: f64 = 1.0e-3;
+    const NPML: usize = 10;
+    const N_STEPS: usize = 300;
+    const SOURCE: (usize, usize, usize) = (25, 25, 25);
+    const PROBE: (usize, usize, usize) = (38, 25, 25);
+
+    let grid_ref = YeeGrid::vacuum(N, N, N, DX);
+    let dt = grid_ref.dt;
+    let t0 = 20.0 * dt;
+    let sigma = 6.0 * dt;
+    drop(grid_ref);
+
+    // PEC run.
+    let pec_trace = cpml001_run_trace(
+        WalkingSkeletonSolver::new(YeeGrid::vacuum(N, N, N, DX)),
+        N_STEPS,
+        SOURCE,
+        PROBE,
+        t0,
+        sigma,
+    );
+
+    // CPML run.
+    let grid_cpml = YeeGrid::vacuum(N, N, N, DX);
+    let params = CpmlParams::for_grid(&grid_cpml, NPML);
+    let cpml_trace = cpml001_run_trace(
+        WalkingSkeletonSolver::with_cpml(grid_cpml, params),
+        N_STEPS,
+        SOURCE,
+        PROBE,
+        t0,
+        sigma,
+    );
+
+    // PEC reflection amplitude: |pec(t) − cpml(t)| peak.
+    let pec_reflection_peak = pec_trace
+        .iter()
+        .zip(cpml_trace.iter())
+        .map(|(p, c)| (p - c).abs())
+        .fold(0.0_f64, f64::max);
+
+    // CPML residual: late-time oscillation minus DC floor.
+    const REFLECTION_START: usize = 80;
+    let late_cpml = &cpml_trace[REFLECTION_START..];
+    let static_floor = late_cpml.iter().copied().sum::<f64>() / (late_cpml.len() as f64);
+    let cpml_reflection_peak = late_cpml
+        .iter()
+        .map(|x| (x - static_floor).abs())
+        .fold(0.0_f64, f64::max);
+
+    // Outgoing-pulse reference (largest amplitude in either trace).
+    let peak_outgoing = pec_trace
+        .iter()
+        .chain(cpml_trace.iter())
+        .map(|x| x.abs())
+        .fold(0.0_f64, f64::max);
+
+    let pec_db = 20.0 * (pec_reflection_peak / peak_outgoing).log10();
+    let cpml_db = 20.0 * (cpml_reflection_peak / peak_outgoing).log10();
+    pec_db - cpml_db // positive = CPML reduces reflection
+}
+
 fn run_cpml_001() -> CaseResult {
+    let t0 = Instant::now();
+    let reduction_db = cpml001_run();
+    let wall_time_seconds = t0.elapsed().as_secs_f64();
+    let status = if reduction_db >= 30.0 {
+        CaseStatus::Passed
+    } else {
+        CaseStatus::Failed
+    };
+    let notes = format!(
+        "CPML reflection reduction = {reduction_db:.2} dB \
+         (gate ≥ 30 dB; 50³×300 steps, probe at (38,25,25), npml=10, \
+         Gaussian t0=20·dt σ=6·dt; Phase 1.validation.2)"
+    );
     CaseResult {
         id: "cpml-001".into(),
-        description: "CPML attenuates >= 30 dB vs PEC (FDTD)".into(),
-        status: CaseStatus::Skipped,
-        notes: "Phase 1.validation.1: cpml_reflection is a yee-fdtd integration test; \
-             aggregator integration deferred to Phase 1.validation.2"
-            .into(),
-        wall_time_seconds: 0.0,
+        description: "CPML attenuates >= 30 dB vs PEC (50³×300 steps, Roden-Gedney 2000)".into(),
+        status,
+        notes,
+        wall_time_seconds,
         plot_paths: Vec::new(),
+    }
+}
+
+// ---------------------------------------------------------------------
+// ntff-001: NTFF broadside/endfire null ≥ 20 dB
+//
+// Physics helpers duplicated from `crates/yee-fdtd/tests/ntff_dipole.rs`.
+// ---------------------------------------------------------------------
+
+/// Execute the 50³×2000-step NTFF simulation and return the
+/// broadside/endfire amplitude ratio in dB.
+///
+/// Gate: ratio ≥ 20 dB.
+fn ntff001_run() -> f64 {
+    use std::f64::consts::FRAC_PI_2;
+    use yee_fdtd::{CpmlParams, NtffParams, NtffState, WalkingSkeletonSolver, YeeGrid};
+
+    const N: usize = 50;
+    const DX: f64 = 1.0e-3;
+    const NPML: usize = 10;
+    const N_STEPS: usize = 2000;
+    const F_PROBE: f64 = 15.0e9;
+    const SRC: (usize, usize, usize) = (25, 25, 25);
+    const BOX_MARGIN_CELLS: usize = NPML + 5;
+
+    let grid = YeeGrid::vacuum(N, N, N, DX);
+    let dt = grid.dt;
+    let t0 = 12.0 * dt;
+    let sigma = 4.0 * dt;
+
+    let params = CpmlParams::for_grid(&grid, NPML);
+    let mut solver = WalkingSkeletonSolver::with_cpml(grid, params);
+
+    let ntff_params = NtffParams {
+        f_probe: F_PROBE,
+        box_margin_cells: BOX_MARGIN_CELLS,
+        theta_rad: FRAC_PI_2,
+        phi_rad: 0.0,
+    };
+    let mut ntff = NtffState::new(solver.grid(), ntff_params);
+
+    for _ in 0..N_STEPS {
+        solver.step_with_source_and_ntff(SRC.0, SRC.1, SRC.2, t0, sigma, &mut ntff);
+    }
+
+    let e_broadside = ntff.far_field_at(FRAC_PI_2, 0.0);
+    let e_endfire = ntff.far_field_at(0.0, 0.0);
+
+    let mag_broad = e_broadside.norm();
+    let mag_end = e_endfire.norm();
+
+    if mag_end == 0.0 {
+        // Perfect null — treat as 100 dB.
+        100.0
+    } else {
+        let ratio = mag_broad / mag_end;
+        20.0 * ratio.log10()
     }
 }
 
 fn run_ntff_001() -> CaseResult {
+    let t0 = Instant::now();
+    let db = ntff001_run();
+    let wall_time_seconds = t0.elapsed().as_secs_f64();
+    let status = if db >= 20.0 {
+        CaseStatus::Passed
+    } else {
+        CaseStatus::Failed
+    };
+    let notes = format!(
+        "broadside/endfire = {db:.2} dB \
+         (gate ≥ 20 dB; 50³×2000 steps, E_z source at (25,25,25), \
+         15 GHz NTFF, npml=10, box_margin=15; Phase 1.validation.2)"
+    );
     CaseResult {
         id: "ntff-001".into(),
-        description: "NTFF broadside/endfire null >= 20 dB".into(),
-        status: CaseStatus::Skipped,
-        notes: "Phase 1.validation.1: ntff_dipole is a yee-fdtd integration test; \
-             aggregator integration deferred to Phase 1.validation.2"
-            .into(),
-        wall_time_seconds: 0.0,
+        description: "NTFF broadside/endfire null >= 20 dB (E_z dipole, 50³×2000 steps)".into(),
+        status,
+        notes,
+        wall_time_seconds,
         plot_paths: Vec::new(),
     }
 }
 
+// ---------------------------------------------------------------------
+// dispersive-001: Drude slab Fresnel reflection within 20%
+//
+// Physics helpers duplicated from `crates/yee-fdtd/tests/dispersive.rs`
+// (`drude_slab_reflects_per_fresnel` test only).
+// ---------------------------------------------------------------------
+
+/// Analytical Fresnel reflection coefficient at normal incidence from vacuum
+/// into a non-magnetic medium with complex relative permittivity `eps_r`.
+///
+/// `Γ = (1 − n) / (1 + n)` where `n = √ε_r` (principal branch).
+fn dispersive001_fresnel_gamma(eps_r: num_complex::Complex64) -> num_complex::Complex64 {
+    let n = eps_r.sqrt();
+    let one = num_complex::Complex64::new(1.0, 0.0);
+    (one - n) / (one + n)
+}
+
+/// Run the two-run Drude-slab simulation and return
+/// `(gamma_measured, gamma_analytic)`.
+///
+/// Gate: |gamma_measured − gamma_analytic| / gamma_analytic ≤ 0.20.
+fn dispersive001_run() -> (f64, f64) {
+    use std::f64::consts::PI;
+    use yee_fdtd::{CpmlParams, CpmlState, DispersiveState, Material, MaterialMap, YeeGrid};
+
+    const N: usize = 80;
+    const DX: f64 = 1.0e-3;
+    const NPML: usize = 10;
+    const N_STEPS: usize = 800;
+    const F_PROBE: f64 = 10.0e9;
+
+    let eps_inf = 1.0_f64;
+    let omega_p = 2.0 * PI * 2.0e10;
+    let gamma_drude = 2.0 * PI * 5.0e9;
+
+    let grid_ref = YeeGrid::vacuum(N, N, N, DX);
+    let dt = grid_ref.dt;
+    let sigma_t = 8.0 * dt;
+    let t0 = 4.0 * sigma_t;
+    drop(grid_ref);
+
+    let source = (20_usize, N / 2, N / 2);
+    let probe = (30_usize, N / 2, N / 2);
+
+    // Helper: run one simulation (vacuum or Drude slab), return E_z trace.
+    let run_trace = |materials: Option<&MaterialMap>| -> Vec<f64> {
+        let mut grid = YeeGrid::vacuum(N, N, N, DX);
+        let params = CpmlParams::for_grid(&grid, NPML);
+        let mut cpml = CpmlState::new(&grid, params);
+        let mut state = materials.map(DispersiveState::new);
+
+        let mut trace = Vec::with_capacity(N_STEPS);
+        for n in 0..N_STEPS {
+            let t = n as f64 * grid.dt;
+            yee_fdtd::update::update_h(&mut grid);
+            cpml.update_h(&mut grid);
+            yee_fdtd::sources::gaussian_pulse_ez(
+                &mut grid, source.0, source.1, source.2, t, t0, sigma_t,
+            );
+            if let (Some(state), Some(materials)) = (state.as_mut(), materials) {
+                state.update_e_with_dispersion(&mut grid, materials);
+            } else {
+                yee_fdtd::update::update_e(&mut grid);
+            }
+            cpml.update_e(&mut grid);
+            trace.push(grid.ez[probe]);
+        }
+        trace
+    };
+
+    // Vacuum reference run.
+    let trace_ref = run_trace(None);
+
+    // Drude slab run.
+    let mut materials = MaterialMap::vacuum(N, N, N);
+    let drude_mat = Material::Drude {
+        eps_inf,
+        omega_p,
+        gamma: gamma_drude,
+    };
+    materials.set_box(50, 70, 0, N + 1, 0, N + 1, drude_mat);
+
+    let trace_slab = run_trace(Some(&materials));
+
+    // Difference = reflected wave.
+    let diff: Vec<f64> = trace_ref
+        .iter()
+        .zip(trace_slab.iter())
+        .map(|(r, s)| s - r)
+        .collect();
+
+    let omega = 2.0 * PI * F_PROBE;
+    let dft_at = |trace: &[f64]| -> num_complex::Complex64 {
+        let mut acc = num_complex::Complex64::new(0.0, 0.0);
+        for (n, &v) in trace.iter().enumerate() {
+            let t = n as f64 * dt;
+            acc += num_complex::Complex64::from_polar(v, -omega * t);
+        }
+        acc * dt
+    };
+
+    let f_incident = dft_at(&trace_ref);
+    let f_reflected = dft_at(&diff);
+
+    // Geometric 1/r correction (method of images).
+    let slab_face_i = 50_usize;
+    let image_i = 2 * slab_face_i - source.0; // = 80
+    let r_direct = ((probe.0 as f64 - source.0 as f64).abs()) * DX;
+    let r_reflected = ((probe.0 as f64 - image_i as f64).abs()) * DX;
+    let geom = r_reflected / r_direct;
+    let measured_gamma = (f_reflected.norm() / f_incident.norm()) * geom;
+
+    // Analytical Fresnel coefficient.
+    let omega_probe = 2.0 * PI * F_PROBE;
+    let eps_drude = drude_mat.permittivity(omega_probe);
+    let analytical_gamma = dispersive001_fresnel_gamma(eps_drude).norm();
+
+    (measured_gamma, analytical_gamma)
+}
+
 fn run_dispersive_001() -> CaseResult {
+    let t0 = Instant::now();
+    let (gamma_measured, gamma_analytic) = dispersive001_run();
+    let wall_time_seconds = t0.elapsed().as_secs_f64();
+    let rel_err = (gamma_measured - gamma_analytic).abs() / gamma_analytic;
+    let status = if rel_err <= 0.20 {
+        CaseStatus::Passed
+    } else {
+        CaseStatus::Failed
+    };
+    let notes = format!(
+        "|Γ_measured|={gamma_measured:.4}, |Γ_analytic|={gamma_analytic:.4}, \
+         rel_err={:.2}% (gate ≤ 20%; 80³×800 steps × 2 runs, \
+         Drude ω_p=2π·20 GHz γ=2π·5 GHz slab i∈[50,70), \
+         probe at (30,40,40), DFT at 10 GHz; Phase 1.validation.2)",
+        100.0 * rel_err
+    );
     CaseResult {
         id: "dispersive-001".into(),
-        description: "Drude slab Fresnel reflection within 20%".into(),
-        status: CaseStatus::Skipped,
-        notes: "Phase 1.validation.1: drude_slab is a yee-fdtd integration test; \
-             aggregator integration deferred to Phase 1.validation.2"
+        description: "Drude slab Fresnel reflection within 20% (80³×800 steps, DFT at 10 GHz)"
             .into(),
-        wall_time_seconds: 0.0,
+        status,
+        notes,
+        wall_time_seconds,
         plot_paths: Vec::new(),
     }
 }
@@ -4959,5 +5270,78 @@ mod tests {
     fn run_all_includes_fdtd_202() {
         let result = run_fdtd_202_lossy_cavity_q();
         assert_eq!(result.id, "fdtd-202", "fdtd-202 case id mismatch");
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 1.validation.2 unit tests: cpml-001, ntff-001, dispersive-001
+    // -----------------------------------------------------------------
+
+    /// cpml-001: CPML attenuates ≥ 30 dB vs PEC.
+    ///
+    /// Wall-time: < 0.5 s (50³×300 steps × 2 runs, NOT `#[ignore]`-gated).
+    #[test]
+    fn cpml_001_passes() {
+        let result = run_cpml_001();
+        assert_eq!(result.id, "cpml-001");
+        assert_eq!(
+            result.status,
+            CaseStatus::Passed,
+            "cpml-001 gate failed: {}",
+            result.notes
+        );
+    }
+
+    /// Verifies that [`run_cpml_001`] returns `id == "cpml-001"`.
+    #[test]
+    fn run_all_includes_cpml_001() {
+        let result = run_cpml_001();
+        assert_eq!(result.id, "cpml-001", "cpml-001 case id mismatch");
+    }
+
+    /// ntff-001: NTFF broadside/endfire null ≥ 20 dB.
+    ///
+    /// Wall-time: < 3 s (50³×2000 steps, NOT `#[ignore]`-gated).
+    #[test]
+    fn ntff_001_passes() {
+        let result = run_ntff_001();
+        assert_eq!(result.id, "ntff-001");
+        assert_eq!(
+            result.status,
+            CaseStatus::Passed,
+            "ntff-001 gate failed: {}",
+            result.notes
+        );
+    }
+
+    /// Verifies that [`run_ntff_001`] returns `id == "ntff-001"`.
+    #[test]
+    fn run_all_includes_ntff_001() {
+        let result = run_ntff_001();
+        assert_eq!(result.id, "ntff-001", "ntff-001 case id mismatch");
+    }
+
+    /// dispersive-001: Drude slab Fresnel reflection within 20 %.
+    ///
+    /// Wall-time: < 8 s (80³×800 steps × 2 runs, NOT `#[ignore]`-gated).
+    #[test]
+    fn dispersive_001_passes() {
+        let result = run_dispersive_001();
+        assert_eq!(result.id, "dispersive-001");
+        assert_eq!(
+            result.status,
+            CaseStatus::Passed,
+            "dispersive-001 gate failed: {}",
+            result.notes
+        );
+    }
+
+    /// Verifies that [`run_dispersive_001`] returns `id == "dispersive-001"`.
+    #[test]
+    fn run_all_includes_dispersive_001() {
+        let result = run_dispersive_001();
+        assert_eq!(
+            result.id, "dispersive-001",
+            "dispersive-001 case id mismatch"
+        );
     }
 }
