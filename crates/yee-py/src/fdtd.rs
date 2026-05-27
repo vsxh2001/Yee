@@ -945,3 +945,165 @@ pub fn run_fresnel_tfsf(
         passed: rel_err < 0.05,
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 2.fdtd.py.4 — cpml-001 / ntff-001 / dispersive-001 Python drivers
+// ---------------------------------------------------------------------------
+
+/// Result of a CPML reflection-attenuation measurement (cpml-001 gate).
+///
+/// Returned by [`run_cpml_reflection`].
+#[pyclass(name = "CpmlReflectionResult", module = "yee._yee")]
+pub struct PyCpmlReflectionResult {
+    /// CPML reflection reduction vs PEC in dB (positive = CPML is better).
+    /// Gate: ≥ 30 dB (Roden–Gedney 2000).
+    #[pyo3(get)]
+    pub reduction_db: f64,
+    /// `true` iff `reduction_db ≥ 30.0`.
+    #[pyo3(get)]
+    pub passed: bool,
+}
+
+#[pymethods]
+impl PyCpmlReflectionResult {
+    fn __repr__(&self) -> String {
+        format!(
+            "CpmlReflectionResult(reduction_db={:.2}, passed={})",
+            self.reduction_db, self.passed,
+        )
+    }
+}
+
+/// Run the CPML reflection-attenuation benchmark (cpml-001 gate).
+///
+/// Compares a PEC-boundary simulation with a CPML-boundary simulation on a
+/// 50³ vacuum grid at dx = 1 mm (300 steps, 10-cell CPML). Returns the
+/// reduction in reflected-wave amplitude in dB.
+///
+/// # Gate criterion (cpml-001)
+///
+/// `reduction_db ≥ 30 dB` (Roden–Gedney 2000; currently ≥ 69 dB).
+///
+/// # Reference
+///
+/// J. A. Roden and S. D. Gedney, "Convolutional PML (CPML): an efficient
+/// FDTD implementation of the CFS-PML for arbitrary media," *Microwave and
+/// Optical Technology Letters*, vol. 27, no. 5, pp. 334–339, 2000.
+#[pyfunction]
+pub fn run_cpml_reflection() -> PyCpmlReflectionResult {
+    let reduction_db = yee_validation::cpml001_run();
+    PyCpmlReflectionResult {
+        reduction_db,
+        passed: reduction_db >= 30.0,
+    }
+}
+
+/// Result of an NTFF broadside/endfire ratio measurement (ntff-001 gate).
+///
+/// Returned by [`run_ntff_broadside`].
+#[pyclass(name = "NtffResult", module = "yee._yee")]
+pub struct PyNtffResult {
+    /// Broadside-to-endfire ratio in dB (broadside = θ=90°, endfire = θ=0°).
+    /// Gate: ≥ 20 dB (E_z dipole sin θ pattern).
+    #[pyo3(get)]
+    pub ratio_db: f64,
+    /// `true` iff `ratio_db ≥ 20.0`.
+    #[pyo3(get)]
+    pub passed: bool,
+}
+
+#[pymethods]
+impl PyNtffResult {
+    fn __repr__(&self) -> String {
+        format!(
+            "NtffResult(ratio_db={:.2}, passed={})",
+            self.ratio_db, self.passed,
+        )
+    }
+}
+
+/// Run the NTFF broadside/endfire ratio benchmark (ntff-001 gate).
+///
+/// Builds a 50³ vacuum grid (dx = 1 mm, 10-cell CPML), drives an E_z
+/// Gaussian source at the centre, runs 2000 steps at 15 GHz, and evaluates
+/// the NTFF far field at broadside (θ = 90°) and endfire (θ = 0°).
+///
+/// # Gate criterion (ntff-001)
+///
+/// `ratio_db ≥ 20 dB` (Balanis §4.2 sin θ pattern has a perfect null at
+/// θ = 0°; 20 dB is a loose gate accounting for finite grid resolution).
+///
+/// # Reference
+///
+/// C. A. Balanis, *Antenna Theory*, 4th ed., §4.2 — short-dipole far-field
+/// `E_θ ∝ sin θ` (maximum at θ = 90°, null at θ = 0°).
+#[pyfunction]
+pub fn run_ntff_broadside() -> PyNtffResult {
+    let ratio_db = yee_validation::ntff001_run();
+    PyNtffResult {
+        ratio_db,
+        passed: ratio_db >= 20.0,
+    }
+}
+
+/// Result of a Drude-slab Fresnel reflection measurement (dispersive-001 gate).
+///
+/// Returned by [`run_dispersive_drude`].
+#[pyclass(name = "DispersiveDrudeResult", module = "yee._yee")]
+pub struct PyDispersiveDrudeResult {
+    /// Measured |Γ| (FDTD DFT of reflected vs incident, with 1/r correction).
+    #[pyo3(get)]
+    pub gamma_measured: f64,
+    /// Analytic |Γ| from `(1−n)/(1+n)` with the Drude ε_r(ω_probe).
+    #[pyo3(get)]
+    pub gamma_analytic: f64,
+    /// Relative error `|γ_m − γ_a| / γ_a`.
+    #[pyo3(get)]
+    pub rel_err: f64,
+    /// `true` iff `rel_err ≤ 0.20`.
+    #[pyo3(get)]
+    pub passed: bool,
+}
+
+#[pymethods]
+impl PyDispersiveDrudeResult {
+    fn __repr__(&self) -> String {
+        format!(
+            "DispersiveDrudeResult(gamma_measured={:.4}, gamma_analytic={:.4}, \
+             rel_err={:.2}%, passed={})",
+            self.gamma_measured,
+            self.gamma_analytic,
+            100.0 * self.rel_err,
+            self.passed,
+        )
+    }
+}
+
+/// Run the Drude-slab Fresnel reflection benchmark (dispersive-001 gate).
+///
+/// Builds an 80³ vacuum grid (dx = 1 mm, 10-cell CPML), fills cells
+/// i∈[50, 70) with a Drude material (ε_inf=1, ω_p=2π·20 GHz,
+/// γ=2π·5 GHz), injects a broadband Gaussian E_z pulse, and measures
+/// |Γ| at 10 GHz via DFT. Compares to the analytic Fresnel coefficient
+/// `(1−n)/(1+n)` with `n = √ε_r(ω_probe)`.
+///
+/// # Gate criterion (dispersive-001)
+///
+/// `rel_err ≤ 20%` (Taflove §9 ADE tolerance for Drude materials).
+///
+/// # Reference
+///
+/// A. Taflove and S. C. Hagness, *Computational Electrodynamics: The
+/// Finite-Difference Time-Domain Method*, 3rd ed., §9 (dispersive media
+/// ADE formulation).
+#[pyfunction]
+pub fn run_dispersive_drude() -> PyDispersiveDrudeResult {
+    let (gamma_measured, gamma_analytic) = yee_validation::dispersive001_run();
+    let rel_err = (gamma_measured - gamma_analytic).abs() / gamma_analytic;
+    PyDispersiveDrudeResult {
+        gamma_measured,
+        gamma_analytic,
+        rel_err,
+        passed: rel_err <= 0.20,
+    }
+}
