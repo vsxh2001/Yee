@@ -34,6 +34,7 @@
 - [FDTD lossy cavity from Python](tutorials/10-fdtd-lossy-cavity-from-python.md)
 - [FDTD cavity resonance from Python](tutorials/11-fdtd-cavity-resonance-from-python.md)
 - [FDTD dipole radiation pattern from Python](tutorials/12-fdtd-dipole-pattern-from-python.md)
+- [FDTD TF/SF Fresnel transmission from Python](tutorials/13-fdtd-fresnel-tfsf-from-python.md)
 
 # Decisions
 
@@ -111,3 +112,5 @@
 - [ADR-0072: Phase 2.fdtd.py.0 Python cavity-Q driver + fdtd-202 aggregator](decisions/0072-phase-2-fdtd-py-0-cavity-q-python.md)
 - [ADR-0073: Phase 2.fdtd.py.1 FDTD cavity-resonance Python driver + fdtd-201/201.x aggregator](decisions/0073-phase-2-fdtd-py-1-cavity-resonance-python.md)
 - [ADR-0074: Phase 1.validation.2 FDTD gate integration (cpml-001, ntff-001, dispersive-001)](decisions/0074-phase-1-validation-2-fdtd-aggregator-gates.md)
+- [ADR-0075: Phase 2.fdtd.py.2 FDTD dipole-pattern Python driver + fdtd-203 gate](decisions/0075-phase-2-fdtd-py-2-dipole-pattern-python.md)
+- [ADR-0076: Phase 2.fdtd.py.3 FDTD TF/SF Fresnel-transmission Python driver + fdtd-204 gate](decisions/0076-phase-2-fdtd-py-3-fresnel-tfsf-python.md)
