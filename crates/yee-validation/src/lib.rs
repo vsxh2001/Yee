@@ -5278,8 +5278,11 @@ mod tests {
 
     /// cpml-001: CPML attenuates ≥ 30 dB vs PEC.
     ///
-    /// Wall-time: < 0.5 s (50³×300 steps × 2 runs, NOT `#[ignore]`-gated).
+    /// Wall-time: ~63 s debug / ~6 s release (50³×300 steps × 2 runs).
+    /// `#[ignore]`-gated — run with:
+    /// `cargo test -p yee-validation --release -- --ignored cpml_001_passes`
     #[test]
+    #[ignore = "slow: ~63 s debug / ~6 s release (50³×300 steps × 2 FDTD runs)"]
     fn cpml_001_passes() {
         let result = run_cpml_001();
         assert_eq!(result.id, "cpml-001");
@@ -5292,7 +5295,9 @@ mod tests {
     }
 
     /// Verifies that [`run_cpml_001`] returns `id == "cpml-001"`.
+    /// `#[ignore]`-gated (runs the full physics; ~63 s debug).
     #[test]
+    #[ignore = "slow: runs full cpml-001 physics (~63 s debug)"]
     fn run_all_includes_cpml_001() {
         let result = run_cpml_001();
         assert_eq!(result.id, "cpml-001", "cpml-001 case id mismatch");
@@ -5300,8 +5305,11 @@ mod tests {
 
     /// ntff-001: NTFF broadside/endfire null ≥ 20 dB.
     ///
-    /// Wall-time: < 3 s (50³×2000 steps, NOT `#[ignore]`-gated).
+    /// Wall-time: ~269 s debug / ~27 s release (50³×2000 steps).
+    /// `#[ignore]`-gated — run with:
+    /// `cargo test -p yee-validation --release -- --ignored ntff_001_passes`
     #[test]
+    #[ignore = "slow: ~269 s debug / ~27 s release (50³×2000 FDTD steps + NTFF DFT)"]
     fn ntff_001_passes() {
         let result = run_ntff_001();
         assert_eq!(result.id, "ntff-001");
@@ -5314,7 +5322,9 @@ mod tests {
     }
 
     /// Verifies that [`run_ntff_001`] returns `id == "ntff-001"`.
+    /// `#[ignore]`-gated (runs the full physics; ~269 s debug).
     #[test]
+    #[ignore = "slow: runs full ntff-001 physics (~269 s debug)"]
     fn run_all_includes_ntff_001() {
         let result = run_ntff_001();
         assert_eq!(result.id, "ntff-001", "ntff-001 case id mismatch");
@@ -5322,8 +5332,11 @@ mod tests {
 
     /// dispersive-001: Drude slab Fresnel reflection within 20 %.
     ///
-    /// Wall-time: < 8 s (80³×800 steps × 2 runs, NOT `#[ignore]`-gated).
+    /// Wall-time: ~100-200 s debug / ~10-20 s release (80³×800 steps × 2 runs).
+    /// `#[ignore]`-gated — run with:
+    /// `cargo test -p yee-validation --release -- --ignored dispersive_001_passes`
     #[test]
+    #[ignore = "slow: ~100-200 s debug / ~10-20 s release (80³×800 steps × 2 Drude runs)"]
     fn dispersive_001_passes() {
         let result = run_dispersive_001();
         assert_eq!(result.id, "dispersive-001");
@@ -5336,7 +5349,9 @@ mod tests {
     }
 
     /// Verifies that [`run_dispersive_001`] returns `id == "dispersive-001"`.
+    /// `#[ignore]`-gated (runs the full physics; ~100-200 s debug).
     #[test]
+    #[ignore = "slow: runs full dispersive-001 physics (~100-200 s debug)"]
     fn run_all_includes_dispersive_001() {
         let result = run_dispersive_001();
         assert_eq!(
