@@ -140,6 +140,7 @@ impl Report {
             run_fdtd_201x_cavity_higher_mode(),
             run_fdtd_202_lossy_cavity_q(),
             run_fdtd_203_dipole_pattern(),
+            run_fdtd_204(),
             run_fem_eig_001(),
             run_fem_eig_002(),
             run_fem_eig_003(),
@@ -1824,6 +1825,61 @@ fn run_fdtd_203_dipole_pattern() -> CaseResult {
         notes: "wall-time ~30 s release; \
                 cargo test -p yee-fdtd --test dipole_pattern --release -- --include-ignored; \
                 or: from yee import run_dipole_pattern; assert run_dipole_pattern().passed"
+            .into(),
+        wall_time_seconds: 0.0,
+        plot_paths: Vec::new(),
+    }
+}
+
+// ---------------------------------------------------------------------
+// fdtd-204: TF/SF Fresnel-transmission gate (Phase 2.fdtd.py.3)
+//
+// Normal-incidence plane wave through ε_r=2.2 dielectric slab.
+// Two-run protocol: vacuum run (probe_inc) for A_inc,
+// slab run (probe_trans) for A_trans; t_measured = A_trans/A_inc.
+// Analytic reference: Born & Wolf §1.6.2 transfer-matrix.
+// ---------------------------------------------------------------------
+
+/// Analytic amplitude transmission coefficient for a lossless dielectric
+/// slab (Born & Wolf §1.6.2 transfer-matrix, normal incidence).
+///
+/// `d_cells * dx` is the slab thickness in metres; n₁ = n₃ = 1 (vacuum).
+pub fn fdtd204_t_analytic(eps_r: f64, d_cells: usize, dx: f64, freq: f64) -> f64 {
+    use std::f64::consts::PI;
+    let c0 = yee_core::units::C0;
+    let n2 = eps_r.sqrt();
+    let d = d_cells as f64 * dx;
+    let delta = 2.0 * PI * freq * n2 * d / c0; // phase depth in slab
+    let r12 = (1.0 - n2) / (1.0 + n2);
+    let r23 = (n2 - 1.0) / (n2 + 1.0);
+    let t12 = 2.0 / (1.0 + n2);
+    let t23 = 2.0 * n2 / (n2 + 1.0);
+    // e^{jδ} and e^{j2δ}
+    let cos2d = (2.0 * delta).cos();
+    let sin2d = (2.0 * delta).sin();
+    let exp2d = num_complex::Complex64::new(cos2d, sin2d);
+    let ejd = num_complex::Complex64::new(delta.cos(), delta.sin());
+    let denom = 1.0 + r12 * r23 * exp2d;
+    let t = t12 * t23 * ejd / denom;
+    t.norm()
+}
+
+/// fdtd-204: TF/SF Fresnel-transmission gate (Phase 2.fdtd.py.3).
+///
+/// Wall-time ~5–15 min release; registered Skipped so the default
+/// `yee validate all` stays fast. Run via:
+///   `cargo test -p yee-validation -- --ignored --release`
+///   (fdtd_204_live_gate)
+/// or from Python (maturin develop --release):
+///   `from yee import run_fresnel_tfsf; assert run_fresnel_tfsf().passed`
+fn run_fdtd_204() -> CaseResult {
+    CaseResult {
+        id: "fdtd-204".into(),
+        description: "TF/SF Fresnel transmission ε_r=2.2 slab 80³×600 steps gate ≤5%".into(),
+        status: CaseStatus::Skipped,
+        notes: "Wall-time ~5–15 min release; run via \
+                `cargo test -p yee-validation -- --ignored --release` \
+                (fdtd_204_live_gate); Phase 2.fdtd.py.3"
             .into(),
         wall_time_seconds: 0.0,
         plot_paths: Vec::new(),
@@ -5403,6 +5459,150 @@ mod tests {
         assert_eq!(
             result.id, "dispersive-001",
             "dispersive-001 case id mismatch"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 2.fdtd.py.3 unit tests: fdtd-204 analytic formula + gate
+    // -----------------------------------------------------------------
+
+    /// Inner driver for fdtd-204: TF/SF plane-wave Fresnel transmission.
+    ///
+    /// Returns `(t_measured, t_analytic)`. Lives in `#[cfg(test)]` because
+    /// the outer `run_fdtd_204()` is a Skipped stub; the physics is only
+    /// exercised via the `fdtd_204_live_gate` `#[ignore]` test.
+    fn fdtd204_run() -> (f64, f64) {
+        use ndarray::Array3;
+        use yee_fdtd::{
+            CpmlParams, PlaneWaveDirection, PlaneWaveSource, WalkingSkeletonSolver, YeeGrid,
+        };
+
+        // fdtd-204 gate constants (local to this fn; kept in one place).
+        const N: usize = 80;
+        const DX: f64 = 1.0e-3; // 1 mm
+        const NPML: usize = 10;
+        const FREQ: f64 = 10.0e9; // 10 GHz
+        const EPS_R: f64 = 2.2; // slab ε_r
+        const SLAB_I0: usize = 50; // slab front face (inclusive)
+        const SLAB_I1: usize = 55; // slab back face (exclusive, 5-cell slab)
+        const N_STEPS: usize = 600;
+        const SETTLE: usize = 200; // discard first 200 steps as transient
+
+        // TF box spans from 12 to n-npml-1 = 69 in i; nearly full in j,k.
+        let tf_i0: usize = 12;
+        let tf_i1: usize = N - NPML - 1; // = 69
+        let tf_j0: usize = 1;
+        let tf_j1: usize = N - 2; // = 78
+        let tf_k0: usize = 1;
+        let tf_k1: usize = N - 2; // = 78
+
+        // Probes: incident probe inside TF (vacuum, before slab);
+        // transmitted probe inside TF (vacuum, after slab).
+        let probe_inc = (25_usize, N / 2, N / 2);
+        let probe_trans = (62_usize, N / 2, N / 2);
+
+        // Helper: run one simulation (vacuum or slab), return E_z trace at probe.
+        let run_sim = |with_slab: bool, probe: (usize, usize, usize)| -> Vec<f64> {
+            let grid = if with_slab {
+                // Build eps_r_cells; shape (N+1, N+1, N+1), all 1.0 except
+                // i in [SLAB_I0, SLAB_I1). Keep CPML cells at 1.0.
+                let mut eps_cells = Array3::<f64>::from_elem((N + 1, N + 1, N + 1), 1.0);
+                for i in SLAB_I0..SLAB_I1 {
+                    for j in 0..=N {
+                        for k in 0..=N {
+                            eps_cells[(i, j, k)] = EPS_R;
+                        }
+                    }
+                }
+                YeeGrid::vacuum(N, N, N, DX).with_eps_r_cells(eps_cells)
+            } else {
+                YeeGrid::vacuum(N, N, N, DX)
+            };
+            let dt = grid.dt;
+            let params = CpmlParams::for_grid(&grid, NPML);
+            let mut solver = WalkingSkeletonSolver::with_cpml(grid, params);
+            let mut pw = PlaneWaveSource::new(
+                tf_i0,
+                tf_i1,
+                tf_j0,
+                tf_j1,
+                tf_k0,
+                tf_k1,
+                PlaneWaveDirection::PlusX,
+                FREQ,
+                50,
+                DX,
+                dt,
+                4,
+            );
+            let mut trace = Vec::with_capacity(N_STEPS);
+            for _ in 0..N_STEPS {
+                solver.step_with_plane_wave(&mut pw);
+                trace.push(solver.grid().ez[probe]);
+            }
+            trace
+        };
+
+        // Vacuum run: probe at probe_inc to measure incident amplitude.
+        let trace_vac = run_sim(false, probe_inc);
+        // Slab run: probe at probe_trans to measure transmitted amplitude.
+        let trace_slab = run_sim(true, probe_trans);
+
+        // Peak amplitude after settling (discard first SETTLE steps as transient).
+        let a_inc = trace_vac[SETTLE..]
+            .iter()
+            .cloned()
+            .fold(0.0_f64, |a, v| a.max(v.abs()));
+        let a_trans = trace_slab[SETTLE..]
+            .iter()
+            .cloned()
+            .fold(0.0_f64, |a, v| a.max(v.abs()));
+        let t_measured = if a_inc > 0.0 { a_trans / a_inc } else { 0.0 };
+
+        let t_analytic = fdtd204_t_analytic(EPS_R, SLAB_I1 - SLAB_I0, DX, FREQ);
+        (t_measured, t_analytic)
+    }
+
+    /// fdtd-204 smoke: analytic formula is well-defined.
+    ///
+    /// Born & Wolf §1.6.2 transfer-matrix for ε_r=2.2, d=5mm, f=10 GHz
+    /// gives |t| ≈ 0.927. This test runs in < 1 ms.
+    #[test]
+    fn fdtd_204_analytic_formula_smoke() {
+        let t = fdtd204_t_analytic(2.2, 5, 1e-3, 10e9);
+        assert!(
+            t > 0.80 && t < 1.0,
+            "fdtd-204 analytic t should be ~0.927, got {t:.4}"
+        );
+    }
+
+    /// fdtd-204 gate: full physics run (~5-15 min release).
+    ///
+    /// Normal-incidence TF/SF plane wave through ε_r=2.2 slab:
+    /// `|t_measured / t_analytic − 1| < 5 %`.
+    #[test]
+    #[ignore = "wall-time ~5-15 min release; run with --ignored --release"]
+    fn fdtd_204_live_gate() {
+        let (t_measured, t_analytic) = fdtd204_run();
+        let rel_err = (t_measured - t_analytic).abs() / t_analytic;
+        assert!(
+            rel_err < 0.05,
+            "fdtd-204 gate FAILED: t_measured={t_measured:.4}, \
+             t_analytic={t_analytic:.4}, rel_err={:.2}% (gate ≤5%)",
+            100.0 * rel_err
+        );
+    }
+
+    /// Verifies that [`run_fdtd_204`] returns `id == "fdtd-204"` and status
+    /// Skipped (wall-time gated externally).
+    #[test]
+    fn run_all_includes_fdtd_204() {
+        let result = run_fdtd_204();
+        assert_eq!(result.id, "fdtd-204", "fdtd-204 case id mismatch");
+        assert_eq!(
+            result.status,
+            CaseStatus::Skipped,
+            "fdtd-204 should be Skipped (wall-time gated)"
         );
     }
 }

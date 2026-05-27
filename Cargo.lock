@@ -6647,6 +6647,7 @@ name = "yee-py"
 version = "0.0.0"
 dependencies = [
  "nalgebra 0.34.2",
+ "ndarray",
  "num-complex",
  "numpy",
  "pyo3",
