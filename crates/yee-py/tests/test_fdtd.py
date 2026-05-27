@@ -266,6 +266,7 @@ def test_run_cpml_reflection_returns_result():
     import yee
 
     r = yee.run_cpml_reflection()
+    assert isinstance(r, yee.CpmlReflectionResult)
     assert hasattr(r, "reduction_db")
     assert hasattr(r, "passed")
     assert isinstance(r.reduction_db, float)
@@ -280,14 +281,25 @@ def test_run_cpml_reflection_passes_gate():
     assert r.passed, f"cpml-001 gate failed: {r.reduction_db:.2f} dB < 30 dB"
 
 
+def test_run_cpml_reflection_repr_smoke():
+    """__repr__ contains 'CpmlReflectionResult' and 'reduction_db'."""
+    import yee
+
+    r = repr(yee.run_cpml_reflection())
+    assert "CpmlReflectionResult" in r
+    assert "reduction_db" in r
+
+
 def test_run_ntff_broadside_returns_result():
     """run_ntff_broadside() returns an NtffResult with expected fields."""
     import yee
 
     r = yee.run_ntff_broadside()
+    assert isinstance(r, yee.NtffResult)
     assert hasattr(r, "ratio_db")
     assert hasattr(r, "passed")
     assert isinstance(r.ratio_db, float)
+    assert r.ratio_db > 0.0
 
 
 def test_run_ntff_broadside_passes_gate():
@@ -298,11 +310,21 @@ def test_run_ntff_broadside_passes_gate():
     assert r.passed, f"ntff-001 gate failed: {r.ratio_db:.2f} dB < 20 dB"
 
 
+def test_run_ntff_broadside_repr_smoke():
+    """__repr__ contains 'NtffResult' and 'ratio_db'."""
+    import yee
+
+    r = repr(yee.run_ntff_broadside())
+    assert "NtffResult" in r
+    assert "ratio_db" in r
+
+
 def test_run_dispersive_drude_returns_result():
     """run_dispersive_drude() returns a DispersiveDrudeResult with expected fields."""
     import yee
 
     r = yee.run_dispersive_drude()
+    assert isinstance(r, yee.DispersiveDrudeResult)
     assert hasattr(r, "gamma_measured")
     assert hasattr(r, "gamma_analytic")
     assert hasattr(r, "rel_err")
@@ -320,3 +342,12 @@ def test_run_dispersive_drude_passes_gate():
         f"dispersive-001 gate failed: rel_err={r.rel_err:.2%} > 20% "
         f"(measured={r.gamma_measured:.4f}, analytic={r.gamma_analytic:.4f})"
     )
+
+
+def test_run_dispersive_drude_repr_smoke():
+    """__repr__ contains 'DispersiveDrudeResult' and 'gamma_measured'."""
+    import yee
+
+    r = repr(yee.run_dispersive_drude())
+    assert "DispersiveDrudeResult" in r
+    assert "gamma_measured" in r

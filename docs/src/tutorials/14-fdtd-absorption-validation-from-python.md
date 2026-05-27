@@ -161,3 +161,5 @@ cargo test -p yee-validation --lib -- dispersive001 --release
 - [FDTD cavity resonance from Python](11-fdtd-cavity-resonance-from-python.md)
 - [FDTD lossy cavity from Python](10-fdtd-lossy-cavity-from-python.md)
 - [FDTD theory details](../theory/fdtd-details.md)
+- [ADR-0074: Phase 1.validation.2 FDTD gate integration (cpml-001, ntff-001, dispersive-001)](../decisions/0074-phase-1-validation-2-fdtd-aggregator-gates.md)
+- [ADR-0077: Phase 2.fdtd.py.4 FDTD absorption Python drivers](../decisions/0077-phase-2-fdtd-py-4-absorption-python.md)

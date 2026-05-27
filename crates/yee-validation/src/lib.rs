@@ -1304,7 +1304,6 @@ fn cpml001_run_trace(
 /// (positive = CPML is better than PEC).
 ///
 /// Gate: reduction ≥ 30 dB.
-/// pub for Python bindings (yee-py); not primary public API.
 pub fn cpml001_run() -> f64 {
     use yee_fdtd::{CpmlParams, WalkingSkeletonSolver, YeeGrid};
 
@@ -1405,7 +1404,6 @@ fn run_cpml_001() -> CaseResult {
 /// broadside/endfire amplitude ratio in dB.
 ///
 /// Gate: ratio ≥ 20 dB.
-/// pub for Python bindings (yee-py); not primary public API.
 pub fn ntff001_run() -> f64 {
     use std::f64::consts::FRAC_PI_2;
     use yee_fdtd::{CpmlParams, NtffParams, NtffState, WalkingSkeletonSolver, YeeGrid};
@@ -1488,7 +1486,6 @@ fn run_ntff_001() -> CaseResult {
 /// into a non-magnetic medium with complex relative permittivity `eps_r`.
 ///
 /// `Γ = (1 − n) / (1 + n)` where `n = √ε_r` (principal branch).
-/// pub for Python bindings (yee-py); not primary public API.
 pub fn dispersive001_fresnel_gamma(eps_r: num_complex::Complex64) -> num_complex::Complex64 {
     let n = eps_r.sqrt();
     let one = num_complex::Complex64::new(1.0, 0.0);
@@ -1499,7 +1496,6 @@ pub fn dispersive001_fresnel_gamma(eps_r: num_complex::Complex64) -> num_complex
 /// `(gamma_measured, gamma_analytic)`.
 ///
 /// Gate: |gamma_measured − gamma_analytic| / gamma_analytic ≤ 0.20.
-/// pub for Python bindings (yee-py); not primary public API.
 pub fn dispersive001_run() -> (f64, f64) {
     use std::f64::consts::PI;
     use yee_fdtd::{CpmlParams, CpmlState, DispersiveState, Material, MaterialMap, YeeGrid};
