@@ -6,7 +6,11 @@
 //! receive numpy arrays for the θ-cut.
 //!
 //! Also exposes [`run_cavity_q`] / [`PyCavityQResult`] for the fdtd-202
-//! lossy-cavity Q-factor ring-down gate (Phase 2.fdtd.py.0).
+//! lossy-cavity Q-factor ring-down gate (Phase 2.fdtd.py.0),
+//! [`run_cavity_resonance`] / [`PyCavityResonanceResult`] for the fdtd-201
+//! TE₁₀₁ resonance gate (Phase 2.fdtd.py.1), and
+//! [`run_dipole_pattern`] / [`PyDipolePatternResult`] for the fdtd-203
+//! short-dipole sin-θ NTFF radiation-pattern gate (Phase 2.fdtd.py.2).
 //!
 //! The Python wrapper holds only the configuration plus the grid
 //! parameters (`nx`, `ny`, `nz`, `dx`); the underlying Rust
@@ -500,6 +504,159 @@ pub fn run_cavity_resonance(
         rel_err,
         passed: rel_err < 0.025,
         probe_vec: probe_series,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2.fdtd.py.2 — short-dipole NTFF radiation-pattern driver
+// ---------------------------------------------------------------------------
+
+/// Result of a short-dipole NTFF radiation-pattern simulation (fdtd-203 gate).
+///
+/// Returned by [`run_dipole_pattern`]. The five scalar fields are exposed as Python
+/// read-only properties. The full θ-cut is available through `.theta_deg_array()` and
+/// `.e_theta_array()`.
+#[pyclass(name = "DipolePatternResult", module = "yee._yee")]
+pub struct PyDipolePatternResult {
+    /// `|E_θ|` at θ = 0° (endfire null; gate requires < 0.15).
+    #[pyo3(get)]
+    pub e_theta_0: f64,
+    /// `|E_θ|` at θ = 45° (gate: |e − 0.707| < 0.15).
+    #[pyo3(get)]
+    pub e_theta_45: f64,
+    /// `|E_θ|` at θ = 90° (broadside peak; normalized to 1.0; gate: |e − 1.0| < 0.05).
+    #[pyo3(get)]
+    pub e_theta_90: f64,
+    /// `|E_θ|` at θ = 135° (gate: |e − 0.707| < 0.15).
+    #[pyo3(get)]
+    pub e_theta_135: f64,
+    /// `|E_θ|` at θ = 180° (endfire null; gate requires < 0.15).
+    #[pyo3(get)]
+    pub e_theta_180: f64,
+    /// `true` iff all five gate criteria pass (fdtd-203, Balanis §4.2 sin θ).
+    #[pyo3(get)]
+    pub passed: bool,
+    /// Internal: full θ array (private; access via `theta_deg_array()`).
+    pub theta_deg_vec: Vec<f64>,
+    /// Internal: full `|E_θ|` array (private; access via `e_theta_array()`).
+    pub e_theta_vec: Vec<f64>,
+}
+
+#[pymethods]
+impl PyDipolePatternResult {
+    /// Return the full θ array as a 1-D numpy `float64` array (37 points, 0°–180° in 5° steps).
+    pub fn theta_deg_array<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.theta_deg_vec.clone().into_pyarray(py)
+    }
+
+    /// Return the full `|E_θ|` array as a 1-D numpy `float64` array (normalized to max=1.0).
+    pub fn e_theta_array<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.e_theta_vec.clone().into_pyarray(py)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "DipolePatternResult(e_theta_0={:.4}, e_theta_90={:.4}, \
+             e_theta_180={:.4}, passed={})",
+            self.e_theta_0, self.e_theta_90, self.e_theta_180, self.passed,
+        )
+    }
+}
+
+/// Run a short-dipole FDTD simulation and return the far-field radiation pattern.
+///
+/// Builds a vacuum grid of `nx × ny × nz` cells at cell size `dx` metres, drives a
+/// z-polarised sinusoidal current source over a 5-cell dipole at the grid centre,
+/// runs for `n_steps` time steps with CPML on all six faces, and returns the NTFF
+/// θ-cut of `|E_θ|` at `φ = 0` normalized to its maximum.
+///
+/// Default scenario matches the fdtd-203 gate (60³, dx=5mm, 800 steps, 1 GHz).
+///
+/// # Reference
+///
+/// C. A. Balanis, *Antenna Theory*, 4th ed., §4.2 — short-dipole far-field
+/// `E_θ ∝ sin θ` (maximum at θ=90°, nulls at θ=0°/180°).
+///
+/// # Gate criteria (fdtd-203)
+///
+/// | θ    | Expected | Gate               |
+/// |------|----------|--------------------|
+/// |  0°  | 0        | e < 0.15           |
+/// | 45°  | 0.707    | |e − 0.707| < 0.15 |
+/// | 90°  | 1.0      | |e − 1.0|  < 0.05  |
+/// | 135° | 0.707    | |e − 0.707| < 0.15 |
+/// | 180° | 0        | e < 0.15           |
+#[pyfunction]
+#[pyo3(signature = (
+    nx = 60usize,
+    ny = 60usize,
+    nz = 60usize,
+    dx = 5.0e-3_f64,
+    n_steps = 800usize,
+    source_freq_hz = 1.0e9_f64,
+))]
+pub fn run_dipole_pattern(
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    dx: f64,
+    n_steps: usize,
+    source_freq_hz: f64,
+    py: Python<'_>,
+) -> PyDipolePatternResult {
+    let (theta_deg, e_theta_phi0) = py.detach(|| {
+        let grid = YeeGrid::vacuum(nx, ny, nz, dx);
+        let ci = nx / 2;
+        let cj = ny / 2;
+        let ck = nz / 2;
+        let cfg = RustCfg {
+            n_steps,
+            dipole_center_cells: (ci, cj, ck),
+            dipole_length_cells: 5,
+            source_freq_hz,
+            ntff_surface_pad_cells: 4,
+            cpml_thickness_cells: 10,
+        };
+        let pat = RustDriver::new(grid, cfg).run();
+        (pat.theta_deg, pat.e_theta_phi0)
+    });
+
+    // Helper closure: find the nearest θ in the discrete array to `target_deg`.
+    let sample = |target_deg: f64| -> f64 {
+        theta_deg
+            .iter()
+            .zip(e_theta_phi0.iter())
+            .min_by(|a, b| {
+                (a.0 - target_deg)
+                    .abs()
+                    .partial_cmp(&(b.0 - target_deg).abs())
+                    .unwrap()
+            })
+            .map(|(_, &v)| v)
+            .unwrap_or(0.0)
+    };
+
+    let e0 = sample(0.0);
+    let e45 = sample(45.0);
+    let e90 = sample(90.0);
+    let e135 = sample(135.0);
+    let e180 = sample(180.0);
+
+    let passed = e0 < 0.15
+        && (e45 - 0.707_f64).abs() < 0.15
+        && (e90 - 1.0_f64).abs() < 0.05
+        && (e135 - 0.707_f64).abs() < 0.15
+        && e180 < 0.15;
+
+    PyDipolePatternResult {
+        e_theta_0: e0,
+        e_theta_45: e45,
+        e_theta_90: e90,
+        e_theta_135: e135,
+        e_theta_180: e180,
+        passed,
+        theta_deg_vec: theta_deg,
+        e_theta_vec: e_theta_phi0,
     }
 }
 
