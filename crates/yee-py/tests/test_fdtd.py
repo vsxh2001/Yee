@@ -226,3 +226,31 @@ def test_run_dipole_pattern_repr_smoke():
     r = repr(run_dipole_pattern(n_steps=5))
     assert "DipolePatternResult" in r
     assert "e_theta_0" in r
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.fdtd.py.3 — fdtd-204 TF/SF Fresnel-transmission gate
+# ---------------------------------------------------------------------------
+
+
+def test_run_fresnel_tfsf_smoke():
+    """Smoke test: 5-step run verifies API plumbing, not physics."""
+    from yee import FresnelTfsfResult, run_fresnel_tfsf
+
+    r = run_fresnel_tfsf(n_steps=5)
+    assert isinstance(r, FresnelTfsfResult)
+    assert hasattr(r, "t_measured")
+    assert hasattr(r, "t_analytic")
+    assert hasattr(r, "rel_err")
+    assert hasattr(r, "passed")
+    assert r.t_analytic > 0.0
+    assert r.t_analytic < 1.0
+
+
+def test_run_fresnel_tfsf_repr_smoke():
+    """__repr__ contains FresnelTfsfResult and t_measured."""
+    from yee import run_fresnel_tfsf
+
+    r = repr(run_fresnel_tfsf(n_steps=5))
+    assert "FresnelTfsfResult" in r
+    assert "t_measured" in r

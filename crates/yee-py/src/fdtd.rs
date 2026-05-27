@@ -8,9 +8,11 @@
 //! Also exposes [`run_cavity_q`] / [`PyCavityQResult`] for the fdtd-202
 //! lossy-cavity Q-factor ring-down gate (Phase 2.fdtd.py.0),
 //! [`run_cavity_resonance`] / [`PyCavityResonanceResult`] for the fdtd-201
-//! TE₁₀₁ resonance gate (Phase 2.fdtd.py.1), and
+//! TE₁₀₁ resonance gate (Phase 2.fdtd.py.1),
 //! [`run_dipole_pattern`] / [`PyDipolePatternResult`] for the fdtd-203
-//! short-dipole sin-θ NTFF radiation-pattern gate (Phase 2.fdtd.py.2).
+//! short-dipole sin-θ NTFF radiation-pattern gate (Phase 2.fdtd.py.2), and
+//! [`run_fresnel_tfsf`] / [`PyFresnelTfsfResult`] for the fdtd-204
+//! TF/SF Fresnel-transmission gate (Phase 2.fdtd.py.3).
 //!
 //! The Python wrapper holds only the configuration plus the grid
 //! parameters (`nx`, `ny`, `nz`, `dx`); the underlying Rust
@@ -770,5 +772,176 @@ pub fn run_cavity_q(
         rel_err,
         passed: rel_err < 0.05,
         probe_vec: probe,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2.fdtd.py.3 — TF/SF Fresnel-transmission driver (fdtd-204 gate)
+// ---------------------------------------------------------------------------
+
+/// Result of a TF/SF Fresnel-transmission simulation (fdtd-204 gate).
+///
+/// The simulation runs a normal-incidence plane wave through a dielectric
+/// slab (ε_r = 2.2, thickness 5 mm) at 10 GHz and measures the amplitude
+/// transmission coefficient.
+#[pyclass(name = "FresnelTfsfResult", module = "yee._yee")]
+pub struct PyFresnelTfsfResult {
+    /// Measured amplitude transmission coefficient (A_trans / A_inc).
+    #[pyo3(get)]
+    pub t_measured: f64,
+    /// Analytic amplitude transmission coefficient from the Born-Wolf
+    /// transfer-matrix formula for the slab geometry.
+    #[pyo3(get)]
+    pub t_analytic: f64,
+    /// Relative error |t_measured − t_analytic| / t_analytic.
+    #[pyo3(get)]
+    pub rel_err: f64,
+    /// `true` iff `rel_err < 0.05` (fdtd-204 gate: ±5 %).
+    #[pyo3(get)]
+    pub passed: bool,
+}
+
+#[pymethods]
+impl PyFresnelTfsfResult {
+    fn __repr__(&self) -> String {
+        format!(
+            "FresnelTfsfResult(t_measured={:.4}, t_analytic={:.4}, \
+             rel_err={:.4}, passed={})",
+            self.t_measured, self.t_analytic, self.rel_err, self.passed
+        )
+    }
+}
+
+/// Run the fdtd-204 TF/SF Fresnel-transmission gate from Python.
+///
+/// Default arguments reproduce the published fdtd-204 scenario:
+/// 80³ grid, ε_r=2.2 slab (5 cells × 1 mm), f=10 GHz, 600 steps.
+///
+/// # Gate criteria (fdtd-204, Born & Wolf §1.6.2)
+/// `|t_measured / t_analytic − 1| < 0.05`  (5 %)
+///
+/// # Example
+/// ```python
+/// from yee import run_fresnel_tfsf
+/// result = run_fresnel_tfsf()
+/// assert result.passed, f"fdtd-204 gate failed: rel_err={result.rel_err:.3f}"
+/// ```
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (
+    *,
+    nx = 80_usize,
+    ny = 80_usize,
+    nz = 80_usize,
+    dx = 1.0e-3_f64,
+    eps_r = 2.2_f64,
+    slab_i0 = 50_usize,
+    slab_i1 = 55_usize,
+    freq_hz = 10.0e9_f64,
+    n_steps = 600_usize,
+    settle  = 200_usize,
+))]
+pub fn run_fresnel_tfsf(
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    dx: f64,
+    eps_r: f64,
+    slab_i0: usize,
+    slab_i1: usize,
+    freq_hz: f64,
+    n_steps: usize,
+    settle: usize,
+) -> PyFresnelTfsfResult {
+    use ndarray::Array3;
+    use yee_fdtd::{CpmlParams, PlaneWaveDirection, PlaneWaveSource, WalkingSkeletonSolver};
+
+    let npml: usize = 10;
+
+    // TF box: i₀=12, i₁=nx-npml-1, j₀=1, j₁=ny-2, k₀=1, k₁=nz-2
+    let tf_i0: usize = 12;
+    let tf_i1: usize = nx.saturating_sub(npml + 1);
+    let tf_j0: usize = 1;
+    let tf_j1: usize = ny.saturating_sub(2);
+    let tf_k0: usize = 1;
+    let tf_k1: usize = nz.saturating_sub(2);
+
+    // Probes: incident (vacuum, inside TF, before slab);
+    //         transmitted (vacuum, inside TF, after slab).
+    let probe_inc = (25_usize.min(nx - 1), ny / 2, nz / 2);
+    let probe_trans = (62_usize.min(nx - 1), ny / 2, nz / 2);
+
+    // Helper: run one simulation (vacuum or slab), return E_z trace at probe.
+    let run_sim = |with_slab: bool, probe: (usize, usize, usize)| -> Vec<f64> {
+        let grid = if with_slab {
+            let mut eps_cells = Array3::<f64>::from_elem((nx + 1, ny + 1, nz + 1), 1.0);
+            for i in slab_i0..slab_i1 {
+                for j in 0..=ny {
+                    for k in 0..=nz {
+                        eps_cells[(i, j, k)] = eps_r;
+                    }
+                }
+            }
+            YeeGrid::vacuum(nx, ny, nz, dx).with_eps_r_cells(eps_cells)
+        } else {
+            YeeGrid::vacuum(nx, ny, nz, dx)
+        };
+        let dt = grid.dt;
+        let params = CpmlParams::for_grid(&grid, npml);
+        let mut solver = WalkingSkeletonSolver::with_cpml(grid, params);
+        let mut pw = PlaneWaveSource::new(
+            tf_i0,
+            tf_i1,
+            tf_j0,
+            tf_j1,
+            tf_k0,
+            tf_k1,
+            PlaneWaveDirection::PlusX,
+            freq_hz,
+            50,
+            dx,
+            dt,
+            4,
+        );
+        let mut trace = Vec::with_capacity(n_steps);
+        for _ in 0..n_steps {
+            solver.step_with_plane_wave(&mut pw);
+            trace.push(solver.grid().ez[probe]);
+        }
+        trace
+    };
+
+    // Vacuum run: measures incident amplitude at probe_inc.
+    let trace_vac = run_sim(false, probe_inc);
+    // Slab run: measures transmitted amplitude at probe_trans.
+    let trace_slab = run_sim(true, probe_trans);
+
+    // Peak amplitude after settling.
+    let settle_clamp = settle.min(n_steps);
+    let a_inc = trace_vac[settle_clamp..]
+        .iter()
+        .cloned()
+        .fold(0.0_f64, |a, v| a.max(v.abs()));
+    let a_trans = trace_slab[settle_clamp..]
+        .iter()
+        .cloned()
+        .fold(0.0_f64, |a, v| a.max(v.abs()));
+    let t_measured = if a_inc > 0.0 { a_trans / a_inc } else { 0.0 };
+
+    // Analytic Born-Wolf §1.6.2 transfer-matrix via the canonical yee-validation
+    // reference implementation (yee-validation is already a dep of yee-py).
+    let t_analytic = yee_validation::fdtd204_t_analytic(eps_r, slab_i1 - slab_i0, dx, freq_hz);
+
+    let rel_err = if t_analytic > 0.0 {
+        (t_measured - t_analytic).abs() / t_analytic
+    } else {
+        0.0
+    };
+
+    PyFresnelTfsfResult {
+        t_measured,
+        t_analytic,
+        rel_err,
+        passed: rel_err < 0.05,
     }
 }

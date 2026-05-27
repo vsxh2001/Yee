@@ -41,6 +41,8 @@ fn _yee(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fdtd::run_cavity_resonance, m)?)?;
     m.add_class::<fdtd::PyDipolePatternResult>()?;
     m.add_function(wrap_pyfunction!(fdtd::run_dipole_pattern, m)?)?;
+    m.add_class::<fdtd::PyFresnelTfsfResult>()?;
+    m.add_function(wrap_pyfunction!(fdtd::run_fresnel_tfsf, m)?)?;
     m.add_class::<bo::PyBoConfig>()?;
     m.add_class::<bo::PyBoResult>()?;
     m.add_function(wrap_pyfunction!(bo::minimize, m)?)?;
