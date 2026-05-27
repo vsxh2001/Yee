@@ -1304,7 +1304,7 @@ fn cpml001_run_trace(
 /// (positive = CPML is better than PEC).
 ///
 /// Gate: reduction ≥ 30 dB.
-fn cpml001_run() -> f64 {
+pub fn cpml001_run() -> f64 {
     use yee_fdtd::{CpmlParams, WalkingSkeletonSolver, YeeGrid};
 
     const N: usize = 50;
@@ -1404,7 +1404,7 @@ fn run_cpml_001() -> CaseResult {
 /// broadside/endfire amplitude ratio in dB.
 ///
 /// Gate: ratio ≥ 20 dB.
-fn ntff001_run() -> f64 {
+pub fn ntff001_run() -> f64 {
     use std::f64::consts::FRAC_PI_2;
     use yee_fdtd::{CpmlParams, NtffParams, NtffState, WalkingSkeletonSolver, YeeGrid};
 
@@ -1486,7 +1486,7 @@ fn run_ntff_001() -> CaseResult {
 /// into a non-magnetic medium with complex relative permittivity `eps_r`.
 ///
 /// `Γ = (1 − n) / (1 + n)` where `n = √ε_r` (principal branch).
-fn dispersive001_fresnel_gamma(eps_r: num_complex::Complex64) -> num_complex::Complex64 {
+pub fn dispersive001_fresnel_gamma(eps_r: num_complex::Complex64) -> num_complex::Complex64 {
     let n = eps_r.sqrt();
     let one = num_complex::Complex64::new(1.0, 0.0);
     (one - n) / (one + n)
@@ -1496,7 +1496,7 @@ fn dispersive001_fresnel_gamma(eps_r: num_complex::Complex64) -> num_complex::Co
 /// `(gamma_measured, gamma_analytic)`.
 ///
 /// Gate: |gamma_measured − gamma_analytic| / gamma_analytic ≤ 0.20.
-fn dispersive001_run() -> (f64, f64) {
+pub fn dispersive001_run() -> (f64, f64) {
     use std::f64::consts::PI;
     use yee_fdtd::{CpmlParams, CpmlState, DispersiveState, Material, MaterialMap, YeeGrid};
 

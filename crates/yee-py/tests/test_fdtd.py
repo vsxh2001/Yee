@@ -254,3 +254,100 @@ def test_run_fresnel_tfsf_repr_smoke():
     r = repr(run_fresnel_tfsf(n_steps=5))
     assert "FresnelTfsfResult" in r
     assert "t_measured" in r
+
+
+# =============================================================================
+# Phase 2.fdtd.py.4 — cpml-001 / ntff-001 / dispersive-001 Python drivers
+# =============================================================================
+
+
+def test_run_cpml_reflection_returns_result():
+    """run_cpml_reflection() returns a CpmlReflectionResult with expected fields."""
+    import yee
+
+    r = yee.run_cpml_reflection()
+    assert isinstance(r, yee.CpmlReflectionResult)
+    assert hasattr(r, "reduction_db")
+    assert hasattr(r, "passed")
+    assert isinstance(r.reduction_db, float)
+    assert r.reduction_db > 0.0
+
+
+def test_run_cpml_reflection_passes_gate():
+    """cpml-001 gate: CPML reduces reflection by ≥ 30 dB vs PEC."""
+    import yee
+
+    r = yee.run_cpml_reflection()
+    assert r.passed, f"cpml-001 gate failed: {r.reduction_db:.2f} dB < 30 dB"
+
+
+def test_run_cpml_reflection_repr_smoke():
+    """__repr__ contains 'CpmlReflectionResult' and 'reduction_db'."""
+    import yee
+
+    r = repr(yee.run_cpml_reflection())
+    assert "CpmlReflectionResult" in r
+    assert "reduction_db" in r
+
+
+def test_run_ntff_broadside_returns_result():
+    """run_ntff_broadside() returns an NtffResult with expected fields."""
+    import yee
+
+    r = yee.run_ntff_broadside()
+    assert isinstance(r, yee.NtffResult)
+    assert hasattr(r, "ratio_db")
+    assert hasattr(r, "passed")
+    assert isinstance(r.ratio_db, float)
+    assert r.ratio_db > 0.0
+
+
+def test_run_ntff_broadside_passes_gate():
+    """ntff-001 gate: NTFF broadside/endfire ratio ≥ 20 dB."""
+    import yee
+
+    r = yee.run_ntff_broadside()
+    assert r.passed, f"ntff-001 gate failed: {r.ratio_db:.2f} dB < 20 dB"
+
+
+def test_run_ntff_broadside_repr_smoke():
+    """__repr__ contains 'NtffResult' and 'ratio_db'."""
+    import yee
+
+    r = repr(yee.run_ntff_broadside())
+    assert "NtffResult" in r
+    assert "ratio_db" in r
+
+
+def test_run_dispersive_drude_returns_result():
+    """run_dispersive_drude() returns a DispersiveDrudeResult with expected fields."""
+    import yee
+
+    r = yee.run_dispersive_drude()
+    assert isinstance(r, yee.DispersiveDrudeResult)
+    assert hasattr(r, "gamma_measured")
+    assert hasattr(r, "gamma_analytic")
+    assert hasattr(r, "rel_err")
+    assert hasattr(r, "passed")
+    assert r.gamma_analytic > 0.0
+    assert r.rel_err >= 0.0
+
+
+def test_run_dispersive_drude_passes_gate():
+    """dispersive-001 gate: Drude-slab Fresnel reflection rel_err ≤ 20%."""
+    import yee
+
+    r = yee.run_dispersive_drude()
+    assert r.passed, (
+        f"dispersive-001 gate failed: rel_err={r.rel_err:.2%} > 20% "
+        f"(measured={r.gamma_measured:.4f}, analytic={r.gamma_analytic:.4f})"
+    )
+
+
+def test_run_dispersive_drude_repr_smoke():
+    """__repr__ contains 'DispersiveDrudeResult' and 'gamma_measured'."""
+    import yee
+
+    r = repr(yee.run_dispersive_drude())
+    assert "DispersiveDrudeResult" in r
+    assert "gamma_measured" in r
