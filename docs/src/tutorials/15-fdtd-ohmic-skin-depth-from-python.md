@@ -47,8 +47,7 @@ Expected output:
 Gate A rel_err_1δ = 1.05%  (gate: < 10%)
 Gate B rel_err_2δ = 2.22%  (gate: < 15%)
 Passed: True
-SkinDepthResult(delta_analytic_m=1.0000e-02, rel_err_1delta=1.0500e-02,
-                rel_err_2delta=2.2200e-02, passed=True)
+SkinDepthResult(delta_analytic_m=1.0000e-02, rel_err_1delta=1.0500e-02, rel_err_2delta=2.2200e-02, passed=True)
 ```
 
 ## 3  Simulation Scenario
