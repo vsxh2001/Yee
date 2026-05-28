@@ -10,9 +10,11 @@
 //! [`run_cavity_resonance`] / [`PyCavityResonanceResult`] for the fdtd-201
 //! TE₁₀₁ resonance gate (Phase 2.fdtd.py.1),
 //! [`run_dipole_pattern`] / [`PyDipolePatternResult`] for the fdtd-203
-//! short-dipole sin-θ NTFF radiation-pattern gate (Phase 2.fdtd.py.2), and
+//! short-dipole sin-θ NTFF radiation-pattern gate (Phase 2.fdtd.py.2),
 //! [`run_fresnel_tfsf`] / [`PyFresnelTfsfResult`] for the fdtd-204
-//! TF/SF Fresnel-transmission gate (Phase 2.fdtd.py.3).
+//! TF/SF Fresnel-transmission gate (Phase 2.fdtd.py.3), and
+//! [`run_skin_depth`] / [`PySkinDepthResult`] for the fdtd-205
+//! Ohmic skin-depth spatial penetration gate (Phase 2.fdtd.py.5).
 //!
 //! The Python wrapper holds only the configuration plus the grid
 //! parameters (`nx`, `ny`, `nz`, `dx`); the underlying Rust
@@ -1105,5 +1107,83 @@ pub fn run_dispersive_drude() -> PyDispersiveDrudeResult {
         gamma_analytic,
         rel_err,
         passed: rel_err <= 0.20,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2.fdtd.py.5 — fdtd-205 Ohmic skin-depth penetration driver
+// ---------------------------------------------------------------------------
+
+/// Result of an Ohmic skin-depth spatial penetration simulation (fdtd-205 gate).
+///
+/// Returned by [`run_skin_depth`].
+#[pyclass(name = "SkinDepthResult", module = "yee._yee")]
+pub struct PySkinDepthResult {
+    /// Analytic skin depth δ = √(2 / (ω μ₀ σ)) in metres.
+    #[pyo3(get)]
+    pub delta_analytic_m: f64,
+    /// Peak |E_x| at the conductor surface (z = Z_SURFACE).
+    #[pyo3(get)]
+    pub amp_surface: f64,
+    /// Peak |E_x| one skin depth into the conductor (z = Z_SURFACE + 10).
+    #[pyo3(get)]
+    pub amp_1delta: f64,
+    /// Peak |E_x| two skin depths into the conductor (z = Z_SURFACE + 20).
+    #[pyo3(get)]
+    pub amp_2delta: f64,
+    /// Measured ratio amp_1delta / amp_surface.
+    #[pyo3(get)]
+    pub ratio_1delta: f64,
+    /// Measured ratio amp_2delta / amp_surface.
+    #[pyo3(get)]
+    pub ratio_2delta: f64,
+    /// Relative error |ratio_1δ − e⁻¹| / e⁻¹. Gate A: < 10 %.
+    #[pyo3(get)]
+    pub rel_err_1delta: f64,
+    /// Relative error |ratio_2δ − e⁻²| / e⁻². Gate B: < 15 %.
+    #[pyo3(get)]
+    pub rel_err_2delta: f64,
+    /// `true` iff Gate A (10 %) and Gate B (15 %) both pass.
+    #[pyo3(get)]
+    pub passed: bool,
+}
+
+#[pymethods]
+impl PySkinDepthResult {
+    fn __repr__(&self) -> String {
+        format!(
+            "SkinDepthResult(delta_analytic_m={:.4e}, rel_err_1delta={:.4e}, \
+             rel_err_2delta={:.4e}, passed={})",
+            self.delta_analytic_m, self.rel_err_1delta, self.rel_err_2delta, self.passed,
+        )
+    }
+}
+
+/// Run the fdtd-205 Ohmic skin-depth gate from Python.
+///
+/// Delegates to [`yee_validation::fdtd205_run`] using the canonical
+/// 5×5×130 scenario (σ = 2.5331 S/m, f = 1 GHz, δ = 10 mm = 10 cells,
+/// 6000-step transient + 2000-step measurement window).
+///
+/// Gate A: `rel_err_1delta < 10 %`  (measured: 1.05 %)
+/// Gate B: `rel_err_2delta < 15 %`  (measured: 2.22 %)
+///
+/// # Reference
+///
+/// D. J. Griffiths, *Introduction to Electrodynamics*, 4th ed., §9.4.1;
+/// A. Taflove and S. C. Hagness, §3.7.
+#[pyfunction]
+pub fn run_skin_depth() -> PySkinDepthResult {
+    let r = yee_validation::fdtd205_run();
+    PySkinDepthResult {
+        delta_analytic_m: r.delta_analytic_m,
+        amp_surface: r.amp_surface,
+        amp_1delta: r.amp_1delta,
+        amp_2delta: r.amp_2delta,
+        ratio_1delta: r.ratio_1delta,
+        ratio_2delta: r.ratio_2delta,
+        rel_err_1delta: r.rel_err_1delta,
+        rel_err_2delta: r.rel_err_2delta,
+        passed: r.passed,
     }
 }

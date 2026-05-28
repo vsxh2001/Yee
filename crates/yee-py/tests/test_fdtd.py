@@ -351,3 +351,54 @@ def test_run_dispersive_drude_repr_smoke():
     r = repr(yee.run_dispersive_drude())
     assert "DispersiveDrudeResult" in r
     assert "gamma_measured" in r
+
+
+# =============================================================================
+# Phase 2.fdtd.py.5 — fdtd-205 Ohmic skin-depth penetration driver
+# =============================================================================
+
+
+def test_run_skin_depth_returns_result():
+    """run_skin_depth() returns a SkinDepthResult with all expected fields."""
+    import yee
+
+    r = yee.run_skin_depth()
+    assert isinstance(r, yee.SkinDepthResult)
+    assert hasattr(r, "delta_analytic_m")
+    assert hasattr(r, "amp_surface")
+    assert hasattr(r, "amp_1delta")
+    assert hasattr(r, "amp_2delta")
+    assert hasattr(r, "ratio_1delta")
+    assert hasattr(r, "ratio_2delta")
+    assert hasattr(r, "rel_err_1delta")
+    assert hasattr(r, "rel_err_2delta")
+    assert hasattr(r, "passed")
+    assert r.delta_analytic_m > 0.0, (
+        f"analytic skin depth should be positive, got {r.delta_analytic_m}"
+    )
+
+
+def test_run_skin_depth_passes_gate():
+    """fdtd-205 gate: Gate A (10%) and Gate B (15%) both pass."""
+    import yee
+
+    r = yee.run_skin_depth()
+    assert r.rel_err_1delta < 0.10, (
+        f"Gate A failed: rel_err_1delta={r.rel_err_1delta:.4f} >= 10%"
+    )
+    assert r.rel_err_2delta < 0.15, (
+        f"Gate B failed: rel_err_2delta={r.rel_err_2delta:.4f} >= 15%"
+    )
+    assert r.passed, (
+        f"fdtd-205 gate failed: rel_err_1delta={r.rel_err_1delta:.4f}, "
+        f"rel_err_2delta={r.rel_err_2delta:.4f}"
+    )
+
+
+def test_run_skin_depth_repr_smoke():
+    """__repr__ contains 'SkinDepthResult' and 'delta_analytic_m'."""
+    import yee
+
+    r = repr(yee.run_skin_depth())
+    assert "SkinDepthResult" in r
+    assert "delta_analytic_m" in r
