@@ -19,8 +19,9 @@
 //! Conductor: `z ∈ [50, 130)` cells, `σ = 2.5331 S/m → δ = 10 mm = 10 cells`.
 //!
 //! Source: soft sinusoidal `E_x` injection spanning the full transverse
-//! cross-section at k = `SRC_Z` = 25. Injecting across all `(i, j)` ensures
-//! a uniform transverse profile — this is required to launch a 1D TEM-like
+//! cross-section at k = `SRC_Z` = 25. Injecting across all interior `(i, j)`
+//! nodes (`j ∈ [1, NY)`) ensures a uniform transverse profile — this is
+//! required to launch a 1D TEM-like
 //! plane wave in the +z direction.
 //!
 //! # Boundary conditions
@@ -52,7 +53,7 @@
 //! cargo test -p yee-fdtd --test ohmic_skin_depth -- --nocapture
 //! ```
 
-use std::f64::consts::PI;
+use std::f64::consts::{E, PI};
 
 use yee_fdtd::{WalkingSkeletonSolver, YeeGrid};
 
@@ -260,7 +261,7 @@ fn skin_depth_ratios_match_analytic() {
 
     let ratio_1 = amp_1 / amp_s;
     let ratio_2 = amp_2 / amp_s;
-    let target_1 = 1.0_f64 / std::f64::consts::E; // e^{-1}
+    let target_1 = 1.0_f64 / E; // e^{-1}
     let target_2 = (-2.0_f64).exp(); // e^{-2}
     let err_1 = (ratio_1 - target_1).abs() / target_1;
     let err_2 = (ratio_2 - target_2).abs() / target_2;

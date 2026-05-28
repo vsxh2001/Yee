@@ -2034,12 +2034,12 @@ pub fn fdtd205_run() -> SkinDepthResult {
 
     let target_1 = 1.0 / E;
     let target_2 = (-2.0_f64).exp();
-    let ratio_1 = if amp_surface > 0.0 {
+    let ratio_1 = if amp_surface > 1e-10 {
         amp_1delta / amp_surface
     } else {
         0.0
     };
-    let ratio_2 = if amp_surface > 0.0 {
+    let ratio_2 = if amp_surface > 1e-10 {
         amp_2delta / amp_surface
     } else {
         0.0
@@ -2069,7 +2069,7 @@ fn run_fdtd_205() -> CaseResult {
     CaseResult {
         id: "fdtd-205".into(),
         description: "Ohmic skin-depth spatial penetration: CA/CB E-update, \
-                      σ=2.533 S/m, f=1 GHz, δ=10 mm; gates |ratio_1δ−e⁻¹|/e⁻¹<10%, \
+                      σ=2.5331 S/m, f=1 GHz, δ=10 mm; gates |ratio_1δ−e⁻¹|/e⁻¹<10%, \
                       |ratio_2δ−e⁻²|/e⁻²<15% (Griffiths §9.4.1)"
             .into(),
         status: if r.passed {
