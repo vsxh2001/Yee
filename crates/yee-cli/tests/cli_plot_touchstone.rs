@@ -264,9 +264,11 @@ fn plot_out_of_range_entry_errors_cleanly() {
     );
 }
 
-/// `--entry 11 --format smith` is rejected with a clean error (not a panic).
+/// `--entry 11 --format smith` now produces a non-empty PNG (Phase 1.plotting.3).
+///
+/// Previously this was rejected; after ADR-0069 it calls `plot_smith_chart_multi`.
 #[test]
-fn plot_entry_with_smith_errors_cleanly() {
+fn plot_entry_with_smith_multi_trace_produces_png() {
     let tmp = TempDir::new();
     let input = tmp.path().join("test.s2p");
     let output = tmp.path().join("out.png");
@@ -279,7 +281,7 @@ fn plot_entry_with_smith_errors_cleanly() {
     )
     .unwrap();
 
-    let out = Command::cargo_bin("yee")
+    Command::cargo_bin("yee")
         .unwrap()
         .args([
             "plot",
@@ -291,12 +293,105 @@ fn plot_entry_with_smith_errors_cleanly() {
             "--entry",
             "11",
         ])
-        .output()
-        .expect("invoke yee");
+        .assert()
+        .success();
 
     assert!(
-        !out.status.success(),
-        "expected failure for smith + --entry combination"
+        output.exists(),
+        "Smith multi-trace PNG not created: {output:?}"
+    );
+    let size = std::fs::metadata(&output).unwrap().len();
+    assert!(size > 1024, "Smith multi-trace PNG too small: {size} bytes");
+}
+
+/// `--all --format smith` on a 2-port file overlays all 4 Smith traces.
+#[test]
+fn plot_all_entries_with_smith_produces_png() {
+    let tmp = TempDir::new();
+    let input = tmp.path().join("test.s2p");
+    let output = tmp.path().join("out.png");
+
+    std::fs::write(
+        &input,
+        "# Hz S RI R 50\n\
+         1.0e9  0.50 0.10  0.30 0.05  0.30 0.05  0.45 0.08\n\
+         1.5e9  0.45 0.08  0.25 0.04  0.25 0.04  0.40 0.07\n\
+         2.0e9  0.40 0.06  0.20 0.03  0.20 0.03  0.35 0.06\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("yee")
+        .unwrap()
+        .args([
+            "plot",
+            input.to_str().unwrap(),
+            "--format",
+            "smith",
+            "--output",
+            output.to_str().unwrap(),
+            "--all",
+        ])
+        .assert()
+        .success();
+
+    assert!(output.exists(), "Smith --all PNG not created: {output:?}");
+    let size = std::fs::metadata(&output).unwrap().len();
+    assert!(size > 1024, "Smith --all PNG too small: {size} bytes");
+}
+
+/// `--entry 11 --entry 21 --format both` emits two files: `out-db.png` and
+/// `out-smith.png`, each containing the multi-trace overlay.
+#[test]
+fn plot_multi_trace_both_emits_db_and_smith() {
+    let tmp = TempDir::new();
+    let input = tmp.path().join("test.s2p");
+    let output = tmp.path().join("out.png");
+
+    std::fs::write(
+        &input,
+        "# Hz S RI R 50\n\
+         1.0e9  0.50 0.10  0.30 0.05  0.30 0.05  0.45 0.08\n\
+         1.5e9  0.45 0.08  0.25 0.04  0.25 0.04  0.40 0.07\n\
+         2.0e9  0.40 0.06  0.20 0.03  0.20 0.03  0.35 0.06\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("yee")
+        .unwrap()
+        .args([
+            "plot",
+            input.to_str().unwrap(),
+            "--format",
+            "both",
+            "--output",
+            output.to_str().unwrap(),
+            "--entry",
+            "11",
+            "--entry",
+            "21",
+        ])
+        .assert()
+        .success();
+
+    let db_path = tmp.path().join("out-db.png");
+    let smith_path = tmp.path().join("out-smith.png");
+    assert!(
+        db_path.exists(),
+        "multi-trace dB PNG not created: {db_path:?}"
+    );
+    assert!(
+        smith_path.exists(),
+        "multi-trace Smith PNG not created: {smith_path:?}"
+    );
+    let db_size = std::fs::metadata(&db_path).unwrap().len();
+    let smith_size = std::fs::metadata(&smith_path).unwrap().len();
+    assert!(
+        db_size > 1024,
+        "multi-trace dB PNG too small: {db_size} bytes"
+    );
+    assert!(
+        smith_size > 1024,
+        "multi-trace Smith PNG too small: {smith_size} bytes"
     );
 }
 

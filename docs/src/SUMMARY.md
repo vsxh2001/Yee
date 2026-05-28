@@ -31,6 +31,11 @@
 - [Open-boundary FEM driven sweep from Python](tutorials/07-fem-open-cavity.md)
 - [Multi-port FEM S-matrix from Python](tutorials/08-fem-multi-port.md)
 - [Cross-section wave-port eigensolve (Rust)](tutorials/09-cross-section-waveport.md)
+- [FDTD lossy cavity from Python](tutorials/10-fdtd-lossy-cavity-from-python.md)
+- [FDTD cavity resonance from Python](tutorials/11-fdtd-cavity-resonance-from-python.md)
+- [FDTD dipole radiation pattern from Python](tutorials/12-fdtd-dipole-pattern-from-python.md)
+- [FDTD TF/SF Fresnel transmission from Python](tutorials/13-fdtd-fresnel-tfsf-from-python.md)
+- [FDTD absorption validation from Python](tutorials/14-fdtd-absorption-validation-from-python.md)
 
 # Decisions
 

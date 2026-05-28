@@ -637,6 +637,125 @@ pub fn assemble_port_face_block(
     block
 }
 
+/// Centroid-approximation rank-1 modal-projected wave-port face block
+/// (Lee-Mittra 1997 §IV, Phase 4.fem.eig.3.5.6; centroid path).
+///
+/// Companion of [`assemble_port_face_block_projected_gauss_pts`] using
+/// the same lumped centroid approximation as [`assemble_port_face_block`].
+/// The block is
+///
+/// ```text
+/// block[i,j] = j · β_eff / μ_r · face_area
+///              · [(n̂ × t_i) · e_t_c]
+///              · [(e_t_c · n̂ × t_j)]
+/// ```
+///
+/// where `t_i = v_{(i+1) mod 3} − v_i` and `e_t_c` is the modal tangential
+/// E-field sampled at the face centroid. The result is rank-1 (outer product
+/// of the modal projections at the centroid).
+///
+/// When `β_eff = 0` the block vanishes identically.
+pub fn assemble_port_face_block_projected(
+    face_vertices: [Vector3<f64>; 3],
+    outward_normal: Vector3<f64>,
+    beta_eff: f64,
+    modal_e_t_at_centroid: Vector3<f64>,
+    mu_r_face: f64,
+) -> SMatrix<Complex64, 3, 3> {
+    // Three edge tangents in CCW order.
+    let t = [
+        face_vertices[1] - face_vertices[0],
+        face_vertices[2] - face_vertices[1],
+        face_vertices[0] - face_vertices[2],
+    ];
+
+    // Face area.
+    let face_area = 0.5 * t[0].cross(&t[1]).norm();
+
+    // (n̂ × t_i) — same as the scalar centroid path.
+    let n_cross_t = [
+        outward_normal.cross(&t[0]),
+        outward_normal.cross(&t[1]),
+        outward_normal.cross(&t[2]),
+    ];
+
+    // Outer prefactor: j · β_eff / μ_r.
+    let prefactor = Complex64::new(0.0, 1.0) * Complex64::new(beta_eff / mu_r_face, 0.0);
+
+    // Modal projection coefficients a_i = (n̂ × t_i) · e_t_c.
+    let a = [
+        n_cross_t[0].dot(&modal_e_t_at_centroid),
+        n_cross_t[1].dot(&modal_e_t_at_centroid),
+        n_cross_t[2].dot(&modal_e_t_at_centroid),
+    ];
+
+    // block[i,j] = j β_eff / μ_r · face_area · a_i · a_j
+    let mut block = SMatrix::<Complex64, 3, 3>::zeros();
+    for i in 0..3 {
+        for j in 0..3 {
+            block[(i, j)] = prefactor * Complex64::new(face_area * a[i] * a[j], 0.0);
+        }
+    }
+
+    block
+}
+
+#[cfg(test)]
+mod tests_projected_centroid {
+    use super::*;
+    use approx::assert_relative_eq;
+
+    fn xy_face() -> ([Vector3<f64>; 3], Vector3<f64>) {
+        let verts = [
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+        ];
+        let normal = Vector3::new(0.0, 0.0, 1.0);
+        (verts, normal)
+    }
+
+    #[test]
+    fn proj_centroid_zero_when_e_t_orthogonal() {
+        // Face in xy-plane, n̂ = (0,0,1). n̂ × t_i lies in the xy-plane.
+        // e_t = (0,0,1) is out-of-plane → dot = 0 → block is zero.
+        let (verts, normal) = xy_face();
+        let e_t = Vector3::new(0.0, 0.0, 1.0);
+        let block = assemble_port_face_block_projected(verts, normal, 100.0, e_t, 1.0);
+        for i in 0..3 {
+            for j in 0..3 {
+                assert_relative_eq!(block[(i, j)].re, 0.0, epsilon = 1e-14);
+                assert_relative_eq!(block[(i, j)].im, 0.0, epsilon = 1e-14);
+            }
+        }
+    }
+
+    #[test]
+    fn proj_centroid_zero_beta_gives_zero_block() {
+        let (verts, normal) = xy_face();
+        let e_t = Vector3::new(1.0, 0.0, 0.0);
+        let block = assemble_port_face_block_projected(verts, normal, 0.0, e_t, 1.0);
+        for i in 0..3 {
+            for j in 0..3 {
+                assert_relative_eq!(block[(i, j)].re, 0.0, epsilon = 1e-14);
+                assert_relative_eq!(block[(i, j)].im, 0.0, epsilon = 1e-14);
+            }
+        }
+    }
+
+    #[test]
+    fn proj_centroid_rank1_structure() {
+        // For a rank-1 outer-product matrix B = v ⊗ v, we have
+        // B[0,1] * B[1,0] ≈ B[0,0] * B[1,1].
+        let (verts, normal) = xy_face();
+        let e_t = Vector3::new(1.0, 1.0, 0.0).normalize();
+        let block = assemble_port_face_block_projected(verts, normal, 200.0, e_t, 1.0);
+        let lhs = block[(0, 1)].im * block[(1, 0)].im;
+        let rhs = block[(0, 0)].im * block[(1, 1)].im;
+        assert_relative_eq!(lhs, rhs, epsilon = 1e-10);
+    }
+}
+
 /// Assemble the per-face modal wave-port right-hand-side contribution
 /// (Phase 4.fem.eig.2 step E2).
 ///
@@ -938,6 +1057,153 @@ pub fn assemble_port_face_block_gauss_pts(
     }
 
     block
+}
+
+/// Rank-1 modal-projected wave-port face block (Lee-Mittra 1997 §IV,
+/// Phase 4.fem.eig.3.5.6).
+///
+/// Computes
+///
+/// ```text
+/// block[i,j] = j · β_eff / μ_r · Σ_g w_g
+///              · [(n̂ × N_i(ξ_g)) · e_t_g]
+///              · [(e_t_g · n̂ × N_j(ξ_g))]
+/// ```
+///
+/// using the same 3-point Gauss rule and exact Whitney-1 basis as
+/// [`assemble_port_face_block_gauss_pts`]. The result is a **rank-1**
+/// matrix in the edge-DoF space (outer product of the modal projections
+/// at the Gauss points).
+///
+/// When `β_eff = 0` the block vanishes identically (same as the scalar
+/// path for evanescent modes — no special-case needed).
+///
+/// `β_eff` is the **correction** coefficient `(β_m − k₀)`, which can be
+/// negative for evanescent modes. The function applies whatever
+/// `β_eff` it receives (no clamping).
+pub fn assemble_port_face_block_projected_gauss_pts(
+    face_vertices: [Vector3<f64>; 3],
+    outward_normal: Vector3<f64>,
+    beta_eff: f64,
+    modal_e_t_at_gauss_pts: [Vector3<f64>; 3],
+    mu_r_face: f64,
+) -> SMatrix<Complex64, 3, 3> {
+    let (grads, face_area) = face_barycentric_gradients_and_area(&face_vertices, outward_normal);
+
+    // Normalise outward normal once for the (n̂ × ·) operations.
+    let n_norm = outward_normal.norm();
+    let n_hat = if n_norm > 0.0 {
+        outward_normal / n_norm
+    } else {
+        outward_normal
+    };
+
+    // Outer prefactor: j · β_eff / μ_r.
+    let prefactor = Complex64::new(0.0, 1.0) * Complex64::new(beta_eff / mu_r_face, 0.0);
+
+    // Per-Gauss-point quadrature weight w_g = A / 3.
+    let w_g = face_area / 3.0;
+
+    let mut block = SMatrix::<Complex64, 3, 3>::zeros();
+
+    for (g, bary) in TRI_GAUSS_3PT_BARY.iter().enumerate() {
+        // Evaluate all three Whitney-1 edge basis functions at this
+        // Gauss point: N_i(ξ) = λ_a ∇λ_b − λ_b ∇λ_a, edge i: a=i, b=(i+1)%3.
+        let mut basis = [Vector3::<f64>::zeros(); 3];
+        for (i, basis_i) in basis.iter_mut().enumerate() {
+            let a = i;
+            let b = (i + 1) % 3;
+            *basis_i = bary[a] * grads[b] - bary[b] * grads[a];
+        }
+
+        // Pre-compute (n̂ × N_i) per edge at this Gauss point.
+        let n_cross_n = [
+            n_hat.cross(&basis[0]),
+            n_hat.cross(&basis[1]),
+            n_hat.cross(&basis[2]),
+        ];
+
+        let e_t_g = modal_e_t_at_gauss_pts[g];
+
+        // Modal projection at this Gauss point: a_i = (n̂ × N_i) · e_t_g.
+        let a_proj = [
+            n_cross_n[0].dot(&e_t_g),
+            n_cross_n[1].dot(&e_t_g),
+            n_cross_n[2].dot(&e_t_g),
+        ];
+
+        // Outer product: block[i,j] += prefactor · w_g · a_i · a_j.
+        for i in 0..3 {
+            for j in 0..3 {
+                block[(i, j)] += prefactor * Complex64::new(w_g * a_proj[i] * a_proj[j], 0.0);
+            }
+        }
+    }
+
+    block
+}
+
+#[cfg(test)]
+mod tests_projected_gauss {
+    use super::*;
+    use approx::assert_relative_eq;
+
+    fn xy_face() -> ([Vector3<f64>; 3], Vector3<f64>) {
+        let verts = [
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+        ];
+        let normal = Vector3::new(0.0, 0.0, 1.0);
+        (verts, normal)
+    }
+
+    #[test]
+    fn proj_gauss_zero_when_e_t_orthogonal_to_face() {
+        // Face in xy-plane, n̂ = (0,0,1). n̂ × N_i(ξ) lies in the xy-plane.
+        // e_t = (0,0,1) is out-of-plane → all (n̂ × N_i) · e_t = 0 → block is zero.
+        let (verts, normal) = xy_face();
+        let e_t = Vector3::new(0.0, 0.0, 1.0);
+        let e_t_gauss = [e_t; 3];
+        let block =
+            assemble_port_face_block_projected_gauss_pts(verts, normal, 100.0, e_t_gauss, 1.0);
+        for i in 0..3 {
+            for j in 0..3 {
+                assert_relative_eq!(block[(i, j)].re, 0.0, epsilon = 1e-14);
+                assert_relative_eq!(block[(i, j)].im, 0.0, epsilon = 1e-14);
+            }
+        }
+    }
+
+    #[test]
+    fn proj_gauss_zero_beta_gives_zero_block() {
+        let (verts, normal) = xy_face();
+        let e_t = Vector3::new(1.0, 0.0, 0.0);
+        let e_t_gauss = [e_t; 3];
+        let block =
+            assemble_port_face_block_projected_gauss_pts(verts, normal, 0.0, e_t_gauss, 1.0);
+        for i in 0..3 {
+            for j in 0..3 {
+                assert_relative_eq!(block[(i, j)].re, 0.0, epsilon = 1e-14);
+                assert_relative_eq!(block[(i, j)].im, 0.0, epsilon = 1e-14);
+            }
+        }
+    }
+
+    #[test]
+    fn proj_gauss_rank1_structure() {
+        // For a rank-1 outer-product matrix B = v ⊗ v:
+        // B[0,1] * B[2,0] ≈ B[0,0] * B[2,1].
+        let (verts, normal) = xy_face();
+        let e_t = Vector3::new(1.0, 1.0, 0.0).normalize();
+        let e_t_gauss = [e_t; 3];
+        let block =
+            assemble_port_face_block_projected_gauss_pts(verts, normal, 200.0, e_t_gauss, 1.0);
+        // Use imaginary parts (the block is purely imaginary for real β_eff).
+        let lhs = block[(0, 1)].im * block[(2, 0)].im;
+        let rhs = block[(0, 0)].im * block[(2, 1)].im;
+        assert_relative_eq!(lhs, rhs, epsilon = 1e-10);
+    }
 }
 
 /// Assemble the per-face wave-port right-hand-side contribution at
