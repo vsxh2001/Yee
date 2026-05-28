@@ -141,6 +141,7 @@ impl Report {
             run_fdtd_202_lossy_cavity_q(),
             run_fdtd_203_dipole_pattern(),
             run_fdtd_204(),
+            run_fdtd_205(),
             run_fem_eig_001(),
             run_fem_eig_002(),
             run_fem_eig_003(),
@@ -1882,6 +1883,210 @@ fn run_fdtd_204() -> CaseResult {
                 (fdtd_204_live_gate); Phase 2.fdtd.py.3"
             .into(),
         wall_time_seconds: 0.0,
+        plot_paths: Vec::new(),
+    }
+}
+
+// ---------------------------------------------------------------------
+// fdtd-205: Ohmic skin-depth spatial penetration gate (Phase 2.fdtd.9)
+//
+// Validates the CA/CB Ohmic-loss E-update reproduces the exponential
+// spatial decay |E(z_surface + n·δ)| / |E(z_surface)| = e^{-n} inside
+// a conducting half-space. Analytic reference: Griffiths §9.4.1.
+// ---------------------------------------------------------------------
+
+/// Result of [`fdtd205_run`] — skin-depth spatial penetration gate.
+#[derive(Debug, Clone)]
+pub struct SkinDepthResult {
+    /// Stable case identifier: `"fdtd-205"`.
+    pub id: &'static str,
+    /// Analytic skin depth δ = √(2 / (ω μ₀ σ)) in metres.
+    pub delta_analytic_m: f64,
+    /// Peak |E_x| at the conductor surface (z = Z_SURFACE).
+    pub amp_surface: f64,
+    /// Peak |E_x| one skin depth into the conductor (z = Z_SURFACE + 10).
+    pub amp_1delta: f64,
+    /// Peak |E_x| two skin depths into the conductor (z = Z_SURFACE + 20).
+    pub amp_2delta: f64,
+    /// Measured ratio amp_1delta / amp_surface.
+    pub ratio_1delta: f64,
+    /// Measured ratio amp_2delta / amp_surface.
+    pub ratio_2delta: f64,
+    /// Relative error |ratio_1delta − e⁻¹| / e⁻¹.
+    pub rel_err_1delta: f64,
+    /// Relative error |ratio_2delta − e⁻²| / e⁻².
+    pub rel_err_2delta: f64,
+    /// `true` iff Gate A (10 %) and Gate B (15 %) both pass and
+    /// `amp_surface > 1e-10` (field reaches the conductor).
+    pub passed: bool,
+}
+
+/// Run the fdtd-205 Ohmic skin-depth penetration gate and return a
+/// [`SkinDepthResult`].
+///
+/// Builds a 5×5×130 vacuum grid with σ = 2.5331 S/m stamped into
+/// z ∈ [50, 130) (exclusive upper bound), injects a 1 GHz sinusoidal
+/// `E_x` source spanning the full transverse cross-section at k = 25,
+/// and tracks peak |E_x| at the conductor surface, 1δ, and 2δ for
+/// 2000 steps after a 6000-step transient.
+///
+/// PMC (Perfect Magnetic Conductor) boundary conditions are enforced at
+/// the y-faces by zeroing `H_z` at `j = 0` and `j = NY − 1` after each
+/// H-update. This prevents the PEC-box evanescent-mode cascade (TM11
+/// cutoff ~42 GHz >> 1 GHz) and recovers the 1D TEM skin-depth physics.
+/// Without PMC-y the evanescent transverse mode decays at
+/// exp(−π/5mm × 1mm) ≈ 0.534 per cell — much faster than the analytic
+/// Ohmic decay exp(−0.1) = 0.905 — and the gate fails by a wide margin.
+///
+/// Gate A: `|ratio_1δ − e⁻¹| / e⁻¹ < 10 %`
+/// Gate B: `|ratio_2δ − e⁻²| / e⁻² < 15 %`
+///
+/// Reference: Griffiths §9.4.1, Taflove §3.7.
+pub fn fdtd205_run() -> SkinDepthResult {
+    use std::f64::consts::{E, PI};
+
+    const NX: usize = 5;
+    const NY: usize = 5;
+    const NZ: usize = 130;
+    const DX: f64 = 1.0e-3;
+    const FREQ: f64 = 1.0e9;
+    const SIGMA: f64 = 2.5331;
+    const MU0: f64 = 1.256_637_061_4e-6;
+    const Z_SURFACE: usize = 50;
+    const SRC_Z: usize = 25;
+    const N_TRANSIENT: usize = 6_000;
+    const N_MEASURE: usize = 2_000;
+
+    let omega = 2.0 * PI * FREQ;
+    let delta = (2.0 / (omega * MU0 * SIGMA)).sqrt();
+
+    let mut grid = yee_fdtd::YeeGrid::vacuum(NX, NY, NZ, DX);
+    grid.set_sigma_box(0, NX + 1, 0, NY + 1, Z_SURFACE, NZ + 1, SIGMA);
+    let dt = grid.dt;
+    let mut solver = yee_fdtd::WalkingSkeletonSolver::new(grid);
+
+    let mut amp_surface = 0.0_f64;
+    let mut amp_1delta = 0.0_f64;
+    let mut amp_2delta = 0.0_f64;
+
+    // Probe y-index: centre of the transverse cross-section.
+    let j_probe = NY / 2;
+
+    for n in 0..(N_TRANSIENT + N_MEASURE) {
+        let t = n as f64 * dt;
+
+        // 1. H update (curl of E).
+        solver.update_h_only();
+
+        // 2. Enforce PMC at y-faces: zero H_z at j=0 and j=NY-1.
+        //    H_z shape is (NX, NY, NZ+1), valid j ∈ [0, NY).
+        //    This removes the evanescent transverse-mode H_z that would
+        //    otherwise contaminate the 1D TEM skin-depth physics.
+        for i in 0..NX {
+            for k in 0..=NZ {
+                solver.grid_mut().hz[(i, 0, k)] = 0.0;
+                solver.grid_mut().hz[(i, NY - 1, k)] = 0.0;
+            }
+        }
+
+        // 3. Soft sinusoidal source: inject E_x over the interior transverse
+        //    slice at k = SRC_Z. j runs 1..NY (interior y).
+        let src_amp = (2.0 * PI * FREQ * t).sin();
+        for i in 0..NX {
+            for j in 1..NY {
+                solver.grid_mut().ex[(i, j, SRC_Z)] += src_amp;
+            }
+        }
+
+        // 4. E update (curl of H, with CA/CB in conductor).
+        solver.update_e_only();
+
+        // 5. PEC at z-faces: zero E_x at k=0 and k=NZ.
+        for i in 0..NX {
+            for j in 0..=NY {
+                solver.grid_mut().ex[(i, j, 0)] = 0.0;
+                solver.grid_mut().ex[(i, j, NZ)] = 0.0;
+            }
+        }
+
+        // 6. Advance clock.
+        solver.advance_clock();
+
+        if n >= N_TRANSIENT {
+            // Average over i to cancel any residual transverse asymmetry.
+            let ex_surf: f64 = (0..NX)
+                .map(|i| solver.grid().ex[(i, j_probe, Z_SURFACE)].abs())
+                .sum::<f64>()
+                / NX as f64;
+            let ex_1d: f64 = (0..NX)
+                .map(|i| solver.grid().ex[(i, j_probe, Z_SURFACE + 10)].abs())
+                .sum::<f64>()
+                / NX as f64;
+            let ex_2d: f64 = (0..NX)
+                .map(|i| solver.grid().ex[(i, j_probe, Z_SURFACE + 20)].abs())
+                .sum::<f64>()
+                / NX as f64;
+            amp_surface = amp_surface.max(ex_surf);
+            amp_1delta = amp_1delta.max(ex_1d);
+            amp_2delta = amp_2delta.max(ex_2d);
+        }
+    }
+
+    let target_1 = 1.0 / E;
+    let target_2 = (-2.0_f64).exp();
+    let ratio_1 = if amp_surface > 0.0 {
+        amp_1delta / amp_surface
+    } else {
+        0.0
+    };
+    let ratio_2 = if amp_surface > 0.0 {
+        amp_2delta / amp_surface
+    } else {
+        0.0
+    };
+    let rel_err_1 = (ratio_1 - target_1).abs() / target_1;
+    let rel_err_2 = (ratio_2 - target_2).abs() / target_2;
+    let passed = rel_err_1 < 0.10 && rel_err_2 < 0.15 && amp_surface > 1e-10;
+
+    SkinDepthResult {
+        id: "fdtd-205",
+        delta_analytic_m: delta,
+        amp_surface,
+        amp_1delta,
+        amp_2delta,
+        ratio_1delta: ratio_1,
+        ratio_2delta: ratio_2,
+        rel_err_1delta: rel_err_1,
+        rel_err_2delta: rel_err_2,
+        passed,
+    }
+}
+
+fn run_fdtd_205() -> CaseResult {
+    let t0 = Instant::now();
+    let r = fdtd205_run();
+    let wall_time_seconds = t0.elapsed().as_secs_f64();
+    CaseResult {
+        id: "fdtd-205".into(),
+        description: "Ohmic skin-depth spatial penetration: CA/CB E-update, \
+                      σ=2.533 S/m, f=1 GHz, δ=10 mm; gates |ratio_1δ−e⁻¹|/e⁻¹<10%, \
+                      |ratio_2δ−e⁻²|/e⁻²<15% (Griffiths §9.4.1)"
+            .into(),
+        status: if r.passed {
+            CaseStatus::Passed
+        } else {
+            CaseStatus::Failed
+        },
+        notes: format!(
+            "fdtd-205 skin-depth: δ={:.1}mm ratio_1δ={:.4}(err{:.1}%) \
+             ratio_2δ={:.4}(err{:.1}%)",
+            r.delta_analytic_m * 1e3,
+            r.ratio_1delta,
+            r.rel_err_1delta * 100.0,
+            r.ratio_2delta,
+            r.rel_err_2delta * 100.0,
+        ),
+        wall_time_seconds,
         plot_paths: Vec::new(),
     }
 }
