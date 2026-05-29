@@ -140,3 +140,5 @@
 - [ADR-0095: App.1.1 — wasm32 build check + CI web-readiness gate](decisions/0095-app-1-1-wasm-build-check.md)
 - [ADR-0096: App.1.2a — yee-studio wasm32 web entry (eframe WebRunner)](decisions/0096-app-1-2a-studio-wasm-web-entry.md)
 - [ADR-0097: Filter Phase F1.2.0 — closed-form edge-coupled dimensional synthesis](decisions/0097-filter-f1-2-0-dimensional-synthesis.md)
+- [ADR-0098: Filter — `yee filter synth` physical dimensions + layout SVG](decisions/0098-filter-f1-2-cli-dims-output.md)
+- [ADR-0099: App — yee-studio physical-dimensions panel](decisions/0099-app-studio-dims-panel.md)
