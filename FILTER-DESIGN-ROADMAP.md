@@ -361,6 +361,12 @@ build on F1.
   the validated `coupled_microstrip` + HJ models (bisection on the monotone
   gap→k). Pure math, WASM-safe, no FDTD/surrogate; gates dim-001/002/003. First
   stage turning the abstract network into concrete geometry.
+- **F1.2.0 surfaced in CLI + Studio** (ADR-0098 `47c2aee` / ADR-0099 `cc51b51`,
+  merges `39c0984`/`272ce5a`): `yee filter synth` prints the physical dims +
+  writes the layout SVG (`--eps-r`/`--h-mm`/`--layout-svg`, FR-4 default); and
+  `yee-studio` shows a live dimensions panel (editable εr/h → line-width/length/
+  gaps). Both consume `dimension_edge_coupled`; StudioState stays egui-free /
+  WASM-safe. Gates cli_dims / studio_state_dims.
 
 **Final goal: a desktop + web APP** (ADR-0089) — one `egui`/`eframe` codebase,
 native + WASM. The shipped light flow (F0/F0.1/F0.2/F1.0) is WASM-safe and is the
