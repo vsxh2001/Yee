@@ -32,10 +32,10 @@ fn version_prints_workspace_version() {
         .stdout(contains("0.0.0"));
 }
 
-/// `yee validate --help` lists the supported `mom`/`fdtd`/`all` targets
-/// and the `--json` flag. This is fast: clap renders help without running
-/// the aggregator. The real-aggregator smoke tests live (ignored) in
-/// `tests/cli_validate.rs`.
+/// `yee validate --help` lists the supported `mom`/`fdtd`/`fem`/`all`
+/// targets and the `--json` flag. This is fast: clap renders help without
+/// running the aggregator. The real-aggregator smoke tests live (ignored)
+/// in `tests/cli_validate.rs`.
 #[test]
 fn validate_help_lists_targets_and_json_flag() {
     Command::cargo_bin("yee")
@@ -45,6 +45,7 @@ fn validate_help_lists_targets_and_json_flag() {
         .success()
         .stdout(contains("mom"))
         .stdout(contains("fdtd"))
+        .stdout(contains("fem"))
         .stdout(contains("all"))
         .stdout(contains("--json"));
 }

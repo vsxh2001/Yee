@@ -99,6 +99,13 @@ pub struct YeeGrid {
     /// for the H update.
     pub mu_r_cells: Option<Array3<f64>>,
 
+    /// Optional per-cell electric conductivity (S/m).
+    ///
+    /// Shape `[nx+1, ny+1, nz+1]` (same as `eps_r_cells`). When `Some`,
+    /// `update_e` applies the lossy CA/CB formulation (Taflove §3.7) per cell.
+    /// When `None`, the standard lossless update runs unchanged.
+    pub sigma_cells: Option<Array3<f64>>,
+
     /// Optional per-component PEC mask for `E_x`. Shape matches `ex`:
     /// `[nx, ny+1, nz+1]`. Any cell with `mask[i, j, k] == true` has its
     /// `E_x` clamped to zero by [`YeeGrid::apply_pec_mask`] after the
@@ -156,6 +163,7 @@ impl YeeGrid {
             mu_r: 1.0,
             eps_r_cells: None,
             mu_r_cells: None,
+            sigma_cells: None,
             pec_mask_ex: None,
             pec_mask_ey: None,
             pec_mask_ez: None,
@@ -222,6 +230,70 @@ impl YeeGrid {
         );
         self.mu_r_cells = Some(cells);
         self
+    }
+
+    /// Attach a pre-built per-cell conductivity array.
+    ///
+    /// The array must have shape `[nx+1, ny+1, nz+1]` and all entries must be
+    /// finite and non-negative. When attached, `update_e` uses the lossy
+    /// CA/CB formulation (Taflove & Hagness §3.7) for every cell.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `cells.dim()` ≠ `(nx + 1, ny + 1, nz + 1)` or any entry is
+    /// non-finite or negative.
+    pub fn with_sigma_cells(mut self, cells: Array3<f64>) -> Self {
+        let expected = (self.nx + 1, self.ny + 1, self.nz + 1);
+        assert_eq!(
+            cells.dim(),
+            expected,
+            "sigma_cells shape {:?} must equal grid extent {:?}",
+            cells.dim(),
+            expected
+        );
+        assert!(
+            cells.iter().all(|&v| v.is_finite() && v >= 0.0),
+            "sigma_cells must be finite and >= 0 everywhere"
+        );
+        self.sigma_cells = Some(cells);
+        self
+    }
+
+    /// Set uniform conductivity in an inclusive-exclusive box `[i0,i1) × [j0,j1) × [k0,k1)`.
+    ///
+    /// If `sigma_cells` is not yet allocated it is created (zero-filled to
+    /// `[nx+1, ny+1, nz+1]`) before the box is written. Indices are clamped
+    /// to the array dimensions, so passing `i1 = NX+99` is safe.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `sigma` is non-finite or negative.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_sigma_box(
+        &mut self,
+        i0: usize,
+        i1: usize,
+        j0: usize,
+        j1: usize,
+        k0: usize,
+        k1: usize,
+        sigma: f64,
+    ) {
+        assert!(
+            sigma.is_finite() && sigma >= 0.0,
+            "sigma must be finite and >= 0"
+        );
+        let cells = self
+            .sigma_cells
+            .get_or_insert_with(|| Array3::zeros((self.nx + 1, self.ny + 1, self.nz + 1)));
+        let (ni, nj, nk) = cells.dim();
+        for i in i0..i1.min(ni) {
+            for j in j0..j1.min(nj) {
+                for k in k0..k1.min(nk) {
+                    cells[(i, j, k)] = sigma;
+                }
+            }
+        }
     }
 
     /// Attach a per-component PEC mask for `E_x`. Shape must be

@@ -26,9 +26,8 @@
 //! `--entry 11 --entry 21`) to select off-diagonal S-matrix entries and overlay
 //! them in one plot. Alternatively pass `--all` to overlay every entry of a
 //! multi-port file. When multi-trace mode is active, `plot_sparams_db` /
-//! `plot_sparams_phase` are called instead; the `smith` and `both` kinds are
-//! not supported with multi-trace (error with guidance). Out-of-range indices
-//! are rejected with a clean error.
+//! `plot_sparams_phase` / `plot_smith_chart_multi` are called as appropriate.
+//! Out-of-range indices are rejected with a clean error.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -150,22 +149,12 @@ fn run_single_trace(
 ///
 /// Resolves the requested S-matrix entries to (row, col) index pairs, extracts
 /// each trace from the row-major `file.data`, labels them `S<row><col>` (e.g.
-/// `S11`, `S21`), and calls `plot_sparams_db` or `plot_sparams_phase`.
-///
-/// `smith` and `both` are not meaningful for multi-trace plots and are rejected
-/// with a clean error.
+/// `S11`, `S21`), and calls the appropriate multi-trace plotter:
+/// - `db`    → [`yee_plotters::plot_sparams_db`]
+/// - `phase` → [`yee_plotters::plot_sparams_phase`]
+/// - `smith` → [`yee_plotters::plot_smith_chart_multi`]
+/// - `both`  → dB file (`out-db.<ext>`) + Smith file (`out-smith.<ext>`)
 fn run_multi_trace(args: &PlotArgs, file: &yee_io::touchstone::File, n: usize) -> Result<ExitCode> {
-    // Smith and both are not supported in multi-trace mode.
-    match args.kind {
-        PlotKind::Smith | PlotKind::Both => {
-            anyhow::bail!(
-                "the `smith` and `both` plot kinds are not supported with \
-                 --entry / --all; use --format db or --format phase"
-            );
-        }
-        PlotKind::Db | PlotKind::Phase => {}
-    }
-
     // Build the list of (row, col) pairs (0-based internally; 1-based on CLI).
     let pairs: Vec<(usize, usize)> = if args.all_entries {
         (0..n).flat_map(|r| (0..n).map(move |c| (r, c))).collect()
@@ -200,8 +189,9 @@ fn run_multi_trace(args: &PlotArgs, file: &yee_io::touchstone::File, n: usize) -
         anyhow::bail!("no S-matrix entries selected; pass --entry <ij> or --all");
     }
 
-    // Extract each trace.
-    let traces: Vec<yee_plotters::SparamTrace> = pairs
+    // Extract S-parameter traces (label + raw complex values). Build as
+    // SparamTrace; convert field-for-field to SmithTrace when needed.
+    let sparam_traces: Vec<yee_plotters::SparamTrace> = pairs
         .iter()
         .map(|&(r, c)| {
             let flat_idx = r * n + c;
@@ -223,17 +213,47 @@ fn run_multi_trace(args: &PlotArgs, file: &yee_io::touchstone::File, n: usize) -
 
     match args.kind {
         PlotKind::Db => {
-            yee_plotters::plot_sparams_db(&file.freq_hz, &traces, &args.output, &config)
+            yee_plotters::plot_sparams_db(&file.freq_hz, &sparam_traces, &args.output, &config)
                 .map_err(|e| anyhow::anyhow!("plot: {e}"))?;
             eprintln!("yee plot: wrote {}", args.output.display());
         }
         PlotKind::Phase => {
-            yee_plotters::plot_sparams_phase(&file.freq_hz, &traces, &args.output, &config)
+            yee_plotters::plot_sparams_phase(&file.freq_hz, &sparam_traces, &args.output, &config)
                 .map_err(|e| anyhow::anyhow!("plot: {e}"))?;
             eprintln!("yee plot: wrote {}", args.output.display());
         }
-        // Already rejected above.
-        PlotKind::Smith | PlotKind::Both => unreachable!(),
+        PlotKind::Smith => {
+            let smith_traces: Vec<yee_plotters::SmithTrace> = sparam_traces
+                .into_iter()
+                .map(|t| yee_plotters::SmithTrace {
+                    label: t.label,
+                    values: t.values,
+                })
+                .collect();
+            yee_plotters::plot_smith_chart_multi(&smith_traces, &args.output, &config)
+                .map_err(|e| anyhow::anyhow!("plot: {e}"))?;
+            eprintln!("yee plot: wrote {}", args.output.display());
+        }
+        PlotKind::Both => {
+            let db_path = suffixed_path(&args.output, "-db");
+            let smith_path = suffixed_path(&args.output, "-smith");
+            let smith_traces: Vec<yee_plotters::SmithTrace> = sparam_traces
+                .iter()
+                .map(|t| yee_plotters::SmithTrace {
+                    label: t.label.clone(),
+                    values: t.values.clone(),
+                })
+                .collect();
+            yee_plotters::plot_sparams_db(&file.freq_hz, &sparam_traces, &db_path, &config)
+                .map_err(|e| anyhow::anyhow!("plot (db): {e}"))?;
+            yee_plotters::plot_smith_chart_multi(&smith_traces, &smith_path, &config)
+                .map_err(|e| anyhow::anyhow!("plot (smith): {e}"))?;
+            eprintln!(
+                "yee plot: wrote {} and {}",
+                db_path.display(),
+                smith_path.display()
+            );
+        }
     }
 
     Ok(ExitCode::SUCCESS)
