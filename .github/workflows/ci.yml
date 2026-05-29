@@ -72,6 +72,29 @@ jobs:
       - name: cargo doc (workspace, no-default-features, no-deps)
         run: cargo doc --workspace --no-default-features --no-deps
 
+  wasm-build:
+    name: WASM build (yee-studio, --no-default-features)
+    runs-on: ubuntu-latest
+    needs: lint-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain + wasm32 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.92"
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # Web-readiness gate (App.1.1, ADR-0095): proves the eframe-free
+      # `StudioState` flow (+ yee-synth/yee-filter) compiles to WASM with the
+      # `desktop` feature off. Guards against a native-only dep leaking in.
+      - name: cargo build (yee-studio, wasm32, no-default-features)
+        run: cargo build -p yee-studio --no-default-features --target wasm32-unknown-unknown
+
   python-bindings:
     runs-on: ubuntu-latest
     needs: lint-test
