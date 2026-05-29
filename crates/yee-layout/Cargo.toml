@@ -1,0 +1,25 @@
+[package]
+name         = "yee-layout"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "Yee layout: parametric microstrip coupled-resonator filter geometry + Hammerstad-Jensen line synthesis — pure geometry, no EM."
+
+[lints.rust]
+unsafe_code  = "forbid"
+missing_docs = "warn"
+
+[dependencies]
+# Pure-geometry crate: the layout is plain `f64` metres in `Vec<Point2>`
+# polygons (spec §API), and the SVG preview is hand-rolled, so no geometry or
+# rendering dependency is needed. `serde` (derive) is the only dependency — it
+# lets the `Layout` type round-trip through JSON for the interactive flow and
+# the F1.x meshing/export steps that consume this crate.
+serde = { workspace = true }
+
+[dev-dependencies]
+# Test-only: the geo-001 gate round-trips the `Layout` through JSON. Not a
+# runtime dependency of the crate.
+serde_json = { workspace = true }

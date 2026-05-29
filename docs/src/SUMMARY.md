@@ -126,3 +126,4 @@
 - [ADR-0083: Phase 1.validation.5 `yee validate --list --json` machine-readable inventory](decisions/0083-phase-1-validation-5-list-json.md)
 - [ADR-0084: Filter Phase F0 — synthesis core (yee-synth + yee-filter)](decisions/0084-filter-f0-synthesis-core.md)
 - [ADR-0085: Filter Phase F0.1 — register synthesis gates in the aggregator](decisions/0085-filter-f0-1-aggregator-registration.md)
+- [ADR-0086: Filter Phase F1.0 — yee-layout parametric planar-filter geometry](decisions/0086-filter-f1-0-yee-layout.md)
