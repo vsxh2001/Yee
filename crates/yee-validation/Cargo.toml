@@ -18,6 +18,11 @@ yee-fem      = { workspace = true }
 yee-mesh     = { workspace = true }
 yee-io       = { workspace = true }
 yee-plotters = { workspace = true }
+# Filter Phase F0.1 (ADR-0085): the synth-001/synth-002/filt-001 gate
+# drivers recompute the F0 published-reference checks by calling into the
+# pure-math synthesis crates.
+yee-synth    = { workspace = true }
+yee-filter   = { workspace = true }
 # Phase 3.nl.0 R6: the `nl-001` production gate consumes `DesignIntent`,
 # the offline parser and the deterministic emitter from `yee-design`.
 yee-design   = { workspace = true }

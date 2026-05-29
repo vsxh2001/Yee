@@ -87,6 +87,31 @@ fn yee_validate_list_json_runs() {
     }
 }
 
+/// Filter Phase F0.1 (ADR-0085): `yee validate synth --list` prints the
+/// filter-synthesis inventory and exits 0 **without running any solver**,
+/// so this test is fast and NOT `#[ignore]`'d. Asserts the three synth/filt
+/// ids and the `Synth` solver column appear.
+#[test]
+fn yee_validate_synth_list_runs() {
+    let output = Command::new(env!("CARGO_BIN_EXE_yee"))
+        .args(["validate", "synth", "--list"])
+        .output()
+        .expect("invoke yee");
+
+    assert!(
+        output.status.success(),
+        "yee validate synth --list exited non-zero; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    for needle in ["synth-001", "synth-002", "filt-001", "Synth"] {
+        assert!(
+            stdout.contains(needle),
+            "synth --list output missing {needle}; got: {stdout}"
+        );
+    }
+}
+
 #[test]
 fn yee_validate_help_lists_target() {
     let output = Command::new(env!("CARGO_BIN_EXE_yee"))
