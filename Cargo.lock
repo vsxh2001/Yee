@@ -6689,7 +6689,6 @@ dependencies = [
  "eframe",
  "egui",
  "egui_plot",
- "num-complex",
  "yee-filter",
  "yee-synth",
 ]
@@ -6731,6 +6730,15 @@ dependencies = [
  "yee-mom",
  "yee-plotters",
  "yee-synth",
+]
+
+[[package]]
+name = "yee-voxel"
+version = "0.0.0"
+dependencies = [
+ "ndarray",
+ "yee-fdtd",
+ "yee-layout",
 ]
 
 [[package]]
