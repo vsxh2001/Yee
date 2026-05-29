@@ -10,29 +10,39 @@
 
 ## 0. Vision
 
-> A designer states a filter specification; Yee guides them — stage by stage,
-> with the designer approving each step — from that spec to a **manufacturable
-> RF filter**: synthesized prototype → coupling matrix → physical layout →
-> full-wave-verified S-parameters → fabrication files (KiCad/Gerber for planar
-> & lumped; STEP/mechanical CAD for waveguide).
+> A designer opens an **app** (desktop **or** in the browser), states a filter
+> specification, and is guided — stage by stage, approving each step — from that
+> spec to a **manufacturable RF filter**: synthesized prototype → coupling matrix
+> → physical layout → full-wave-verified S-parameters → fabrication files
+> (KiCad/Gerber for planar & lumped; STEP/mechanical CAD for waveguide).
+
+**The final deliverable is an interactive filter-design application, shipped as
+both a desktop app and a web app** (clarified 2026-05-29). The synthesis/design
+flow built by Phases F0–F4 is the *engine* of that app; the **App/Studio track**
+(§5a) is the product surface that makes it usable end-to-end without the CLI.
 
 Today Yee is a strong EM **analysis + optimization back-end**: given a geometry
 it returns S-parameters (MoM / FDTD / FEM), and `yee-surrogate` (GP + Bayesian
 optimization + NSGA-II + active learning) can tune parameters. The filter
 *front-end* — synthesis, dimensional mapping, parametric layout, manufacturing
-export, and the interactive design flow that ties them together — does not yet
-exist. This roadmap builds it.
+export, and the interactive design flow that ties them together — is what F0–F4
+build; the app/web-app wraps it.
 
 **Scope decisions (locked 2026-05-29):**
+- **Delivery: a desktop + web app.** One Rust/`egui` codebase via `eframe`,
+  which targets **native** (desktop) and **WASM** (browser, WebGL/WebGPU). No
+  separate JS rewrite — the existing `yee-gui` (egui 0.34 / wgpu 29) is the seed.
+  See ADR-0089 for the architecture (light flow client-side in WASM; heavy EM +
+  surrogate optimization on a native `yee-server` the web client calls).
 - **Technologies:** planar (microstrip/stripline), waveguide/cavity, and
   lumped-element LC — a technology-agnostic core with three back-ends.
-- **Automation:** *synthesis-assisted interactive* — the tool proposes each
+- **Automation:** *synthesis-assisted interactive* — the app proposes each
   stage; the designer inspects, tunes, and approves before the next stage.
 - **Manufacturing output:** KiCad/Gerber (planar + lumped PCB) **and**
   STEP/mechanical CAD (waveguide). (Not GDSII in this roadmap.)
 - **Home:** new crates inside the Yee monorepo (`yee-synth`, `yee-filter`,
-  `yee-layout`, `yee-export`), reusing the existing workspace + CI + the
-  multi-track orchestration pattern (`ROADMAP.md` §5 / CLAUDE.md §5).
+  `yee-layout`, `yee-export`, plus `yee-studio` + `yee-server` for the app),
+  reusing the existing workspace + CI + the multi-track orchestration pattern.
 
 ---
 
@@ -209,11 +219,53 @@ follow-on **Phase F0.1**.
   truth within tolerance; sensitivity ranking matches analytic expectation.
 
 ### Phase F6 — Interactive Filter Design Studio (the product)
-- Polished `yee-gui` wizard: spec entry, per-stage review/edit/approve,
+*Superseded/expanded by the App/Studio track (§5a) — F6 is the desktop-app
+milestone within it. Retained here as the capstone of the F-series flow.*
+- Polished filter-design app: spec entry, per-stage review/edit/approve,
   live spec-mask, project save/load, one-click report + fab export.
 - `yee-py` scripting API for the whole flow; `yee filter` CLI parity.
 - **Gate:** a new user designs, verifies, and exports a spec-compliant filter
-  end-to-end through the GUI without touching code (recorded walkthrough).
+  end-to-end through the app without touching code (recorded walkthrough).
+
+---
+
+## 5a. App / Web-app track (the final deliverable)
+
+The F-series above builds the *flow*; this track wraps it in the shipped
+**desktop + web app**. One `egui`/`eframe` codebase, two build targets (native +
+WASM). Architecture per **ADR-0089**: the *light* flow (spec → synthesis →
+coupling matrix → layout preview → spec-mask plot — all pure-Rust, WASM-safe,
+already shipped as F0/F0.1/F0.2/F1.0) runs **client-side**; the *heavy* steps
+(FDTD/FEM verification, surrogate dimensional synthesis, mesh/export) run on a
+native **`yee-server`** the web client calls over HTTP, and in-process for the
+desktop app. New crates: `yee-studio` (the egui app) + `yee-server` (axum API).
+
+- **App.0 — `yee-studio` desktop skeleton.** An `eframe` native app wiring the
+  shipped light flow as stage-gated panels: spec form → synthesized g-values +
+  coupling matrix → `yee-layout` geometry preview (SVG/2-D) → `draw_sparam_with_
+  mask` ideal-response view. Calls `yee-synth`/`yee-filter`/`yee-layout`/
+  `yee-plotters` in-process. Seeded from the existing `yee-gui` panels. **Gate:**
+  launch, enter a Chebyshev BPF spec, see synthesis + layout + spec-mask views
+  update; a headless smoke test constructs the app state and renders each panel.
+- **App.1 — WASM web build of the light flow.** Compile the App.0 light path to
+  `wasm32-unknown-unknown` via `eframe` web; deploy as a static site (CI →
+  Pages). Everything through the ideal-response spec-mask view runs fully in the
+  browser, no server. **Gate:** `trunk build` / `wasm-pack` produces a loadable
+  bundle; a headless WASM smoke test (wasm-bindgen-test) exercises the flow.
+- **App.2 — `yee-server` EM/optimization backend.** An axum service exposing the
+  heavy steps (FDTD/FEM verify, surrogate dimensional synthesis from F1.1+,
+  mesh, KiCad/Gerber/STEP export) as JSON/artifact endpoints. The web client
+  calls it for the F1.1+ stages; the desktop app links the engine directly.
+  **Gate:** a round-trip — web client POSTs a `FilterProject`, server returns an
+  EM-verified S-parameter Touchstone + a pass/fail against the spec mask.
+- **App.3 — full end-to-end in the app + deploy.** Spec → … → fab-file download,
+  in both desktop and browser; project save/load; design report. **Gate:** the
+  F6 walkthrough, performed in the deployed web app, end-to-end without code.
+
+**Sequencing:** App.0 can start now (it consumes only shipped light crates) and
+proceeds in parallel with the F1.1+ EM work; App.1 follows App.0; App.2 lands
+once F1.1–F1.4 give the server something to verify/optimize; App.3 is the
+capstone. The light client (App.0/App.1) is **not** blocked on the EM loop.
 
 ---
 
@@ -282,14 +334,22 @@ build on F1.
   mapping is F1.2).
 - **1.plotting.4** (ADR-0087, merge `8d6e81f`): `yee-plotters` spec-mask overlay
   (`draw_sparam_with_mask` + `mask_violations`) for the Stage-6 verification view.
+- **F0.2** (ADR-0088, merge `4de1a28`): `yee filter synth --plot` — renders the
+  synthesized |S21| with the spec mask overlaid (the spec→visual pipe).
 
-**Next (F1 toward the headline gate — published Swanson hairpin BPF on FDTD):**
-- **F1.1** — an FDTD coupling/Q-extraction primitive: drive a single coupled
-  resonator pair (and a singly-loaded resonator) through `yee-fdtd`, extract the
-  coupling coefficient `k` and external `Qe` from the EM response. The
-  EM-in-the-loop building block the dimensional synthesizer needs.
-- **F1.2** — dimensional synthesis: `yee-surrogate` BO over `yee-layout` gaps/
-  lengths, using F1.1 extraction, to hit the F0 `CouplingMatrix` targets.
-- **F1.3** — full-filter assembly + full-wave verify + spec-mask (`draw_sparam_
-  with_mask`) → the `filt-planar-001` Swanson hairpin gate. **F1.4** — `yee-export`
-  KiCad/Gerber + round-trip gate.
+**Final goal clarified 2026-05-29: deliver a desktop + web APP** (ADR-0089) — one
+`egui`/`eframe` codebase, native + WASM. The light flow already shipped (F0/F0.1/
+F0.2/F1.0) is WASM-safe and becomes the in-browser front-end; heavy EM goes
+behind a native `yee-server`. See §5a.
+
+**Two parallel fronts next:**
+- *Product (startable now — consumes only shipped light crates):* **App.0** —
+  a `yee-studio` `eframe` desktop app wiring the spec → synthesis → coupling
+  matrix → layout preview → spec-mask views as stage-gated panels (seed from
+  `yee-gui`). Then **App.1** WASM web build.
+- *Engine (toward the headline Swanson-hairpin FDTD gate):* **F1.1** — FDTD
+  coupling/Qe-extraction primitive (drive a coupled resonator pair + a singly-
+  loaded resonator through `yee-fdtd`, extract `k`/`Qe`); **F1.2** surrogate-BO
+  dimensional synthesis to the F0 `CouplingMatrix`; **F1.3** verify + spec-mask
+  gate; **F1.4** `yee-export` KiCad/Gerber. **App.2** (`yee-server`) lands once
+  F1.1+ give it EM to serve.
