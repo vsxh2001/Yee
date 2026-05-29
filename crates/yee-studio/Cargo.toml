@@ -1,0 +1,24 @@
+[package]
+name         = "yee-studio"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "Yee Filter Studio — App.0 eframe filter-design desktop skeleton."
+
+[[bin]]
+name = "yee-studio"
+path = "src/main.rs"
+
+[dependencies]
+yee-synth  = { workspace = true }
+yee-filter = { workspace = true }
+egui        = { workspace = true }
+eframe      = { workspace = true, features = ["wgpu"] }
+egui_plot   = { workspace = true }
+num-complex = { workspace = true }
+
+[lints.rust]
+unsafe_code  = "forbid"
+missing_docs = "warn"
