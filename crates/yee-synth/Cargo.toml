@@ -1,0 +1,19 @@
+[package]
+name         = "yee-synth"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "Yee synth: classical filter synthesis (Butterworth/Chebyshev prototypes, coupling matrix, external Q) — pure math, no EM."
+
+[lints.rust]
+unsafe_code  = "forbid"
+missing_docs = "warn"
+
+[dependencies]
+# Pure-math synthesis: the coupling matrix is a plain `Vec<Vec<f64>>` (spec
+# §2.5), so no linear-algebra dep is needed yet. `nalgebra` / `yee-core` get
+# re-added when the coupling-matrix → S-parameter realization (eigen path)
+# lands in a later filter phase.
+serde     = { workspace = true }

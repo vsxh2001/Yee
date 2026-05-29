@@ -1,0 +1,20 @@
+[package]
+name         = "yee-filter"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "Yee filter: filter-domain data model, ideal response, and spec-mask gating (Filter Phase F0)."
+
+[lints.rust]
+unsafe_code  = "forbid"
+missing_docs = "warn"
+
+[dependencies]
+# Touchstone I/O lives in the CLI layer (`yee-cli` declares `yee-io`), so the
+# library stays I/O-free; `yee-io` / `yee-core` get re-added here if a type
+# from them is consumed directly in a later filter phase.
+yee-synth   = { workspace = true }
+serde       = { workspace = true }
+num-complex = { workspace = true }

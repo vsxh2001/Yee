@@ -1,0 +1,21 @@
+# Satisfiable Chebyshev bandpass for `yee filter synth` (Filter Phase F0).
+#
+# 0.5 dB-ripple Chebyshev, centre 2 GHz, 10% fractional bandwidth (band edges
+# 1.9 / 2.1 GHz), order 5. The single stopband point at 2.4 GHz (requiring
+# 40 dB rejection) is met with margin by the order-5 prototype, so the
+# spec-mask verdict is PASS and `yee filter synth` exits 0.
+
+response = "Bandpass"
+f0_hz = 2.0e9
+fbw = 0.10
+order = 5
+z0_ohm = 50.0
+
+[approximation.Chebyshev]
+ripple_db = 0.5
+
+[mask]
+passband_ripple_db = 0.5
+return_loss_db = 9.0
+# Each stopband row is [frequency_hz, minimum_rejection_db].
+stopband = [[2.4e9, 40.0]]

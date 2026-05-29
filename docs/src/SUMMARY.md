@@ -124,3 +124,4 @@
 - [ADR-0081: Phase 1.gui.6 VSWR circles on the Smith chart](decisions/0081-phase-1-gui-6-vswr-circles.md)
 - [ADR-0082: Phase 1.validation.4 `yee validate --list` registered-case inventory](decisions/0082-phase-1-validation-4-validate-list.md)
 - [ADR-0083: Phase 1.validation.5 `yee validate --list --json` machine-readable inventory](decisions/0083-phase-1-validation-5-list-json.md)
+- [ADR-0084: Filter Phase F0 — synthesis core (yee-synth + yee-filter)](decisions/0084-filter-f0-synthesis-core.md)

@@ -27,10 +27,16 @@ yee-io      = { workspace = true }
 yee-plotters = { workspace = true }
 yee-validation = { path = "../yee-validation", version = "0.0.0" }
 yee-design  = { workspace = true }
+yee-synth   = { workspace = true }
+yee-filter  = { workspace = true }
 num-complex = { workspace = true }
 clap        = { workspace = true }
 clap_complete = "4"
+serde       = { workspace = true }
 serde_json  = { workspace = true }
+# `toml` is not in the workspace dep table; declare directly to parse the
+# `FilterSpec` input for `yee filter synth` (matches yee-design's rationale).
+toml        = "0.8"
 anyhow      = { workspace = true }
 tracing     = { workspace = true }
 tracing-subscriber = { workspace = true }

@@ -42,6 +42,7 @@ use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 
+mod filter;
 mod plot;
 
 #[derive(Parser, Debug)]
@@ -214,6 +215,19 @@ enum Command {
         #[arg(long)]
         model: Option<String>,
     },
+    /// Filter design (synthesis + ideal response + spec-mask check).
+    ///
+    /// Filter Phase F0 walking skeleton. The `synth` subcommand parses a
+    /// [`yee_filter::FilterSpec`] TOML, synthesizes the lowpass prototype and
+    /// all-pole coupling matrix ([`yee_filter::synthesize`]), sweeps the
+    /// closed-form ideal response ([`yee_filter::ideal_response`]), writes the
+    /// S-parameters as a Touchstone `.s2p` via `yee-io`, and grades the
+    /// response against the spec mask ([`yee_filter::check_mask`]). Exit 0 on a
+    /// PASS verdict, 1 on a mask FAIL.
+    Filter {
+        #[command(subcommand)]
+        command: FilterCommand,
+    },
     /// Run an FDTD simulation end-to-end and emit the radiation pattern as JSON.
     ///
     /// Composes [`yee_fdtd::FdtdDriver`] from a vacuum [`yee_fdtd::YeeGrid`]
@@ -249,6 +263,25 @@ enum Command {
         cpml: usize,
         /// Output JSON path. If unset, write to stdout.
         #[arg(long)]
+        output: Option<PathBuf>,
+    },
+}
+
+/// Subcommands under `yee filter`.
+#[derive(Subcommand, Debug)]
+enum FilterCommand {
+    /// Synthesize a filter from a `FilterSpec` TOML and report the spec-mask
+    /// verdict.
+    ///
+    /// Parses `<spec>`, synthesizes the prototype + coupling matrix, sweeps the
+    /// closed-form ideal response, writes a Touchstone `.s2p`, and prints the
+    /// mask PASS/FAIL verdict. Exit 0 on PASS, 1 on FAIL.
+    Synth {
+        /// Path to the `FilterSpec` TOML.
+        spec: PathBuf,
+        /// Output Touchstone path (`.s2p`). Defaults to the spec stem with a
+        /// `.s2p` extension next to the spec file.
+        #[arg(long, short)]
         output: Option<PathBuf>,
     },
 }
@@ -401,6 +434,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Bench { target, extra } => run_bench(target, extra),
+        Command::Filter { command } => match command {
+            FilterCommand::Synth { spec, output } => filter::run_synth(&spec, output.as_deref()),
+        },
         Command::Design {
             prompt,
             output,
