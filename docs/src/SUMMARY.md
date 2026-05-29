@@ -37,6 +37,7 @@
 - [FDTD TF/SF Fresnel transmission from Python](tutorials/13-fdtd-fresnel-tfsf-from-python.md)
 - [FDTD absorption validation from Python](tutorials/14-fdtd-absorption-validation-from-python.md)
 - [FDTD Ohmic skin-depth from Python](tutorials/15-fdtd-ohmic-skin-depth-from-python.md)
+- [FDTD lumped series-LC resonance from Python](tutorials/16-fdtd-lumped-lc-resonance-from-python.md)
 
 # Decisions
 
@@ -119,3 +120,4 @@
 - [ADR-0077: Phase 2.fdtd.py.4 FDTD absorption Python drivers (cpml-001/ntff-001/dispersive-001)](decisions/0077-phase-2-fdtd-py-4-absorption-python.md)
 - [ADR-0078: fdtd-205 Ohmic skin-depth penetration gate](decisions/0078-fdtd-205-ohmic-skin-depth.md)
 - [ADR-0079: Phase 2.fdtd.py.5 skin-depth Python driver](decisions/0079-phase-2-fdtd-py-5-skin-depth-python.md)
+- [ADR-0080: fdtd-206 lumped series-LC resonant frequency gate](decisions/0080-fdtd-206-lc-resonance.md)
