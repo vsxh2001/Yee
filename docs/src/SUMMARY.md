@@ -16,6 +16,7 @@
 - [CUDA backend](theory/cuda-backend.md)
 - [Touchstone v1.1 File Format](theory/touchstone-format.md)
 - [RF Filter Synthesis & Design Flow](theory/filter-synthesis.md)
+- [Coupled Lines & Dimensional Synthesis](theory/coupled-lines-dimensional-synthesis.md)
 - [GP Surrogates and Bayesian Optimization](theory/surrogate-gp-bo.md)
 - [Multi-objective Optimization and Active Learning](theory/multi-objective-and-active-learning.md)
 
@@ -142,3 +143,4 @@
 - [ADR-0097: Filter Phase F1.2.0 — closed-form edge-coupled dimensional synthesis](decisions/0097-filter-f1-2-0-dimensional-synthesis.md)
 - [ADR-0098: Filter — `yee filter synth` physical dimensions + layout SVG](decisions/0098-filter-f1-2-cli-dims-output.md)
 - [ADR-0099: App — yee-studio physical-dimensions panel](decisions/0099-app-studio-dims-panel.md)
+- [ADR-0100: Filter Phase F1.4.0 — yee-export Gerber walking skeleton](decisions/0100-filter-f1-4-0-yee-export-gerber.md)
