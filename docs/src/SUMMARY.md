@@ -15,6 +15,7 @@
 - [FEM Eigenmode Solver (3-D Nedelec)](theory/fem-eigenmode.md)
 - [CUDA backend](theory/cuda-backend.md)
 - [Touchstone v1.1 File Format](theory/touchstone-format.md)
+- [RF Filter Synthesis & Design Flow](theory/filter-synthesis.md)
 - [GP Surrogates and Bayesian Optimization](theory/surrogate-gp-bo.md)
 - [Multi-objective Optimization and Active Learning](theory/multi-objective-and-active-learning.md)
 
