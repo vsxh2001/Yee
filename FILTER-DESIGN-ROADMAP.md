@@ -269,16 +269,27 @@ build on F1.
 
 ## 9. Status & next step
 
-**Phase F0 SHIPPED** (2026-05-29, ADR-0084, merge `dbfc5c5`): `yee-synth` +
-`yee-filter` + `yee filter synth`; `synth-001`/`synth-002`/`filt-001` green.
+**SHIPPED so far (2026-05-29):**
+- **F0** (ADR-0084, merge `dbfc5c5`): `yee-synth` + `yee-filter` +
+  `yee filter synth`; `synth-001`/`synth-002`/`filt-001` green.
+- **F0.1** (ADR-0085, merge `e71e400`): the three synthesis gates registered in
+  the `yee-validation` aggregator under a new `Solver::Synth` / `yee validate
+  synth` target — they now appear in `yee validate --list[ --json]`.
+- **F1.0** (ADR-0086, merge `9a51655`): `yee-layout` crate — parametric
+  microstrip geometry (edge-coupled + hairpin generators), Hammerstad-Jensen
+  width/ε_eff synthesis, dependency-free SVG preview; gates `geo-001/002/003`.
+  Geometry-only (no EM yet); consumes explicit dims (the coupling-matrix→dims
+  mapping is F1.2).
+- **1.plotting.4** (ADR-0087, merge `8d6e81f`): `yee-plotters` spec-mask overlay
+  (`draw_sparam_with_mask` + `mask_violations`) for the Stage-6 verification view.
 
-**Next:**
-- **F0.1** (small): register `synth-001`/`synth-002`/`filt-001` in the
-  `yee-validation` aggregator so they appear in `yee validate --list` (adds the
-  `synth-*`/`filt-*` cases + a `Solver::Synth`-style category).
-- **F1** (the headline): planar track to first manufacturable filter on the
-  **FDTD** back-end — `yee-layout` edge-coupled/hairpin generators, coupling
-  extraction + `yee-surrogate` BO with FDTD in the loop, `yee-export` KiCad/
-  Gerber, gate = reproduce the published Swanson hairpin BPF (`v1-001`). Begin
-  F1 by scoping `yee-layout` (parametric geometry) + the dimensional-synthesis
-  driver against the F0 `FilterProject`/`CouplingMatrix` it now consumes.
+**Next (F1 toward the headline gate — published Swanson hairpin BPF on FDTD):**
+- **F1.1** — an FDTD coupling/Q-extraction primitive: drive a single coupled
+  resonator pair (and a singly-loaded resonator) through `yee-fdtd`, extract the
+  coupling coefficient `k` and external `Qe` from the EM response. The
+  EM-in-the-loop building block the dimensional synthesizer needs.
+- **F1.2** — dimensional synthesis: `yee-surrogate` BO over `yee-layout` gaps/
+  lengths, using F1.1 extraction, to hit the F0 `CouplingMatrix` targets.
+- **F1.3** — full-filter assembly + full-wave verify + spec-mask (`draw_sparam_
+  with_mask`) → the `filt-planar-001` Swanson hairpin gate. **F1.4** — `yee-export`
+  KiCad/Gerber + round-trip gate.
