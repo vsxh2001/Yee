@@ -6590,6 +6590,8 @@ version = "0.0.0"
 dependencies = [
  "num-complex",
  "serde",
+ "serde_json",
+ "yee-layout",
  "yee-synth",
 ]
 

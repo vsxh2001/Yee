@@ -16,5 +16,15 @@ missing_docs = "warn"
 # library stays I/O-free; `yee-io` / `yee-core` get re-added here if a type
 # from them is consumed directly in a later filter phase.
 yee-synth   = { workspace = true }
+# Dimensional synthesis (Filter Phase F1.2.0) inverts `yee-layout`'s validated
+# Hammerstad-Jensen / Kirschning-Jansen closed-form microstrip models to size an
+# edge-coupled BPF. `yee-layout` is `serde`-only (pure geometry, no EM/FDTD/
+# native dep) so this keeps `yee-filter` WASM-safe (ADR-0089/0097); no cycle:
+# `yee-layout` does not depend on `yee-filter`.
+yee-layout  = { workspace = true }
 serde       = { workspace = true }
 num-complex = { workspace = true }
+
+[dev-dependencies]
+# Test-only: the dim-003 gate round-trips `EdgeCoupledDimensions` through JSON.
+serde_json = { workspace = true }
