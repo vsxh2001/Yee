@@ -8,7 +8,8 @@
 //! substrate slab of `ε_r = layout.substrate.eps_r`, a one-cell-thick PEC
 //! top-metal layer where a trace polygon covers the cell centre
 //! (point-in-polygon ray-cast), and air above. The result is a `YeeGrid` with
-//! per-cell `ε_r` and a per-component `E_z` PEC mask already attached, ready
+//! per-cell `ε_r` and tangential `Ex`+`Ey` PEC masks already attached (a
+//! horizontal PEC sheet zeroes the in-plane field, not the normal `Ez`), ready
 //! for the F1.1b k/Q_e extraction step.
 //!
 //! This crate does **no** EM time-stepping — building the grid assigns
@@ -78,7 +79,7 @@ pub struct VoxelOptions {
 /// A material-assigned FDTD model produced from a planar microstrip layout.
 #[derive(Debug)]
 pub struct MicrostripModel {
-    /// The Yee grid with per-cell `ε_r` and an `E_z` PEC mask attached.
+    /// The Yee grid with per-cell `ε_r` and tangential `Ex`+`Ey` PEC masks attached.
     pub grid: YeeGrid,
     /// Grid cell dimensions `(nx, ny, nz)`.
     pub dims: (usize, usize, usize),
