@@ -39,6 +39,7 @@
 - [FDTD absorption validation from Python](tutorials/14-fdtd-absorption-validation-from-python.md)
 - [FDTD Ohmic skin-depth from Python](tutorials/15-fdtd-ohmic-skin-depth-from-python.md)
 - [FDTD lumped series-LC resonance from Python](tutorials/16-fdtd-lumped-lc-resonance-from-python.md)
+- [Designing an RF filter](tutorials/17-filter-design.md)
 
 # Decisions
 
