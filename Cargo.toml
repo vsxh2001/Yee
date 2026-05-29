@@ -20,6 +20,7 @@ members = [
     "crates/yee-filter",
     "crates/yee-studio",
     "crates/yee-layout",
+    "crates/yee-voxel",
     "examples/half-wave-dipole",
     "examples/microstrip-line",
     "examples/patch-2g4",

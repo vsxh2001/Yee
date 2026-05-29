@@ -1,0 +1,17 @@
+[package]
+name         = "yee-voxel"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "Yee voxel: native bridge that rasterizes a planar microstrip yee-layout::Layout into a material-assigned yee-fdtd::YeeGrid (ε_r slab + PEC ground + PEC traces). No time-stepping."
+
+[lints.rust]
+unsafe_code  = "forbid"
+missing_docs = "warn"
+
+[dependencies]
+yee-layout = { workspace = true }
+yee-fdtd   = { workspace = true }
+ndarray    = { workspace = true }

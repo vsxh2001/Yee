@@ -6733,6 +6733,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "yee-voxel"
+version = "0.0.0"
+dependencies = [
+ "ndarray",
+ "yee-fdtd",
+ "yee-layout",
+]
+
+[[package]]
 name = "yeslogic-fontconfig-sys"
 version = "6.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
