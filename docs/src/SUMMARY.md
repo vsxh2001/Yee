@@ -139,3 +139,4 @@
 - [ADR-0094: Filter Phase F1.1b.gate — coupled-microstrip even/odd model](decisions/0094-filter-f1-1b-coupled-line-model.md)
 - [ADR-0095: App.1.1 — wasm32 build check + CI web-readiness gate](decisions/0095-app-1-1-wasm-build-check.md)
 - [ADR-0096: App.1.2a — yee-studio wasm32 web entry (eframe WebRunner)](decisions/0096-app-1-2a-studio-wasm-web-entry.md)
+- [ADR-0097: Filter Phase F1.2.0 — closed-form edge-coupled dimensional synthesis](decisions/0097-filter-f1-2-0-dimensional-synthesis.md)
