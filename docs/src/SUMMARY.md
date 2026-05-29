@@ -130,3 +130,4 @@
 - [ADR-0087: Phase 1.plotting.4 — S-parameter spec-mask overlay](decisions/0087-phase-1-plotting-4-spec-mask-overlay.md)
 - [ADR-0088: Filter Phase F0.2 — `yee filter synth --plot`](decisions/0088-filter-f0-2-synth-plot.md)
 - [ADR-0089: Filter-design app architecture (egui/eframe desktop + web)](decisions/0089-filter-design-app-architecture.md)
+- [ADR-0090: App.0 — yee-studio filter-design desktop app skeleton](decisions/0090-app-0-yee-studio-desktop.md)
