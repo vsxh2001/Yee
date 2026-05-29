@@ -259,6 +259,11 @@ impl eframe::App for StudioApp {
             // ---- physical dimensions (F1.2.0; ADR-0099) ------------------
             ui.separator();
             show_dimensions(ui, &mut self.state);
+
+            // ---- top-view layout preview (F1.2.0; ADR-0101) --------------
+            ui.separator();
+            ui.label("Layout (top view, mm)");
+            show_layout(ui, &self.state);
         });
     }
 }
@@ -332,6 +337,47 @@ fn show_dimensions(ui: &mut egui::Ui, state: &mut StudioState) {
                 Color32::from_rgb(220, 60, 60),
                 format!("no dimensions: {msg}"),
             );
+        }
+    }
+}
+
+/// Render the "Layout" top-view canvas (F1.2.0; ADR-0101): each
+/// [`yee_layout::Layout`] trace polygon drawn as a filled
+/// [`egui_plot::Polygon`] in millimetres, with equal data aspect so the
+/// geometry is not distorted. Shows the [`yee_filter::DimError`] string on
+/// `Err`.
+///
+/// `Layout.traces` vertices are in metres; they are scaled to millimetres
+/// (`×1e3`) for the plot. The `StudioState` itself stays egui-free — only this
+/// `app` module (behind `desktop`/`web`) touches `egui_plot`.
+fn show_layout(ui: &mut egui::Ui, state: &StudioState) {
+    /// Metres → millimetres for the canvas coordinates.
+    const MM: f64 = 1.0e3;
+
+    match &state.layout {
+        Ok(layout) => {
+            let metal_fill = Color32::from_rgba_unmultiplied(200, 140, 40, 160);
+            Plot::new("studio_layout_plot")
+                .data_aspect(1.0)
+                .x_axis_label("x (mm)")
+                .y_axis_label("y (mm)")
+                .legend(Legend::default())
+                .show(ui, |plot_ui| {
+                    // One distinct-named polygon per trace so each metal
+                    // footprint gets its own egui_plot item Id (egui_plot
+                    // derives the Id from the name — shared names hover as one).
+                    for (i, poly) in layout.traces.iter().enumerate() {
+                        let pts: Vec<[f64; 2]> =
+                            poly.verts.iter().map(|p| [p.x * MM, p.y * MM]).collect();
+                        plot_ui.polygon(
+                            Polygon::new(format!("trace {i}"), PlotPoints::from(pts))
+                                .fill_color(metal_fill),
+                        );
+                    }
+                });
+        }
+        Err(msg) => {
+            ui.colored_label(Color32::from_rgb(220, 60, 60), format!("no layout: {msg}"));
         }
     }
 }

@@ -25,7 +25,7 @@
 
 use yee_filter::{
     EdgeCoupledDimensions, FilterProject, FilterSpec, check_mask, dimension_edge_coupled,
-    ideal_response, synthesize,
+    dimension_edge_coupled_layout, ideal_response, synthesize,
 };
 use yee_layout::Substrate;
 
@@ -112,6 +112,20 @@ pub struct StudioState {
     /// [`eps_r`]: StudioState::eps_r
     /// [`h_m`]: StudioState::h_m
     pub dims: Result<EdgeCoupledDimensions, String>,
+    /// Top-view planar layout (F1.2.0; ADR-0101) — the edge-coupled microstrip
+    /// trace polygons for the synthesized filter on the [`eps_r`]/[`h_m`]
+    /// substrate, or the [`yee_filter::DimError`] display string when the
+    /// coupling cannot be realized on the chosen substrate.
+    ///
+    /// Derived alongside [`dims`] from the same `substrate`. The error is stored
+    /// as a `String` (not the `DimError`) and [`yee_layout::Layout`] carries no
+    /// `egui`/native type, so [`StudioState`] stays egui-free and WASM-safe
+    /// (ADR-0089/0101). Coordinates in the polygons are in metres.
+    ///
+    /// [`dims`]: StudioState::dims
+    /// [`eps_r`]: StudioState::eps_r
+    /// [`h_m`]: StudioState::h_m
+    pub layout: Result<yee_layout::Layout, String>,
 }
 
 impl StudioState {
@@ -134,6 +148,7 @@ impl StudioState {
             h_m: 1.6e-3,
             // Populated by `apply_derived` below.
             dims: Err(String::new()),
+            layout: Err(String::new()),
         };
         // `project` is already synthesized above; derive the rest (no re-synth).
         state.apply_derived();
@@ -189,6 +204,12 @@ impl StudioState {
             metal_thickness_m: 0.0,
         };
         self.dims = dimension_edge_coupled(&self.project, &substrate).map_err(|e| e.to_string());
+
+        // Top-view layout polygons (F1.2.0; ADR-0101) from the same substrate.
+        // The `DimError` is mapped to its display string so `StudioState` holds
+        // no non-`Result` error type and stays egui-free / WASM-safe.
+        self.layout =
+            dimension_edge_coupled_layout(&self.project, &substrate).map_err(|e| e.to_string());
     }
 }
 
@@ -373,6 +394,30 @@ mod tests {
         assert_eq!(dims.gaps_m.len(), 4, "N=5 ⇒ 4 inter-resonator gaps");
         for (i, &gap) in dims.gaps_m.iter().enumerate() {
             assert!(gap > 0.0, "gap[{i}] must be positive, got {gap}");
+        }
+    }
+
+    #[test]
+    fn studio_state_layout() {
+        // Default Chebyshev N=5 spec + the FR-4 substrate defaults (ε_r = 4.4,
+        // h = 1.6 mm) should produce a realizable top-view layout (ADR-0101).
+        let state = StudioState::from_spec(satisfiable_spec());
+
+        let layout = state
+            .layout
+            .as_ref()
+            .expect("default N=5 spec must produce a layout on FR-4");
+
+        assert!(
+            !layout.traces.is_empty(),
+            "layout must have at least one trace polygon"
+        );
+        for (i, poly) in layout.traces.iter().enumerate() {
+            assert!(
+                poly.verts.len() >= 3,
+                "trace polygon {i} must have ≥ 3 vertices, got {}",
+                poly.verts.len()
+            );
         }
     }
 }
