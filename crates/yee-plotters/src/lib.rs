@@ -9,7 +9,7 @@
 //!
 //! ## Public surface
 //!
-//! Six entry points:
+//! Seven entry points:
 //!
 //! * [`plot_s11_db`] — `|S₁₁|` in decibels vs. frequency (single trace).
 //! * [`plot_s11_phase`] — `arg(S₁₁)` in degrees vs. frequency (single trace).
@@ -22,10 +22,13 @@
 //!   frequency, each labelled and colour-coded with a legend.
 //! * [`plot_sparams_phase`] — overlay multiple S-parameter traces (phase in
 //!   degrees) with a legend.
+//! * [`draw_sparam_with_mask`] — overlay labelled dB traces with spec-mask
+//!   ([`MaskRegion`]) forbidden regions shaded; [`mask_violations`] is the pure
+//!   pass/fail companion.
 //!
-//! All share a [`PlotConfig`] (size, title, output [`PlotFormat`]) and dispatch
-//! to either a `BitMapBackend` (PNG) or an `SVGBackend` (SVG) depending on
-//! `config.format`.
+//! All public draw functions share a [`PlotConfig`] (size, title, output
+//! [`PlotFormat`]) and dispatch to either a `BitMapBackend` (PNG) or an
+//! `SVGBackend` (SVG) depending on `config.format`.
 
 use std::path::Path;
 
@@ -106,6 +109,73 @@ pub struct SmithTrace {
     pub label: String,
     /// Raw complex S-parameter values, one per frequency sample.
     pub values: Vec<Complex64>,
+}
+
+/// Which side of a spec-mask limit is forbidden.
+///
+/// Used by [`MaskRegion`] and [`mask_violations`] / [`draw_sparam_with_mask`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MaskKind {
+    /// The trace must stay **below** `limit_db` in the region (e.g. stopband
+    /// rejection): a sample above the limit is a violation.
+    Ceiling,
+    /// The trace must stay **above** `limit_db` in the region (e.g. passband
+    /// minimum `|S₂₁|`): a sample below the limit is a violation.
+    Floor,
+}
+
+/// One forbidden region of a spec mask, in plain `f64` data (not coupled to
+/// any solver-side spec type) so any caller can construct it.
+///
+/// A region constrains the trace over the closed frequency interval
+/// `[f_lo_hz, f_hi_hz]` to one side of `limit_db`, per [`MaskKind`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MaskRegion {
+    /// Lower edge of the region's frequency span, in Hz (inclusive).
+    pub f_lo_hz: f64,
+    /// Upper edge of the region's frequency span, in Hz (inclusive).
+    pub f_hi_hz: f64,
+    /// Whether the trace must stay below ([`MaskKind::Ceiling`]) or above
+    /// ([`MaskKind::Floor`]) the limit inside this region.
+    pub kind: MaskKind,
+    /// The limit, in dB.
+    pub limit_db: f64,
+}
+
+/// Indices of `trace_db` samples (paired with `freqs_hz`) that violate **any**
+/// region.
+///
+/// A sample at frequency `f` is a violation of a region when
+/// `f ∈ [f_lo_hz, f_hi_hz]` and either
+/// `kind == Ceiling && db > limit_db` or `kind == Floor && db < limit_db`.
+/// The returned indices are sorted and unique.
+///
+/// Pure — no I/O. `freqs_hz` and `trace_db` are expected to have equal length;
+/// only the overlapping prefix is checked if they differ.
+pub fn mask_violations(freqs_hz: &[f64], trace_db: &[f64], regions: &[MaskRegion]) -> Vec<usize> {
+    let mut hits: Vec<usize> = Vec::new();
+    let n = freqs_hz.len().min(trace_db.len());
+    for i in 0..n {
+        let f = freqs_hz[i];
+        let db = trace_db[i];
+        let violated = regions.iter().any(|r| {
+            if f < r.f_lo_hz || f > r.f_hi_hz {
+                return false;
+            }
+            match r.kind {
+                MaskKind::Ceiling => db > r.limit_db,
+                MaskKind::Floor => db < r.limit_db,
+            }
+        });
+        if violated {
+            hits.push(i);
+        }
+    }
+    // Already ascending and unique by construction, but keep the contract
+    // explicit so a future change to the loop can't silently break it.
+    hits.sort_unstable();
+    hits.dedup();
+    hits
 }
 
 /// Map a `plotters` `DrawingAreaErrorKind` into our [`Error`] type.
@@ -478,6 +548,89 @@ pub fn plot_sparams_phase(
     }
 }
 
+/// Render labelled dB traces with spec-mask regions shaded on their forbidden
+/// side.
+///
+/// Each `MaskRegion`'s forbidden area is drawn as a translucent red rectangle
+/// **before** the traces (so the data sits on top):
+/// * [`MaskKind::Ceiling`] — from `limit_db` up to the plot top, across
+///   `[f_lo_hz, f_hi_hz]`.
+/// * [`MaskKind::Floor`] — from the plot bottom up to `limit_db`, across
+///   `[f_lo_hz, f_hi_hz]`.
+///
+/// Traces are drawn on top with the shared multi-trace colour cycle and a
+/// legend. Size, title, and output format (PNG or SVG) come from `config`,
+/// matching every other draw function in the crate.
+///
+/// * X-axis: `"frequency (GHz)"` — values are `freqs_hz[i] / 1e9`.
+/// * Y-axis: `"|S| (dB)"`. The y-range covers all traces **and** every mask
+///   limit with a small pad, so the shaded forbidden side is always visible.
+///
+/// `freqs_hz` must have the same length as every `trace` dB slice.
+///
+/// # Errors
+///
+/// Returns [`Error::Render`] if the `plotters` backend fails.
+pub fn draw_sparam_with_mask(
+    path: &Path,
+    freqs_hz: &[f64],
+    traces: &[(&str, &[f64])],
+    regions: &[MaskRegion],
+    config: &PlotConfig,
+) -> Result<(), Error> {
+    for (label, ys) in traces {
+        assert_eq!(
+            freqs_hz.len(),
+            ys.len(),
+            "freqs_hz and trace '{label}' must have equal length"
+        );
+    }
+
+    let xs_ghz: Vec<f64> = freqs_hz.iter().map(|f| f * 1.0e-9).collect();
+    let (x_min, x_max) = finite_range(&xs_ghz, 0.0, 1.0);
+
+    // Y-range must cover the traces and every mask limit so the shaded
+    // forbidden side is on-screen.
+    let mut y_values: Vec<f64> = traces
+        .iter()
+        .flat_map(|(_, ys)| ys.iter().copied())
+        .collect();
+    y_values.extend(regions.iter().map(|r| r.limit_db));
+    let (y_min_raw, y_max_raw) = finite_range(&y_values, MIN_DB, 0.0);
+    let y_pad = ((y_max_raw - y_min_raw).abs() * 0.05).max(1.0);
+    let y_min = y_min_raw - y_pad;
+    let y_max = y_max_raw + y_pad;
+
+    let size = (config.width_px, config.height_px);
+    if matches!(config.format, PlotFormat::Svg) {
+        let root = SVGBackend::new(path, size).into_drawing_area();
+        draw_masked_traces(
+            &root,
+            &config.title,
+            &xs_ghz,
+            traces,
+            regions,
+            x_min,
+            x_max,
+            y_min,
+            y_max,
+        )
+    } else {
+        let root = BitMapBackend::new(path, size).into_drawing_area();
+        draw_masked_traces(
+            &root,
+            &config.title,
+            &xs_ghz,
+            traces,
+            regions,
+            x_min,
+            x_max,
+            y_min,
+            y_max,
+        )
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Backend-agnostic drawing helpers
 // ---------------------------------------------------------------------------
@@ -592,6 +745,101 @@ where
         let colour = trace_colour(i);
         let series_data: Vec<(f64, f64)> = xs.iter().copied().zip(ys.iter().copied()).collect();
         let label = trace.label.clone();
+        chart
+            .draw_series(LineSeries::new(series_data, colour.stroke_width(2)))
+            .map_err(map_render_err)?
+            .label(label)
+            .legend(move |(x, y)| {
+                PathElement::new(vec![(x, y), (x + 20, y)], colour.stroke_width(2))
+            });
+    }
+
+    chart
+        .configure_series_labels()
+        .background_style(WHITE.mix(0.8))
+        .border_style(BLACK)
+        .draw()
+        .map_err(map_render_err)?;
+
+    root.present().map_err(map_render_err)?;
+    Ok(())
+}
+
+/// Render dB traces with spec-mask regions shaded on their forbidden side.
+///
+/// Drawing order (so data sits on top of the mask):
+/// 1. White fill, chart frame and mesh.
+/// 2. Each [`MaskRegion`]'s forbidden side as a translucent red rectangle.
+/// 3. The labelled traces (shared colour cycle) with a legend.
+///
+/// Region rectangles are clamped to the chart's `[x_min, x_max]` /
+/// `[y_min, y_max]` window so an out-of-range limit or frequency span does not
+/// draw past the frame.
+#[allow(clippy::too_many_arguments)]
+fn draw_masked_traces<DB>(
+    root: &DrawingArea<DB, plotters::coord::Shift>,
+    title: &str,
+    xs_ghz: &[f64],
+    traces: &[(&str, &[f64])],
+    regions: &[MaskRegion],
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+) -> Result<(), Error>
+where
+    DB: DrawingBackend,
+    DB::ErrorType: 'static,
+{
+    root.fill(&WHITE).map_err(map_render_err)?;
+
+    let mut chart = ChartBuilder::on(root)
+        .caption(title, ("sans-serif", 24).into_font())
+        .margin(10)
+        .x_label_area_size(40)
+        .y_label_area_size(60)
+        // Reserve right margin for the legend so it does not overlap the chart.
+        .right_y_label_area_size(80)
+        .build_cartesian_2d(x_min..x_max, y_min..y_max)
+        .map_err(map_render_err)?;
+
+    chart
+        .configure_mesh()
+        .x_desc("frequency (GHz)")
+        .y_desc("|S| (dB)")
+        .draw()
+        .map_err(map_render_err)?;
+
+    // Forbidden regions, shaded translucent red, drawn before the traces.
+    let fill = RGBColor(0xE6, 0x19, 0x4B).mix(0.18);
+    for r in regions {
+        // Region frequency span in GHz, clamped to the visible x-window.
+        let rx_lo = (r.f_lo_hz * 1.0e-9).max(x_min);
+        let rx_hi = (r.f_hi_hz * 1.0e-9).min(x_max);
+        if rx_hi <= rx_lo {
+            continue; // entirely off-screen or degenerate
+        }
+        // Forbidden y-band, clamped to the visible y-window.
+        let (ry_lo, ry_hi) = match r.kind {
+            MaskKind::Ceiling => (r.limit_db.max(y_min), y_max),
+            MaskKind::Floor => (y_min, r.limit_db.min(y_max)),
+        };
+        if ry_hi <= ry_lo {
+            continue; // forbidden band outside the visible window
+        }
+        chart
+            .draw_series(std::iter::once(Rectangle::new(
+                [(rx_lo, ry_lo), (rx_hi, ry_hi)],
+                fill.filled(),
+            )))
+            .map_err(map_render_err)?;
+    }
+
+    // Data traces on top, with legend.
+    for (i, (label, ys)) in traces.iter().enumerate() {
+        let colour = trace_colour(i);
+        let series_data: Vec<(f64, f64)> = xs_ghz.iter().copied().zip(ys.iter().copied()).collect();
+        let label = (*label).to_string();
         chart
             .draw_series(LineSeries::new(series_data, colour.stroke_width(2)))
             .map_err(map_render_err)?
@@ -1184,5 +1432,124 @@ mod tests {
         let body = fs::read_to_string(tmp.path()).expect("read svg");
         assert!(body.contains("<svg"), "SVG missing <svg tag");
         assert!(body.len() > 256, "SVG body too short: {} bytes", body.len());
+    }
+
+    // --- spec-mask overlay tests --------------------------------------------
+
+    /// `mask_violations`: a Ceiling region flags the sample that rises above
+    /// the limit; an all-compliant trace returns no indices; a Floor region is
+    /// symmetric (flags the sample that dips below the limit).
+    #[test]
+    fn mask_violations_ceiling_floor_and_compliant() {
+        // Stopband [2,3] GHz, Ceiling at −20 dB. Sample at index 1 (2.5 GHz)
+        // sits at −15 dB → above the ceiling → violation.
+        let freqs = [2.0e9, 2.5e9, 3.0e9];
+        let ceiling = [MaskRegion {
+            f_lo_hz: 2.0e9,
+            f_hi_hz: 3.0e9,
+            kind: MaskKind::Ceiling,
+            limit_db: -20.0,
+        }];
+
+        let violating = [-25.0, -15.0, -30.0];
+        assert_eq!(
+            mask_violations(&freqs, &violating, &ceiling),
+            vec![1],
+            "the −15 dB sample inside a −20 dB ceiling must be flagged"
+        );
+
+        // All samples comfortably below the ceiling → no violations.
+        let compliant = [-25.0, -28.0, -30.0];
+        assert_eq!(
+            mask_violations(&freqs, &compliant, &ceiling),
+            Vec::<usize>::new(),
+            "a fully compliant trace must return no indices"
+        );
+
+        // Floor case, symmetric: passband [1,2] GHz must stay above −3 dB.
+        // Sample at index 1 (1.5 GHz) dips to −6 dB → below the floor.
+        let pb_freqs = [1.0e9, 1.5e9, 2.0e9];
+        let floor = [MaskRegion {
+            f_lo_hz: 1.0e9,
+            f_hi_hz: 2.0e9,
+            kind: MaskKind::Floor,
+            limit_db: -3.0,
+        }];
+        let floor_trace = [-1.0, -6.0, -2.0];
+        assert_eq!(
+            mask_violations(&pb_freqs, &floor_trace, &floor),
+            vec![1],
+            "the −6 dB sample inside a −3 dB floor must be flagged"
+        );
+        let floor_ok = [-1.0, -2.0, -0.5];
+        assert_eq!(
+            mask_violations(&pb_freqs, &floor_ok, &floor),
+            Vec::<usize>::new(),
+            "a trace staying above the floor must return no indices"
+        );
+    }
+
+    /// `mask_violations`: a sample outside a region's frequency span is never a
+    /// violation, and indices are sorted/unique across multiple regions.
+    #[test]
+    fn mask_violations_respects_freq_span_and_dedups() {
+        let freqs = [1.0e9, 2.0e9, 3.0e9, 4.0e9];
+        // −10 dB sample at 1 GHz: would violate the ceiling, but it is outside
+        // the [2,3] GHz span, so it must NOT be flagged.
+        let trace = [-10.0, -5.0, -50.0, -10.0];
+        let regions = [
+            MaskRegion {
+                f_lo_hz: 2.0e9,
+                f_hi_hz: 3.0e9,
+                kind: MaskKind::Ceiling,
+                limit_db: -20.0,
+            },
+            // Overlapping ceiling that also catches index 1 — must dedup.
+            MaskRegion {
+                f_lo_hz: 1.5e9,
+                f_hi_hz: 2.5e9,
+                kind: MaskKind::Ceiling,
+                limit_db: -20.0,
+            },
+        ];
+        // Index 1 (2 GHz, −5 dB) is in both ceilings; index 2 (3 GHz, −50 dB)
+        // is below the limit so compliant. Index 0 is out of span.
+        assert_eq!(mask_violations(&freqs, &trace, &regions), vec![1]);
+    }
+
+    /// Render smoke test (mirrors the ADR-0081 VSWR render test): a masked plot
+    /// to a temp PNG returns `Ok` and the file exists and is non-empty.
+    #[test]
+    fn draw_sparam_with_mask_writes_png() {
+        let (freq, s11) = synthetic_sweep();
+        let s11_db: Vec<f64> = s11.iter().map(|z| db_clamped(*z)).collect();
+        let s21_db: Vec<f64> = vec![-10.0; freq.len()];
+        let traces: Vec<(&str, &[f64])> = vec![("S11", &s11_db), ("S21", &s21_db)];
+        let regions = [
+            MaskRegion {
+                f_lo_hz: 1.8e9,
+                f_hi_hz: 2.2e9,
+                kind: MaskKind::Floor,
+                limit_db: -3.0,
+            },
+            MaskRegion {
+                f_lo_hz: 2.5e9,
+                f_hi_hz: 3.0e9,
+                kind: MaskKind::Ceiling,
+                limit_db: -20.0,
+            },
+        ];
+
+        let tmp = NamedTempFile::with_suffix(".png").expect("tempfile");
+        let config = PlotConfig {
+            title: "spec mask test".into(),
+            ..PlotConfig::default()
+        };
+        draw_sparam_with_mask(tmp.path(), &freq, &traces, &regions, &config)
+            .expect("draw_sparam_with_mask");
+
+        assert!(tmp.path().exists(), "output PNG must exist");
+        let len = fs::metadata(tmp.path()).expect("metadata").len();
+        assert!(len > 1024, "PNG file must be non-trivial, got {len} bytes");
     }
 }

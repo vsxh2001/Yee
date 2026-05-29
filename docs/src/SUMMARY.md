@@ -127,3 +127,4 @@
 - [ADR-0084: Filter Phase F0 — synthesis core (yee-synth + yee-filter)](decisions/0084-filter-f0-synthesis-core.md)
 - [ADR-0085: Filter Phase F0.1 — register synthesis gates in the aggregator](decisions/0085-filter-f0-1-aggregator-registration.md)
 - [ADR-0086: Filter Phase F1.0 — yee-layout parametric planar-filter geometry](decisions/0086-filter-f1-0-yee-layout.md)
+- [ADR-0087: Phase 1.plotting.4 — S-parameter spec-mask overlay](decisions/0087-phase-1-plotting-4-spec-mask-overlay.md)
