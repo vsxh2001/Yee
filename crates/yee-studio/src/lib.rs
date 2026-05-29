@@ -26,12 +26,14 @@ use yee_filter::{FilterProject, FilterSpec, check_mask, ideal_response, synthesi
 /// Lives in its own module so this crate root stays egui-free and WASM-safe;
 /// only [`app`] and the binary entry depend on `egui`/`eframe`.
 ///
-/// Gated behind the default `desktop` Cargo feature (App.1.0; ADR-0092): a
-/// `--no-default-features` build compiles [`StudioState`] with **no**
-/// `eframe`/`egui`/`wgpu` in the dep graph, satisfying the ADR-0089 WASM-safety
-/// constraint. Only the actual `wasm32-unknown-unknown`/`trunk` build remains
-/// for App.1 (it needs the wasm toolchain installed).
-#[cfg(feature = "desktop")]
+/// Gated behind either the `desktop` (native) or `web` (wasm32 browser) Cargo
+/// feature, both of which pull in `eframe`/`egui`/`egui_plot` (App.1.0/1.2a;
+/// ADR-0092/0096): a `--no-default-features` build compiles [`StudioState`] with
+/// **no** `eframe`/`egui`/`wgpu` in the dep graph, satisfying the ADR-0089
+/// WASM-safety constraint. The `web` feature compiles this same UI for
+/// `wasm32-unknown-unknown` behind the `WebRunner` entry in `src/main.rs`; the
+/// `trunk` bundle + deploy remain for App.1.2b (they need the wasm toolchain).
+#[cfg(any(feature = "desktop", feature = "web"))]
 pub mod app;
 
 /// Number of points in the response sweep (mirrors `yee-cli`'s `SWEEP_POINTS`).
