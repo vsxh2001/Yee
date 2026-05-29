@@ -144,3 +144,5 @@
 - [ADR-0098: Filter — `yee filter synth` physical dimensions + layout SVG](decisions/0098-filter-f1-2-cli-dims-output.md)
 - [ADR-0099: App — yee-studio physical-dimensions panel](decisions/0099-app-studio-dims-panel.md)
 - [ADR-0100: Filter Phase F1.4.0 — yee-export Gerber walking skeleton](decisions/0100-filter-f1-4-0-yee-export-gerber.md)
+- [ADR-0101: App — yee-studio layout preview canvas](decisions/0101-app-studio-layout-canvas.md)
+- [ADR-0102: Filter — `yee filter synth --gerber` export wiring](decisions/0102-filter-cli-gerber-export.md)
