@@ -122,3 +122,4 @@
 - [ADR-0079: Phase 2.fdtd.py.5 skin-depth Python driver](decisions/0079-phase-2-fdtd-py-5-skin-depth-python.md)
 - [ADR-0080: fdtd-206 lumped series-LC resonant frequency gate](decisions/0080-fdtd-206-lc-resonance.md)
 - [ADR-0081: Phase 1.gui.6 VSWR circles on the Smith chart](decisions/0081-phase-1-gui-6-vswr-circles.md)
+- [ADR-0082: Phase 1.validation.4 `yee validate --list` registered-case inventory](decisions/0082-phase-1-validation-4-validate-list.md)

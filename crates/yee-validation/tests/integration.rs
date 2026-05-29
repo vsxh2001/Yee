@@ -6,6 +6,74 @@
 //! solve runs ~7-8 min in `--release`. Run explicitly with
 //! `cargo test -p yee-validation --release -- --include-ignored`.
 
+use yee_validation::{ExecutionPolicy, list_cases};
+
+/// `list_cases()` exposes the registered-case inventory without running
+/// any solver, so this test is fast and NOT `#[ignore]`'d.
+///
+/// Asserts the inventory is non-empty, contains the canonical
+/// `mom-001` and `fem-eig-006` ids, and that the `Skipped*`-policy
+/// descriptors are labelled as expected — `fem-eig-006` is the
+/// open-gate case ([`ExecutionPolicy::SkippedGateOpen`]) and at least
+/// one wall-time-gated case (e.g. `fdtd-201`) carries
+/// [`ExecutionPolicy::SkippedWallTime`]. The policy→`Skipped`
+/// behavioural contract (that those runners really return
+/// `CaseStatus::Skipped`) is verified by the in-crate unit test
+/// `skipped_policy_runners_return_skipped`, which can reach the private
+/// registry runners directly and cheaply without `Report::run_all`
+/// (the latter would pull the ~8 min `mom-001` solve).
+#[test]
+fn list_cases_matches_registry() {
+    let cases = list_cases();
+    assert!(!cases.is_empty(), "list_cases() must be non-empty");
+
+    let ids: Vec<&str> = cases.iter().map(|d| d.id).collect();
+    assert!(
+        ids.contains(&"mom-001"),
+        "list_cases() must contain mom-001; got {ids:?}"
+    );
+    assert!(
+        ids.contains(&"fem-eig-006"),
+        "list_cases() must contain fem-eig-006; got {ids:?}"
+    );
+
+    let fem_eig_006 = cases
+        .iter()
+        .find(|d| d.id == "fem-eig-006")
+        .expect("fem-eig-006 descriptor present");
+    assert_eq!(
+        fem_eig_006.policy,
+        ExecutionPolicy::SkippedGateOpen,
+        "fem-eig-006 is the open-gate case (|S11| ~ 0.955, ADR-0070)"
+    );
+
+    assert!(
+        cases
+            .iter()
+            .any(|d| d.policy == ExecutionPolicy::SkippedWallTime),
+        "at least one case (e.g. fdtd-201) must be SkippedWallTime"
+    );
+
+    // Order spot-check (spec DoD item 4): list_cases() is derived from the
+    // same case_registry() as run_all(), so the inventory is ordered and
+    // stable. mom-001 (registered first) must precede fem-eig-006 (last).
+    // Full id-order equality against the registry is asserted by the in-crate
+    // `list_cases_ids_match_registry_order` unit test, which avoids running
+    // run_all() (its mom-001 solve is ~8 min).
+    let mom_pos = ids
+        .iter()
+        .position(|&id| id == "mom-001")
+        .expect("mom-001 present");
+    let fem_pos = ids
+        .iter()
+        .position(|&id| id == "fem-eig-006")
+        .expect("fem-eig-006 present");
+    assert!(
+        mom_pos < fem_pos,
+        "list_cases() order: mom-001 ({mom_pos}) must precede fem-eig-006 ({fem_pos})"
+    );
+}
+
 #[test]
 #[ignore = "slow: ~8 min for mom-001"]
 fn mom_001_passes_through_aggregator() {

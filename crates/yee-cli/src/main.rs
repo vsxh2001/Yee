@@ -8,6 +8,9 @@
 //!   aggregator (real mom-001 NEC-4 gate; FEM-eig-001/002/004/005 gates;
 //!   Phase-deferred FDTD cases report `Skipped`). Filters by target prefix
 //!   (`mom-*`, FDTD-family, `fem-*`) and exits 1 if any included case failed.
+//!   Pass `--list` to print the registered-case inventory (id, solver,
+//!   policy, description) and exit 0 **without running any solver** — instant,
+//!   unlike the default path which runs the ~7-8 min mom-001 solve.
 //! - `yee mesh <path>` — constructs a `yee_mesh::Session`. Without the
 //!   `gmsh` feature this exits with code 2 and a guidance message.
 //! - `yee export <input> --format <touchstone|hdf5> <output>` — reads/writes
@@ -65,6 +68,12 @@ enum Command {
     /// Exit code is non-zero iff any *included* case has status
     /// `Failed`. `Skipped` cases (Phase-deferred placeholders) do not
     /// fail the run.
+    ///
+    /// Pass `--list` to print the registered-case inventory (CASE /
+    /// SOLVER / POLICY / DESCRIPTION) and exit 0 without running any
+    /// solver. `--list` short-circuits before the aggregator, so it is
+    /// instant; it still honours `target` (e.g. `yee validate fem
+    /// --list` lists only `fem-*` cases).
     Validate {
         /// Which solver to validate.
         #[arg(value_enum, default_value_t = ValidateTarget::All)]
@@ -72,6 +81,10 @@ enum Command {
         /// Emit JSON report to stdout (default: human-readable table).
         #[arg(long)]
         json: bool,
+        /// List the registered cases (id, solver, policy, description)
+        /// and exit 0 without running any solver. Filtered by `target`.
+        #[arg(long)]
+        list: bool,
     },
     /// Mesh a geometry file via Gmsh.
     Mesh {
@@ -341,7 +354,13 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
-        Command::Validate { target, json } => run_validate(target, json),
+        Command::Validate { target, json, list } => {
+            if list {
+                Ok(run_validate_list(target))
+            } else {
+                run_validate(target, json)
+            }
+        }
         Command::Mesh { input } => Ok(run_mesh(&input)),
         Command::Run { project } => {
             println!("yee run {} — Phase 0 stub.", project.display());
@@ -684,6 +703,86 @@ fn run_validate(target: ValidateTarget, json: bool) -> Result<ExitCode> {
     } else {
         Ok(ExitCode::SUCCESS)
     }
+}
+
+/// List the registered validation cases (filtered by `target`) and
+/// return [`ExitCode::SUCCESS`] — **no solver is executed**.
+///
+/// Backs `yee validate --list`. Pulls the case inventory from
+/// [`yee_validation::list_cases`] (which maps the single-source
+/// registry to descriptors without invoking any runner), filters with
+/// the same [`case_matches_target`] used by the run path, and prints a
+/// fixed-width `CASE | SOLVER | POLICY | DESCRIPTION` table. Listing
+/// never "fails", so the exit code is always success.
+fn run_validate_list(target: ValidateTarget) -> ExitCode {
+    use yee_validation::{ExecutionPolicy, Solver};
+
+    let cases: Vec<yee_validation::CaseDescriptor> = yee_validation::list_cases()
+        .into_iter()
+        .filter(|d| case_matches_target(d.id, target))
+        .collect();
+
+    const H_CASE: &str = "CASE";
+    const H_SOLVER: &str = "SOLVER";
+    const H_POLICY: &str = "POLICY";
+    const H_DESC: &str = "DESCRIPTION";
+
+    // Pre-format the categorical cells so column widths derive from the
+    // final strings (mirrors the column-sizing idiom in
+    // `print_human_report`).
+    struct Row {
+        id: &'static str,
+        solver: &'static str,
+        policy: &'static str,
+        description: &'static str,
+    }
+    let rows: Vec<Row> = cases
+        .iter()
+        .map(|d| Row {
+            id: d.id,
+            solver: match d.solver {
+                Solver::Mom => "MoM",
+                Solver::Fdtd => "FDTD",
+                Solver::Fem => "FEM",
+            },
+            policy: match d.policy {
+                ExecutionPolicy::Run => "Run",
+                ExecutionPolicy::SkippedWallTime => "Skipped(wall-time)",
+                ExecutionPolicy::SkippedGateOpen => "Skipped(gate-open)",
+            },
+            description: d.description,
+        })
+        .collect();
+
+    let w_case = rows
+        .iter()
+        .map(|r| r.id.len())
+        .max()
+        .unwrap_or(0)
+        .max(H_CASE.len());
+    let w_solver = rows
+        .iter()
+        .map(|r| r.solver.len())
+        .max()
+        .unwrap_or(0)
+        .max(H_SOLVER.len());
+    let w_policy = rows
+        .iter()
+        .map(|r| r.policy.len())
+        .max()
+        .unwrap_or(0)
+        .max(H_POLICY.len());
+
+    println!("{H_CASE:<w_case$}  {H_SOLVER:<w_solver$}  {H_POLICY:<w_policy$}  {H_DESC}");
+    for r in &rows {
+        let id = r.id;
+        let solver = r.solver;
+        let policy = r.policy;
+        let description = r.description;
+        println!("{id:<w_case$}  {solver:<w_solver$}  {policy:<w_policy$}  {description}");
+    }
+
+    ExitCode::SUCCESS
 }
 
 /// Render a [`yee_validation::Report`] as a 4-column fixed-width table.
