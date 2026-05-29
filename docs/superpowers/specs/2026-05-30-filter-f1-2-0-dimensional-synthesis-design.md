@@ -70,8 +70,12 @@ inter-resonator coupling to realize).
 5. **`dim-002` (physical sanity, `tests/`):** for the same design — every
    `gaps_m[i] > 0`; gaps **strictly decrease** as `target_k` increases (sort by
    target_k, assert monotone); `line_width_m == microstrip_width(z0, εr, h)`
-   (exact); `resonator_length_m` within ±2 % of `c/(2 f0 √eps_eff)`; all
-   dimensions in `[1 µm, 20 mm]`.
+   (exact); `resonator_length_m` within ±2 % of `c/(2 f0 √eps_eff)`. **Range
+   bounds (note — these are split by dimension kind):** the in-plane *coupling
+   features* (`line_width_m`, every `gaps_m[i]`) lie in `[1 µm, 20 mm]`; the
+   *resonator length* is a half guided-wavelength (≈ 41 mm at 2 GHz on FR-4, so
+   it CANNOT fit a 20 mm cap) and is bounded by its own physical window
+   `[1 mm, 200 mm]`. Do NOT apply the 20 mm cap to the resonator length.
 6. **`dim-003` (`tests/`):** `dimension_edge_coupled_layout` returns a `Layout`
    with ≥ 1 polygon and the expected port count; `EdgeCoupledDimensions` `serde`
    round-trips byte-identically.

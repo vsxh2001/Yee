@@ -356,6 +356,11 @@ build on F1.
   per-target; WebRunner takes a DOM `HtmlCanvasElement`; no RUSTFLAGS — wgpu 29
   WebGL2 fallback). Gate `cargo check -p yee-studio --target wasm32 --features web`
   exit 0; native + headless-wasm builds unregressed. (App.1.2b = trunk bundle/deploy.)
+- **F1.2.0** (ADR-0097, merge `1d5dd05`): `yee-filter::dimension_edge_coupled` —
+  closed-form CouplingMatrix → microstrip dims (width/length/gaps) by inverting
+  the validated `coupled_microstrip` + HJ models (bisection on the monotone
+  gap→k). Pure math, WASM-safe, no FDTD/surrogate; gates dim-001/002/003. First
+  stage turning the abstract network into concrete geometry.
 
 **Final goal: a desktop + web APP** (ADR-0089) — one `egui`/`eframe` codebase,
 native + WASM. The shipped light flow (F0/F0.1/F0.2/F1.0) is WASM-safe and is the
@@ -393,6 +398,14 @@ in-browser front-end; heavy EM goes behind a native `yee-server`. See §5a.
   **NEXT = F1.1b.1** — the FDTD coupled-resonator DRIVER: `yee-voxel` voxelize a
   coupled pair → `LumpedRlcPort`s → run `yee-fdtd` → single-bin DFT → `extract_*`,
   gated against the F1.1b.gate even/odd `k`/split-frequency reference. HEAVY
-  (multi-min FDTD). Then **F1.2** surrogate-BO dimensional synthesis; **F1.3**
-  verify + mask gate; **F1.4** `yee-export`. **App.2** (`yee-server`) once F1.1+ exist.
+  (multi-min FDTD). **F1.2.0 dimensional synthesis ✅ SHIPPED** (ADR-0097, merge
+  `1d5dd05`): `yee-filter::dimension_edge_coupled` inverts the validated
+  `coupled_microstrip` + HJ models (bisection on the monotone gap→k) to map a
+  `CouplingMatrix` → physical edge-coupled microstrip dims (width/length/gaps) —
+  closed-form, pure-math, WASM-safe, no FDTD/surrogate; gates dim-001 (inversion
+  round-trip <1%) / dim-002 / dim-003. First stage turning the abstract network
+  into concrete geometry. **NEXT = F1.2.1** = surrogate-BO + EM-in-loop refinement
+  (consumes F1.1b.1's FDTD k/Qe to refine the F1.2.0 seed) + `qe`→I/O feed
+  dimensioning. Then **F1.3** verify + mask gate; **F1.4** `yee-export`. **App.2**
+  (`yee-server`) once F1.1+ exist.
   (Tutorial 17 — filter design via CLI + Studio — shipped, merge `c6e477c`.)

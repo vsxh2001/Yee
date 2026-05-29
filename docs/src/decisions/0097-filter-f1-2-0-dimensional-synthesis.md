@@ -80,7 +80,9 @@ becomes concrete geometry.
 - **`dim-002` (physical sanity):** every gap > 0 and **strictly decreasing** as
   its target `k` increases (tighter coupling → smaller gap); `line_width_m`
   equals `microstrip_width(z0, εr, h)`; `resonator_length_m` ≈ `λ_g/2` within the
-  model; all dimensions in a physically sane µm–mm range for the fixture.
+  model (±2 %). Range bounds are split by kind: coupling features (width, gaps)
+  in `[1 µm, 20 mm]`; the resonator length is a half guided-wavelength (≈ 41 mm
+  at 2 GHz on FR-4) so it has its own `[1 mm, 200 mm]` window, NOT the 20 mm cap.
 - **`dim-003`:** the assembled `Layout` is non-degenerate (polygons, ports) and
   `EdgeCoupledDimensions` `serde` round-trips.
 
