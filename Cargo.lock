@@ -6689,7 +6689,6 @@ dependencies = [
  "eframe",
  "egui",
  "egui_plot",
- "num-complex",
  "yee-filter",
  "yee-synth",
 ]

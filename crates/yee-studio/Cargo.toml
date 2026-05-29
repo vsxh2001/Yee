@@ -11,12 +11,20 @@ description  = "Yee Filter Studio — App.0 eframe filter-design desktop skeleto
 name = "yee-studio"
 path = "src/main.rs"
 
+[features]
+default = ["desktop"]
+# The `desktop` feature pulls in the native eframe/egui windowing shell
+# (`src/app.rs` + the windowed `src/main.rs` entry). Disabling it
+# (`--no-default-features`) compiles only the egui-free `StudioState` flow
+# logic, which is WASM-safe (App.1; ADR-0092).
+desktop = ["dep:eframe", "dep:egui", "dep:egui_plot"]
+
 [dependencies]
 yee-synth  = { workspace = true }
 yee-filter = { workspace = true }
-egui        = { workspace = true }
-eframe      = { workspace = true, features = ["wgpu"] }
-egui_plot   = { workspace = true }
+egui        = { workspace = true, optional = true }
+eframe      = { workspace = true, features = ["wgpu"], optional = true }
+egui_plot   = { workspace = true, optional = true }
 
 [lints.rust]
 unsafe_code  = "forbid"
