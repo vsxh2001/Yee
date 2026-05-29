@@ -53,6 +53,40 @@ fn yee_validate_list_runs() {
     );
 }
 
+/// `yee validate --list --json` emits the registered-case inventory as a JSON
+/// array, exit 0, running no solver (ADR-0083). Fast, NOT `#[ignore]`'d.
+/// Substring assertions avoid needing a JSON parser in the test deps.
+#[test]
+fn yee_validate_list_json_runs() {
+    let output = Command::new(env!("CARGO_BIN_EXE_yee"))
+        .args(["validate", "--list", "--json"])
+        .output()
+        .expect("invoke yee");
+
+    assert!(
+        output.status.success(),
+        "yee validate --list --json exited non-zero; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let trimmed = stdout.trim();
+    assert!(
+        trimmed.starts_with('[') && trimmed.ends_with(']'),
+        "--list --json output is not a JSON array; got: {stdout}"
+    );
+    for needle in [
+        "\"mom-001\"",
+        "\"fem-eig-006\"",
+        "\"SkippedGateOpen\"",
+        "\"Run\"",
+    ] {
+        assert!(
+            stdout.contains(needle),
+            "--list --json output missing {needle}; got: {stdout}"
+        );
+    }
+}
+
 #[test]
 fn yee_validate_help_lists_target() {
     let output = Command::new(env!("CARGO_BIN_EXE_yee"))

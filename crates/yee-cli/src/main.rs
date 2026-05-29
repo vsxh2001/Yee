@@ -10,7 +10,8 @@
 //!   (`mom-*`, FDTD-family, `fem-*`) and exits 1 if any included case failed.
 //!   Pass `--list` to print the registered-case inventory (id, solver,
 //!   policy, description) and exit 0 **without running any solver** — instant,
-//!   unlike the default path which runs the ~7-8 min mom-001 solve.
+//!   unlike the default path which runs the ~7-8 min mom-001 solve. Add
+//!   `--json` to `--list` to emit that inventory as a JSON array for CI/tooling.
 //! - `yee mesh <path>` — constructs a `yee_mesh::Session`. Without the
 //!   `gmsh` feature this exits with code 2 and a guidance message.
 //! - `yee export <input> --format <touchstone|hdf5> <output>` — reads/writes
@@ -73,7 +74,8 @@ enum Command {
     /// SOLVER / POLICY / DESCRIPTION) and exit 0 without running any
     /// solver. `--list` short-circuits before the aggregator, so it is
     /// instant; it still honours `target` (e.g. `yee validate fem
-    /// --list` lists only `fem-*` cases).
+    /// --list` lists only `fem-*` cases). Combining `--list --json` emits
+    /// the inventory as a JSON array (descriptors) instead of the table.
     Validate {
         /// Which solver to validate.
         #[arg(value_enum, default_value_t = ValidateTarget::All)]
@@ -356,7 +358,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
         Command::Validate { target, json, list } => {
             if list {
-                Ok(run_validate_list(target))
+                Ok(run_validate_list(target, json))
             } else {
                 run_validate(target, json)
             }
@@ -714,13 +716,24 @@ fn run_validate(target: ValidateTarget, json: bool) -> Result<ExitCode> {
 /// the same [`case_matches_target`] used by the run path, and prints a
 /// fixed-width `CASE | SOLVER | POLICY | DESCRIPTION` table. Listing
 /// never "fails", so the exit code is always success.
-fn run_validate_list(target: ValidateTarget) -> ExitCode {
+fn run_validate_list(target: ValidateTarget, json: bool) -> ExitCode {
     use yee_validation::{ExecutionPolicy, Solver};
 
     let cases: Vec<yee_validation::CaseDescriptor> = yee_validation::list_cases()
         .into_iter()
         .filter(|d| case_matches_target(d.id, target))
         .collect();
+
+    if json {
+        // Emit the filtered inventory as a JSON array (ADR-0083). No solver
+        // is run; each CaseDescriptor serializes as
+        // `{"id","solver","description","policy"}`. CaseDescriptor + its enums
+        // derive Serialize, so serializing our owned data cannot fail.
+        let s = serde_json::to_string_pretty(&cases)
+            .expect("CaseDescriptor serialization is infallible");
+        println!("{s}");
+        return ExitCode::SUCCESS;
+    }
 
     const H_CASE: &str = "CASE";
     const H_SOLVER: &str = "SOLVER";
