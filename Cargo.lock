@@ -6580,8 +6580,6 @@ version = "0.0.0"
 dependencies = [
  "num-complex",
  "serde",
- "yee-core",
- "yee-io",
  "yee-synth",
 ]
 
@@ -6689,9 +6687,7 @@ dependencies = [
 name = "yee-synth"
 version = "0.0.0"
 dependencies = [
- "nalgebra 0.34.2",
  "serde",
- "yee-core",
 ]
 
 [[package]]

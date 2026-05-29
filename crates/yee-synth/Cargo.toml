@@ -12,6 +12,8 @@ unsafe_code  = "forbid"
 missing_docs = "warn"
 
 [dependencies]
-yee-core  = { workspace = true }
-nalgebra  = { workspace = true }
+# Pure-math synthesis: the coupling matrix is a plain `Vec<Vec<f64>>` (spec
+# §2.5), so no linear-algebra dep is needed yet. `nalgebra` / `yee-core` get
+# re-added when the coupling-matrix → S-parameter realization (eigen path)
+# lands in a later filter phase.
 serde     = { workspace = true }
