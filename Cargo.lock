@@ -6615,6 +6615,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "yee-layout"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "yee-mesh"
 version = "0.0.0"
 dependencies = [
