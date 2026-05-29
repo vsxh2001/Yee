@@ -29,6 +29,7 @@ web = [
     "dep:egui",
     "dep:egui_plot",
     "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
     "dep:web-sys",
     "dep:console_error_panic_hook",
 ]
@@ -58,9 +59,10 @@ web-sys = { version = "0.3", optional = true, features = [
     "Window",
 ] }
 # Drives the async `WebRunner::start` future from the `#[wasm_bindgen(start)]`
-# entry. wasm-only, so it never enters a native build; not feature-gated because
-# `[[bin]]`'s wasm32 entry is the only consumer and it is itself `web`-gated.
-wasm-bindgen-futures = { version = "0.4" }
+# entry. wasm-only (this target table) AND `web`-gated (`optional` + pulled via
+# the `web` feature), so it stays out of the `--no-default-features` wasm32
+# headless tree — keeping that path egui- and wasm-glue-free (App.1.1 invariant).
+wasm-bindgen-futures = { version = "0.4", optional = true }
 
 # eframe is split per-target: native keeps its default windowing features
 # (x11/wayland/winit) plus wgpu; wasm32 takes `default-features = false` + wgpu
