@@ -1187,3 +1187,73 @@ pub fn run_skin_depth() -> PySkinDepthResult {
         passed: r.passed,
     }
 }
+
+// -----------------------------------------------------------------------
+// fdtd-206: Lumped series-LC resonant frequency gate (Phase 2.fdtd.6.1)
+// -----------------------------------------------------------------------
+
+/// Returned by [`run_lc_resonance`].
+#[pyclass(name = "LcResonanceResult", module = "yee._yee", skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyLcResonanceResult {
+    inner: yee_validation::LcResonanceResult,
+}
+
+#[pymethods]
+impl PyLcResonanceResult {
+    /// Measured ring-down frequency (Hz).
+    #[getter]
+    fn f_measured_hz(&self) -> f64 {
+        self.inner.f_measured_hz
+    }
+    /// Analytic resonant frequency 1/(2π√LC) (Hz).
+    #[getter]
+    fn f_analytic_hz(&self) -> f64 {
+        self.inner.f_analytic_hz
+    }
+    /// Relative frequency error |f_measured − f_analytic| / f_analytic.
+    #[getter]
+    fn rel_err(&self) -> f64 {
+        self.inner.rel_err
+    }
+    /// `True` iff `rel_err < 2 %`.
+    #[getter]
+    fn passed(&self) -> bool {
+        self.inner.passed
+    }
+    fn __repr__(&self) -> String {
+        format!(
+            "LcResonanceResult(f_measured_hz={:.4e}, f_analytic_hz={:.4e}, \
+             rel_err={:.4e}, passed={})",
+            self.inner.f_measured_hz,
+            self.inner.f_analytic_hz,
+            self.inner.rel_err,
+            self.inner.passed,
+        )
+    }
+}
+
+/// Run the fdtd-206 lumped series-LC resonant frequency gate.
+///
+/// Validates that the FDTD series-RLC ODE integration reproduces the
+/// natural resonant frequency f\u{2080} = 1/(2\u{03c0}\u{221a}LC) = 1 GHz within \u{b1}2%.
+///
+/// # Returns
+///
+/// A :class:`LcResonanceResult` with fields ``f_measured_hz``,
+/// ``f_analytic_hz``, ``rel_err``, and ``passed``.
+///
+/// # Example
+///
+/// ```python
+/// from yee import run_lc_resonance
+/// result = run_lc_resonance()
+/// assert result.passed
+/// print(f"f_measured = {result.f_measured_hz:.4e} Hz")
+/// ```
+#[pyfunction]
+pub fn run_lc_resonance(py: Python<'_>) -> PyLcResonanceResult {
+    py.detach(|| PyLcResonanceResult {
+        inner: yee_validation::fdtd206_run(),
+    })
+}
