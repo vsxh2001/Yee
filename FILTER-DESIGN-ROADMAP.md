@@ -145,8 +145,13 @@ These come from the engine's current state and are non-negotiable constraints:
 Phase IDs follow the `ROADMAP.md` convention. Each phase = spec + plan + ADR
 (lockstep) before code, dispatched on disjoint lanes, reviewed before merge.
 
-### Phase F0 — Synthesis walking skeleton (spec → ideal response)
+### Phase F0 — Synthesis walking skeleton (spec → ideal response) — **SHIPPED** (ADR-0084, merge `dbfc5c5`)
 *The minimal end-to-end pipe: pure math, no EM, no layout, no new heavy deps.*
+Shipped 2026-05-29: `yee-synth` + `yee-filter` crates + `yee filter synth` CLI;
+gates `synth-001`/`synth-002`/`filt-001` pass as crate tests; closed-form ideal
+response used for `filt-001` (coupling-matrix→S realization is F1+). The
+`yee-validation` aggregator registration of the three gates is the small
+follow-on **Phase F0.1**.
 - `yee-synth`: Butterworth + Chebyshev lowpass-prototype g-values; lowpass→
   bandpass transform; J/K-inverter & coupling-matrix synthesis (all-pole).
 - `yee-filter`: `FilterSpec`, `Prototype`, `CouplingMatrix`, `Topology` types;
@@ -262,10 +267,18 @@ build on F1.
 
 ---
 
-## 9. Immediate next step
+## 9. Status & next step
 
-Stand up **Phase F0**: write the spec + plan + ADR for `yee-synth` +
-`yee-filter` (the synthesis core and data model), then dispatch the build on the
-`crates/yee-synth/**` + `crates/yee-filter/**` lane with the `synth-001` /
-`filt-001` published-table gates as the DoD. No EM, no new heavy deps — a clean,
-fully-validatable walking skeleton that every later phase plugs into.
+**Phase F0 SHIPPED** (2026-05-29, ADR-0084, merge `dbfc5c5`): `yee-synth` +
+`yee-filter` + `yee filter synth`; `synth-001`/`synth-002`/`filt-001` green.
+
+**Next:**
+- **F0.1** (small): register `synth-001`/`synth-002`/`filt-001` in the
+  `yee-validation` aggregator so they appear in `yee validate --list` (adds the
+  `synth-*`/`filt-*` cases + a `Solver::Synth`-style category).
+- **F1** (the headline): planar track to first manufacturable filter on the
+  **FDTD** back-end — `yee-layout` edge-coupled/hairpin generators, coupling
+  extraction + `yee-surrogate` BO with FDTD in the loop, `yee-export` KiCad/
+  Gerber, gate = reproduce the published Swanson hairpin BPF (`v1-001`). Begin
+  F1 by scoping `yee-layout` (parametric geometry) + the dimensional-synthesis
+  driver against the F0 `FilterProject`/`CouplingMatrix` it now consumes.
