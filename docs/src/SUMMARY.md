@@ -136,3 +136,4 @@
 - [ADR-0091: Filter Phase F1.1a — yee-voxel Layout→FDTD voxelizer](decisions/0091-filter-f1-1a-yee-voxel.md)
 - [ADR-0092: App.1.0 — yee-studio WASM-prep (gate eframe shell behind a feature)](decisions/0092-app-1-0-studio-wasm-prep.md)
 - [ADR-0093: Filter Phase F1.1b.0 — coupling/Qe extraction algorithm](decisions/0093-filter-f1-1b0-coupling-extraction.md)
+- [ADR-0095: App.1.1 — wasm32 build check + CI web-readiness gate](decisions/0095-app-1-1-wasm-build-check.md)
