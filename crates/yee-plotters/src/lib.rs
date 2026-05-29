@@ -659,12 +659,15 @@ fn smith_x_arc_pts(x: f64, n: usize) -> Vec<(f64, f64)> {
 fn smith_vswr_circle_pts(vswr: f64, n: usize) -> Vec<(f64, f64)> {
     debug_assert!(vswr > 1.0, "smith_vswr_circle_pts: vswr must be > 1.0");
     let rho = (vswr - 1.0) / (vswr + 1.0);
-    (0..=n)
+    let first = (rho, 0.0_f64);
+    let mut pts: Vec<(f64, f64)> = (0..n)
         .map(|i| {
             let theta = (i as f64) * std::f64::consts::TAU / (n as f64);
             (rho * theta.cos(), rho * theta.sin())
         })
-        .collect()
+        .collect();
+    pts.push(first);
+    pts
 }
 
 /// Fixed colour palette for multi-trace Smith chart plots.
@@ -1152,6 +1155,32 @@ mod tests {
             format: PlotFormat::Svg,
         };
         plot_smith_chart_multi(&traces, tmp.path(), &cfg).expect("plot_smith_chart_multi");
+        let body = fs::read_to_string(tmp.path()).expect("read svg");
+        assert!(body.contains("<svg"), "SVG missing <svg tag");
+        assert!(body.len() > 256, "SVG body too short: {} bytes", body.len());
+    }
+
+    /// `plot_smith_chart_multi` renders VSWR circles unconditionally; verify
+    /// the output file is non-empty with a single trace.
+    #[test]
+    fn plot_smith_chart_multi_with_vswr_circles_renders() {
+        let traces = vec![SmithTrace {
+            label: "S11".to_string(),
+            values: vec![
+                Complex64::new(0.3, 0.1),
+                Complex64::new(0.0, 0.0),
+                Complex64::new(-0.2, 0.3),
+            ],
+        }];
+        let tmp = NamedTempFile::with_suffix(".svg").expect("tempfile");
+        let cfg = PlotConfig {
+            width_px: 600,
+            height_px: 600,
+            title: "VSWR circles smoke test".to_string(),
+            format: PlotFormat::Svg,
+        };
+        plot_smith_chart_multi(&traces, tmp.path(), &cfg)
+            .expect("plot_smith_chart_multi with vswr circles");
         let body = fs::read_to_string(tmp.path()).expect("read svg");
         assert!(body.contains("<svg"), "SVG missing <svg tag");
         assert!(body.len() > 256, "SVG body too short: {} bytes", body.len());
