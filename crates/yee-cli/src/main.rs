@@ -287,6 +287,10 @@ enum FilterCommand {
         /// `.s2p` extension next to the spec file.
         #[arg(long, short)]
         output: Option<PathBuf>,
+        /// Also render the synthesized |S21| response with the spec-mask
+        /// forbidden regions overlaid, to this image path (`.png`/`.svg`).
+        #[arg(long)]
+        plot: Option<PathBuf>,
     },
 }
 
@@ -441,7 +445,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
         Command::Bench { target, extra } => run_bench(target, extra),
         Command::Filter { command } => match command {
-            FilterCommand::Synth { spec, output } => filter::run_synth(&spec, output.as_deref()),
+            FilterCommand::Synth { spec, output, plot } => {
+                filter::run_synth(&spec, output.as_deref(), plot.as_deref())
+            }
         },
         Command::Design {
             prompt,
