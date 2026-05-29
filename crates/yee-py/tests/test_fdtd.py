@@ -402,3 +402,34 @@ def test_run_skin_depth_repr_smoke():
     r = repr(yee.run_skin_depth())
     assert "SkinDepthResult" in r
     assert "delta_analytic_m" in r
+
+
+def test_run_lc_resonance_returns_result():
+    """run_lc_resonance() returns LcResonanceResult with all expected fields."""
+    import yee
+
+    r = yee.run_lc_resonance()
+    assert isinstance(r, yee.LcResonanceResult)
+    assert r.f_measured_hz > 0
+    assert r.f_analytic_hz > 0
+    assert 0.0 <= r.rel_err
+
+
+def test_run_lc_resonance_passes_gate():
+    """fdtd-206 gate: |f_measured - 1 GHz| / 1 GHz < 2%."""
+    import yee
+
+    r = yee.run_lc_resonance()
+    assert r.passed, (
+        f"fdtd-206 gate FAILED: f_measured={r.f_measured_hz:.4e} Hz, "
+        f"rel_err={r.rel_err:.4e} (gate < 2%)"
+    )
+
+
+def test_run_lc_resonance_repr_smoke():
+    """__repr__ contains LcResonanceResult and f_measured_hz."""
+    import yee
+
+    r = repr(yee.run_lc_resonance())
+    assert "LcResonanceResult" in r
+    assert "f_measured_hz" in r
