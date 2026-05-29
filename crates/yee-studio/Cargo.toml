@@ -17,7 +17,6 @@ yee-filter = { workspace = true }
 egui        = { workspace = true }
 eframe      = { workspace = true, features = ["wgpu"] }
 egui_plot   = { workspace = true }
-num-complex = { workspace = true }
 
 [lints.rust]
 unsafe_code  = "forbid"

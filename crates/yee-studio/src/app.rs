@@ -283,13 +283,16 @@ fn show_response_plot(ui: &mut egui::Ui, state: &StudioState) {
         .y_axis_label("|S21| (dB)")
         .legend(Legend::default())
         .show(ui, |plot_ui| {
-            // Shade each forbidden region.
-            for region in &state.mask_regions {
+            // Shade each forbidden region. Names carry the loop index so each
+            // polygon gets a distinct egui Id (egui_plot derives the item Id
+            // from the name — shared names make all co-named boxes hover as one
+            // once there is more than one stopband point).
+            for (i, region) in state.mask_regions.iter().enumerate() {
                 let box_pts = forbidden_box(region, y_min, y_max);
                 let (name, fill) = if region.floor {
-                    ("passband floor", floor_fill)
+                    (format!("passband floor {i}"), floor_fill)
                 } else {
-                    ("stopband ceiling", ceil_fill)
+                    (format!("stopband ceiling {i}"), ceil_fill)
                 };
                 plot_ui.polygon(
                     Polygon::new(name, PlotPoints::from(box_pts))

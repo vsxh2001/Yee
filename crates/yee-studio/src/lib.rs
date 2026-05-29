@@ -25,6 +25,11 @@ use yee_filter::{FilterProject, FilterSpec, check_mask, ideal_response, synthesi
 ///
 /// Lives in its own module so this crate root stays egui-free and WASM-safe;
 /// only [`app`] and the binary entry depend on `egui`/`eframe`.
+///
+/// TODO(App.1): gate this `mod app` behind `#[cfg(not(target_arch =
+/// "wasm32"))]` or a `desktop` Cargo feature before the WASM build lands, so a
+/// WASM consumer can compile [`StudioState`] without pulling in the native
+/// `eframe`/`wgpu` windowing shell (ADR-0089 WASM-safety constraint).
 pub mod app;
 
 /// Number of points in the response sweep (mirrors `yee-cli`'s `SWEEP_POINTS`).
@@ -91,7 +96,8 @@ impl StudioState {
             mask_pass: false,
             mask_notes: Vec::new(),
         };
-        state.recompute();
+        // `project` is already synthesized above; derive the rest (no re-synth).
+        state.apply_derived();
         state
     }
 
@@ -101,23 +107,33 @@ impl StudioState {
     /// dB trace, builds the spec-mask regions, and grades the mask. Call this
     /// after any edit to `spec`.
     pub fn recompute(&mut self) {
-        // 1. Synthesis.
+        // Synthesis (the only place `synthesize` runs); the response + mask
+        // fields derive from the fresh project via `apply_derived`.
         self.project = synthesize(&self.spec);
+        self.apply_derived();
+    }
 
-        // 2. Sweep grid (mirrors yee-cli's 401-pt `f0·(1 ± 6·fbw/2)`).
+    /// Re-derive the response + spec-mask fields from the current `spec` and
+    /// `project` — everything *except* synthesis. Shared by [`recompute`] and
+    /// [`from_spec`] so the project is synthesized exactly once per build/edit.
+    ///
+    /// [`recompute`]: StudioState::recompute
+    /// [`from_spec`]: StudioState::from_spec
+    fn apply_derived(&mut self) {
+        // Sweep grid (mirrors yee-cli's 401-pt `f0·(1 ± 6·fbw/2)`).
         self.freqs_hz = sweep_freqs(self.spec.f0_hz, self.spec.fbw);
 
-        // 3 + 4. Ideal response → |S21| dB (floored at 1e-12).
+        // Ideal response → |S21| dB (floored at 1e-12).
         let s21 = ideal_response(&self.project, &self.freqs_hz);
         self.s21_db = s21
             .iter()
             .map(|z| 20.0 * z.norm().max(1e-12).log10())
             .collect();
 
-        // 5. Spec-mask regions.
+        // Spec-mask regions.
         self.mask_regions = spec_mask_regions(&self.spec);
 
-        // 6. Mask verdict + notes.
+        // Mask verdict + notes.
         let report = check_mask(&self.project, &self.freqs_hz);
         self.mask_pass = report.pass;
         self.mask_notes = mask_notes(&self.spec, &report);
