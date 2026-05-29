@@ -18,13 +18,66 @@ default = ["desktop"]
 # (`--no-default-features`) compiles only the egui-free `StudioState` flow
 # logic, which is WASM-safe (App.1; ADR-0092).
 desktop = ["dep:eframe", "dep:egui", "dep:egui_plot"]
+# The `web` feature pulls in the SAME eframe/egui/egui_plot UI for the browser
+# (`src/app.rs` + the `wasm32` `WebRunner` entry in `src/main.rs`) plus the
+# wasm glue (`wasm-bindgen`/`web-sys`/`console_error_panic_hook`). Build it with
+# `--features web --target wasm32-unknown-unknown` (App.1.2a; ADR-0096). The
+# `eframe` dep is split per-target below so the native default windowing
+# features (x11/wayland/winit) do not leak into the wasm32 build.
+web = [
+    "dep:eframe",
+    "dep:egui",
+    "dep:egui_plot",
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+    "dep:web-sys",
+    "dep:console_error_panic_hook",
+]
 
 [dependencies]
 yee-synth  = { workspace = true }
 yee-filter = { workspace = true }
 egui        = { workspace = true, optional = true }
-eframe      = { workspace = true, features = ["wgpu"], optional = true }
 egui_plot   = { workspace = true, optional = true }
+# wasm glue for the `web` feature's browser entry (App.1.2a; ADR-0096). All
+# three are pulled only via `web`; native (`desktop`) builds never see them.
+# Versions track the transitives eframe 0.34 already brings in via `Cargo.lock`
+# (wasm-bindgen 0.2 / web-sys 0.3) to minimize lock churn.
+wasm-bindgen             = { version = "0.2", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
+
+# `web-sys` is needed (with the DOM features) only when building the `web`
+# feature for wasm32 — to fetch the `<canvas>` element handed to
+# `eframe::WebRunner::start` (eframe 0.34 takes a `web_sys::HtmlCanvasElement`,
+# not a string id). eframe already enables these same features on wasm32, so
+# this adds no new lock entries.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3", optional = true, features = [
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "Window",
+] }
+# Drives the async `WebRunner::start` future from the `#[wasm_bindgen(start)]`
+# entry. wasm-only (this target table) AND `web`-gated (`optional` + pulled via
+# the `web` feature), so it stays out of the `--no-default-features` wasm32
+# headless tree — keeping that path egui- and wasm-glue-free (App.1.1 invariant).
+wasm-bindgen-futures = { version = "0.4", optional = true }
+
+# eframe is split per-target: native keeps its default windowing features
+# (x11/wayland/winit) plus wgpu; wasm32 takes `default-features = false` + wgpu
+# so the native-only features never reach the browser build (ADR-0096).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+eframe = { workspace = true, features = ["wgpu"], optional = true }
+
+# Declared directly (not `workspace = true`) because a workspace-inherited dep
+# cannot set `default-features = false`; the version tracks the workspace
+# `eframe = "0.34"` pin so the dep graph stays single-versioned.
+[target.'cfg(target_arch = "wasm32")'.dependencies.eframe]
+version          = "0.34"
+optional         = true
+default-features = false
+features         = ["wgpu", "default_fonts"]
 
 [lints.rust]
 unsafe_code  = "forbid"
