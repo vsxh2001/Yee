@@ -367,6 +367,13 @@ build on F1.
   `yee-studio` shows a live dimensions panel (editable εr/h → line-width/length/
   gaps). Both consume `dimension_edge_coupled`; StudioState stays egui-free /
   WASM-safe. Gates cli_dims / studio_state_dims.
+- **F1.4.0** (ADR-0100, merge `21614fe`): new **`yee-export`** crate —
+  `layout_to_gerber(&Layout)` emits a single-copper-layer RS-274X Gerber (G36/G37
+  regions, 4.6 fixed-point mm). First manufacturing-file output (the
+  spec→manufacturable endpoint's first brick). WASM-safe, pure text; gates
+  gerber-001 (structure) / gerber-002 (coordinate round-trip).
+- **Theory chapter** (merge `5603ae5`): `docs/src/theory/coupled-lines-dimensional-synthesis.md`
+  documenting the KJ coupled-microstrip model + F1.2.0 inversion.
 
 **Final goal: a desktop + web APP** (ADR-0089) — one `egui`/`eframe` codebase,
 native + WASM. The shipped light flow (F0/F0.1/F0.2/F1.0) is WASM-safe and is the
@@ -412,6 +419,9 @@ in-browser front-end; heavy EM goes behind a native `yee-server`. See §5a.
   round-trip <1%) / dim-002 / dim-003. First stage turning the abstract network
   into concrete geometry. **NEXT = F1.2.1** = surrogate-BO + EM-in-loop refinement
   (consumes F1.1b.1's FDTD k/Qe to refine the F1.2.0 seed) + `qe`→I/O feed
-  dimensioning. Then **F1.3** verify + mask gate; **F1.4** `yee-export`. **App.2**
-  (`yee-server`) once F1.1+ exist.
+  dimensioning. Then **F1.3** verify + mask gate. **F1.4.0 `yee-export` Gerber
+  ✅ SHIPPED** (ADR-0100, merge `21614fe`) — `layout_to_gerber` single-copper-layer
+  RS-274X; **NEXT F1.4.1+** = drill/board-outline, multi-layer, KiCad footprint/PCB,
+  STEP/3-D + consumer wiring (CLI/studio export buttons). **App.2** (`yee-server`)
+  once F1.1+ exist.
   (Tutorial 17 — filter design via CLI + Studio — shipped, merge `c6e477c`.)
