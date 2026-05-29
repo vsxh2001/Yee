@@ -347,12 +347,13 @@ in-browser front-end; heavy EM goes behind a native `yee-server`. See §5a.
 **Two parallel fronts next:**
 - *Product:* **App.1** — WASM web build of the App.0 light path (cfg-gate
   `yee-studio::app` first; `trunk`/`wasm-pack` static deploy).
-- *Engine (toward the Swanson-hairpin FDTD gate):* **F1.1 splits** — all FDTD
-  primitives already exist (per-cell ε_r, PEC masks, `LumpedRlcPort`, single-bin
-  DFT, decay-fit Q); the one gap is a **`Layout`→`YeeGrid` voxelizer**. So
-  **F1.1a = new `yee-voxel` crate** (rasterize a microstrip stack: ground PEC +
-  substrate ε_r slab + trace PEC; gate = correct cells, NO FDTD run — do NOT add
-  a `yee-fdtd` dep to `yee-layout`, keep it WASM-safe), then **F1.1b** = drive a
-  coupled-resonator pair, extract `k`/`Qe`. Then **F1.2** surrogate-BO dimensional
-  synthesis; **F1.3** verify + mask gate; **F1.4** `yee-export`. **App.2**
-  (`yee-server`) once F1.1+ exist.
+- *Engine (toward the Swanson-hairpin FDTD gate):* **F1.1a `yee-voxel` ✅ SHIPPED**
+  (ADR-0091, merge `c4f3af4`): `voxelize_microstrip(&Layout) → YeeGrid` (ground
+  PEC + substrate ε_r slab + trace PEC, point-in-polygon rasterized; tangential
+  Ex+Ey masks per the review P0 fix); gate voxel_001 (no FDTD run). `yee-layout`
+  untouched (WASM-safe). **NEXT = F1.1b** — drive a voxelized coupled-resonator
+  pair through `yee-fdtd` (LumpedRlcPort + single-bin DFT), extract `k` from the
+  two split peaks `(f2²−f1²)/(f2²+f1²)` and `Qe` from a singly-loaded ring-down;
+  the validatable gate (coupled-microstrip even/odd k reference) is the crux to
+  design. Then **F1.2** surrogate-BO dimensional synthesis; **F1.3** verify +
+  mask gate; **F1.4** `yee-export`. **App.2** (`yee-server`) once F1.1+ exist.
