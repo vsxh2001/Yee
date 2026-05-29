@@ -9,11 +9,15 @@
 //!
 //! ## Public surface
 //!
-//! Five entry points:
+//! Six entry points:
 //!
 //! * [`plot_s11_db`] — `|S₁₁|` in decibels vs. frequency (single trace).
 //! * [`plot_s11_phase`] — `arg(S₁₁)` in degrees vs. frequency (single trace).
-//! * [`plot_smith_chart`] — `S₁₁` on the complex unit disk (Smith-style).
+//! * [`plot_smith_chart`] — `S₁₁` on the complex unit disk (Smith-style),
+//!   back-compat single-trace wrapper around [`plot_smith_chart_multi`].
+//! * [`plot_smith_chart_multi`] — overlay multiple [`SmithTrace`] values on a
+//!   Smith chart with constant-R/X arc reference overlays. [`SmithTrace`] is
+//!   the Smith equivalent of [`SparamTrace`].
 //! * [`plot_sparams_db`] — overlay multiple S-parameter traces in dB vs.
 //!   frequency, each labelled and colour-coded with a legend.
 //! * [`plot_sparams_phase`] — overlay multiple S-parameter traces (phase in
@@ -88,6 +92,19 @@ pub struct SparamTrace {
     /// Human-readable label shown in the plot legend (e.g. `"S11"`, `"S21"`).
     pub label: String,
     /// Complex S-parameter samples, one per frequency point.
+    pub values: Vec<Complex64>,
+}
+
+/// A single labelled S-parameter trace for Smith-chart export.
+///
+/// Parallel to [`SparamTrace`] for [`plot_sparams_db`].
+/// Used with [`plot_smith_chart_multi`] to render multiple overlaid
+/// trajectories on the Smith chart.
+#[derive(Debug, Clone)]
+pub struct SmithTrace {
+    /// Legend label (e.g. `"S11"`, `"S22"`).
+    pub label: String,
+    /// Raw complex S-parameter values, one per frequency sample.
     pub values: Vec<Complex64>,
 }
 
@@ -252,12 +269,13 @@ pub fn plot_s11_phase(
 
 /// Plot `S₁₁` on the complex unit disk (Smith-chart style).
 ///
-/// We don't render the full Smith-chart constant-resistance / constant-
-/// reactance arc family — for now the chart is just:
+/// Back-compat single-trace wrapper around [`plot_smith_chart_multi`].
+/// The chart includes:
 ///
-/// 1. A light-grey reference unit circle (200 samples).
-/// 2. An origin crosshair through `(0, 0)`.
-/// 3. The `S₁₁(f)` trajectory as a connected red line.
+/// 1. Constant-R circles and constant-X arc reference overlays (light grey).
+/// 2. A light-grey reference unit circle (200 samples).
+/// 3. An origin crosshair through `(0, 0)`.
+/// 4. The `S₁₁(f)` trajectory as a connected coloured line.
 ///
 /// The aspect ratio is locked to 1:1 by giving both axes the range
 /// `[-1.1, 1.1]`; downstream callers should pick `width_px ≈ height_px`
@@ -267,16 +285,41 @@ pub fn plot_smith_chart(
     out_path: &Path,
     config: &PlotConfig,
 ) -> Result<(), Error> {
+    let trace = SmithTrace {
+        label: "S11".to_string(),
+        values: s11.to_vec(),
+    };
+    plot_smith_chart_multi(&[trace], out_path, config)
+}
+
+/// Plot multiple S-parameter traces on a Smith-chart canvas with
+/// constant-R/X arc reference overlays.
+///
+/// Each [`SmithTrace`] is rendered as a connected polyline. When only one
+/// trace is provided the behaviour matches the original `plot_smith_chart`.
+///
+/// The reference arc grid is always drawn (light grey, `RGBColor(210,210,210)`):
+/// - constant-R circles for r ∈ {0.2, 0.5, 1.0, 2.0, 5.0}
+/// - constant-X arcs for x ∈ {±0.2, ±0.5, ±1.0, ±2.0, ±5.0}
+///
+/// The aspect ratio is locked to 1:1 by giving both axes the range
+/// `[-1.1, 1.1]`; downstream callers should pick `width_px ≈ height_px`
+/// for a round circle.
+pub fn plot_smith_chart_multi(
+    traces: &[SmithTrace],
+    out_path: &Path,
+    config: &PlotConfig,
+) -> Result<(), Error> {
     match config.format {
         PlotFormat::Png => {
             let root = BitMapBackend::new(out_path, (config.width_px, config.height_px))
                 .into_drawing_area();
-            draw_smith(&root, &config.title, s11)
+            draw_smith_multi(&root, &config.title, traces)
         }
         PlotFormat::Svg => {
             let root =
                 SVGBackend::new(out_path, (config.width_px, config.height_px)).into_drawing_area();
-            draw_smith(&root, &config.title, s11)
+            draw_smith_multi(&root, &config.title, traces)
         }
     }
 }
@@ -569,12 +612,75 @@ where
     Ok(())
 }
 
-/// Render a Smith-style chart (reference unit circle + crosshair + S₁₁
-/// trajectory) into `root`.
-fn draw_smith<DB>(
+/// Compute sample points on the constant-resistance circle for normalised
+/// resistance `r` on the Smith chart.
+///
+/// Centre = `(r/(r+1), 0)`, radius = `1/(r+1)`.
+/// Returns `n + 1` points forming a closed loop (last point equals first).
+fn smith_r_circle_pts(r: f64, n: usize) -> Vec<(f64, f64)> {
+    let centre_re = r / (r + 1.0);
+    let radius = 1.0 / (r + 1.0);
+    (0..=n)
+        .map(|i| {
+            let theta = (i as f64) * std::f64::consts::TAU / (n as f64);
+            (centre_re + radius * theta.cos(), radius * theta.sin())
+        })
+        .collect()
+}
+
+/// Compute sample points on the constant-reactance arc for normalised
+/// reactance `x` (`x ≠ 0`) on the Smith chart, clipped to the unit disk.
+///
+/// Full circle: centre = `(1, 1/x)`, radius = `1/|x|`.
+/// Only points satisfying `re² + im² ≤ 1.0 + 1e-9` are returned.
+fn smith_x_arc_pts(x: f64, n: usize) -> Vec<(f64, f64)> {
+    debug_assert!(x != 0.0, "smith_x_arc_pts: x must be non-zero");
+    let centre_im = 1.0 / x;
+    let radius = 1.0 / x.abs();
+    (0..n)
+        .filter_map(|i| {
+            let theta = (i as f64) * std::f64::consts::TAU / (n as f64);
+            let re = 1.0 + radius * theta.cos();
+            let im = centre_im + radius * theta.sin();
+            if re * re + im * im <= 1.0 + 1e-9 {
+                Some((re, im))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Fixed colour palette for multi-trace Smith chart plots.
+///
+/// Eight distinct colours; traces beyond index 7 wrap around. Matches the
+/// palette used by the `draw_multi_trace` family of functions.
+const SMITH_PALETTE: &[RGBColor] = &[
+    RGBColor(228, 26, 28),
+    RGBColor(55, 126, 184),
+    RGBColor(77, 175, 74),
+    RGBColor(255, 127, 0),
+    RGBColor(152, 78, 163),
+    RGBColor(166, 86, 40),
+    RGBColor(247, 129, 191),
+    RGBColor(153, 153, 153),
+];
+
+/// Render multiple Smith-chart traces with constant-R/X arc overlays into
+/// `root`.
+///
+/// Drawing order:
+/// 1. White fill.
+/// 2. Chart frame and mesh.
+/// 3. Origin crosshair (light grey).
+/// 4. Unit circle (light grey).
+/// 5. Constant-R circles (very light grey, stroke 1).
+/// 6. Constant-X arcs (very light grey, stroke 1).
+/// 7. Data traces with legend.
+fn draw_smith_multi<DB>(
     root: &DrawingArea<DB, plotters::coord::Shift>,
     title: &str,
-    s11: &[Complex64],
+    traces: &[SmithTrace],
 ) -> Result<(), Error>
 where
     DB: DrawingBackend,
@@ -614,10 +720,10 @@ where
         .map_err(map_render_err)?;
 
     // Reference unit circle (200 samples, closed).
-    let n = 200usize;
-    let unit: Vec<(f64, f64)> = (0..=n)
+    let n_unit = 200usize;
+    let unit: Vec<(f64, f64)> = (0..=n_unit)
         .map(|i| {
-            let theta = (i as f64) * std::f64::consts::TAU / (n as f64);
+            let theta = (i as f64) * std::f64::consts::TAU / (n_unit as f64);
             (theta.cos(), theta.sin())
         })
         .collect();
@@ -628,11 +734,45 @@ where
         ))
         .map_err(map_render_err)?;
 
-    // S₁₁ trajectory in red.
-    let traj: Vec<(f64, f64)> = s11.iter().map(|z| (z.re, z.im)).collect();
-    chart
-        .draw_series(LineSeries::new(traj, RED.stroke_width(2)))
-        .map_err(map_render_err)?;
+    // Constant-R circles.
+    let arc_style = RGBColor(210, 210, 210).stroke_width(1);
+    for &r in &[0.2_f64, 0.5, 1.0, 2.0, 5.0] {
+        let pts = smith_r_circle_pts(r, 128);
+        chart
+            .draw_series(LineSeries::new(pts, arc_style))
+            .map_err(map_render_err)?;
+    }
+
+    // Constant-X arcs.
+    for &x in &[0.2_f64, 0.5, 1.0, 2.0, 5.0, -0.2, -0.5, -1.0, -2.0, -5.0] {
+        let pts = smith_x_arc_pts(x, 256);
+        chart
+            .draw_series(LineSeries::new(pts, arc_style))
+            .map_err(map_render_err)?;
+    }
+
+    // Data traces with legend entries.
+    for (i, trace) in traces.iter().enumerate() {
+        let colour = SMITH_PALETTE[i % SMITH_PALETTE.len()];
+        let traj: Vec<(f64, f64)> = trace.values.iter().map(|z| (z.re, z.im)).collect();
+        let label = trace.label.clone();
+        chart
+            .draw_series(LineSeries::new(traj, colour.stroke_width(2)))
+            .map_err(map_render_err)?
+            .label(label)
+            .legend(move |(x, y)| {
+                PathElement::new(vec![(x, y), (x + 20, y)], colour.stroke_width(2))
+            });
+    }
+
+    if traces.len() > 1 {
+        chart
+            .configure_series_labels()
+            .background_style(WHITE.mix(0.8))
+            .border_style(BLACK)
+            .draw()
+            .map_err(map_render_err)?;
+    }
 
     root.present().map_err(map_render_err)?;
     Ok(())
@@ -864,5 +1004,98 @@ mod tests {
             body.contains("S21"),
             "SVG should contain legend label 'S21'"
         );
+    }
+
+    // --- Smith chart arc / multi-trace tests --------------------------------
+
+    /// `smith_r_circle_pts(1.0, 64)` returns 65 points forming a closed loop
+    /// all lying on the circle centred at (0.5, 0.0) with radius 0.5.
+    #[test]
+    fn smith_r_circle_pts_correct_geometry() {
+        let pts = smith_r_circle_pts(1.0, 64);
+        assert_eq!(pts.len(), 65, "expected n+1 = 65 points");
+
+        // First and last must be identical (closed loop).
+        assert!(
+            (pts[0].0 - pts[64].0).abs() < 1e-12 && (pts[0].1 - pts[64].1).abs() < 1e-12,
+            "first and last point must be equal: {:?} vs {:?}",
+            pts[0],
+            pts[64]
+        );
+
+        // All points must lie on the circle: centre=(0.5,0), radius=0.5.
+        for (re, im) in &pts {
+            let dist = ((re - 0.5).powi(2) + im.powi(2)).sqrt();
+            assert!(
+                (dist - 0.5).abs() < 1e-9,
+                "point ({re}, {im}) is not on r=1 circle (dist={dist})"
+            );
+        }
+    }
+
+    /// Every point of `smith_x_arc_pts(1.0, 256)` lies on the circle with
+    /// centre (1.0, 1.0) and radius 1.0 — verifies the constant-X arc formula.
+    #[test]
+    fn smith_x_arc_pts_on_circle() {
+        let pts = smith_x_arc_pts(1.0, 256);
+        assert!(!pts.is_empty(), "expected non-empty arc for x=1.0");
+        for (re, im) in &pts {
+            let dist = ((re - 1.0).powi(2) + (im - 1.0).powi(2)).sqrt();
+            assert!(
+                (dist - 1.0).abs() < 1e-9,
+                "point ({re}, {im}) not on circle: dist={dist}"
+            );
+        }
+    }
+
+    /// All points returned by `smith_x_arc_pts(0.2, 512)` must lie inside or
+    /// on the unit disk.
+    #[test]
+    fn smith_x_arc_pts_inside_unit_disk() {
+        let pts = smith_x_arc_pts(0.2, 512);
+        assert!(!pts.is_empty(), "expected some points inside the unit disk");
+        for (re, im) in &pts {
+            let r2 = re * re + im * im;
+            assert!(
+                r2 <= 1.0 + 1e-9,
+                "point ({re}, {im}) is outside the unit disk (r²={r2})"
+            );
+        }
+    }
+
+    /// `plot_smith_chart_multi` with two traces writes a non-empty SVG file.
+    #[test]
+    fn plot_smith_chart_multi_two_traces_writes_svg() {
+        let traces = vec![
+            SmithTrace {
+                label: "S11".to_string(),
+                values: vec![
+                    Complex64::new(0.5, 0.3),
+                    Complex64::new(0.2, -0.1),
+                    Complex64::new(-0.1, 0.0),
+                    Complex64::new(0.0, 0.5),
+                ],
+            },
+            SmithTrace {
+                label: "S22".to_string(),
+                values: vec![
+                    Complex64::new(-0.3, 0.2),
+                    Complex64::new(0.1, 0.4),
+                    Complex64::new(0.4, -0.2),
+                    Complex64::new(0.6, 0.0),
+                ],
+            },
+        ];
+        let tmp = NamedTempFile::with_suffix(".svg").expect("tempfile");
+        let cfg = PlotConfig {
+            width_px: 600,
+            height_px: 600,
+            title: "Smith multi-trace test".to_string(),
+            format: PlotFormat::Svg,
+        };
+        plot_smith_chart_multi(&traces, tmp.path(), &cfg).expect("plot_smith_chart_multi");
+        let body = fs::read_to_string(tmp.path()).expect("read svg");
+        assert!(body.contains("<svg"), "SVG missing <svg tag");
+        assert!(body.len() > 256, "SVG body too short: {} bytes", body.len());
     }
 }

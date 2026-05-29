@@ -47,6 +47,29 @@ fn mom_001_emits_plot_artifacts() {
     }
 }
 
+/// fem-eig-001: assert the WR-90 cavity eigenmode case is registered
+/// in `run_all` and reports `Passed`.
+///
+/// The driver runs in ~7 s release on a 12×9×15 mesh; gated `#[ignore]`
+/// here because calling `run_all` also pulls in the slow mom-001 solve
+/// (~8 min). Run with
+/// `cargo test -p yee-validation --release -- --include-ignored`.
+#[test]
+#[ignore = "slow: aggregator invokes mom-001 (~8 min) + fem-eig-001 (~7 s)"]
+fn fem_eig_001_registered_and_passes_through_aggregator() {
+    let report = yee_validation::Report::run_all();
+    let case = report
+        .cases
+        .iter()
+        .find(|c| c.id == "fem-eig-001")
+        .expect("fem-eig-001 must be registered in run_all");
+    assert!(
+        matches!(case.status, yee_validation::CaseStatus::Passed),
+        "fem-eig-001 did not pass: {}",
+        case.notes
+    );
+}
+
 /// mom-002: assert the microstrip case lands in
 /// [`yee_validation::Status::Passed`] when the aggregator runs all
 /// cases. Ignored because the aggregator pulls in mom-001 (~8 min)

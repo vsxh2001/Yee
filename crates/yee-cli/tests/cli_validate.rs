@@ -36,5 +36,35 @@ fn yee_validate_help_lists_target() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.to_lowercase().contains("mom"));
     assert!(stdout.to_lowercase().contains("fdtd"));
+    assert!(stdout.to_lowercase().contains("fem"));
     assert!(stdout.to_lowercase().contains("all"));
+}
+
+/// `yee validate fem --json` must exit 0 and emit a JSON array that
+/// contains a `fem-eig-001` entry. The FEM drivers that run (001/002/
+/// 004/005) complete in seconds in `--release`; 003 and 006 are
+/// registered Skipped (wall-time / open gate) so no `Failed` case is
+/// present and the command exits 0.
+///
+/// Gated `#[ignore]` because the FEM sparse-LU solves are slow in
+/// debug mode. Run with:
+/// `cargo test -p yee-cli --release -- --include-ignored`.
+#[test]
+#[ignore = "slow in debug: FEM solves (fem-eig-001 ~7 s release, longer debug); run with --release --include-ignored"]
+fn yee_validate_fem_json_exits_0_and_contains_fem_eig_001() {
+    let output = Command::new(env!("CARGO_BIN_EXE_yee"))
+        .args(["validate", "fem", "--json"])
+        .output()
+        .expect("invoke yee");
+
+    assert!(
+        output.status.success(),
+        "yee validate fem --json exited non-zero; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("\"fem-eig-001\""),
+        "JSON output does not contain fem-eig-001 entry; got: {stdout}"
+    );
 }
