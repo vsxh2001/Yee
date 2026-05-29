@@ -28,13 +28,17 @@ const SWEEP_POINTS: usize = 401;
 const SPAN_MULT: f64 = 6.0;
 
 /// Run `yee filter synth <spec> [--output <out.s2p>] [--plot <out.png>]
-/// [--eps-r <εr>] [--h-mm <h>] [--layout-svg <out.svg>]`.
+/// [--eps-r <εr>] [--h-mm <h>] [--layout-svg <out.svg>] [--gerber <out.gbr>]`.
 ///
 /// `eps_r` / `h_mm` describe the substrate used for the F1.2.0 physical
 /// dimensioning (FR-4 defaults `4.4` / `1.6 mm` are supplied by the CLI). When
 /// the synthesized couplings cannot be realized on that substrate the dims path
 /// prints a diagnostic and returns a non-zero [`ExitCode`] — it is never
 /// silently skipped.
+///
+/// `--layout-svg` / `--gerber` both emit the same edge-coupled [`Layout`]; it is
+/// built **once** (via `dimension_edge_coupled_layout`) when either flag is set,
+/// so the SVG and the Gerber can never diverge.
 pub fn run_synth(
     spec_path: &Path,
     output: Option<&Path>,
@@ -42,6 +46,7 @@ pub fn run_synth(
     eps_r: f64,
     h_mm: f64,
     layout_svg: Option<&Path>,
+    gerber: Option<&Path>,
 ) -> Result<ExitCode> {
     let text = std::fs::read_to_string(spec_path)
         .with_context(|| format!("failed to read filter spec {}", spec_path.display()))?;
@@ -175,13 +180,25 @@ pub fn run_synth(
         );
     }
 
-    // ---- optional layout SVG ---------------------------------------------
-    if let Some(svg_path) = layout_svg {
+    // ---- optional layout exports (SVG / Gerber) --------------------------
+    // Build the edge-coupled layout ONCE when either exporter is requested, so
+    // the `--layout-svg` and `--gerber` outputs can never diverge.
+    if layout_svg.is_some() || gerber.is_some() {
         let layout = dimension_edge_coupled_layout(&proj, &substrate)
-            .map_err(|e| anyhow::anyhow!("failed to build layout for SVG: {e}"))?;
-        std::fs::write(svg_path, layout.to_svg())
-            .with_context(|| format!("failed to write layout SVG {}", svg_path.display()))?;
-        println!("  wrote layout SVG: {}", svg_path.display());
+            .map_err(|e| anyhow::anyhow!("failed to build layout: {e}"))?;
+        if let Some(svg_path) = layout_svg {
+            std::fs::write(svg_path, layout.to_svg())
+                .with_context(|| format!("failed to write layout SVG {}", svg_path.display()))?;
+            println!("  wrote layout SVG: {}", svg_path.display());
+        }
+        if let Some(gerber_path) = gerber {
+            let gerber_text =
+                yee_export::layout_to_gerber(&layout, &yee_export::GerberOptions::default());
+            std::fs::write(gerber_path, gerber_text).with_context(|| {
+                format!("failed to write layout Gerber {}", gerber_path.display())
+            })?;
+            println!("  wrote layout Gerber: {}", gerber_path.display());
+        }
     }
 
     if report.pass {
