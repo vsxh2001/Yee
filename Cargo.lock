@@ -6683,6 +6683,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "yee-studio"
+version = "0.0.0"
+dependencies = [
+ "eframe",
+ "egui",
+ "egui_plot",
+ "num-complex",
+ "yee-filter",
+ "yee-synth",
+]
+
+[[package]]
 name = "yee-surrogate"
 version = "0.0.0"
 dependencies = [

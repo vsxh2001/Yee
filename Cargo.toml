@@ -18,6 +18,7 @@ members = [
     "crates/yee-design",
     "crates/yee-synth",
     "crates/yee-filter",
+    "crates/yee-studio",
     "crates/yee-layout",
     "examples/half-wave-dipole",
     "examples/microstrip-line",
