@@ -123,6 +123,7 @@ fn yee_validate_help_lists_target() {
     assert!(stdout.to_lowercase().contains("mom"));
     assert!(stdout.to_lowercase().contains("fdtd"));
     assert!(stdout.to_lowercase().contains("fem"));
+    assert!(stdout.to_lowercase().contains("synth"));
     assert!(stdout.to_lowercase().contains("all"));
 }
 
