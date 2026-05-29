@@ -1,0 +1,19 @@
+[package]
+name         = "yee-export"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "Yee export: manufacturing-file emitters (RS-274X Gerber) from a yee-layout Layout — pure text, WASM-safe, no EM."
+
+[lints.rust]
+unsafe_code  = "forbid"
+missing_docs = "warn"
+
+[dependencies]
+# Pure-text emitter: walks `yee-layout`'s `Layout` polygons (plain `f64` metres
+# in `Vec<Point2>`) and writes an RS-274X Gerber string. No serde is needed —
+# `GerberOptions` is a plain options struct that is not (de)serialised here, and
+# the output is a hand-rolled `String`. WASM-safe: no native / FDTD dependency.
+yee-layout = { workspace = true }
