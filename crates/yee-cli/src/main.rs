@@ -303,6 +303,10 @@ enum FilterCommand {
         /// path (F1.2.0 `dimension_edge_coupled_layout`).
         #[arg(long)]
         layout_svg: Option<PathBuf>,
+        /// Also write the synthesized edge-coupled layout as a single-copper
+        /// Gerber to this path (F1.4.0 `yee_export::layout_to_gerber`).
+        #[arg(long)]
+        gerber: Option<PathBuf>,
     },
 }
 
@@ -464,6 +468,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 eps_r,
                 h_mm,
                 layout_svg,
+                gerber,
             } => filter::run_synth(
                 &spec,
                 output.as_deref(),
@@ -471,6 +476,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 eps_r,
                 h_mm,
                 layout_svg.as_deref(),
+                gerber.as_deref(),
             ),
         },
         Command::Design {

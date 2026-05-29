@@ -160,6 +160,57 @@ fn cli_dims() {
     let _ = std::fs::remove_file(&svg);
 }
 
+/// F1.4.0: `yee filter synth --gerber` writes a single-copper-layer Gerber for
+/// the committed Chebyshev 0.5 dB N=5 fixture on the default FR-4 substrate, via
+/// `yee_export::layout_to_gerber`. Pure closed-form math (no EM/FDTD), so NOT
+/// `#[ignore]`'d.
+#[test]
+fn cli_gerber() {
+    let s2p = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cli_gerber.s2p");
+    let gbr = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cli_gerber.gbr");
+    let _ = std::fs::remove_file(&s2p);
+    let _ = std::fs::remove_file(&gbr);
+
+    // FR-4 defaults (eps_r=4.4, h=1.6 mm) are supplied by the CLI — exercise
+    // them implicitly by omitting --eps-r/--h-mm.
+    let output = Command::new(env!("CARGO_BIN_EXE_yee"))
+        .args(["filter", "synth"])
+        .arg(fixture())
+        .arg("--output")
+        .arg(&s2p)
+        .arg("--gerber")
+        .arg(&gbr)
+        .output()
+        .expect("invoke yee");
+
+    assert!(
+        output.status.success(),
+        "yee filter synth --gerber exited non-zero; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // The Gerber must be a structurally-valid single-layer file: the FS/format
+    // header and the M02* end-of-file marker.
+    assert!(
+        gbr.exists(),
+        "layout Gerber {} was not written",
+        gbr.display()
+    );
+    let gerber = std::fs::read_to_string(&gbr).expect("read layout Gerber");
+    assert!(
+        gerber.contains("%FSLAX46Y46*%"),
+        "Gerber missing FS coordinate-format header; got:\n{}",
+        &gerber[..gerber.len().min(200)]
+    );
+    assert!(
+        gerber.contains("M02*"),
+        "Gerber missing M02* end-of-file marker"
+    );
+
+    let _ = std::fs::remove_file(&s2p);
+    let _ = std::fs::remove_file(&gbr);
+}
+
 /// Pull the first SI-metres value out of a dimensions line whose text starts
 /// with `label` and has the shape `... = <value> m  (<mm> mm) ...`.
 fn parse_si_after(stdout: &str, label: &str) -> f64 {
