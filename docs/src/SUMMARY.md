@@ -132,3 +132,4 @@
 - [ADR-0088: Filter Phase F0.2 — `yee filter synth --plot`](decisions/0088-filter-f0-2-synth-plot.md)
 - [ADR-0089: Filter-design app architecture (egui/eframe desktop + web)](decisions/0089-filter-design-app-architecture.md)
 - [ADR-0090: App.0 — yee-studio filter-design desktop app skeleton](decisions/0090-app-0-yee-studio-desktop.md)
+- [ADR-0092: App.1.0 — yee-studio WASM-prep (gate eframe shell behind a feature)](decisions/0092-app-1-0-studio-wasm-prep.md)
