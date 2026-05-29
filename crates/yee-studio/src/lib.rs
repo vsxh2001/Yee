@@ -18,8 +18,16 @@
 //! 4. `s21_db = 20·log10(max(|S21|, 1e-12))`.
 //! 5. Closed-form spec-mask regions ([`MaskRegionView`]).
 //! 6. [`yee_filter::check_mask`] → `mask_pass` + human-readable notes.
+//! 7. [`yee_filter::dimension_edge_coupled`] over the synthesized project and the
+//!    editable substrate → physical microstrip [`EdgeCoupledDimensions`] (F1.2.0;
+//!    ADR-0099), stored as a `Result<_, String>` so the error path stays
+//!    egui-free and WASM-safe.
 
-use yee_filter::{FilterProject, FilterSpec, check_mask, ideal_response, synthesize};
+use yee_filter::{
+    EdgeCoupledDimensions, FilterProject, FilterSpec, check_mask, dimension_edge_coupled,
+    ideal_response, synthesize,
+};
+use yee_layout::Substrate;
 
 /// The `eframe` shell (spec editor + synthesis panel + `|S21|`/mask plot).
 ///
@@ -82,6 +90,28 @@ pub struct StudioState {
     pub mask_pass: bool,
     /// Human-readable mask notes (ripple/RL summary + per-stopband + failures).
     pub mask_notes: Vec<String>,
+    /// Substrate relative permittivity `ε_r` used for dimensional synthesis
+    /// (default `4.4`, FR-4). Editable; changing it re-derives [`dims`].
+    ///
+    /// [`dims`]: StudioState::dims
+    pub eps_r: f64,
+    /// Substrate height `h` (metal-to-ground spacing), metres, used for
+    /// dimensional synthesis (default `1.6e-3`, FR-4). Editable; changing it
+    /// re-derives [`dims`].
+    ///
+    /// [`dims`]: StudioState::dims
+    pub h_m: f64,
+    /// Physical microstrip dimensions (F1.2.0; ADR-0099) for the synthesized
+    /// edge-coupled filter on the [`eps_r`]/[`h_m`] substrate, or the
+    /// [`yee_filter::DimError`] display string when the coupling cannot be
+    /// realized on the chosen substrate.
+    ///
+    /// The error is stored as a `String` (not the `DimError`) so [`StudioState`]
+    /// holds no `egui`/native type and stays WASM-safe (ADR-0089/0099).
+    ///
+    /// [`eps_r`]: StudioState::eps_r
+    /// [`h_m`]: StudioState::h_m
+    pub dims: Result<EdgeCoupledDimensions, String>,
 }
 
 impl StudioState {
@@ -99,6 +129,11 @@ impl StudioState {
             mask_regions: Vec::new(),
             mask_pass: false,
             mask_notes: Vec::new(),
+            // FR-4 substrate defaults (ε_r = 4.4 on a 1.6 mm board).
+            eps_r: 4.4,
+            h_m: 1.6e-3,
+            // Populated by `apply_derived` below.
+            dims: Err(String::new()),
         };
         // `project` is already synthesized above; derive the rest (no re-synth).
         state.apply_derived();
@@ -141,6 +176,19 @@ impl StudioState {
         let report = check_mask(&self.project, &self.freqs_hz);
         self.mask_pass = report.pass;
         self.mask_notes = mask_notes(&self.spec, &report);
+
+        // Physical microstrip dimensions (F1.2.0; ADR-0099). Only `eps_r` and
+        // `height_m` feed the closed-form synthesis; `loss_tangent` /
+        // `metal_thickness_m` are unused here, set to neutral defaults. The
+        // `DimError` is mapped to its display string so `StudioState` holds no
+        // non-`Result` error type and stays egui-free / WASM-safe (ADR-0089).
+        let substrate = Substrate {
+            eps_r: self.eps_r,
+            height_m: self.h_m,
+            loss_tangent: 0.0,
+            metal_thickness_m: 0.0,
+        };
+        self.dims = dimension_edge_coupled(&self.project, &substrate).map_err(|e| e.to_string());
     }
 }
 
@@ -287,5 +335,44 @@ mod tests {
             !state.mask_pass,
             "order N=2 should fail the 40 dB stopband mask"
         );
+    }
+
+    #[test]
+    fn studio_state_dims() {
+        // Default Chebyshev N=5 spec + the FR-4 substrate defaults (ε_r = 4.4,
+        // h = 1.6 mm) should size onto a realizable edge-coupled microstrip
+        // filter (F1.2.0; ADR-0099).
+        let state = StudioState::from_spec(satisfiable_spec());
+
+        // The FR-4 defaults are wired in the constructor.
+        assert!(
+            (state.eps_r - 4.4).abs() < 1e-12,
+            "default ε_r = 4.4 (FR-4)"
+        );
+        assert!(
+            (state.h_m - 1.6e-3).abs() < 1e-12,
+            "default h = 1.6 mm (FR-4)"
+        );
+
+        let dims = state
+            .dims
+            .as_ref()
+            .expect("default N=5 spec must dimension onto FR-4");
+
+        assert!(
+            dims.line_width_m > 0.0,
+            "line width must be positive, got {}",
+            dims.line_width_m
+        );
+        assert!(
+            dims.resonator_length_m > 0.0,
+            "resonator length must be positive, got {}",
+            dims.resonator_length_m
+        );
+        // N=5 ⇒ N−1 = 4 inter-resonator gaps, every one positive.
+        assert_eq!(dims.gaps_m.len(), 4, "N=5 ⇒ 4 inter-resonator gaps");
+        for (i, &gap) in dims.gaps_m.iter().enumerate() {
+            assert!(gap > 0.0, "gap[{i}] must be positive, got {gap}");
+        }
     }
 }

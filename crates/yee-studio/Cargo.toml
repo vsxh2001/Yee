@@ -37,6 +37,10 @@ web = [
 [dependencies]
 yee-synth  = { workspace = true }
 yee-filter = { workspace = true }
+# `yee-layout` supplies the `Substrate` model F1.2.0 dimensional synthesis sizes
+# the filter onto. It is serde-only (no egui/eframe/wgpu, no FDTD), so it keeps
+# the `--no-default-features` `StudioState` flow WASM-safe (ADR-0089/0099).
+yee-layout = { workspace = true }
 egui        = { workspace = true, optional = true }
 egui_plot   = { workspace = true, optional = true }
 # wasm glue for the `web` feature's browser entry (App.1.2a; ADR-0096). All

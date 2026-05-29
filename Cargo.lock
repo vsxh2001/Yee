@@ -6706,6 +6706,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "yee-filter",
+ "yee-layout",
  "yee-synth",
 ]
 
