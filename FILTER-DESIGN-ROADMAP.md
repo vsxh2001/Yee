@@ -374,6 +374,11 @@ build on F1.
   gerber-001 (structure) / gerber-002 (coordinate round-trip).
 - **Theory chapter** (merge `5603ae5`): `docs/src/theory/coupled-lines-dimensional-synthesis.md`
   documenting the KJ coupled-microstrip model + F1.2.0 inversion.
+- **App.studio layout canvas** (ADR-0101, merge `b863b52`): `yee-studio` draws the
+  synthesized filter geometry live — `StudioState.layout` (egui-free, WASM-safe) +
+  an `egui_plot` top-view canvas of the trace polygons. Gate studio_state_layout.
+- **CLI `--gerber`** (ADR-0102, merge `97fbd8a`): `yee filter synth --gerber` writes
+  the F1.4.0 layout Gerber (Layout shared with `--layout-svg`). Gate cli_gerber.
 
 **Final goal: a desktop + web APP** (ADR-0089) — one `egui`/`eframe` codebase,
 native + WASM. The shipped light flow (F0/F0.1/F0.2/F1.0) is WASM-safe and is the
