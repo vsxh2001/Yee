@@ -1187,3 +1187,61 @@ pub fn run_skin_depth() -> PySkinDepthResult {
         passed: r.passed,
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 2.fdtd.py.6 — fdtd-206 lumped series-LC resonance driver
+// ---------------------------------------------------------------------------
+
+/// Result of a lumped series-LC resonance simulation (fdtd-206 gate).
+///
+/// Returned by [`run_lc_resonance`].
+#[pyclass(name = "LcResonanceResult", module = "yee._yee")]
+pub struct PyLcResonanceResult {
+    /// Measured resonant frequency from the DFT peak (Hz).
+    #[pyo3(get)]
+    pub f_measured_hz: f64,
+    /// Analytic resonant frequency f₀ = 1/(2π√LC) (Hz).
+    #[pyo3(get)]
+    pub f_analytic_hz: f64,
+    /// Relative error |f_measured − f₀| / f₀.
+    #[pyo3(get)]
+    pub rel_err: f64,
+    /// `true` iff `rel_err < 2 %`.
+    #[pyo3(get)]
+    pub passed: bool,
+}
+
+#[pymethods]
+impl PyLcResonanceResult {
+    fn __repr__(&self) -> String {
+        format!(
+            "LcResonanceResult(f_measured_hz={:.4e}, f_analytic_hz={:.4e}, \
+             rel_err={:.4e}, passed={})",
+            self.f_measured_hz, self.f_analytic_hz, self.rel_err, self.passed,
+        )
+    }
+}
+
+/// Run the fdtd-206 lumped series-LC resonance gate from Python.
+///
+/// Delegates to [`yee_validation::fdtd206_run`] using the canonical
+/// 5×5×40 scenario (L=100 µH, C≈25.33 fF → f₀=1 GHz, R=100 kΩ → Q≈6.28,
+/// 30-step kick + 5000-step ring-down, 1000-bin DFT scan 0.5–1.5 GHz).
+///
+/// Gate: `rel_err < 2 %`
+///
+/// # References
+///
+/// Pozar, "Microwave Engineering," 4th ed., §2.4;
+/// Hayt & Kemmerly, "Engineering Circuit Analysis," §14.1;
+/// Taflove & Hagness, §15.10.
+#[pyfunction]
+pub fn run_lc_resonance() -> PyLcResonanceResult {
+    let r = yee_validation::fdtd206_run();
+    PyLcResonanceResult {
+        f_measured_hz: r.f_measured_hz,
+        f_analytic_hz: r.f_analytic_hz,
+        rel_err: r.rel_err,
+        passed: r.passed,
+    }
+}

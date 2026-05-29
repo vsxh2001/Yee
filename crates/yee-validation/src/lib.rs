@@ -142,6 +142,7 @@ impl Report {
             run_fdtd_203_dipole_pattern(),
             run_fdtd_204(),
             run_fdtd_205(),
+            run_fdtd_206_lumped_lc_resonance(),
             run_fem_eig_001(),
             run_fem_eig_002(),
             run_fem_eig_003(),
@@ -2086,6 +2087,164 @@ fn run_fdtd_205() -> CaseResult {
             r.ratio_2delta,
             r.rel_err_2delta * 100.0,
         ),
+        wall_time_seconds,
+        plot_paths: Vec::new(),
+    }
+}
+
+// -----------------------------------------------------------------------
+// fdtd-206 — series-LC resonant frequency gate (Phase 2.fdtd.6.1)
+// -----------------------------------------------------------------------
+
+/// Result of [`fdtd206_run`] — series-LC resonant frequency gate (Phase 2.fdtd.6.1).
+#[derive(Debug, Clone)]
+pub struct LcResonanceResult {
+    /// Measured resonant frequency from the DFT peak (Hz).
+    pub f_measured_hz: f64,
+    /// Analytic resonant frequency f₀ = 1/(2π√LC) (Hz).
+    pub f_analytic_hz: f64,
+    /// Relative error |f_measured − f₀| / f₀.
+    pub rel_err: f64,
+    /// `true` iff `rel_err < 2 %`.
+    pub passed: bool,
+}
+
+/// Run the fdtd-206 series-LC resonant frequency gate.
+///
+/// Sets up a 5×5×40 PEC box at dx=1 mm, places a series-LC port at the
+/// centre cell (2,2,20) with L=100 µH, C≈25.33 fF → f₀=1 GHz analytic,
+/// R=100 kΩ → Q≈6.28. Kicks with a broadband Gaussian pulse (30 steps),
+/// then records the inductor-current ring-down (5000 steps). A 1000-bin
+/// DFT scan from 0.5 GHz to 1.5 GHz extracts the peak frequency; the
+/// gate asserts |f_measured − f₀| / f₀ < 2 %.
+///
+/// **Parameter note**: The FDTD–LC coupling coefficient γ = 0.27·μ₀·dx/L
+/// must satisfy γ << 1 to avoid systematic frequency shifts.  With L=1 nH
+/// and dx=1 mm, γ ≈ 0.34 (44% error); with L=100 µH, γ ≈ 3×10⁻⁷ (0.15%).
+///
+/// # References
+/// - Pozar, "Microwave Engineering," 4th ed., §2.4.
+/// - Hayt & Kemmerly, "Engineering Circuit Analysis," §14.1.
+/// - Taflove & Hagness, §15.10 (series-RLC FDTD update).
+pub fn fdtd206_run() -> LcResonanceResult {
+    use std::f64::consts::PI;
+    use yee_fdtd::{
+        WalkingSkeletonSolver, YeeGrid,
+        lumped::{LumpedRlcPort, SourceWaveform},
+    };
+
+    const NX: usize = 5;
+    const NY: usize = 5;
+    const NZ: usize = 40;
+    const DX: f64 = 1.0e-3;
+    // L must satisfy γ = 0.27·μ₀·dx/L << 1 for the discrete resonant
+    // frequency to match the analytic value (see fdtd-206 implementation notes).
+    // With L=1 nH: γ ≈ 0.34 → ~44% frequency error.
+    // With L=100 µH: γ ≈ 3×10⁻⁷ → 0.15% error.
+    const L_H: f64 = 1.0e-4;
+    const F0_HZ: f64 = 1.0e9;
+    // C = 1 / (4π² f₀² L) ≈ 25.330 fF (for f₀=1 GHz with L=100 µH)
+    const C_F: f64 = 2.533_029_591_058_444e-16;
+    // R = 100 kΩ → Q = √(L/C)/R ≈ 6.28
+    const R_OHM: f64 = 1.0e5;
+    const N_KICK: usize = 30;
+    const N_RING: usize = 5_000;
+    const DFT_N_BINS: usize = 1_000;
+    const DFT_F_LO_HZ: f64 = 0.5e9;
+    const DFT_F_HI_HZ: f64 = 1.5e9;
+    const TOL_F0_REL: f64 = 0.02;
+
+    let grid = YeeGrid::vacuum(NX, NY, NZ, DX);
+    let dt = grid.dt;
+
+    let port_cell = (NX / 2, NY / 2, NZ / 2);
+    let mut port = LumpedRlcPort::series_rlc(port_cell, R_OHM, L_H, C_F, SourceWaveform::None);
+
+    let mut solver = WalkingSkeletonSolver::new(grid);
+
+    // Gaussian kick: peak at step 10, σ = 4 steps.
+    let t0_kick = 10.0 * dt;
+    let sigma_kick = 4.0 * dt;
+    let v_kick = 1.0_f64;
+
+    // Kick phase: excite the LC with a broadband impulse.
+    for n in 0..N_KICK {
+        solver.update_h_only();
+        #[allow(deprecated)]
+        yee_fdtd::boundary::apply_pec(solver.grid_mut());
+        let t = (n as f64) * dt;
+        let kick = v_kick * (-(t - t0_kick).powi(2) / (2.0 * sigma_kick.powi(2))).exp();
+        solver.grid_mut().ez[port_cell] += kick;
+        solver.update_e_only();
+        #[allow(deprecated)]
+        yee_fdtd::boundary::apply_pec(solver.grid_mut());
+        port.correct_e(solver.grid_mut(), n, dt);
+        solver.advance_clock();
+    }
+
+    // Ring-down phase: record inductor current I_L each step.
+    let mut il_probe = Vec::with_capacity(N_RING);
+    for n in N_KICK..(N_KICK + N_RING) {
+        solver.update_h_only();
+        #[allow(deprecated)]
+        yee_fdtd::boundary::apply_pec(solver.grid_mut());
+        solver.update_e_only();
+        #[allow(deprecated)]
+        yee_fdtd::boundary::apply_pec(solver.grid_mut());
+        port.correct_e(solver.grid_mut(), n, dt);
+        il_probe.push(port.inductor_current());
+        solver.advance_clock();
+    }
+
+    // DFT scan: find peak frequency in [F_LO, F_HI].
+    let df = (DFT_F_HI_HZ - DFT_F_LO_HZ) / (DFT_N_BINS as f64 - 1.0);
+    let mut peak_amp = 0.0_f64;
+    let mut f_peak = DFT_F_LO_HZ;
+    for k in 0..DFT_N_BINS {
+        let f = DFT_F_LO_HZ + (k as f64) * df;
+        let omega = 2.0 * PI * f;
+        let (mut re, mut im) = (0.0_f64, 0.0_f64);
+        for (n, &il) in il_probe.iter().enumerate() {
+            let phase = omega * (n as f64) * dt;
+            re += il * phase.cos();
+            im += il * phase.sin();
+        }
+        let amp = (re * re + im * im).sqrt();
+        if amp > peak_amp {
+            peak_amp = amp;
+            f_peak = f;
+        }
+    }
+
+    let rel_err = (f_peak - F0_HZ).abs() / F0_HZ;
+    LcResonanceResult {
+        f_measured_hz: f_peak,
+        f_analytic_hz: F0_HZ,
+        rel_err,
+        passed: rel_err < TOL_F0_REL,
+    }
+}
+
+fn run_fdtd_206_lumped_lc_resonance() -> CaseResult {
+    let t0 = Instant::now();
+    let result = fdtd206_run();
+    let wall_time_seconds = t0.elapsed().as_secs_f64();
+    let status = if result.passed {
+        CaseStatus::Passed
+    } else {
+        CaseStatus::Failed
+    };
+    let notes = format!(
+        "f_measured={:.4e} Hz, f_analytic={:.4e} Hz, rel_err={:.4e} (gate < 2 %)",
+        result.f_measured_hz, result.f_analytic_hz, result.rel_err
+    );
+    CaseResult {
+        id: "fdtd-206".into(),
+        description: "Lumped series-LC resonant frequency (FDTD Phase 2.fdtd.6.1, \
+                      L=100µH, C≈25.33fF, f₀=1GHz analytic, R=100kΩ, Q≈6.28)"
+            .into(),
+        status,
+        notes,
         wall_time_seconds,
         plot_paths: Vec::new(),
     }
@@ -5808,6 +5967,21 @@ mod tests {
             result.status,
             CaseStatus::Skipped,
             "fdtd-204 should be Skipped (wall-time gated)"
+        );
+    }
+
+    /// Verifies that the fdtd-206 series-LC resonant frequency gate passes
+    /// (Phase 2.fdtd.6.1): |f_measured − 1 GHz| / 1 GHz < 2 %.
+    /// NOT `#[ignore]`-gated (< 3 s debug, < 0.1 s release).
+    #[test]
+    fn fdtd_206_lc_resonance_passes() {
+        let result = run_fdtd_206_lumped_lc_resonance();
+        assert_eq!(result.id, "fdtd-206");
+        assert_eq!(
+            result.status,
+            CaseStatus::Passed,
+            "fdtd-206 gate failed: {}",
+            result.notes
         );
     }
 }

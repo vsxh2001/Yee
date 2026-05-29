@@ -51,6 +51,8 @@ fn _yee(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fdtd::run_dispersive_drude, m)?)?;
     m.add_class::<fdtd::PySkinDepthResult>()?;
     m.add_function(wrap_pyfunction!(fdtd::run_skin_depth, m)?)?;
+    m.add_class::<fdtd::PyLcResonanceResult>()?;
+    m.add_function(wrap_pyfunction!(fdtd::run_lc_resonance, m)?)?;
     m.add_class::<bo::PyBoConfig>()?;
     m.add_class::<bo::PyBoResult>()?;
     m.add_function(wrap_pyfunction!(bo::minimize, m)?)?;

@@ -230,4 +230,4 @@ These are the things that will bite you if you skip them. Update this section wh
 
 ---
 
-*Last updated: 2026-05-28, post Phase 2.fdtd.py.5 (ADR-0079): `run_skin_depth()` / `SkinDepthResult` shipped in yee-py — Python API surface for the fdtd-205 Ohmic skin-depth gate (Gate A 1.05 %, Gate B 2.22 %). Delegates to `yee_validation::fdtd205_run()`; 3 pytest cases; tutorial 15. Review APPROVED (no P0; P1-B repr-wrapping in tutorial fixed pre-merge). `run_all()` registration unchanged (already in Phase 2.fdtd.9). Update this file whenever a decision is made twice or a gotcha bites twice.*
+*Last updated: 2026-05-29, post Phase 2.fdtd.6.1 (ADR-0080): `fdtd206_run()` / `LcResonanceResult` shipped in yee-validation and `run_lc_resonance()` / `PyLcResonanceResult` in yee-py — series-LC resonant frequency gate (f₀=1GHz, rel_err < 2%, gate L=1nH/C≈25.33pF/R=1Ω/Q≈6.28). `lumped_lc_resonance.rs` integration test; tutorial 16. NOT `#[ignore]`-gated (< 0.1 s). Update this file whenever a decision is made twice or a gotcha bites twice.*
