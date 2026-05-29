@@ -240,13 +240,13 @@ already shipped as F0/F0.1/F0.2/F1.0) runs **client-side**; the *heavy* steps
 native **`yee-server`** the web client calls over HTTP, and in-process for the
 desktop app. New crates: `yee-studio` (the egui app) + `yee-server` (axum API).
 
-- **App.0 — `yee-studio` desktop skeleton.** An `eframe` native app wiring the
-  shipped light flow as stage-gated panels: spec form → synthesized g-values +
-  coupling matrix → `yee-layout` geometry preview (SVG/2-D) → `draw_sparam_with_
-  mask` ideal-response view. Calls `yee-synth`/`yee-filter`/`yee-layout`/
-  `yee-plotters` in-process. Seeded from the existing `yee-gui` panels. **Gate:**
-  launch, enter a Chebyshev BPF spec, see synthesis + layout + spec-mask views
-  update; a headless smoke test constructs the app state and renders each panel.
+- **App.0 — `yee-studio` desktop skeleton. ✅ SHIPPED** (ADR-0090, merge `338a35c`).
+  A native `eframe` app: spec-editor panel → synthesis panel (g-values, coupling
+  matrix, Qe, PASS/FAIL) → `egui_plot` |S21|-vs-spec-mask view, recomputed live.
+  `StudioState` (the flow logic) is egui-free + WASM-safe per ADR-0089 (App.1
+  reuses it); only `app.rs`/`main.rs` are native. Gate `studio_state_recompute`
+  (headless, pass+fail). Layout preview deferred (needs the F1.2 dims mapping).
+  TODO(App.1): cfg-gate `mod app` before the WASM build.
 - **App.1 — WASM web build of the light flow.** Compile the App.0 light path to
   `wasm32-unknown-unknown` via `eframe` web; deploy as a static site (CI →
   Pages). Everything through the ideal-response spec-mask view runs fully in the
@@ -336,20 +336,23 @@ build on F1.
   (`draw_sparam_with_mask` + `mask_violations`) for the Stage-6 verification view.
 - **F0.2** (ADR-0088, merge `4de1a28`): `yee filter synth --plot` — renders the
   synthesized |S21| with the spec mask overlaid (the spec→visual pipe).
+- **Filter-synthesis theory chapter** (merge `fe45016`): `docs/src/theory/filter-synthesis.md`.
+- **App.0** (ADR-0090, merge `338a35c`): `yee-studio` eframe desktop app — the
+  first product surface; spec → synthesis → spec-mask plot, live.
 
-**Final goal clarified 2026-05-29: deliver a desktop + web APP** (ADR-0089) — one
-`egui`/`eframe` codebase, native + WASM. The light flow already shipped (F0/F0.1/
-F0.2/F1.0) is WASM-safe and becomes the in-browser front-end; heavy EM goes
-behind a native `yee-server`. See §5a.
+**Final goal: a desktop + web APP** (ADR-0089) — one `egui`/`eframe` codebase,
+native + WASM. The shipped light flow (F0/F0.1/F0.2/F1.0) is WASM-safe and is the
+in-browser front-end; heavy EM goes behind a native `yee-server`. See §5a.
 
 **Two parallel fronts next:**
-- *Product (startable now — consumes only shipped light crates):* **App.0** —
-  a `yee-studio` `eframe` desktop app wiring the spec → synthesis → coupling
-  matrix → layout preview → spec-mask views as stage-gated panels (seed from
-  `yee-gui`). Then **App.1** WASM web build.
-- *Engine (toward the headline Swanson-hairpin FDTD gate):* **F1.1** — FDTD
-  coupling/Qe-extraction primitive (drive a coupled resonator pair + a singly-
-  loaded resonator through `yee-fdtd`, extract `k`/`Qe`); **F1.2** surrogate-BO
-  dimensional synthesis to the F0 `CouplingMatrix`; **F1.3** verify + spec-mask
-  gate; **F1.4** `yee-export` KiCad/Gerber. **App.2** (`yee-server`) lands once
-  F1.1+ give it EM to serve.
+- *Product:* **App.1** — WASM web build of the App.0 light path (cfg-gate
+  `yee-studio::app` first; `trunk`/`wasm-pack` static deploy).
+- *Engine (toward the Swanson-hairpin FDTD gate):* **F1.1 splits** — all FDTD
+  primitives already exist (per-cell ε_r, PEC masks, `LumpedRlcPort`, single-bin
+  DFT, decay-fit Q); the one gap is a **`Layout`→`YeeGrid` voxelizer**. So
+  **F1.1a = new `yee-voxel` crate** (rasterize a microstrip stack: ground PEC +
+  substrate ε_r slab + trace PEC; gate = correct cells, NO FDTD run — do NOT add
+  a `yee-fdtd` dep to `yee-layout`, keep it WASM-safe), then **F1.1b** = drive a
+  coupled-resonator pair, extract `k`/`Qe`. Then **F1.2** surrogate-BO dimensional
+  synthesis; **F1.3** verify + mask gate; **F1.4** `yee-export`. **App.2**
+  (`yee-server`) once F1.1+ exist.
