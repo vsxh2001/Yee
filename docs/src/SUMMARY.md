@@ -134,3 +134,4 @@
 - [ADR-0090: App.0 — yee-studio filter-design desktop app skeleton](decisions/0090-app-0-yee-studio-desktop.md)
 - [ADR-0091: Filter Phase F1.1a — yee-voxel Layout→FDTD voxelizer](decisions/0091-filter-f1-1a-yee-voxel.md)
 - [ADR-0092: App.1.0 — yee-studio WASM-prep (gate eframe shell behind a feature)](decisions/0092-app-1-0-studio-wasm-prep.md)
+- [ADR-0093: Filter Phase F1.1b.0 — coupling/Qe extraction algorithm](decisions/0093-filter-f1-1b0-coupling-extraction.md)
