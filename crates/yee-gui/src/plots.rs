@@ -230,6 +230,31 @@ pub fn smith_r_circle_points(r: f64, n: usize) -> Vec<[f64; 2]> {
     pts
 }
 
+/// Constant-VSWR circle on the Smith chart in the Γ-plane.
+///
+/// The locus of constant VSWR = (1+|Γ|)/(1−|Γ|) is a circle centred at the
+/// origin with radius ρ = (VSWR−1)/(VSWR+1) (Pozar §2.5).
+///
+/// Returns `n + 1` points forming a closed circle.  All points lie on or
+/// inside the unit disk for any VSWR > 1.
+///
+/// # Panics
+///
+/// Panics in debug builds if `vswr <= 1.0`.
+pub fn smith_vswr_circle_points(vswr: f64, n: usize) -> Vec<[f64; 2]> {
+    debug_assert!(vswr > 1.0, "smith_vswr_circle_points: vswr must be > 1.0");
+    let rho = (vswr - 1.0) / (vswr + 1.0);
+    let first = [rho, 0.0_f64];
+    let mut pts: Vec<[f64; 2]> = (0..n)
+        .map(|i| {
+            let theta = (i as f64) * std::f64::consts::TAU / (n as f64);
+            [rho * theta.cos(), rho * theta.sin()]
+        })
+        .collect();
+    pts.push(first);
+    pts
+}
+
 /// Constant-X arc on the Smith chart, clipped to the unit disk.
 ///
 /// The full constant-X circle has centre `(1, 1/x)` and radius `1/|x|`.
@@ -307,7 +332,8 @@ pub fn show_s11_db_plot(ui: &mut egui::Ui, freq_hz: &[f64], s11: &[Complex64]) {
 /// 1. The unit circle `|Γ| = 1` as a reference boundary.
 /// 2. Constant-R circles for `r ∈ [0.2, 0.5, 1.0, 2.0, 5.0]`.
 /// 3. Constant-X arcs for `x ∈ [±0.2, ±0.5, ±1.0, ±2.0, ±5.0]`.
-/// 4. One coloured line per [`SmithSeries`] in `series`.
+/// 4. VSWR circles for `VSWR ∈ [1.5, 2.0, 3.0, 5.0, 10.0]` (light blue-grey).
+/// 5. One coloured line per [`SmithSeries`] in `series`.
 ///
 /// The plot uses a locked 1:1 data aspect ratio so circles appear round, and
 /// an `egui_plot` legend so trace labels are visible.
@@ -335,6 +361,13 @@ pub fn show_smith_chart(ui: &mut egui::Ui, series: &[SmithSeries]) {
             for &x in X_VALUES {
                 let pts: PlotPoints = smith_x_arc_points(x, 256).into_iter().collect();
                 plot_ui.line(Line::new(format!("x={x}"), pts));
+            }
+
+            // 3.5. VSWR circles (light blue-grey, before data traces).
+            let vswr_colour = egui::Color32::from_rgb(180, 180, 220);
+            for &vswr in &[1.5_f64, 2.0, 3.0, 5.0, 10.0] {
+                let pts: PlotPoints = smith_vswr_circle_points(vswr, 128).into_iter().collect();
+                plot_ui.line(Line::new(format!("VSWR={vswr}"), pts).color(vswr_colour));
             }
 
             // 4. Data traces.
@@ -593,6 +626,54 @@ mod tests {
                 "point ({re},{im}) outside unit disk: |Γ|²={mag2}"
             );
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // smith_vswr_circle_points
+    // -------------------------------------------------------------------------
+
+    /// `smith_vswr_circle_points(2.0, 64)` returns exactly `n + 1 = 65` points.
+    #[test]
+    fn smith_vswr_circle_points_has_n_plus_1_points() {
+        let n = 64usize;
+        let pts = smith_vswr_circle_points(2.0, n);
+        assert_eq!(pts.len(), n + 1, "expected n+1 = {} points", n + 1);
+    }
+
+    /// Every point of a VSWR circle lies at radius ρ = (VSWR−1)/(VSWR+1).
+    #[test]
+    fn smith_vswr_circle_points_all_on_circle() {
+        for &vswr in &[1.5_f64, 2.0, 3.0, 5.0, 10.0] {
+            let rho = (vswr - 1.0) / (vswr + 1.0);
+            let pts = smith_vswr_circle_points(vswr, 128);
+            for &[re, im] in &pts {
+                let r = (re * re + im * im).sqrt();
+                assert!(
+                    (r - rho).abs() < 1e-12,
+                    "VSWR={vswr}: point ({re},{im}) has radius {r}, expected {rho}"
+                );
+            }
+        }
+    }
+
+    /// The circle is closed: first point equals last point.
+    #[test]
+    fn smith_vswr_circle_points_closes() {
+        let pts = smith_vswr_circle_points(3.0, 64);
+        assert_eq!(
+            pts.first().unwrap(),
+            pts.last().unwrap(),
+            "VSWR circle must be closed (first == last)"
+        );
+    }
+
+    /// For VSWR = 2, ρ = 1/3.  The first sample (i=0, θ=0) must be (1/3, 0).
+    #[test]
+    fn smith_vswr_circle_points_rho_for_vswr_2() {
+        let pts = smith_vswr_circle_points(2.0, 64);
+        let [x, y] = pts[0];
+        assert!((x - 1.0 / 3.0).abs() < 1e-12, "x[0] should be 1/3, got {x}");
+        assert!(y.abs() < 1e-12, "y[0] should be 0, got {y}");
     }
 
     // -------------------------------------------------------------------------

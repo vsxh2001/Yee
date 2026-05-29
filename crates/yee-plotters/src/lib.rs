@@ -651,6 +651,22 @@ fn smith_x_arc_pts(x: f64, n: usize) -> Vec<(f64, f64)> {
         .collect()
 }
 
+/// Compute sample points on the constant-VSWR circle in the Γ-plane.
+///
+/// The locus VSWR = (1+|Γ|)/(1−|Γ|) = const is a circle centred at the
+/// origin with radius ρ = (VSWR−1)/(VSWR+1) (Pozar §2.5).
+/// Returns `n + 1` points forming a closed loop (last point equals first).
+fn smith_vswr_circle_pts(vswr: f64, n: usize) -> Vec<(f64, f64)> {
+    debug_assert!(vswr > 1.0, "smith_vswr_circle_pts: vswr must be > 1.0");
+    let rho = (vswr - 1.0) / (vswr + 1.0);
+    (0..=n)
+        .map(|i| {
+            let theta = (i as f64) * std::f64::consts::TAU / (n as f64);
+            (rho * theta.cos(), rho * theta.sin())
+        })
+        .collect()
+}
+
 /// Fixed colour palette for multi-trace Smith chart plots.
 ///
 /// Eight distinct colours; traces beyond index 7 wrap around. Matches the
@@ -676,7 +692,8 @@ const SMITH_PALETTE: &[RGBColor] = &[
 /// 4. Unit circle (light grey).
 /// 5. Constant-R circles (very light grey, stroke 1).
 /// 6. Constant-X arcs (very light grey, stroke 1).
-/// 7. Data traces with legend.
+/// 7. VSWR circles for VSWR ∈ {1.5, 2, 3, 5, 10} (light blue-grey, stroke 1).
+/// 8. Data traces with legend.
 fn draw_smith_multi<DB>(
     root: &DrawingArea<DB, plotters::coord::Shift>,
     title: &str,
@@ -748,6 +765,15 @@ where
         let pts = smith_x_arc_pts(x, 256);
         chart
             .draw_series(LineSeries::new(pts, arc_style))
+            .map_err(map_render_err)?;
+    }
+
+    // VSWR circles (light blue-grey, before data traces).
+    let vswr_style = RGBColor(190, 190, 220).stroke_width(1);
+    for &vswr in &[1.5_f64, 2.0, 3.0, 5.0, 10.0] {
+        let pts = smith_vswr_circle_pts(vswr, 128);
+        chart
+            .draw_series(LineSeries::new(pts, vswr_style))
             .map_err(map_render_err)?;
     }
 
@@ -1061,6 +1087,38 @@ mod tests {
                 "point ({re}, {im}) is outside the unit disk (r²={r2})"
             );
         }
+    }
+
+    // --- smith_vswr_circle_pts tests ----------------------------------------
+
+    /// All points of `smith_vswr_circle_pts(2.0, 64)` must lie at radius
+    /// ρ = (2−1)/(2+1) = 1/3.
+    #[test]
+    fn smith_vswr_circle_pts_radius_vswr_2() {
+        let rho = 1.0_f64 / 3.0;
+        let pts = smith_vswr_circle_pts(2.0, 64);
+        for (re, im) in &pts {
+            let r = (re * re + im * im).sqrt();
+            assert!(
+                (r - rho).abs() < 1e-12,
+                "point ({re}, {im}) has radius {r}, expected {rho}"
+            );
+        }
+    }
+
+    /// `smith_vswr_circle_pts(3.0, 64)` returns `n+1 = 65` points and the
+    /// first and last points are equal within 1e-12 (closed loop).
+    #[test]
+    fn smith_vswr_circle_pts_closed() {
+        let n = 64usize;
+        let pts = smith_vswr_circle_pts(3.0, n);
+        assert_eq!(pts.len(), n + 1, "expected n+1 = {} points", n + 1);
+        assert!(
+            (pts[0].0 - pts[n].0).abs() < 1e-12 && (pts[0].1 - pts[n].1).abs() < 1e-12,
+            "circle must be closed: first={:?}, last={:?}",
+            pts[0],
+            pts[n]
+        );
     }
 
     /// `plot_smith_chart_multi` with two traces writes a non-empty SVG file.
