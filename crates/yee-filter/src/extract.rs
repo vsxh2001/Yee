@@ -51,6 +51,9 @@ pub struct CouplingExtraction {
 ///
 /// Returns `None` if `freqs_hz.len() != mag.len()`, the length is `< 5`, or
 /// fewer than two distinct interior local maxima exist (e.g. a single peak).
+///
+/// `freqs_hz` is assumed strictly increasing (a normal sweep); if the two
+/// picked peaks somehow share a frequency, `f_lo == f_hi` yields `k = 0`.
 pub fn extract_coupling(freqs_hz: &[f64], mag: &[f64]) -> Option<CouplingExtraction> {
     if freqs_hz.len() != mag.len() || mag.len() < 5 {
         return None;
@@ -118,7 +121,8 @@ pub fn extract_q_ringdown(samples: &[f64], dt_s: f64, f0_hz: f64) -> Option<f64>
             continue;
         }
         let m = samples[i].abs();
-        let is_local_max = m >= samples[i - 1].abs() && m >= samples[i + 1].abs();
+        // Strict local maximum (matches `extract_coupling`): a plateau is not a peak.
+        let is_local_max = m > samples[i - 1].abs() && m > samples[i + 1].abs();
         if is_local_max && m > 0.0 {
             ts.push(i as f64 * dt_s);
             ln_env.push(m.ln());
@@ -239,26 +243,53 @@ mod tests {
         let q = extract_q_ringdown(&samples, dt, f0).expect("decaying ring-down → Some");
         let q_expected = PI * f0 * tau;
         let rel_err = (q - q_expected).abs() / q_expected;
-        eprintln!(
-            "extract-002: Q_recovered = {:.6}, Q_expected = π·f0·τ = {:.6}, \
-             rel_err = {:.4} %",
-            q,
-            q_expected,
-            rel_err * 100.0
-        );
+        // This phase-aligned signal lands its |sample| maxima exactly on
+        // sin(π/2)=1 (40 samples/cycle), so the envelope is a perfect
+        // exp(−t/τ) and the OLS recovers τ to ~machine precision — the formula
+        // path (slope → τ=−1/slope → Q=π f0 τ) is exact here. The phase-shifted
+        // case below exercises off-peak envelope sampling at the ~% level so a
+        // wrong τ formula could not hide behind the perfect signal.
         assert!(
             rel_err <= 0.03,
-            "recovered Q = {:.6} vs expected {:.6}, rel_err = {:.4} % exceeds 3 %",
-            q,
-            q_expected,
+            "recovered Q = {q:.6} vs expected {q_expected:.6}, rel_err = {:.4} % exceeds 3 %",
             rel_err * 100.0
         );
 
-        // Negative control: a constant (no decay) → None.
+        // Phase-shifted: |sample| maxima no longer land exactly on the
+        // exponential, so this genuinely tests the envelope fit (not a perfect
+        // exp). Q must still come back within ~5 %.
+        let shifted: Vec<f64> = (0..n)
+            .map(|i| {
+                let t = i as f64 * dt;
+                (-t / tau).exp() * (2.0 * PI * f0 * t + 0.3).sin()
+            })
+            .collect();
+        let q_shift = extract_q_ringdown(&shifted, dt, f0).expect("shifted ring-down → Some");
+        let rel_err_shift = (q_shift - q_expected).abs() / q_expected;
+        assert!(
+            rel_err_shift <= 0.05,
+            "phase-shifted recovered Q = {q_shift:.6} vs expected {q_expected:.6}, \
+             rel_err = {:.4} % exceeds 5 %",
+            rel_err_shift * 100.0
+        );
+
+        // Negative control 1: a constant (no decay) → None.
         let constant = vec![1.0_f64; n];
         assert!(
             extract_q_ringdown(&constant, dt, f0).is_none(),
             "constant samples (no decay) should yield None"
+        );
+        // Negative control 2: a GROWING envelope (positive slope) → None — a
+        // more diagnostic check than the constant (exercises the slope ≥ 0 path).
+        let growing: Vec<f64> = (0..n)
+            .map(|i| {
+                let t = i as f64 * dt;
+                (t / tau).exp() * (2.0 * PI * f0 * t).sin()
+            })
+            .collect();
+        assert!(
+            extract_q_ringdown(&growing, dt, f0).is_none(),
+            "growing envelope (no decay) should yield None"
         );
     }
 }
