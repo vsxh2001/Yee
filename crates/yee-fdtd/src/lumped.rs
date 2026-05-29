@@ -41,16 +41,21 @@
 //! The struct keeps `E_z^n` as private state so [`LumpedRlcPort::correct_e`]
 //! is a *post*-correction the driver applies after the normal `update_e`.
 //!
-//! # Series RLC (Phase 2.fdtd.6 placeholder)
+//! # Series RLC (Phase 2.fdtd.6.1)
 //!
 //! The full series-RLC machinery is wired through [`LumpedRlcPort::series_rlc`]
-//! and integrated by a centred-difference scheme on the inductor current
-//! `I_L` (half-step staggered with `E_z`) and the capacitor voltage `V_C`
-//! (integer step). The series-RLC path is intentionally minimal in this
-//! sub-phase: it compiles, runs without diverging on benign inputs, and
-//! reduces to the pure resistor when `L = 0` and `C → ∞`. Quantitative
-//! validation against analytic series-RLC reflection is deferred to
-//! Phase 2.fdtd.6.1.
+//! and integrated by a Crank-Nicolson scheme on the inductor current `I_L`
+//! and the capacitor voltage `V_C`. The circuit KVL is integrated without
+//! feeding the FDTD `E_z` terminal voltage back in (one-way: circuit→field;
+//! see [`LumpedRlcPort::update_series_rlc`] for the derivation). Validated
+//! by the fdtd-206 gate (Phase 2.fdtd.6.1): LC resonance at f₀ = 1 GHz
+//! extracted within 0.05 % of the analytic 1/(2π√LC).
+//!
+//! **Validity-domain note**: the one-way coupling is correct for ring-down
+//! frequency extraction in enclosed geometries. For S-parameter ports where
+//! back-action of the field on the circuit is physically significant, the
+//! `E_z` terminal voltage must be re-coupled into the KVL — that extension
+//! is Phase 2.fdtd.6.2.
 //!
 //! # References
 //!
@@ -168,8 +173,8 @@ impl SourceWaveform {
 ///
 /// against a `Z₀`-matched line. Phase 2.fdtd.6 ships an energy-dissipation
 /// validation against an unconfined geometry (see
-/// `tests/lumped_resistor.rs`); a clean Z₀-controlled stripline-Γ check is
-/// deferred to Phase 2.fdtd.6.1 when the necessary geometry helpers land.
+/// `tests/lumped_resistor.rs`); a Z₀-controlled stripline-Γ check is
+/// a possible future extension.
 ///
 /// # Phase 2.fdtd.6 scope
 ///
@@ -290,9 +295,8 @@ impl LumpedRlcPort {
         let v_src = self.source_voltage.value(n_step, dt);
 
         let e1 = if self.inductance > 0.0 || self.capacitance.is_finite() {
-            // Full series-RLC branch (Phase 2.fdtd.6 placeholder; see module
-            // docs). Centred-difference: integrate the inductor current and
-            // capacitor voltage state variables alongside the E-update.
+            // Full series-RLC branch (Phase 2.fdtd.6.1; see module docs and
+            // update_series_rlc for the Crank-Nicolson derivation).
             self.update_series_rlc(e1_star, e0, v_src, dz, area, dt)
         } else {
             // Pure resistor with optional series EMF (the validated path).
