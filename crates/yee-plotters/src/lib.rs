@@ -26,10 +26,9 @@
 //!   ([`MaskRegion`]) forbidden regions shaded; [`mask_violations`] is the pure
 //!   pass/fail companion.
 //!
-//! The `plot_*` functions share a [`PlotConfig`] (size, title, output
+//! All public draw functions share a [`PlotConfig`] (size, title, output
 //! [`PlotFormat`]) and dispatch to either a `BitMapBackend` (PNG) or an
-//! `SVGBackend` (SVG) depending on `config.format`; [`draw_sparam_with_mask`]
-//! picks the backend from the output path extension instead.
+//! `SVGBackend` (SVG) depending on `config.format`.
 
 use std::path::Path;
 
@@ -560,9 +559,8 @@ pub fn plot_sparams_phase(
 ///   `[f_lo_hz, f_hi_hz]`.
 ///
 /// Traces are drawn on top with the shared multi-trace colour cycle and a
-/// legend. The output format (PNG or SVG) is picked from the `path` extension
-/// (`.svg` → SVG, anything else → PNG), matching the rest of the crate's
-/// raster/vector split.
+/// legend. Size, title, and output format (PNG or SVG) come from `config`,
+/// matching every other draw function in the crate.
 ///
 /// * X-axis: `"frequency (GHz)"` — values are `freqs_hz[i] / 1e9`.
 /// * Y-axis: `"|S| (dB)"`. The y-range covers all traces **and** every mask
@@ -578,7 +576,7 @@ pub fn draw_sparam_with_mask(
     freqs_hz: &[f64],
     traces: &[(&str, &[f64])],
     regions: &[MaskRegion],
-    title: &str,
+    config: &PlotConfig,
 ) -> Result<(), Error> {
     for (label, ys) in traces {
         assert_eq!(
@@ -603,20 +601,32 @@ pub fn draw_sparam_with_mask(
     let y_min = y_min_raw - y_pad;
     let y_max = y_max_raw + y_pad;
 
-    let is_svg = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("svg"));
-
-    if is_svg {
-        let root = SVGBackend::new(path, (800, 600)).into_drawing_area();
+    let size = (config.width_px, config.height_px);
+    if matches!(config.format, PlotFormat::Svg) {
+        let root = SVGBackend::new(path, size).into_drawing_area();
         draw_masked_traces(
-            &root, title, &xs_ghz, traces, regions, x_min, x_max, y_min, y_max,
+            &root,
+            &config.title,
+            &xs_ghz,
+            traces,
+            regions,
+            x_min,
+            x_max,
+            y_min,
+            y_max,
         )
     } else {
-        let root = BitMapBackend::new(path, (800, 600)).into_drawing_area();
+        let root = BitMapBackend::new(path, size).into_drawing_area();
         draw_masked_traces(
-            &root, title, &xs_ghz, traces, regions, x_min, x_max, y_min, y_max,
+            &root,
+            &config.title,
+            &xs_ghz,
+            traces,
+            regions,
+            x_min,
+            x_max,
+            y_min,
+            y_max,
         )
     }
 }
@@ -1531,11 +1541,15 @@ mod tests {
         ];
 
         let tmp = NamedTempFile::with_suffix(".png").expect("tempfile");
-        draw_sparam_with_mask(tmp.path(), &freq, &traces, &regions, "spec mask test")
+        let config = PlotConfig {
+            title: "spec mask test".into(),
+            ..PlotConfig::default()
+        };
+        draw_sparam_with_mask(tmp.path(), &freq, &traces, &regions, &config)
             .expect("draw_sparam_with_mask");
 
         assert!(tmp.path().exists(), "output PNG must exist");
         let len = fs::metadata(tmp.path()).expect("metadata").len();
-        assert!(len > 0, "PNG file must be non-empty, got {len} bytes");
+        assert!(len > 1024, "PNG file must be non-trivial, got {len} bytes");
     }
 }
