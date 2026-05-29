@@ -4,10 +4,12 @@
 //!
 //! Phase 0 wires the following subcommands:
 //!
-//! - `yee validate <mom|fdtd|fem|all> [--json]` — runs the `yee-validation`
-//!   aggregator (real mom-001 NEC-4 gate; FEM-eig-001/002/004/005 gates;
+//! - `yee validate <mom|fdtd|fem|synth|all> [--json]` — runs the
+//!   `yee-validation` aggregator (real mom-001 NEC-4 gate; FEM-eig-001/002/004/005
+//!   gates; filter-synthesis synth-001/synth-002/filt-001 gates;
 //!   Phase-deferred FDTD cases report `Skipped`). Filters by target prefix
-//!   (`mom-*`, FDTD-family, `fem-*`) and exits 1 if any included case failed.
+//!   (`mom-*`, FDTD-family, `fem-*`, `synth-*`/`filt-*`) and exits 1 if any
+//!   included case failed.
 //!   Pass `--list` to print the registered-case inventory (id, solver,
 //!   policy, description) and exit 0 **without running any solver** — instant,
 //!   unlike the default path which runs the ~7-8 min mom-001 solve. Add
@@ -63,9 +65,11 @@ enum Command {
     /// Invokes the `yee-validation` aggregator and filters by `target`
     /// prefix. `mom` includes `mom-*` cases; `fdtd` includes
     /// `cpml-*` / `ntff-*` / `dispersive-*` / `fdtd-*`; `fem` includes
-    /// `fem-eig-*` cases (FEM eigenmode suite); `all` runs the full
-    /// report. Default output is a human-readable table; pass
-    /// `--json` to emit the serialized [`yee_validation::Report`].
+    /// `fem-eig-*` cases (FEM eigenmode suite); `synth` includes the
+    /// filter-synthesis gates (`synth-*` / `filt-*`, Filter Phase F0);
+    /// `all` runs the full report. Default output is a human-readable
+    /// table; pass `--json` to emit the serialized
+    /// [`yee_validation::Report`].
     ///
     /// Exit code is non-zero iff any *included* case has status
     /// `Failed`. `Skipped` cases (Phase-deferred placeholders) do not
@@ -370,6 +374,8 @@ enum ValidateTarget {
     Fdtd,
     /// Finite-element method eigenmode suite (Phase 4).
     Fem,
+    /// Filter-synthesis gates (`synth-*` / `filt-*`, Filter Phase F0).
+    Synth,
     /// Run every available solver's validation suite.
     All,
 }
@@ -703,7 +709,8 @@ fn run_mesh(_input: &std::path::Path) -> ExitCode {
 /// in one place and matches the brief: `mom-*` for [`ValidateTarget::Mom`];
 /// `cpml-*` / `ntff-*` / `dispersive-*` / `fdtd-*` for
 /// [`ValidateTarget::Fdtd`]; `fem-*` for [`ValidateTarget::Fem`];
-/// everything for [`ValidateTarget::All`].
+/// `synth-*` / `filt-*` for [`ValidateTarget::Synth`]; everything for
+/// [`ValidateTarget::All`].
 fn case_matches_target(case_id: &str, target: ValidateTarget) -> bool {
     match target {
         ValidateTarget::All => true,
@@ -715,6 +722,7 @@ fn case_matches_target(case_id: &str, target: ValidateTarget) -> bool {
                 || case_id.starts_with("fdtd-")
         }
         ValidateTarget::Fem => case_id.starts_with("fem-"),
+        ValidateTarget::Synth => case_id.starts_with("synth-") || case_id.starts_with("filt-"),
     }
 }
 
@@ -793,6 +801,7 @@ fn run_validate_list(target: ValidateTarget, json: bool) -> ExitCode {
                 Solver::Mom => "MoM",
                 Solver::Fdtd => "FDTD",
                 Solver::Fem => "FEM",
+                Solver::Synth => "Synth",
             },
             policy: match d.policy {
                 ExecutionPolicy::Run => "Run",

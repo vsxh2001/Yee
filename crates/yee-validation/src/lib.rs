@@ -95,7 +95,9 @@ pub type Status = CaseStatus;
 /// Mirrors the `yee validate <target>` prefix routing in `yee-cli`:
 /// `mom-*` cases map to [`Solver::Mom`]; the FDTD family
 /// (`cpml-*` / `ntff-*` / `dispersive-*` / `fdtd-*`) maps to
-/// [`Solver::Fdtd`]; `fem-*` cases map to [`Solver::Fem`].
+/// [`Solver::Fdtd`]; `fem-*` cases map to [`Solver::Fem`]; the
+/// filter-synthesis family (`synth-*` / `filt-*`) maps to
+/// [`Solver::Synth`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Solver {
     /// Method-of-moments planar solver (`mom-*`).
@@ -105,6 +107,12 @@ pub enum Solver {
     Fdtd,
     /// Finite-element eigenmode suite (`fem-*`).
     Fem,
+    /// Filter-synthesis (pure-math) gates (`synth-*` / `filt-*`).
+    ///
+    /// Phase F0.1 (ADR-0085): the F0 synthesis core (`yee-synth` /
+    /// `yee-filter`) ships no EM, so these gates recompute closed-form
+    /// published references in milliseconds.
+    Synth,
 }
 
 /// How a case behaves inside [`Report::run_all`].
@@ -457,6 +465,38 @@ fn case_registry() -> Vec<(CaseDescriptor, fn() -> CaseResult)> {
                 policy: ExecutionPolicy::SkippedGateOpen,
             },
             run_fem_eig_006 as fn() -> CaseResult,
+        ),
+        // Filter Phase F0.1 (ADR-0085): the F0 synthesis gates, surfaced
+        // in the aggregator. Pure-math, ms-scale; all `Run`.
+        (
+            CaseDescriptor {
+                id: "synth-001",
+                solver: Solver::Synth,
+                description: "Chebyshev 0.5 dB N=5 prototype g-values vs published \
+                              [1.7058,1.2296,2.5408,1.2296,1.7058] (g6=1.0), <=1e-3",
+                policy: ExecutionPolicy::Run,
+            },
+            run_synth_001 as fn() -> CaseResult,
+        ),
+        (
+            CaseDescriptor {
+                id: "synth-002",
+                solver: Solver::Synth,
+                description: "Chebyshev 0.5 dB N=3 FBW=0.10 coupling: k12==k23 + Qe \
+                              vs closed form (<=1e-9)",
+                policy: ExecutionPolicy::Run,
+            },
+            run_synth_002 as fn() -> CaseResult,
+        ),
+        (
+            CaseDescriptor {
+                id: "filt-001",
+                solver: Solver::Synth,
+                description: "Chebyshev 0.5 dB bandpass synthesize + check_mask PASS \
+                              (order-5, 2 GHz, FBW=0.10)",
+                policy: ExecutionPolicy::Run,
+            },
+            run_filt_001 as fn() -> CaseResult,
         ),
     ]
 }
@@ -2638,6 +2678,256 @@ fn run_fem_eig_006() -> CaseResult {
             .into(),
         wall_time_seconds: 0.0,
         plot_paths: Vec::new(),
+    }
+}
+
+// ---------------------------------------------------------------------
+// Filter Phase F0.1 (ADR-0085): synth-001 / synth-002 / filt-001 drivers
+//
+// These recompute the F0 published-reference checks (mirroring the
+// `yee-synth` / `yee-filter` crate tests) by calling into the pure-math
+// synthesis crates and folding the pass/fail into a `CaseResult`. They
+// are `pub` so the `synth_filt_cases_registered_and_pass` integration
+// test can invoke them directly (DoD item 4); they run in microseconds
+// so calling them from a `#[test]` is cheap. All carry
+// [`ExecutionPolicy::Run`].
+// ---------------------------------------------------------------------
+
+/// Published Chebyshev 0.5 dB N=5 prototype g-values `g1..g5` (Pozar
+/// Table 8.4 / Matthaei-Young-Jones Table 4.05-2). `synth-001` reference.
+const SYNTH_001_G_REF: [f64; 5] = [1.7058, 1.2296, 2.5408, 1.2296, 1.7058];
+/// Published load termination `g_{N+1} = g6 = 1.0` for the odd-order
+/// Chebyshev N=5 prototype.
+const SYNTH_001_G_LOAD_REF: f64 = 1.0;
+/// Absolute tolerance on the `synth-001` g-values vs the published table.
+const SYNTH_001_TOL: f64 = 1e-3;
+
+/// `synth-001`: recompute the Chebyshev 0.5 dB N=5 lowpass-prototype
+/// g-values via [`yee_synth::prototype`] and compare to the published
+/// reference `[1.7058, 1.2296, 2.5408, 1.2296, 1.7058]` (`g6 = 1.0`).
+///
+/// [`CaseStatus::Passed`] iff every `g1..g5` and the load `g6` match the
+/// published value within [`SYNTH_001_TOL`]; otherwise [`CaseStatus::Failed`]
+/// with the max deviation reported in `notes`. Pure math, microsecond-scale.
+pub fn run_synth_001() -> CaseResult {
+    let id = "synth-001";
+    let description =
+        "Chebyshev 0.5 dB N=5 prototype g-values vs published table (<=1e-3)".to_string();
+    let start = Instant::now();
+
+    let proto = yee_synth::prototype(yee_synth::Approximation::Chebyshev { ripple_db: 0.5 }, 5);
+    // `proto.g` is [g0, g1, .., g5, g6], length N+2 = 7.
+    let mut max_dev = 0.0_f64;
+    let mut worst = String::new();
+    if proto.g.len() != 7 {
+        return CaseResult {
+            id: id.into(),
+            description,
+            status: CaseStatus::Failed,
+            notes: format!("prototype g-vector length {} != N+2 = 7", proto.g.len()),
+            wall_time_seconds: start.elapsed().as_secs_f64(),
+            plot_paths: Vec::new(),
+        };
+    }
+    for (k, &want) in SYNTH_001_G_REF.iter().enumerate() {
+        let got = proto.g[k + 1]; // g[0]=g0, g1 at index 1
+        let dev = (got - want).abs();
+        if dev > max_dev {
+            max_dev = dev;
+            worst = format!("g{}: got {got:.4}, want {want:.4}", k + 1);
+        }
+    }
+    let got_load = proto.g[6];
+    let load_dev = (got_load - SYNTH_001_G_LOAD_REF).abs();
+    if load_dev > max_dev {
+        max_dev = load_dev;
+        worst = format!("g6 (load): got {got_load:.4}, want {SYNTH_001_G_LOAD_REF:.4}");
+    }
+
+    let wall_time_seconds = start.elapsed().as_secs_f64();
+    if max_dev < SYNTH_001_TOL {
+        CaseResult {
+            id: id.into(),
+            description,
+            status: CaseStatus::Passed,
+            notes: format!("g-values within {SYNTH_001_TOL:.0e} (max deviation {max_dev:.2e})"),
+            wall_time_seconds,
+            plot_paths: Vec::new(),
+        }
+    } else {
+        CaseResult {
+            id: id.into(),
+            description,
+            status: CaseStatus::Failed,
+            notes: format!("max deviation {max_dev:.2e} >= {SYNTH_001_TOL:.0e} at {worst}"),
+            wall_time_seconds,
+            plot_paths: Vec::new(),
+        }
+    }
+}
+
+/// Fractional bandwidth for the `synth-002` worked example.
+const SYNTH_002_FBW: f64 = 0.10;
+/// Closed-form self-consistency tolerance for `synth-002` (spec §2.5).
+const SYNTH_002_TOL: f64 = 1e-9;
+
+/// `synth-002`: synthesize the all-pole coupling design for a Chebyshev
+/// 0.5 dB N=3 prototype at FBW = 0.10 via [`yee_synth::coupling_design`]
+/// and check the synchronous symmetry + closed-form self-consistency
+/// (spec §2.5, mirroring the `synth_002_coupling` crate test).
+///
+/// [`CaseStatus::Passed`] iff (a) `k12 == k23` and `Qe_in == Qe_out`
+/// (synchronous symmetry, ≤ [`SYNTH_002_TOL`]) and (b) `k`/`Qe` match the
+/// closed form `k = FBW/√(g_i g_{i+1})`, `Qe = g0·g1/FBW` recomputed in
+/// the driver (≤ [`SYNTH_002_TOL`]). Otherwise [`CaseStatus::Failed`].
+pub fn run_synth_002() -> CaseResult {
+    let id = "synth-002";
+    let description =
+        "Chebyshev 0.5 dB N=3 FBW=0.10 coupling: symmetry + closed form (<=1e-9)".to_string();
+    let start = Instant::now();
+
+    let proto = yee_synth::prototype(yee_synth::Approximation::Chebyshev { ripple_db: 0.5 }, 3);
+    let design = yee_synth::coupling_design(&proto, SYNTH_002_FBW);
+    let g = &proto.g; // [g0, g1, g2, g3, g4]
+
+    let mut failures: Vec<String> = Vec::new();
+
+    if design.k.len() != 2 {
+        failures.push(format!(
+            "k must have N-1 = 2 entries, got {}",
+            design.k.len()
+        ));
+    } else {
+        // Synchronous symmetry.
+        let k_sym = (design.k[0] - design.k[1]).abs();
+        if k_sym > SYNTH_002_TOL {
+            failures.push(format!(
+                "k12 ({}) != k23 ({}), |Δ|={k_sym:.2e}",
+                design.k[0], design.k[1]
+            ));
+        }
+        // Closed-form self-consistency: k_{i,i+1} = FBW / sqrt(g_i g_{i+1}).
+        let k12 = SYNTH_002_FBW / (g[1] * g[2]).sqrt();
+        let k23 = SYNTH_002_FBW / (g[2] * g[3]).sqrt();
+        if (design.k[0] - k12).abs() > SYNTH_002_TOL {
+            failures.push(format!("k12 mismatch vs §2.5: {} != {k12}", design.k[0]));
+        }
+        if (design.k[1] - k23).abs() > SYNTH_002_TOL {
+            failures.push(format!("k23 mismatch vs §2.5: {} != {k23}", design.k[1]));
+        }
+    }
+
+    let qe_sym = (design.qe_in - design.qe_out).abs();
+    if qe_sym > SYNTH_002_TOL {
+        failures.push(format!(
+            "Qe_in ({}) != Qe_out ({}), |Δ|={qe_sym:.2e}",
+            design.qe_in, design.qe_out
+        ));
+    }
+    let qe_in = g[0] * g[1] / SYNTH_002_FBW;
+    let qe_out = g[3] * g[4] / SYNTH_002_FBW;
+    if (design.qe_in - qe_in).abs() > SYNTH_002_TOL {
+        failures.push(format!(
+            "Qe_in mismatch vs §2.5: {} != {qe_in}",
+            design.qe_in
+        ));
+    }
+    if (design.qe_out - qe_out).abs() > SYNTH_002_TOL {
+        failures.push(format!(
+            "Qe_out mismatch vs §2.5: {} != {qe_out}",
+            design.qe_out
+        ));
+    }
+
+    let wall_time_seconds = start.elapsed().as_secs_f64();
+    if failures.is_empty() {
+        CaseResult {
+            id: id.into(),
+            description,
+            status: CaseStatus::Passed,
+            notes: format!(
+                "k12=k23={:.6}, Qe_in=Qe_out={:.4} (symmetric, closed-form within {SYNTH_002_TOL:.0e})",
+                design.k[0], design.qe_in
+            ),
+            wall_time_seconds,
+            plot_paths: Vec::new(),
+        }
+    } else {
+        CaseResult {
+            id: id.into(),
+            description,
+            status: CaseStatus::Failed,
+            notes: failures.join("; "),
+            wall_time_seconds,
+            plot_paths: Vec::new(),
+        }
+    }
+}
+
+/// `filt-001`: synthesize a satisfiable Chebyshev 0.5 dB bandpass
+/// (order 5, centre 2 GHz, FBW = 0.10) via [`yee_filter::synthesize`],
+/// sweep the band, and grade it against its own [`yee_filter::SpecMask`]
+/// with [`yee_filter::check_mask`] (mirroring `filt_001_mask`).
+///
+/// [`CaseStatus::Passed`] iff the mask report passes (passband ripple ≤
+/// 0.5 dB, in-band return loss ≥ 9 dB, and the 2.4 GHz stopband point
+/// ≥ 40 dB down). Otherwise [`CaseStatus::Failed`] with the mask
+/// failures in `notes`.
+pub fn run_filt_001() -> CaseResult {
+    let id = "filt-001";
+    let description =
+        "Chebyshev 0.5 dB bandpass synthesize + check_mask PASS (order-5, 2 GHz)".to_string();
+    let start = Instant::now();
+
+    let spec = yee_filter::FilterSpec {
+        response: yee_filter::Response::Bandpass,
+        approximation: yee_filter::Approximation::Chebyshev { ripple_db: 0.5 },
+        f0_hz: 2.0e9,
+        fbw: 0.10,
+        order: Some(5),
+        z0_ohm: 50.0,
+        mask: yee_filter::SpecMask {
+            passband_ripple_db: 0.5,
+            return_loss_db: 9.0,
+            // 2.4 GHz maps to Ω ≈ 3.67; an order-5 0.5 dB Chebyshev rejects
+            // it strongly. Mirrors the `filt_001_mask` satisfiable case.
+            stopband: vec![(2.4e9, 40.0)],
+        },
+    };
+    let proj = yee_filter::synthesize(&spec);
+
+    // Dense passband sweep (601 pts across 1.85–2.15 GHz) — matches the
+    // crate test's `swept_band`.
+    let lo = 1.85e9;
+    let hi = 2.15e9;
+    let steps = 601usize;
+    let freqs: Vec<f64> = (0..steps)
+        .map(|i| lo + (hi - lo) * (i as f64) / ((steps - 1) as f64))
+        .collect();
+    let report = yee_filter::check_mask(&proj, &freqs);
+
+    let wall_time_seconds = start.elapsed().as_secs_f64();
+    if report.pass {
+        CaseResult {
+            id: id.into(),
+            description,
+            status: CaseStatus::Passed,
+            notes: format!(
+                "mask PASS: ripple={:.3} dB (<=0.5), RL={:.3} dB (>=9), stopband met",
+                report.worst_passband_ripple_db, report.worst_return_loss_db
+            ),
+            wall_time_seconds,
+            plot_paths: Vec::new(),
+        }
+    } else {
+        CaseResult {
+            id: id.into(),
+            description,
+            status: CaseStatus::Failed,
+            notes: format!("mask FAIL: {}", report.failures.join("; ")),
+            wall_time_seconds,
+            plot_paths: Vec::new(),
+        }
     }
 }
 

@@ -6705,10 +6705,12 @@ dependencies = [
  "yee-design",
  "yee-fdtd",
  "yee-fem",
+ "yee-filter",
  "yee-io",
  "yee-mesh",
  "yee-mom",
  "yee-plotters",
+ "yee-synth",
 ]
 
 [[package]]
