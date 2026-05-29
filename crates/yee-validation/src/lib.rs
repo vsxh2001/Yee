@@ -55,11 +55,15 @@
 //! empirical `Im(Z) = 0` crossing and the wave-port edge-feed
 //! adoption are deferred to Phase 1.1.1.x / 1.3.1.x.
 //!
-//! The FDTD cases (`cpml-001`, `ntff-001`, `dispersive-001`) continue
-//! to report [`CaseStatus::Skipped`] until their test fixtures are
-//! promoted out of `#[cfg(test)]` modules; that work is Phase
-//! 1.validation.2 territory and explicitly out of lane for this
-//! landing.
+//! The FDTD cases (`cpml-001`, `ntff-001`, `dispersive-001`) run real
+//! physics and report [`CaseStatus::Passed`]/[`CaseStatus::Failed`] —
+//! their fixtures were promoted out of `#[cfg(test)]` modules in Phase
+//! 1.validation.2. The wall-time-gated FDTD cases (`fdtd-201`,
+//! `fdtd-201-x`, `fdtd-203`, `fdtd-204`) and `fem-eig-003` register
+//! [`CaseStatus::Skipped`] in the default path to keep it fast; run
+//! their strict gates via `cargo test -p yee-fdtd --release --
+//! --include-ignored` (and the named FEM test). Each case's policy is
+//! exposed without execution via [`list_cases`] / `yee validate --list`.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
