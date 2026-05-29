@@ -26,6 +26,33 @@ fn yee_validate_mom_json_runs() {
     assert!(stdout.contains("\"mom-001\""));
 }
 
+/// `yee validate --list` must print the registered-case inventory and
+/// exit 0 **without running any solver**, so this test is fast and NOT
+/// `#[ignore]`'d. Asserts the canonical `mom-001` and `fem-eig-006`
+/// ids appear in the table.
+#[test]
+fn yee_validate_list_runs() {
+    let output = Command::new(env!("CARGO_BIN_EXE_yee"))
+        .args(["validate", "--list"])
+        .output()
+        .expect("invoke yee");
+
+    assert!(
+        output.status.success(),
+        "yee validate --list exited non-zero; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("mom-001"),
+        "--list output missing mom-001; got: {stdout}"
+    );
+    assert!(
+        stdout.contains("fem-eig-006"),
+        "--list output missing fem-eig-006; got: {stdout}"
+    );
+}
+
 #[test]
 fn yee_validate_help_lists_target() {
     let output = Command::new(env!("CARGO_BIN_EXE_yee"))

@@ -86,6 +86,65 @@ pub enum CaseStatus {
 /// without coupling to the historical "Case" prefix.
 pub type Status = CaseStatus;
 
+/// Solver family a validation case belongs to.
+///
+/// Mirrors the `yee validate <target>` prefix routing in `yee-cli`:
+/// `mom-*` cases map to [`Solver::Mom`]; the FDTD family
+/// (`cpml-*` / `ntff-*` / `dispersive-*` / `fdtd-*`) maps to
+/// [`Solver::Fdtd`]; `fem-*` cases map to [`Solver::Fem`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum Solver {
+    /// Method-of-moments planar solver (`mom-*`).
+    Mom,
+    /// Finite-difference time-domain solver (`cpml-*` / `ntff-*` /
+    /// `dispersive-*` / `fdtd-*`).
+    Fdtd,
+    /// Finite-element eigenmode suite (`fem-*`).
+    Fem,
+}
+
+/// How a case behaves inside [`Report::run_all`].
+///
+/// This is a **static, human-maintained label** describing the
+/// case's execution policy, not a measured outcome — `--list` reports
+/// policy (run vs why-skipped), never pass/fail, because it executes
+/// no solver. The label is kept truthful by a doc-comment contract
+/// plus a unit test asserting the `Skipped*` cases really do return
+/// [`CaseStatus::Skipped`] from their (fast) registry runners.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum ExecutionPolicy {
+    /// Executed on every `run_all()`; its pass/fail counts toward
+    /// [`Report::has_failures`].
+    Run,
+    /// Registered [`CaseStatus::Skipped`] to keep the default
+    /// `yee validate` path fast; the strict gate runs via a named
+    /// `#[ignore]`'d test (e.g. `fem-eig-003` ~31 min, `fdtd-204`
+    /// ~5–15 min).
+    SkippedWallTime,
+    /// Registered [`CaseStatus::Skipped`] because the gate is open /
+    /// deferred to a future phase (e.g. `fem-eig-006` `|S11|≈0.955`,
+    /// ADR-0070).
+    SkippedGateOpen,
+}
+
+/// Non-executing metadata for one registered validation case.
+///
+/// Produced by [`list_cases`] without invoking any solver. Each
+/// descriptor is paired with its executing runner in the single-source
+/// `case_registry`, so the listed inventory provably matches what
+/// [`Report::run_all`] executes (no metadata drift).
+#[derive(Debug, Clone, Serialize)]
+pub struct CaseDescriptor {
+    /// Stable identifier (e.g. `mom-001`, `fem-eig-006`).
+    pub id: &'static str,
+    /// Solver family the case belongs to.
+    pub solver: Solver,
+    /// Human-readable one-line description.
+    pub description: &'static str,
+    /// Execution policy inside [`Report::run_all`] (run vs why-skipped).
+    pub policy: ExecutionPolicy,
+}
+
 /// Result row for a single validation case.
 #[derive(Debug, Clone, Serialize)]
 pub struct CaseResult {
@@ -129,27 +188,13 @@ impl Report {
     /// The remaining FDTD cases are Phase deferrals; see the crate-level
     /// documentation for the full status of each.
     pub fn run_all() -> Report {
-        let cases = vec![
-            run_mom_001(),
-            run_mom_002(),
-            run_mom_003(),
-            run_cpml_001(),
-            run_ntff_001(),
-            run_dispersive_001(),
-            run_fdtd_201_cavity_resonance(),
-            run_fdtd_201x_cavity_higher_mode(),
-            run_fdtd_202_lossy_cavity_q(),
-            run_fdtd_203_dipole_pattern(),
-            run_fdtd_204(),
-            run_fdtd_205(),
-            run_fdtd_206_lumped_lc_resonance(),
-            run_fem_eig_001(),
-            run_fem_eig_002(),
-            run_fem_eig_003(),
-            run_fem_eig_004(),
-            run_fem_eig_005(),
-            run_fem_eig_006(),
-        ];
+        // Single source of truth: every case is declared exactly once in
+        // `case_registry()`. Here we map each registered runner through
+        // execution; `list_cases()` maps the same registry to descriptors
+        // without invoking any runner. The produced `cases` Vec is
+        // order-for-order and content-for-content identical to the prior
+        // hand-written `vec![run_mom_001(), …]` literal.
+        let cases = case_registry().into_iter().map(|(_, f)| f()).collect();
 
         Report {
             generated_at: chrono_iso_now(),
@@ -209,6 +254,217 @@ impl Report {
 /// Prefer [`Report::run_all`] in new code.
 pub fn run_all() -> Report {
     Report::run_all()
+}
+
+/// Single source of truth for the registered validation cases.
+///
+/// Each entry pairs a non-executing [`CaseDescriptor`] with the
+/// executing `run_*` wrapper that produces its [`CaseResult`]. Both
+/// [`Report::run_all`] (which maps the runners through execution) and
+/// [`list_cases`] (which maps to descriptors only) derive from this one
+/// list, so the listed inventory cannot drift from what `run_all()`
+/// actually executes.
+///
+/// Order matches the historical `run_all()` literal exactly; do not
+/// reorder without auditing every downstream consumer of the report's
+/// case ordering. The `as fn() -> CaseResult` coercion turns each
+/// zero-capture wrapper into a plain function pointer so they can be
+/// stored uniformly alongside their descriptors.
+///
+/// Each descriptor's [`ExecutionPolicy`] is authored to match its
+/// wrapper's real behaviour: [`ExecutionPolicy::Run`] for wrappers that
+/// invoke a driver and propagate its status; [`ExecutionPolicy::SkippedWallTime`]
+/// for wrappers hard-coding [`CaseStatus::Skipped`] to keep the default
+/// path fast; [`ExecutionPolicy::SkippedGateOpen`] for wrappers
+/// hard-coding `Skipped` because the gate is open/deferred.
+fn case_registry() -> Vec<(CaseDescriptor, fn() -> CaseResult)> {
+    vec![
+        (
+            CaseDescriptor {
+                id: "mom-001",
+                solver: Solver::Mom,
+                description: "Half-wave dipole impedance vs NEC-4 87 + j41 Ohm \
+                              (24x176 cylinder mesh, ~7-8 min release)",
+                policy: ExecutionPolicy::Run,
+            },
+            run_mom_001 as fn() -> CaseResult,
+        ),
+        (
+            CaseDescriptor {
+                id: "mom-002",
+                solver: Solver::Mom,
+                description: "50 Ohm microstrip Z0 on FR-4, half-wave resonator at 1 GHz \
+                              (Sommerfeld DCIM + TEM-smoothed port, loose band)",
+                policy: ExecutionPolicy::Run,
+            },
+            run_mom_002 as fn() -> CaseResult,
+        ),
+        (
+            CaseDescriptor {
+                id: "mom-003",
+                solver: Solver::Mom,
+                description: "2.4 GHz rectangular patch on FR-4 (Balanis 14-x, \
+                              Sommerfeld DCIM + TEM-smoothed port, loose band)",
+                policy: ExecutionPolicy::Run,
+            },
+            run_mom_003 as fn() -> CaseResult,
+        ),
+        (
+            CaseDescriptor {
+                id: "cpml-001",
+                solver: Solver::Fdtd,
+                description: "CPML attenuates >= 30 dB vs PEC (50^3 x 300 steps, Roden-Gedney)",
+                policy: ExecutionPolicy::Run,
+            },
+            run_cpml_001 as fn() -> CaseResult,
+        ),
+        (
+            CaseDescriptor {
+                id: "ntff-001",
+                solver: Solver::Fdtd,
+                description: "NTFF broadside/endfire null >= 20 dB (E_z dipole, 50^3 x 2000 steps)",
+                policy: ExecutionPolicy::Run,
+            },
+            run_ntff_001 as fn() -> CaseResult,
+        ),
+        (
+            CaseDescriptor {
+                id: "dispersive-001",
+                solver: Solver::Fdtd,
+                description: "Drude slab Fresnel reflection within 20% \
+                              (80^3 x 800 steps, DFT at 10 GHz)",
+                policy: ExecutionPolicy::Run,
+            },
+            run_dispersive_001 as fn() -> CaseResult,
+        ),
+        (
+            CaseDescriptor {
+                id: "fdtd-201",
+                solver: Solver::Fdtd,
+                description: "Rectangular PEC cavity TE101 resonant frequency (FDTD DFT scan)",
+                policy: ExecutionPolicy::SkippedWallTime,
+            },
+            run_fdtd_201_cavity_resonance as fn() -> CaseResult,
+        ),
+        (
+            CaseDescriptor {
+                id: "fdtd-201-x",
+                solver: Solver::Fdtd,
+                description: "Rectangular PEC cavity TE201 higher-mode resonant frequency (FDTD)",
+                policy: ExecutionPolicy::SkippedWallTime,
+            },
+            run_fdtd_201x_cavity_higher_mode as fn() -> CaseResult,
+        ),
+        (
+            CaseDescriptor {
+                id: "fdtd-202",
+                solver: Solver::Fdtd,
+                description: "Lossy-cavity Q-factor ring-down (CA/CB, Q ~ 20, +-5%)",
+                policy: ExecutionPolicy::Run,
+            },
+            run_fdtd_202_lossy_cavity_q as fn() -> CaseResult,
+        ),
+        (
+            CaseDescriptor {
+                id: "fdtd-203",
+                solver: Solver::Fdtd,
+                description: "FDTD short-dipole sin-theta NTFF radiation pattern (Balanis 4.2)",
+                policy: ExecutionPolicy::SkippedWallTime,
+            },
+            run_fdtd_203_dipole_pattern as fn() -> CaseResult,
+        ),
+        (
+            CaseDescriptor {
+                id: "fdtd-204",
+                solver: Solver::Fdtd,
+                description: "TF/SF Fresnel transmission eps_r=2.2 slab, 80^3 x 600 steps, gate <=5%",
+                policy: ExecutionPolicy::SkippedWallTime,
+            },
+            run_fdtd_204 as fn() -> CaseResult,
+        ),
+        (
+            CaseDescriptor {
+                id: "fdtd-205",
+                solver: Solver::Fdtd,
+                description: "Ohmic skin-depth spatial penetration (CA/CB E-update, Griffiths 9.4.1)",
+                policy: ExecutionPolicy::Run,
+            },
+            run_fdtd_205 as fn() -> CaseResult,
+        ),
+        (
+            CaseDescriptor {
+                id: "fdtd-206",
+                solver: Solver::Fdtd,
+                description: "Lumped series-LC resonant frequency, gate <2% (Pozar 2.4, Taflove 15.10)",
+                policy: ExecutionPolicy::Run,
+            },
+            run_fdtd_206_lumped_lc_resonance as fn() -> CaseResult,
+        ),
+        (
+            CaseDescriptor {
+                id: "fem-eig-001",
+                solver: Solver::Fem,
+                description: "WR-90 rectangular cavity TE101 eigenmode (FEM, ~7 s release)",
+                policy: ExecutionPolicy::Run,
+            },
+            run_fem_eig_001 as fn() -> CaseResult,
+        ),
+        (
+            CaseDescriptor {
+                id: "fem-eig-002",
+                solver: Solver::Fem,
+                description: "Lossy SiO2 cavity dispersive TE101 eigenmode (FEM)",
+                policy: ExecutionPolicy::Run,
+            },
+            run_fem_eig_002 as fn() -> CaseResult,
+        ),
+        (
+            CaseDescriptor {
+                id: "fem-eig-003",
+                solver: Solver::Fem,
+                description: "WR-90 stub + CFS-PML absorption floor, 50-pt sweep (FEM, ~31 min)",
+                policy: ExecutionPolicy::SkippedWallTime,
+            },
+            run_fem_eig_003 as fn() -> CaseResult,
+        ),
+        (
+            CaseDescriptor {
+                id: "fem-eig-004",
+                solver: Solver::Fem,
+                description: "WR-90 two-port thru-line |S21|/|S11|/reciprocity (FEM)",
+                policy: ExecutionPolicy::Run,
+            },
+            run_fem_eig_004 as fn() -> CaseResult,
+        ),
+        (
+            CaseDescriptor {
+                id: "fem-eig-005",
+                solver: Solver::Fem,
+                description: "WR-90 T-junction 3-port passivity + reciprocity (FEM)",
+                policy: ExecutionPolicy::Run,
+            },
+            run_fem_eig_005 as fn() -> CaseResult,
+        ),
+        (
+            CaseDescriptor {
+                id: "fem-eig-006",
+                solver: Solver::Fem,
+                description: "High-aspect WR-90 wave-port |S11| < 0.1 (FEM, gate open ~0.955)",
+                policy: ExecutionPolicy::SkippedGateOpen,
+            },
+            run_fem_eig_006 as fn() -> CaseResult,
+        ),
+    ]
+}
+
+/// All registered cases as non-executing descriptors.
+///
+/// Derived from the same `case_registry()` that [`Report::run_all`]
+/// executes, so the listed inventory matches the executed set by
+/// construction. **No solver is invoked** — this is the engine behind
+/// `yee validate --list`.
+pub fn list_cases() -> Vec<CaseDescriptor> {
+    case_registry().into_iter().map(|(d, _)| d).collect()
 }
 
 fn chrono_iso_now() -> String {
@@ -5251,6 +5507,62 @@ mod tests {
     fn status_alias_resolves_to_case_status() {
         let s: Status = Status::Passed;
         assert_eq!(s, CaseStatus::Passed);
+    }
+
+    /// Policy/behaviour contract for the `Skipped*`-policy cases: every
+    /// descriptor tagged [`ExecutionPolicy::SkippedWallTime`] or
+    /// [`ExecutionPolicy::SkippedGateOpen`] in the registry must have a
+    /// runner that actually returns [`CaseStatus::Skipped`]. This keeps
+    /// the static `policy` label from drifting away from the runner's
+    /// real behaviour (the drift risk ADR-0082 calls out).
+    ///
+    /// `mom-001` is excluded — it is the only `Run`-policy case in the
+    /// registry that is slow, and runners for `Skipped*` cases are all
+    /// fast by construction (they return a hard-coded `Skipped` without
+    /// touching a solver), so iterating them here is cheap. The
+    /// `fem-eig-006` `SkippedGateOpen` runner and the `fdtd-201`
+    /// `SkippedWallTime` runner are exercised by this loop.
+    #[test]
+    fn skipped_policy_runners_return_skipped() {
+        let registry = case_registry();
+        let mut saw_gate_open = false;
+        let mut saw_wall_time = false;
+        for (descriptor, runner) in registry {
+            match descriptor.policy {
+                ExecutionPolicy::SkippedWallTime | ExecutionPolicy::SkippedGateOpen => {
+                    // Skipped* runners are hard-coded `Skipped` no-ops —
+                    // invoking them does not run any solver.
+                    let result = runner();
+                    assert_eq!(
+                        result.status,
+                        CaseStatus::Skipped,
+                        "registry case {} has a Skipped* policy but its runner returned {:?}",
+                        descriptor.id,
+                        result.status
+                    );
+                    if descriptor.policy == ExecutionPolicy::SkippedGateOpen {
+                        saw_gate_open = true;
+                    } else {
+                        saw_wall_time = true;
+                    }
+                }
+                ExecutionPolicy::Run => {}
+            }
+        }
+        // Guard against the registry losing its representative skipped
+        // cases (fem-eig-006 gate-open, fdtd-201 wall-time).
+        assert!(saw_gate_open, "expected at least one SkippedGateOpen case");
+        assert!(saw_wall_time, "expected at least one SkippedWallTime case");
+    }
+
+    /// `list_cases()` is derived from the same `case_registry()` that
+    /// `run_all()` executes, so the descriptor ids (in order) must equal
+    /// the registry ids (in order). Verified without running `run_all()`.
+    #[test]
+    fn list_cases_ids_match_registry_order() {
+        let registry_ids: Vec<&str> = case_registry().into_iter().map(|(d, _)| d.id).collect();
+        let listed_ids: Vec<&str> = list_cases().into_iter().map(|d| d.id).collect();
+        assert_eq!(listed_ids, registry_ids);
     }
 
     /// One-shot measurement helper: prints the empirical `Z_in` for the
