@@ -22,7 +22,7 @@ use egui::Color32;
 use egui_plot::{Legend, Line, Plot, PlotPoints, Polygon};
 
 use crate::{MaskRegionView, StudioState};
-use yee_synth::Approximation;
+use yee_filter::Approximation;
 
 /// Top-level application state: the headless [`StudioState`] plus a little UI
 /// scratch (the editable ripple value when the approximation is Chebyshev).
