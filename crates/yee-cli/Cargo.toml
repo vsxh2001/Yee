@@ -29,6 +29,7 @@ yee-validation = { path = "../yee-validation", version = "0.0.0" }
 yee-design  = { workspace = true }
 yee-synth   = { workspace = true }
 yee-filter  = { workspace = true }
+yee-layout  = { workspace = true }
 num-complex = { workspace = true }
 clap        = { workspace = true }
 clap_complete = "4"

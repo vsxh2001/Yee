@@ -6517,6 +6517,7 @@ dependencies = [
  "yee-fdtd",
  "yee-filter",
  "yee-io",
+ "yee-layout",
  "yee-mesh",
  "yee-mom",
  "yee-plotters",
