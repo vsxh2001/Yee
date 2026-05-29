@@ -123,3 +123,4 @@
 - [ADR-0080: fdtd-206 lumped series-LC resonant frequency gate](decisions/0080-fdtd-206-lc-resonance.md)
 - [ADR-0081: Phase 1.gui.6 VSWR circles on the Smith chart](decisions/0081-phase-1-gui-6-vswr-circles.md)
 - [ADR-0082: Phase 1.validation.4 `yee validate --list` registered-case inventory](decisions/0082-phase-1-validation-4-validate-list.md)
+- [ADR-0083: Phase 1.validation.5 `yee validate --list --json` machine-readable inventory](decisions/0083-phase-1-validation-5-list-json.md)
