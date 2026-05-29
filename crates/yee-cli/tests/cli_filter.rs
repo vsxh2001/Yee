@@ -60,6 +60,40 @@ fn yee_filter_synth_passes_and_writes_touchstone() {
 }
 
 #[test]
+fn yee_filter_synth_plot_writes_png() {
+    // `--plot` renders the |S21| response with the spec mask overlaid (no EM).
+    let out = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cli_filter_cheb_bpf.png");
+    let s2p = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cli_filter_plot.s2p");
+    let _ = std::fs::remove_file(&out);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_yee"))
+        .args(["filter", "synth"])
+        .arg(fixture())
+        .arg("--output")
+        .arg(&s2p)
+        .arg("--plot")
+        .arg(&out)
+        .output()
+        .expect("invoke yee");
+
+    assert!(
+        output.status.success(),
+        "yee filter synth --plot exited non-zero; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("wrote plot"),
+        "stdout missing 'wrote plot'"
+    );
+    assert!(out.exists(), "plot {} was not written", out.display());
+    let len = std::fs::metadata(&out).expect("plot metadata").len();
+    assert!(len > 1024, "plot PNG must be non-trivial, got {len} bytes");
+
+    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_file(&s2p);
+}
+
+#[test]
 fn yee_filter_help_lists_synth() {
     let output = Command::new(env!("CARGO_BIN_EXE_yee"))
         .args(["filter", "--help"])

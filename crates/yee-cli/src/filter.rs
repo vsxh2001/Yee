@@ -13,6 +13,7 @@ use std::process::ExitCode;
 
 use yee_filter::{FilterSpec, check_mask, ideal_response, synthesize};
 use yee_io::touchstone::{File, Format, FreqUnit};
+use yee_plotters::{MaskKind, MaskRegion, PlotConfig, PlotFormat, draw_sparam_with_mask};
 
 /// Number of points in the response sweep written to the Touchstone file.
 const SWEEP_POINTS: usize = 401;
@@ -20,8 +21,8 @@ const SWEEP_POINTS: usize = 401;
 /// `f0·(1 ± SPAN·FBW/2)` keeps a wide skirt around the passband.
 const SPAN_MULT: f64 = 6.0;
 
-/// Run `yee filter synth <spec> [--output <out.s2p>]`.
-pub fn run_synth(spec_path: &Path, output: Option<&Path>) -> Result<ExitCode> {
+/// Run `yee filter synth <spec> [--output <out.s2p>] [--plot <out.png>]`.
+pub fn run_synth(spec_path: &Path, output: Option<&Path>, plot: Option<&Path>) -> Result<ExitCode> {
     let text = std::fs::read_to_string(spec_path)
         .with_context(|| format!("failed to read filter spec {}", spec_path.display()))?;
     let spec: FilterSpec = toml::from_str(&text)
@@ -86,6 +87,32 @@ pub fn run_synth(spec_path: &Path, output: Option<&Path>) -> Result<ExitCode> {
         .with_context(|| format!("failed to write Touchstone {}", out_path.display()))?;
     println!("  wrote Touchstone: {}", out_path.display());
 
+    // ---- optional spec-mask plot -----------------------------------------
+    if let Some(plot_path) = plot {
+        let s21_db: Vec<f64> = s21
+            .iter()
+            .map(|z| 20.0 * z.norm().max(1e-12).log10())
+            .collect();
+        let regions = spec_mask_regions(&spec);
+        let format = if plot_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("svg"))
+        {
+            PlotFormat::Svg
+        } else {
+            PlotFormat::Png
+        };
+        let cfg = PlotConfig {
+            title: format!("{:?} filter |S21| vs spec mask", spec.approximation),
+            format,
+            ..PlotConfig::default()
+        };
+        draw_sparam_with_mask(plot_path, &freqs, &[("S21", &s21_db)], &regions, &cfg)
+            .map_err(|e| anyhow::anyhow!("failed to write plot {}: {e}", plot_path.display()))?;
+        println!("  wrote plot: {}", plot_path.display());
+    }
+
     if report.pass {
         println!("VERDICT: PASS");
         Ok(ExitCode::SUCCESS)
@@ -129,4 +156,62 @@ fn write_s2p(path: &Path, z0: f64, freqs: &[f64], s21: &[Complex64]) -> yee_io::
         comments: vec![" yee filter synth — ideal closed-form response".to_string()],
     };
     yee_io::touchstone::write(path, &file)
+}
+
+/// Map a [`FilterSpec`]'s spec mask to |S21| forbidden regions for the plot:
+/// a passband `Floor` at `−passband_ripple_db` over `[f0·(1−fbw/2), f0·(1+fbw/2)]`,
+/// and a `Ceiling` at `−reject` over a ±2 % band around each stopband point.
+fn spec_mask_regions(spec: &FilterSpec) -> Vec<MaskRegion> {
+    let f1 = spec.f0_hz * (1.0 - spec.fbw / 2.0);
+    let f2 = spec.f0_hz * (1.0 + spec.fbw / 2.0);
+    let mut regions = vec![MaskRegion {
+        f_lo_hz: f1,
+        f_hi_hz: f2,
+        kind: MaskKind::Floor,
+        limit_db: -spec.mask.passband_ripple_db,
+    }];
+    for &(f_s, reject_db) in &spec.mask.stopband {
+        regions.push(MaskRegion {
+            f_lo_hz: f_s * 0.98,
+            f_hi_hz: f_s * 1.02,
+            kind: MaskKind::Ceiling,
+            limit_db: -reject_db,
+        });
+    }
+    regions
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use yee_filter::{Approximation, Response, SpecMask};
+
+    #[test]
+    fn spec_mask_regions_passband_floor_and_stopband_ceiling() {
+        let spec = FilterSpec {
+            response: Response::Bandpass,
+            approximation: Approximation::Chebyshev { ripple_db: 0.5 },
+            f0_hz: 2.0e9,
+            fbw: 0.10,
+            order: Some(5),
+            z0_ohm: 50.0,
+            mask: SpecMask {
+                passband_ripple_db: 0.5,
+                return_loss_db: 10.0,
+                stopband: vec![(2.4e9, 40.0)],
+            },
+        };
+        let r = spec_mask_regions(&spec);
+        assert_eq!(r.len(), 2, "one passband Floor + one stopband Ceiling");
+
+        assert_eq!(r[0].kind, MaskKind::Floor);
+        assert!((r[0].f_lo_hz - 1.9e9).abs() < 1.0, "passband lo edge");
+        assert!((r[0].f_hi_hz - 2.1e9).abs() < 1.0, "passband hi edge");
+        assert!((r[0].limit_db - (-0.5)).abs() < 1e-9, "floor at -ripple");
+
+        assert_eq!(r[1].kind, MaskKind::Ceiling);
+        assert!((r[1].f_lo_hz - 2.352e9).abs() < 1.0, "stopband lo (-2%)");
+        assert!((r[1].f_hi_hz - 2.448e9).abs() < 1.0, "stopband hi (+2%)");
+        assert!((r[1].limit_db - (-40.0)).abs() < 1e-9, "ceiling at -reject");
+    }
 }
