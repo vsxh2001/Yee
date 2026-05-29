@@ -1,9 +1,11 @@
-//! `yee filter synth` handler (Filter Phase F0).
+//! `yee filter synth` handler (Filter Phase F0 + F1.2.0).
 //!
 //! Parses a [`yee_filter::FilterSpec`] TOML, synthesizes the lowpass prototype
 //! and all-pole coupling matrix, sweeps the closed-form ideal response, writes
-//! the S-parameters as a Touchstone `.s2p` via `yee-io`, and prints the
-//! spec-mask verdict. Exit 0 on PASS, 1 on FAIL.
+//! the S-parameters as a Touchstone `.s2p` via `yee-io`, prints the spec-mask
+//! verdict, and (F1.2.0) emits the physical edge-coupled microstrip dimensions
+//! — optionally writing the layout SVG. Exit 0 on PASS, 1 on FAIL (or on an
+//! unrealizable coupling for the chosen substrate).
 
 use std::path::{Path, PathBuf};
 
@@ -11,8 +13,12 @@ use anyhow::{Context, Result};
 use num_complex::Complex64;
 use std::process::ExitCode;
 
-use yee_filter::{FilterSpec, check_mask, ideal_response, synthesize};
+use yee_filter::{
+    FilterSpec, check_mask, dimension_edge_coupled, dimension_edge_coupled_layout, ideal_response,
+    synthesize,
+};
 use yee_io::touchstone::{File, Format, FreqUnit};
+use yee_layout::Substrate;
 use yee_plotters::{MaskKind, MaskRegion, PlotConfig, PlotFormat, draw_sparam_with_mask};
 
 /// Number of points in the response sweep written to the Touchstone file.
@@ -21,8 +27,22 @@ const SWEEP_POINTS: usize = 401;
 /// `f0·(1 ± SPAN·FBW/2)` keeps a wide skirt around the passband.
 const SPAN_MULT: f64 = 6.0;
 
-/// Run `yee filter synth <spec> [--output <out.s2p>] [--plot <out.png>]`.
-pub fn run_synth(spec_path: &Path, output: Option<&Path>, plot: Option<&Path>) -> Result<ExitCode> {
+/// Run `yee filter synth <spec> [--output <out.s2p>] [--plot <out.png>]
+/// [--eps-r <εr>] [--h-mm <h>] [--layout-svg <out.svg>]`.
+///
+/// `eps_r` / `h_mm` describe the substrate used for the F1.2.0 physical
+/// dimensioning (FR-4 defaults `4.4` / `1.6 mm` are supplied by the CLI). When
+/// the synthesized couplings cannot be realized on that substrate the dims path
+/// prints a diagnostic and returns a non-zero [`ExitCode`] — it is never
+/// silently skipped.
+pub fn run_synth(
+    spec_path: &Path,
+    output: Option<&Path>,
+    plot: Option<&Path>,
+    eps_r: f64,
+    h_mm: f64,
+    layout_svg: Option<&Path>,
+) -> Result<ExitCode> {
     let text = std::fs::read_to_string(spec_path)
         .with_context(|| format!("failed to read filter spec {}", spec_path.display()))?;
     let spec: FilterSpec = toml::from_str(&text)
@@ -111,6 +131,57 @@ pub fn run_synth(spec_path: &Path, output: Option<&Path>, plot: Option<&Path>) -
         draw_sparam_with_mask(plot_path, &freqs, &[("S21", &s21_db)], &regions, &cfg)
             .map_err(|e| anyhow::anyhow!("failed to write plot {}: {e}", plot_path.display()))?;
         println!("  wrote plot: {}", plot_path.display());
+    }
+
+    // ---- F1.2.0 physical dimensions --------------------------------------
+    // Build the substrate from the CLI εr/h (h supplied in mm). The remaining
+    // Substrate fields (loss tangent, metal thickness) do not enter the
+    // closed-form dimensioning; use neutral zero defaults.
+    let substrate = Substrate {
+        eps_r,
+        height_m: h_mm * 1e-3,
+        loss_tangent: 0.0,
+        metal_thickness_m: 0.0,
+    };
+    println!("  substrate: eps_r = {eps_r:.4}   h = {h_mm:.4} mm");
+
+    let dims = match dimension_edge_coupled(&proj, &substrate) {
+        Ok(dims) => dims,
+        Err(e) => {
+            // Surface the unrealizable-coupling (or topology/order) error and
+            // exit non-zero — never silently skip the dimensions.
+            eprintln!("  ERROR: cannot dimension edge-coupled filter: {e}");
+            println!("VERDICT: FAIL (dimensioning)");
+            return Ok(ExitCode::FAILURE);
+        }
+    };
+
+    println!("  physical dimensions (edge-coupled half-wave microstrip):");
+    println!(
+        "    line width       = {:.6e} m  ({:.4} mm)",
+        dims.line_width_m,
+        dims.line_width_m * 1e3
+    );
+    println!(
+        "    resonator length = {:.6e} m  ({:.4} mm)",
+        dims.resonator_length_m,
+        dims.resonator_length_m * 1e3
+    );
+    for (i, (gap, k)) in dims.gaps_m.iter().zip(dims.target_k.iter()).enumerate() {
+        println!(
+            "    gap[{i}] = {:.6e} m  ({:.4} mm)   target_k = {k:.6}",
+            gap,
+            gap * 1e3
+        );
+    }
+
+    // ---- optional layout SVG ---------------------------------------------
+    if let Some(svg_path) = layout_svg {
+        let layout = dimension_edge_coupled_layout(&proj, &substrate)
+            .map_err(|e| anyhow::anyhow!("failed to build layout for SVG: {e}"))?;
+        std::fs::write(svg_path, layout.to_svg())
+            .with_context(|| format!("failed to write layout SVG {}", svg_path.display()))?;
+        println!("  wrote layout SVG: {}", svg_path.display());
     }
 
     if report.pass {

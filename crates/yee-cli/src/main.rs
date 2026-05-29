@@ -291,6 +291,18 @@ enum FilterCommand {
         /// forbidden regions overlaid, to this image path (`.png`/`.svg`).
         #[arg(long)]
         plot: Option<PathBuf>,
+        /// Substrate relative permittivity `ε_r` for the F1.2.0 physical
+        /// dimensioning (default FR-4 `4.4`).
+        #[arg(long, default_value_t = 4.4)]
+        eps_r: f64,
+        /// Substrate dielectric height `h` in millimetres for the F1.2.0
+        /// physical dimensioning (default FR-4 `1.6` mm).
+        #[arg(long, default_value_t = 1.6)]
+        h_mm: f64,
+        /// Also write the synthesized edge-coupled layout as an SVG to this
+        /// path (F1.2.0 `dimension_edge_coupled_layout`).
+        #[arg(long)]
+        layout_svg: Option<PathBuf>,
     },
 }
 
@@ -445,9 +457,21 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
         Command::Bench { target, extra } => run_bench(target, extra),
         Command::Filter { command } => match command {
-            FilterCommand::Synth { spec, output, plot } => {
-                filter::run_synth(&spec, output.as_deref(), plot.as_deref())
-            }
+            FilterCommand::Synth {
+                spec,
+                output,
+                plot,
+                eps_r,
+                h_mm,
+                layout_svg,
+            } => filter::run_synth(
+                &spec,
+                output.as_deref(),
+                plot.as_deref(),
+                eps_r,
+                h_mm,
+                layout_svg.as_deref(),
+            ),
         },
         Command::Design {
             prompt,
