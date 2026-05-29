@@ -44,9 +44,17 @@ substrate slab of `ε_r = layout.substrate.eps_r` for `round(height_m/dx)` cell
 layers; the top-metal traces (PEC, one cell thick) at the substrate-top layer,
 rasterized by point-in-polygon over each trace `Polygon`; air (ε_r = 1) above.
 X-Y extent from `layout.bbox` + `xy_margin_cells`. The `eps_r_cells`
-(`Array3<f64>`) and `pec_mask_ez` (`Array3<bool>`) are built at the exact shapes
-`YeeGrid::with_eps_r_cells` / `with_pec_mask_ez` require, then fed to
-`YeeGrid::vacuum(..).with_eps_r_cells(..).with_pec_mask_ez(..)`.
+(`Array3<f64>`) and the PEC masks are built at the exact shapes the `YeeGrid`
+builders require, then fed to `YeeGrid::vacuum(..).with_eps_r_cells(..)…`.
+
+> **Review correction (shipped impl).** This ADR's prose said `pec_mask_ez`. That
+> is the WRONG component: a horizontal PEC sheet (ground plane, traces) zeroes the
+> **tangential** field — `Ex` and `Ey` — on its plane, not the normal `Ez`. The
+> shipped voxelizer masks `pec_mask_ex` (shape `(nx, ny+1, nz+1)`) **and**
+> `pec_mask_ey` (`(nx+1, ny, nz+1)`) at the ground (k=0) and trace (k_top) planes,
+> at their staggered node positions (`Ex` at `((i+0.5)dx, j·dx)`, `Ey` at
+> `(i·dx, (j+0.5)dx)`), and chains `.with_pec_mask_ex(..).with_pec_mask_ey(..)`.
+> Read `pec_mask_ez` below as `pec_mask_ex`+`pec_mask_ey`.
 
 **No EM:** building the grid assigns materials only — there is no time-stepping,
 so the gate runs in milliseconds.

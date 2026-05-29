@@ -132,37 +132,54 @@ pub fn voxelize_microstrip(layout: &Layout, opts: &VoxelOptions) -> MicrostripMo
 
     // --- Material arrays at YeeGrid's exact required shapes. ---
     // `with_eps_r_cells` requires `(nx+1, ny+1, nz+1)`.
-    // `with_pec_mask_ez`  requires `(nx+1, ny+1, nz)`  (the `ez` component shape).
+    // A horizontal PEC sheet (the ground plane and the metal traces) zeroes the
+    // TANGENTIAL field — `Ex` and `Ey` — on its plane, NOT the normal `Ez`. So
+    // mask the two in-plane components at their staggered node positions:
+    //   `with_pec_mask_ex` requires `(nx, ny+1, nz+1)`; `Ex` node at ((i+0.5)dx, j·dx).
+    //   `with_pec_mask_ey` requires `(nx+1, ny, nz+1)`; `Ey` node at (i·dx, (j+0.5)dx).
     let mut eps = Array3::<f64>::from_elem((nx + 1, ny + 1, nz + 1), 1.0);
-    let mut pec = Array3::<bool>::from_elem((nx + 1, ny + 1, nz), false);
+    let mut pec_ex = Array3::<bool>::from_elem((nx, ny + 1, nz + 1), false);
+    let mut pec_ey = Array3::<bool>::from_elem((nx + 1, ny, nz + 1), false);
 
-    // Cell (i, j) centre in metres.
-    let cell_center = |i: usize, j: usize| Point2 {
-        x: x0 + (i as f64 + 0.5) * dx,
-        y: y0 + (j as f64 + 0.5) * dx,
+    let in_trace = |x: f64, y: f64| {
+        layout
+            .traces
+            .iter()
+            .any(|p| point_in_polygon(Point2 { x, y }, p))
     };
 
-    // Logical cell (i, j, k) is represented at node index (i, j, k) of each
-    // array. Both arrays are oversized by +1 in x and y relative to the cell
-    // count, so writing node (i, j, *) for i in 0..nx, j in 0..ny is always in
-    // bounds. `eps` is additionally +1 in z (covers k in 0..=nz); `pec` has
-    // exactly `nz` z-samples (covers k in 0..nz), matching the `Ez` staggering.
+    // Substrate dielectric per cell, k = 1 ..= n_sub (air ε_r = 1.0 elsewhere is
+    // the array default).
     for i in 0..nx {
         for j in 0..ny {
-            let c = cell_center(i, j);
-
-            // Ground plane: PEC across the whole layer (k = 0).
-            pec[(i, j, 0)] = true;
-
-            // Substrate dielectric for k = 1 ..= n_sub.
             for k in 1..=n_sub {
                 eps[(i, j, k)] = eps_r_sub;
             }
-            // (Air ε_r = 1.0 above k_top is already the array default.)
+        }
+    }
 
-            // Top-metal layer (k = k_top): PEC where a trace covers the centre.
-            if layout.traces.iter().any(|p| point_in_polygon(c, p)) {
-                pec[(i, j, k_top)] = true;
+    // Tangential `Ex` PEC: ground plane (k = 0, whole layer) + traces
+    // (k = k_top, where the `Ex` node ((i+0.5)dx, j·dx) lies under a trace).
+    for i in 0..nx {
+        for j in 0..=ny {
+            pec_ex[(i, j, 0)] = true;
+            let x = x0 + (i as f64 + 0.5) * dx;
+            let y = y0 + j as f64 * dx;
+            if in_trace(x, y) {
+                pec_ex[(i, j, k_top)] = true;
+            }
+        }
+    }
+
+    // Tangential `Ey` PEC: ground plane (k = 0) + traces (k = k_top), with the
+    // `Ey` node at (i·dx, (j+0.5)dx).
+    for i in 0..=nx {
+        for j in 0..ny {
+            pec_ey[(i, j, 0)] = true;
+            let x = x0 + i as f64 * dx;
+            let y = y0 + (j as f64 + 0.5) * dx;
+            if in_trace(x, y) {
+                pec_ey[(i, j, k_top)] = true;
             }
         }
     }
@@ -180,7 +197,8 @@ pub fn voxelize_microstrip(layout: &Layout, opts: &VoxelOptions) -> MicrostripMo
 
     let grid = YeeGrid::vacuum(nx, ny, nz, dx)
         .with_eps_r_cells(eps)
-        .with_pec_mask_ez(pec);
+        .with_pec_mask_ex(pec_ex)
+        .with_pec_mask_ey(pec_ey);
 
     MicrostripModel {
         grid,

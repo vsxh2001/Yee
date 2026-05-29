@@ -2,6 +2,11 @@
 
 **Phase:** F1.1a · **ADR:** ADR-0091 · **Date:** 2026-05-29 · **Status:** Accepted
 
+> **Review correction (shipped impl):** where this spec says `pec_mask_ez`, the
+> shipped voxelizer uses tangential `pec_mask_ex` **+** `pec_mask_ey` instead — a
+> horizontal PEC sheet (ground plane / traces) zeroes in-plane `Ex`/`Ey`, not the
+> normal `Ez`. Masks at the ground (k=0) and trace (k_top) planes, staggered.
+
 ## Goal
 Convert a planar microstrip `yee-layout::Layout` into a material-assigned
 `yee-fdtd::YeeGrid` (ε_r slab + PEC ground + PEC traces). The one missing block

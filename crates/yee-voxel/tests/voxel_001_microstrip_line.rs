@@ -104,49 +104,60 @@ fn voxel_001_microstrip_line() {
         eps[(nx / 2, ny / 2, nz - 1)]
     );
 
-    // --- Ground plane (k=0) fully PEC. ---
-    let pec = grid
-        .pec_mask_ez
+    // --- Ground plane (k=0): tangential Ex AND Ey fully PEC. ---
+    // A horizontal PEC plane zeroes the in-plane (tangential) field, so both
+    // Ex and Ey are masked at k=0; the normal Ez is NOT (ADR-0091 review fix).
+    let pec_ex = grid
+        .pec_mask_ex
         .as_ref()
-        .expect("pec_mask_ez must be attached");
-    assert_eq!(pec.dim(), (nx + 1, ny + 1, nz));
+        .expect("pec_mask_ex must be attached");
+    let pec_ey = grid
+        .pec_mask_ey
+        .as_ref()
+        .expect("pec_mask_ey must be attached");
+    assert_eq!(pec_ex.dim(), (nx, ny + 1, nz + 1));
+    assert_eq!(pec_ey.dim(), (nx + 1, ny, nz + 1));
     for i in 0..nx {
+        for j in 0..=ny {
+            assert!(pec_ex[(i, j, 0)], "ground Ex node ({i},{j},0) must be PEC");
+        }
+    }
+    for i in 0..=nx {
         for j in 0..ny {
-            assert!(pec[(i, j, 0)], "ground cell ({i},{j},0) must be PEC");
+            assert!(pec_ey[(i, j, 0)], "ground Ey node ({i},{j},0) must be PEC");
         }
     }
 
-    // --- Trace-layer PEC-cell count ≈ (w·l)/dx². ---
+    // --- Trace-layer (k=k_top) tangential-PEC count (Ex nodes) ≈ (w·l)/dx². ---
     let expected_trace_cells = (W * L) / (DX * DX); // 240.0
     let mut trace_count = 0usize;
     for i in 0..nx {
-        for j in 0..ny {
-            if pec[(i, j, k_top)] {
+        for j in 0..=ny {
+            if pec_ex[(i, j, k_top)] {
                 trace_count += 1;
             }
         }
     }
-    // Allow ±1 row and ±1 column of rounding slack.
+    // Staggered Ex nodes near the trace boundary add a row/col of rounding slack.
     let nrow = (W / DX).round() as usize; // 6
     let ncol = (L / DX).round() as usize; // 40
-    let slack = (nrow + ncol + 1) as f64;
+    let slack = (nrow + ncol + 2) as f64;
     assert!(
         (trace_count as f64 - expected_trace_cells).abs() <= slack,
-        "trace PEC-cell count {trace_count} should be ≈ {expected_trace_cells} (±{slack})"
+        "trace Ex PEC-node count {trace_count} should be ≈ {expected_trace_cells} (±{slack})"
     );
 
-    // --- A cell under the trace is PEC; one in the margin is not. ---
-    // Trace centre maps to a cell well inside the rectangle.
+    // --- An Ex node under the trace is PEC; one in the margin is not. ---
     let ci = (((W / 2.0 - (layout.bbox.min.x - MARGIN as f64 * DX)) / DX).floor()) as usize;
     let cj = (((L / 2.0 - (layout.bbox.min.y - MARGIN as f64 * DX)) / DX).floor()) as usize;
     assert!(
-        pec[(ci, cj, k_top)],
-        "cell ({ci},{cj},{k_top}) under the trace centre must be PEC"
+        pec_ex[(ci, cj, k_top)],
+        "Ex node ({ci},{cj},{k_top}) under the trace centre must be PEC"
     );
-    // A corner cell (i=0, j=0) is in the air margin, well off the trace.
+    // A corner node (i=0, j=0) is in the air margin, well off the trace.
     assert!(
-        !pec[(0, 0, k_top)],
-        "margin cell (0,0,{k_top}) must not be PEC"
+        !pec_ex[(0, 0, k_top)],
+        "margin Ex node (0,0,{k_top}) must not be PEC"
     );
 
     // --- Ports map to in-range cells at the top-metal layer. ---
