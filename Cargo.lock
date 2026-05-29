@@ -6558,6 +6558,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "yee-export"
+version = "0.0.0"
+dependencies = [
+ "yee-layout",
+]
+
+[[package]]
 name = "yee-fdtd"
 version = "0.0.0"
 dependencies = [

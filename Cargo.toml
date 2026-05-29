@@ -21,6 +21,7 @@ members = [
     "crates/yee-studio",
     "crates/yee-layout",
     "crates/yee-voxel",
+    "crates/yee-export",
     "examples/half-wave-dipole",
     "examples/microstrip-line",
     "examples/patch-2g4",
@@ -54,6 +55,7 @@ yee-design   = { path = "crates/yee-design",  version = "0.0.0" }
 yee-synth    = { path = "crates/yee-synth",   version = "0.0.0" }
 yee-filter   = { path = "crates/yee-filter",  version = "0.0.0" }
 yee-layout   = { path = "crates/yee-layout",  version = "0.0.0" }
+yee-export   = { path = "crates/yee-export",  version = "0.0.0" }
 
 # CUDA (one binding for the whole project)
 cudarc = { version = "0.19", default-features = false, features = [
