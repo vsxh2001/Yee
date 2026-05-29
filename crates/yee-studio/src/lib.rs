@@ -26,10 +26,12 @@ use yee_filter::{FilterProject, FilterSpec, check_mask, ideal_response, synthesi
 /// Lives in its own module so this crate root stays egui-free and WASM-safe;
 /// only [`app`] and the binary entry depend on `egui`/`eframe`.
 ///
-/// TODO(App.1): gate this `mod app` behind `#[cfg(not(target_arch =
-/// "wasm32"))]` or a `desktop` Cargo feature before the WASM build lands, so a
-/// WASM consumer can compile [`StudioState`] without pulling in the native
-/// `eframe`/`wgpu` windowing shell (ADR-0089 WASM-safety constraint).
+/// Gated behind the default `desktop` Cargo feature (App.1.0; ADR-0092): a
+/// `--no-default-features` build compiles [`StudioState`] with **no**
+/// `eframe`/`egui`/`wgpu` in the dep graph, satisfying the ADR-0089 WASM-safety
+/// constraint. Only the actual `wasm32-unknown-unknown`/`trunk` build remains
+/// for App.1 (it needs the wasm toolchain installed).
+#[cfg(feature = "desktop")]
 pub mod app;
 
 /// Number of points in the response sweep (mirrors `yee-cli`'s `SWEEP_POINTS`).

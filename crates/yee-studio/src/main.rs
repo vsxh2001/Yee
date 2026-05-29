@@ -10,12 +10,16 @@
 //! The windowed binary is build-only in CI (no display); the logic is gated by
 //! the headless `studio_state_recompute_*` tests in the library crate.
 
+#[cfg(feature = "desktop")]
 use eframe::egui;
 
+#[cfg(feature = "desktop")]
 use yee_filter::{Approximation, FilterSpec, Response, SpecMask};
+#[cfg(feature = "desktop")]
 use yee_studio::{StudioState, app::StudioApp};
 
 /// The default satisfiable Chebyshev 0.5 dB N=5 bandpass spec the app opens to.
+#[cfg(feature = "desktop")]
 fn default_spec() -> FilterSpec {
     FilterSpec {
         response: Response::Bandpass,
@@ -32,6 +36,7 @@ fn default_spec() -> FilterSpec {
     }
 }
 
+#[cfg(feature = "desktop")]
 fn main() -> eframe::Result<()> {
     let state = StudioState::from_spec(default_spec());
 
@@ -48,4 +53,15 @@ fn main() -> eframe::Result<()> {
         native_options,
         Box::new(move |_cc| Ok(Box::new(StudioApp::new(state.clone())))),
     )
+}
+
+/// Stub entry for `--no-default-features` builds (no `desktop` feature, hence no
+/// GUI): prints a notice so the `[[bin]] yee-studio` target still links while the
+/// WASM-safe [`yee_studio::StudioState`] flow logic compiles eframe-free
+/// (App.1.0; ADR-0092).
+#[cfg(not(feature = "desktop"))]
+fn main() {
+    println!(
+        "yee-studio built without the `desktop` feature (no GUI); use the library's StudioState API."
+    );
 }
