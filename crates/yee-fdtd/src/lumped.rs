@@ -175,10 +175,9 @@ impl SourceWaveform {
 ///
 /// - Pure resistor ([`LumpedRlcPort::pure_resistor`]) is the primary
 ///   validated path.
-/// - Series-RLC ([`LumpedRlcPort::series_rlc`]) compiles and self-tests
-///   (passive RLC oscillator decays correctly, see unit tests in this
-///   module) but its quantitative validation against analytic series-RLC
-///   reflection is Phase 2.fdtd.6.1.
+/// - Series-RLC ([`LumpedRlcPort::series_rlc`]) is validated by the
+///   fdtd-206 gate (Phase 2.fdtd.6.1): a 5×5×40 PEC-box LC resonance
+///   at 1 GHz passes within ±2 % of the analytic 1/(2π√LC) frequency.
 #[derive(Debug, Clone)]
 pub struct LumpedRlcPort {
     /// Yee cell `(i, j, k)` of the `E_z` edge the port modifies.

@@ -43,7 +43,7 @@ print(f"rel_err    = {result.rel_err * 100:.3f} %")
 | R | 1 Ω |
 | Q | ≈6.28 |
 | f₀ analytic | 1 GHz |
-| Gate | \|f_measured − f₀\| / f₀ < 2 % |
+| Gate | `abs(f_measured − f₀) / f₀ < 2 %` |
 
 ## Result fields
 
