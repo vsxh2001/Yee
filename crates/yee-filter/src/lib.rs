@@ -40,6 +40,10 @@
 use num_complex::Complex64;
 use serde::{Deserialize, Serialize};
 
+/// Coupling/Qe extraction (Filter Phase F1.1b.0): measured response → `k`/`Q`.
+pub mod extract;
+pub use extract::{CouplingExtraction, extract_coupling, extract_q_ringdown};
+
 pub use yee_synth::Approximation;
 use yee_synth::{Prototype, coupling_design, lowpass_to_bandpass, min_order, prototype};
 
