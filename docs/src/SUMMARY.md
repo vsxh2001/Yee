@@ -146,3 +146,5 @@
 - [ADR-0100: Filter Phase F1.4.0 — yee-export Gerber walking skeleton](decisions/0100-filter-f1-4-0-yee-export-gerber.md)
 - [ADR-0101: App — yee-studio layout preview canvas](decisions/0101-app-studio-layout-canvas.md)
 - [ADR-0102: Filter — `yee filter synth --gerber` export wiring](decisions/0102-filter-cli-gerber-export.md)
+- [ADR-0103: Filter Phase F1.4.1a — yee-export Gerber board outline (Edge.Cuts)](decisions/0103-filter-f1-4-1-gerber-board-outline.md)
+- [ADR-0104: Filter — register coupled/dim/gerber gates in the validation aggregator](decisions/0104-filter-validation-aggregator-gates.md)
