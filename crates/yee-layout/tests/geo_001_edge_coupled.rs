@@ -137,6 +137,12 @@ fn to_svg_is_well_formed() {
         layout.traces.len(),
         "SVG polygon count should match trace count"
     );
+    // Each port should appear as a circle marker.
+    assert_eq!(
+        svg.matches("<circle").count(),
+        layout.ports.len(),
+        "SVG circle count should match port count"
+    );
 }
 
 #[test]
