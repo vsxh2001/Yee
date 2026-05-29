@@ -339,14 +339,35 @@ build on F1.
 - **Filter-synthesis theory chapter** (merge `fe45016`): `docs/src/theory/filter-synthesis.md`.
 - **App.0** (ADR-0090, merge `338a35c`): `yee-studio` eframe desktop app — the
   first product surface; spec → synthesis → spec-mask plot, live.
+- **App.1.0** (ADR-0092, merge `ead2819`): `yee-studio` eframe shell gated behind a
+  default `desktop` feature so `StudioState` builds egui-free (web-ready).
+- **App.1.1** (ADR-0095, merge `d901a2c`): `yee-studio --no-default-features` PROVEN
+  to compile to `wasm32-unknown-unknown` (egui absent); CI `wasm-build` job gates it.
+- **F1.1a** (ADR-0091, merge `c4f3af4`): `yee-voxel` crate —
+  `voxelize_microstrip(&Layout) → YeeGrid` (tangential Ex+Ey PEC masks); gate voxel_001.
+- **F1.1b.0** (ADR-0093, merge `be2d2bc`): `yee-filter::extract` — `extract_coupling`
+  + `extract_q_ringdown`, validated vs analytic signals (no FDTD).
+- **F1.1b.gate** (ADR-0094, merge `e676c42`): `yee-layout::coupled_microstrip`
+  (Kirschning-Jansen 1984 even/odd model + coupler k); gates coupled_001 vs Steer
+  Ex 5.6.1 (≤0.21%) + coupled_002 monotonic k. The validatable `k` reference for F1.1b.1.
 
 **Final goal: a desktop + web APP** (ADR-0089) — one `egui`/`eframe` codebase,
 native + WASM. The shipped light flow (F0/F0.1/F0.2/F1.0) is WASM-safe and is the
 in-browser front-end; heavy EM goes behind a native `yee-server`. See §5a.
 
 **Two parallel fronts next:**
-- *Product:* **App.1** — WASM web build of the App.0 light path (cfg-gate
-  `yee-studio::app` first; `trunk`/`wasm-pack` static deploy).
+- *Product:* **App.1.0/1.1 ✅ SHIPPED** (ADR-0092 `ead2819` / ADR-0095 `d901a2c`):
+  `yee-studio` eframe shell behind a default `desktop` feature, and the
+  `--no-default-features` light path PROVEN to compile to `wasm32-unknown-unknown`
+  (egui absent from the dep tree) under a CI `wasm-build` job. **NEXT = App.1.2**
+  — the full eframe-WEB build (the `app` module in-browser). Recon (2026-05-30)
+  recommends a **split**: **App.1.2a** = add a `web` feature (eframe `wgpu` works on
+  wasm via WebGPU→WebGL2 fallback; +`wasm-bindgen`/`web-sys`/`console_error_panic_hook`,
+  `wasm-bindgen-futures` as a `cfg(wasm32)` target dep) + a `#[cfg(target_arch="wasm32")]`
+  `WebRunner::new().start("the_canvas_id", …)` entry, gate `cargo check -p yee-studio
+  --target wasm32-unknown-unknown --features web` exit 0 (no toolchain install — LIGHT);
+  **App.1.2b** = `trunk` bundle + `index.html`/`Trunk.toml` + static deploy (needs
+  `cargo install trunk` — HEAVIER; riskiest = wgpu-WebGL2). Do 1.2a first.
 - *Engine (toward the Swanson-hairpin FDTD gate):* **F1.1a `yee-voxel` ✅ SHIPPED**
   (ADR-0091, merge `c4f3af4`): `voxelize_microstrip(&Layout) → YeeGrid` (ground
   PEC + substrate ε_r slab + trace PEC, point-in-polygon rasterized; tangential
@@ -354,10 +375,15 @@ in-browser front-end; heavy EM goes behind a native `yee-server`. See §5a.
   untouched (WASM-safe). **F1.1b.0 `extract` ✅ SHIPPED** (ADR-0093, merge
   `be2d2bc`): `yee-filter::extract_coupling` (k from the two split peaks
   `(f2²−f1²)/(f2²+f1²)`) + `extract_q_ringdown` (Qe = π f0 τ decay-fit), validated
-  vs analytic signals — the extraction the FDTD driver feeds. **NEXT = F1.1b.1** —
-  the FDTD coupled-resonator DRIVER: `yee-voxel` voxelize a coupled pair →
-  `LumpedRlcPort`s → run `yee-fdtd` → single-bin DFT → `extract_*`. Crux = the
-  validatable gate (coupled-microstrip even/odd `k` reference). HEAVY (multi-min
-  FDTD). Then **F1.2** surrogate-BO dimensional synthesis; **F1.3** verify + mask
-  gate; **F1.4** `yee-export`. **App.2** (`yee-server`) once F1.1+ exist.
+  vs analytic signals — the extraction the FDTD driver feeds. **F1.1b.gate
+  coupled-line model ✅ SHIPPED** (ADR-0094, merge `e676c42`): `yee-layout::
+  coupled_microstrip` (Kirschning-Jansen 1984 quasi-static even/odd z0e/z0o/εeff +
+  coupler `k=(z0e−z0o)/(z0e+z0o)`); gates coupled_001 vs Steer Ex 5.6.1 (≤0.21%) +
+  coupled_002 5-gap monotonic k; pure f64, WASM-safe. This is the validatable `k`
+  reference for F1.1b.1 and the initial-dimensioning model for F1.2.
+  **NEXT = F1.1b.1** — the FDTD coupled-resonator DRIVER: `yee-voxel` voxelize a
+  coupled pair → `LumpedRlcPort`s → run `yee-fdtd` → single-bin DFT → `extract_*`,
+  gated against the F1.1b.gate even/odd `k`/split-frequency reference. HEAVY
+  (multi-min FDTD). Then **F1.2** surrogate-BO dimensional synthesis; **F1.3**
+  verify + mask gate; **F1.4** `yee-export`. **App.2** (`yee-server`) once F1.1+ exist.
   (Tutorial 17 — filter design via CLI + Studio — shipped, merge `c6e477c`.)
