@@ -350,6 +350,12 @@ build on F1.
 - **F1.1b.gate** (ADR-0094, merge `e676c42`): `yee-layout::coupled_microstrip`
   (Kirschning-Jansen 1984 even/odd model + coupler k); gates coupled_001 vs Steer
   Ex 5.6.1 (≤0.21%) + coupled_002 monotonic k. The validatable `k` reference for F1.1b.1.
+- **App.1.2a** (ADR-0096, merge `92f1696`): the full `yee-studio` eframe `StudioApp`
+  now compiles for `wasm32-unknown-unknown` behind a `web` feature + a
+  `#[wasm_bindgen(start)]` `eframe::WebRunner` browser entry (eframe split
+  per-target; WebRunner takes a DOM `HtmlCanvasElement`; no RUSTFLAGS — wgpu 29
+  WebGL2 fallback). Gate `cargo check -p yee-studio --target wasm32 --features web`
+  exit 0; native + headless-wasm builds unregressed. (App.1.2b = trunk bundle/deploy.)
 
 **Final goal: a desktop + web APP** (ADR-0089) — one `egui`/`eframe` codebase,
 native + WASM. The shipped light flow (F0/F0.1/F0.2/F1.0) is WASM-safe and is the
@@ -359,15 +365,18 @@ in-browser front-end; heavy EM goes behind a native `yee-server`. See §5a.
 - *Product:* **App.1.0/1.1 ✅ SHIPPED** (ADR-0092 `ead2819` / ADR-0095 `d901a2c`):
   `yee-studio` eframe shell behind a default `desktop` feature, and the
   `--no-default-features` light path PROVEN to compile to `wasm32-unknown-unknown`
-  (egui absent from the dep tree) under a CI `wasm-build` job. **NEXT = App.1.2**
-  — the full eframe-WEB build (the `app` module in-browser). Recon (2026-05-30)
-  recommends a **split**: **App.1.2a** = add a `web` feature (eframe `wgpu` works on
-  wasm via WebGPU→WebGL2 fallback; +`wasm-bindgen`/`web-sys`/`console_error_panic_hook`,
-  `wasm-bindgen-futures` as a `cfg(wasm32)` target dep) + a `#[cfg(target_arch="wasm32")]`
-  `WebRunner::new().start("the_canvas_id", …)` entry, gate `cargo check -p yee-studio
-  --target wasm32-unknown-unknown --features web` exit 0 (no toolchain install — LIGHT);
-  **App.1.2b** = `trunk` bundle + `index.html`/`Trunk.toml` + static deploy (needs
-  `cargo install trunk` — HEAVIER; riskiest = wgpu-WebGL2). Do 1.2a first.
+  (egui absent from the dep tree) under a CI `wasm-build` job. App.1.2 split in two:
+  **App.1.2a ✅ SHIPPED** (ADR-0096, merge `92f1696`) — the full eframe `StudioApp`
+  compiles for wasm32 behind a `web` feature + a `#[wasm_bindgen(start)]`
+  `eframe::WebRunner` entry (eframe split per-target with `default-features=false`
+  + `["wgpu","default_fonts"]` on wasm; `WebRunner::start` takes a DOM
+  `HtmlCanvasElement` fetched via `web-sys`, not a string id — eframe 0.34.2; no
+  RUSTFLAGS needed, wgpu 29 WebGL2 fallback compiles clean). Gate
+  `cargo check -p yee-studio --target wasm32 --features web` exit 0; native +
+  headless-wasm unregressed. **NEXT = App.1.2b** = `trunk` bundle +
+  `index.html`/`Trunk.toml` + static deploy (needs `cargo install trunk` — HEAVIER;
+  riskiest = wgpu-WebGL2 at runtime; the web entry already expects
+  `<canvas id="the_canvas_id">`). Delivers the loadable in-browser app.
 - *Engine (toward the Swanson-hairpin FDTD gate):* **F1.1a `yee-voxel` ✅ SHIPPED**
   (ADR-0091, merge `c4f3af4`): `voxelize_microstrip(&Layout) → YeeGrid` (ground
   PEC + substrate ε_r slab + trace PEC, point-in-polygon rasterized; tangential
