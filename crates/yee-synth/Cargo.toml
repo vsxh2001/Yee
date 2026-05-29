@@ -1,0 +1,17 @@
+[package]
+name         = "yee-synth"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "Yee synth: classical filter synthesis (Butterworth/Chebyshev prototypes, coupling matrix, external Q) — pure math, no EM."
+
+[lints.rust]
+unsafe_code  = "forbid"
+missing_docs = "warn"
+
+[dependencies]
+yee-core  = { workspace = true }
+nalgebra  = { workspace = true }
+serde     = { workspace = true }

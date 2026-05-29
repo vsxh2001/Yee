@@ -1,0 +1,19 @@
+[package]
+name         = "yee-filter"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "Yee filter: filter-domain data model, ideal response, and spec-mask gating (Filter Phase F0)."
+
+[lints.rust]
+unsafe_code  = "forbid"
+missing_docs = "warn"
+
+[dependencies]
+yee-core    = { workspace = true }
+yee-synth   = { workspace = true }
+yee-io      = { workspace = true }
+serde       = { workspace = true }
+num-complex = { workspace = true }
