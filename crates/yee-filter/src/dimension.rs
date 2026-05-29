@@ -169,6 +169,16 @@ fn solve_gap(index: usize, target_k: f64, w_m: f64, h_m: f64, eps_r: f64) -> Res
             hi = mid;
         }
     }
+    // Loop exhausted without hitting GAP_REL_TOL. For a strictly-monotone
+    // `coupling_coefficient` over [GAP_MIN_M, GAP_MAX_M] (proven by `coupled_002`)
+    // bisection converges far inside GAP_MAX_ITERS, so reaching here signals the
+    // monotonicity assumption broke (e.g. a future coupled-microstrip model
+    // change). Trip it in debug/test builds; release returns the best estimate.
+    debug_assert!(
+        (k_of(mid) - target_k).abs() <= 100.0 * GAP_REL_TOL * target_k.abs().max(f64::MIN_POSITIVE),
+        "solve_gap: bisection did not converge in {GAP_MAX_ITERS} iters (index {index}, \
+         target_k {target_k}) — coupling_coefficient may be non-monotone over the gap bracket"
+    );
     Ok(mid)
 }
 
