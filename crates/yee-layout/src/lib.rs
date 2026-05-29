@@ -18,7 +18,10 @@
 //! - [`hairpin_bpf`] — N U-folded resonators plus a tapped feed.
 //!
 //! Microstrip line sizing uses the Hammerstad-Jensen closed form
-//! ([`microstrip_width`] / [`eps_eff`]).
+//! ([`microstrip_width`] / [`eps_eff`]). Edge-coupled-line electrical
+//! parameters use the Kirschning-Jansen static even/odd model
+//! ([`coupled_microstrip`] / [`coupling_coefficient`], in the [`coupled`]
+//! module).
 //!
 //! ## References
 //!
@@ -28,6 +31,10 @@
 //! - Pozar, *Microwave Engineering* 4e, §3.8 (microstrip design equations).
 //! - Hong & Lancaster, *Microstrip Filters for RF/Microwave Applications*,
 //!   chs. 5 (edge-coupled) and 6 (hairpin).
+//! - Kirschning & Jansen, "Accurate Wide-Range Design Equations for the
+//!   Frequency-Dependent Characteristic of Parallel Coupled Microstrip Lines,"
+//!   *IEEE Trans. MTT*, vol. 32, no. 1, pp. 83–90, 1984 (coupled even/odd
+//!   model; see the [`coupled`] module).
 //!
 //! ## Example
 //!
@@ -43,6 +50,9 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
+
+pub mod coupled;
+pub use coupled::{CoupledMicrostrip, coupled_microstrip, coupling_coefficient};
 
 /// Free-space wave impedance `η₀ = 120π` Ω, used by the Hammerstad-Jensen
 /// `B` term (`377π / (2·z0·√εr)` with `377 = 120π`).
