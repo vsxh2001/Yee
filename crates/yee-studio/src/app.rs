@@ -7,10 +7,15 @@
 //! - a central **synthesis** [`egui::CentralPanel`] (g-values, coupling matrix
 //!   grid, external Q, coloured PASS/FAIL verdict + notes), and
 //! - an [`egui_plot::Plot`] of `|S21|` (dB) vs frequency (GHz) with each
-//!   spec-mask region shaded on its forbidden side.
+//!   spec-mask region shaded on its forbidden side, and
+//! - a **physical-dimensions** section (F1.2.0; ADR-0099): editable substrate
+//!   `ε_r` / `h` (mm) inputs plus the synthesized microstrip line width,
+//!   resonator length, and per-section gaps (or the [`yee_filter::DimError`]
+//!   string when the coupling is unrealizable on the chosen substrate).
 //!
-//! Every edit in the side panel calls [`StudioState::recompute`] so the central
-//! panel and the plot stay live.
+//! Every edit in the side panel — and every substrate edit in the dimensions
+//! section — calls [`StudioState::recompute`] so the central panel, the plot,
+//! and the dimensions stay live.
 
 use eframe::egui;
 use egui::Color32;
@@ -250,7 +255,84 @@ impl eframe::App for StudioApp {
             ui.separator();
             ui.label("|S21| (dB) vs spec mask");
             show_response_plot(ui, &self.state);
+
+            // ---- physical dimensions (F1.2.0; ADR-0099) ------------------
+            ui.separator();
+            show_dimensions(ui, &mut self.state);
         });
+    }
+}
+
+/// Render the "Physical dimensions" section: editable substrate `ε_r` / `h`
+/// (mm) inputs and the synthesized microstrip dimensions (F1.2.0; ADR-0099).
+///
+/// Editing `ε_r` or `h` updates [`StudioState::eps_r`] / [`StudioState::h_m`]
+/// and re-derives via [`StudioState::recompute`] so the read-out stays live.
+/// Shows the line width, resonator length, and per-section gaps in millimetres
+/// on `Ok`, or the [`yee_filter::DimError`] string on `Err`.
+fn show_dimensions(ui: &mut egui::Ui, state: &mut StudioState) {
+    /// Metres → millimetres for display.
+    const MM: f64 = 1.0e3;
+
+    ui.heading("Physical dimensions");
+    ui.label("Edge-coupled microstrip (F1.2.0)");
+
+    let mut dirty = false;
+
+    // Substrate ε_r.
+    ui.horizontal(|ui| {
+        ui.label("εr");
+        if ui
+            .add(
+                egui::DragValue::new(&mut state.eps_r)
+                    .speed(0.01)
+                    .range(1.0..=20.0),
+            )
+            .changed()
+        {
+            dirty = true;
+        }
+    });
+
+    // Substrate height h, edited in millimetres (stored in metres).
+    ui.horizontal(|ui| {
+        ui.label("h (mm)");
+        let mut h_mm = state.h_m * MM;
+        if ui
+            .add(
+                egui::DragValue::new(&mut h_mm)
+                    .speed(0.01)
+                    .range(0.01..=20.0),
+            )
+            .changed()
+        {
+            state.h_m = h_mm / MM;
+            dirty = true;
+        }
+    });
+
+    if dirty {
+        state.recompute();
+    }
+
+    // Read-out (or the error string when the coupling is unrealizable).
+    match &state.dims {
+        Ok(dims) => {
+            ui.label(format!("line width: {:.4} mm", dims.line_width_m * MM));
+            ui.label(format!(
+                "resonator length: {:.4} mm",
+                dims.resonator_length_m * MM
+            ));
+            for (i, &gap) in dims.gaps_m.iter().enumerate() {
+                ui.label(format!("gap {}–{}: {:.4} mm", i + 1, i + 2, gap * MM));
+            }
+        }
+        Err(msg) => {
+            ui.colored_label(
+                Color32::from_rgb(220, 60, 60),
+                format!("no dimensions: {msg}"),
+            );
+        }
     }
 }
 
