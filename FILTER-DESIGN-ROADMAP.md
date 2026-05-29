@@ -351,9 +351,13 @@ in-browser front-end; heavy EM goes behind a native `yee-server`. See §5a.
   (ADR-0091, merge `c4f3af4`): `voxelize_microstrip(&Layout) → YeeGrid` (ground
   PEC + substrate ε_r slab + trace PEC, point-in-polygon rasterized; tangential
   Ex+Ey masks per the review P0 fix); gate voxel_001 (no FDTD run). `yee-layout`
-  untouched (WASM-safe). **NEXT = F1.1b** — drive a voxelized coupled-resonator
-  pair through `yee-fdtd` (LumpedRlcPort + single-bin DFT), extract `k` from the
-  two split peaks `(f2²−f1²)/(f2²+f1²)` and `Qe` from a singly-loaded ring-down;
-  the validatable gate (coupled-microstrip even/odd k reference) is the crux to
-  design. Then **F1.2** surrogate-BO dimensional synthesis; **F1.3** verify +
-  mask gate; **F1.4** `yee-export`. **App.2** (`yee-server`) once F1.1+ exist.
+  untouched (WASM-safe). **F1.1b.0 `extract` ✅ SHIPPED** (ADR-0093, merge
+  `be2d2bc`): `yee-filter::extract_coupling` (k from the two split peaks
+  `(f2²−f1²)/(f2²+f1²)`) + `extract_q_ringdown` (Qe = π f0 τ decay-fit), validated
+  vs analytic signals — the extraction the FDTD driver feeds. **NEXT = F1.1b.1** —
+  the FDTD coupled-resonator DRIVER: `yee-voxel` voxelize a coupled pair →
+  `LumpedRlcPort`s → run `yee-fdtd` → single-bin DFT → `extract_*`. Crux = the
+  validatable gate (coupled-microstrip even/odd `k` reference). HEAVY (multi-min
+  FDTD). Then **F1.2** surrogate-BO dimensional synthesis; **F1.3** verify + mask
+  gate; **F1.4** `yee-export`. **App.2** (`yee-server`) once F1.1+ exist.
+  (Tutorial 17 — filter design via CLI + Studio — shipped, merge `c6e477c`.)
