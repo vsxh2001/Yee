@@ -128,8 +128,20 @@ fn fdtd_coupling_001_matches_analytic_within_fifteen_percent() {
     // Run the FDTD coupled-resonator driver (walking-skeleton defaults,
     // synchronous centre = F0_HZ).
     // ------------------------------------------------------------------
+    // Hypothesis (ADR-0108 iter#5): the iter#1-#4 split (~2.2%) is suppressed
+    // ~4x below even the εeff-difference prediction (0.091) and is
+    // grid-independent. Root cause hypothesis: WalkingSkeletonSolver::new puts
+    // HARD-PEC outer walls, and the air box is tiny (air_above 8 cells, xy
+    // margin 6 cells ≈ 1-3 mm). A close PEC ceiling/walls confine the microstrip
+    // fringing + air-gap fields that SET the even/odd εeff difference, collapsing
+    // the split — a box-size (mm) effect, hence grid-independent. Test it with a
+    // much larger air box (coarser 0.4 mm cells to afford the cell budget).
     let cfg = CoupledRunConfig {
         f0_hz: F0_HZ,
+        dx_m: 0.4e-3,
+        xy_margin_cells: 24,
+        air_above_cells: 48,
+        n_steps: 40_000,
         ..CoupledRunConfig::default()
     };
     let result = run_coupled_pair(&layout, &cfg);
@@ -168,3 +180,4 @@ fn fdtd_coupling_001_matches_analytic_within_fifteen_percent() {
         rel_err * 100.0,
     );
 }
+
