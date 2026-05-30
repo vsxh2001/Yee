@@ -449,7 +449,14 @@ in-browser front-end; heavy EM goes behind a native `yee-server`. See §5a.
   `CouplingMatrix` → physical edge-coupled microstrip dims (width/length/gaps) —
   closed-form, pure-math, WASM-safe, no FDTD/surrogate; gates dim-001 (inversion
   round-trip <1%) / dim-002 / dim-003. First stage turning the abstract network
-  into concrete geometry. **NEXT = F1.2.1** = surrogate-BO + EM-in-loop refinement
+  into concrete geometry. **F1.2.2 hairpin dimensional synthesis ✅ SHIPPED**
+  (ADR-0109, merge `e343082`): `yee-filter::dimension_hairpin` /
+  `dimension_hairpin_layout` — a SECOND topology, reusing the same coupled-line
+  gap→k bisection (adjacent hairpin arms are edge-coupled) with λg/4 U-folded
+  arms; gate hairpin_dim_001 (round-trip <1%); pure-math, WASM-safe. Per-section
+  gaps validated in `HairpinDimensions`; `hairpin_bpf` Layout uses the mean gap
+  (uniform-gap walking-skeleton limitation, documented; per-section geometry =
+  follow-on). **NEXT = F1.2.1** = surrogate-BO + EM-in-loop refinement
   (consumes F1.1b.1's FDTD k/Qe to refine the F1.2.0 seed) + `qe`→I/O feed
   dimensioning. Then **F1.3** verify + mask gate. **F1.4.0 `yee-export` Gerber
   ✅ SHIPPED** (ADR-0100, merge `21614fe`) — `layout_to_gerber` single-copper-layer
