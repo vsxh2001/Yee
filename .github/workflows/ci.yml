@@ -143,3 +143,39 @@ jobs:
         run: ../../.venv/bin/pytest tests/ -v
       - name: cargo clippy (yee-py)
         run: cargo clippy -p yee-py --all-targets -- -D warnings
+
+  fdtd-coupling-gate:
+    name: FDTD propagation ε_eff gate (fdtd-line-eeff, release)
+    runs-on: ubuntu-latest
+    # No `needs: lint-test`: this gate builds only the yee-voxel tree in
+    # `--release` and is independent of the workspace lint-test job (whose
+    # debug-mode mom-001 solve runs 60-90 min, CLAUDE.md §10). Running it in
+    # parallel returns the FDTD verdict in a few minutes instead of serializing
+    # behind the slow lint-test.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.92"
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # Filter Phase F1.1b.1 (ADR-0108): the first full-wave EM solve in the
+      # filter pipeline. A driven, time-gated PROPAGATION measurement of the
+      # microstrip phase velocity → ε_eff (the resonant-split method of PR #1
+      # was unworkable — see ADR-0108). The single-line gate
+      # `fdtd-line-eeff-001` extracts ε_eff of a straight line; the coupled gate
+      # `fdtd-line-eeff-coupled-001` extracts the even/odd ε_eff of a coupled
+      # pair. Both are `#[ignore]`'d for default `cargo test` (multi-minute FDTD)
+      # and run here in `--release` on a GitHub runner (never on the
+      # memory-constrained dev box), asserting ≤ 15 % vs the analytic reference.
+      # Mirrors the `mom-001` / gpu-nightly `--release --ignored` release-gate
+      # idiom (CLAUDE.md §4: never merge an unrun solver gate).
+      - name: fdtd-line-eeff-001 (single line, release, ignored)
+        run: cargo test -p yee-voxel --release --test fdtd_line_eeff_001 -- --ignored --nocapture
+      - name: fdtd-line-eeff-coupled-001 (coupled even/odd, release, ignored)
+        run: cargo test -p yee-voxel --release --test fdtd_line_eeff_coupled_001 -- --ignored --nocapture
