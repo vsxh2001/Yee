@@ -179,3 +179,39 @@ jobs:
         run: cargo test -p yee-voxel --release --test fdtd_line_eeff_001 -- --ignored --nocapture
       - name: fdtd-line-eeff-coupled-001 (coupled even/odd, release, ignored)
         run: cargo test -p yee-voxel --release --test fdtd_line_eeff_coupled_001 -- --ignored --nocapture
+
+  fdtd-lumped-rlc-gate:
+    name: FDTD two-way lumped RLC gate (lumped-rlc-twoway-001, release)
+    runs-on: ubuntu-latest
+    # No `needs: lint-test`: this gate builds only the yee-fdtd tree in
+    # `--release` and is independent of the workspace lint-test job (whose
+    # debug-mode mom-001 solve runs 60-90 min, CLAUDE.md §10). Runs in parallel
+    # so the FDTD verdict returns in seconds instead of serializing behind it.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.92"
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # Phase 2.fdtd.6.2 (ADR-0116): the stable, two-way semi-implicit lumped
+      # series-R-L-C port. `lumped-rlc-twoway-001` asserts (a) stability of a
+      # near-lossless reactive load (no NaN; the old ≥196 Ω explicit-C
+      # divergence is gone), and (b) two-way correctness — a calibrated
+      # pure-resistor shunt reflects with |Γ| matching the analytic
+      # −Z₀/(2R+Z₀) law across the band, and a source-free reactive load is
+      # not inert. `#[ignore]`'d for default `cargo test` (a few seconds of
+      # FDTD) and run here in `--release`. Mirrors the `fdtd-coupling-gate` /
+      # `mom-001` `--release --ignored` release-gate idiom (CLAUDE.md §4).
+      - name: lumped-rlc-twoway-001 (two-way port, release, ignored)
+        run: cargo test -p yee-fdtd --release --test lumped_rlc_twoway_001 -- --ignored --nocapture
+      # No-regression guard: the existing one-way lumped gates (fdtd-206 LC
+      # ring-down + the resistor energy gate) must stay green under the new
+      # builder-gated path.
+      - name: lumped no-regression (fdtd-206 + resistor, release)
+        run: cargo test -p yee-fdtd --release --test lumped_lc_resonance --test lumped_resistor -- --include-ignored

@@ -52,6 +52,34 @@ pub use dimension::{
     dimension_edge_coupled_layout, dimension_hairpin, dimension_hairpin_layout,
 };
 
+/// Closed-form lumped-element LC ladder synthesis (Filter Phase F2.0):
+/// prototype g-values → ideal series/shunt LC resonators for a band-pass
+/// filter.
+pub mod lumped;
+pub use lumped::{
+    LcBranch, LcResonator, LumpedError, LumpedLadder, MaskVerdict, mask_verdict, synthesize_lumped,
+};
+// `ladder_s21` is `#[doc(hidden)] pub`: the realized-response ABCD helper, kept
+// out of the documented API surface but reachable by the `lumped_001` gate.
+#[doc(hidden)]
+pub use lumped::ladder_s21;
+
+/// Monte-Carlo tolerance / yield analysis (Filter Phase F2.4): snap each L/C to
+/// an E-series value, perturb within tolerance over many seeded trials, and
+/// report the fraction of realized ladders that meet the spec mask.
+pub mod tolerance;
+pub use tolerance::{YieldResult, monte_carlo_yield};
+
+/// E-series component selection + bill of materials (Filter Phase F2.1): ideal
+/// LC ladder values → nearest IEC 60063 standard parts + a grouped [`Bom`].
+pub mod parts;
+pub use parts::{Bom, BomLine, CompKind, ESeries, select_components};
+
+/// Lumped-LC PCB board generator (Filter Phase F2.2): place an LC ladder's
+/// resonators as SMD footprints + pads + traces on a [`yee_layout::Layout`].
+pub mod board;
+pub use board::{BranchKind, Footprint, LumpedBoard, PadSpec, Placement, lumped_board};
+
 pub use yee_synth::Approximation;
 use yee_synth::{Prototype, coupling_design, lowpass_to_bandpass, min_order, prototype};
 
