@@ -153,16 +153,21 @@ fn fdtd_coupling_001_matches_analytic_within_fifteen_percent() {
     // (even supermode) and anti-phase (odd supermode), each giving a single
     // dominant resonance, then forms k = (f_odd² − f_even²)/(f_odd² + f_even²).
     // ------------------------------------------------------------------
-    // A large air box is retained from the PR #1 iter#5 finding: hard-PEC
-    // outer walls (WalkingSkeletonSolver::new) confine the microstrip fringing
-    // + air-gap fields that SET the even/odd εeff difference, suppressing the
-    // split — a box-size (mm) effect, hence grid-independent. dx = 0.4 mm with
-    // air_above 48 / xy margin 24 cells affords a much larger open region.
+    // Open domain via CPML absorbing boundaries (the determined PR #1 / ADR-0108
+    // fix): the driver builds its solver with `WalkingSkeletonSolver::with_cpml`,
+    // so the six outer faces *absorb* rather than reflect. That removes both
+    // PEC-box failure modes — a small box *confines* the fringing/air-gap fields
+    // that set the even/odd εeff split (split → 0), and a large box becomes a
+    // resonant *cavity* whose box modes swamp the microstrip resonances. With
+    // absorbing walls only a *modest* air clearance is needed: enough that the
+    // strips sit a few physical cells clear of the 8-cell CPML region. dx =
+    // 0.4 mm, xy margin 16 / air_above 20 cells (both ≥ 8-cell CPML + clearance);
+    // 40 k steps (> CPML + clearance round-trips) for the DFT resolution floor.
     let cfg = CoupledRunConfig {
         f0_hz: F0_HZ,
         dx_m: 0.4e-3,
-        xy_margin_cells: 24,
-        air_above_cells: 48,
+        xy_margin_cells: 16,
+        air_above_cells: 20,
         n_steps: 40_000,
         ..CoupledRunConfig::default()
     };

@@ -62,7 +62,7 @@
 //! ```
 
 use ndarray::Array3;
-use yee_fdtd::{LumpedRlcPort, SourceWaveform, WalkingSkeletonSolver, YeeGrid};
+use yee_fdtd::{CpmlParams, LumpedRlcPort, SourceWaveform, WalkingSkeletonSolver, YeeGrid};
 use yee_layout::{Layout, Point2, Polygon};
 
 /// Voxelization parameters for [`voxelize_microstrip`].
@@ -321,6 +321,19 @@ pub struct CoupledRunConfig {
     /// Peak drive voltage (V) of the Gaussian-modulated pulse fed into the
     /// driven port's series EMF.
     pub drive_v0: f64,
+    /// CPML absorbing-boundary thickness, in cells, on every outer face. The
+    /// solver is built with [`WalkingSkeletonSolver::with_cpml`] so the six
+    /// outer faces *absorb* rather than reflect — an **open** domain.
+    ///
+    /// This is the determined fix for `fdtd-coupling-001` (PR #1 root cause,
+    /// ADR-0108): a hard-PEC outer wall either *confines* the microstrip
+    /// fringing fields that set the even/odd εeff split (small box → split
+    /// suppressed) or becomes a *resonant cavity* whose box modes swamp the
+    /// microstrip resonances (large box → spurious peaks). A radiating
+    /// microstrip structure needs absorbing walls. The
+    /// [`VoxelOptions::xy_margin_cells`] / [`VoxelOptions::air_above_cells`]
+    /// clearance must keep the strips a few cells *clear* of this CPML region.
+    pub cpml_thickness_cells: usize,
 }
 
 impl Default for CoupledRunConfig {
@@ -353,6 +366,11 @@ impl Default for CoupledRunConfig {
             // Weak coupling: ~10× a 50 Ω system impedance keeps loaded Q high.
             port_resistance_ohm: 500.0,
             drive_v0: 1.0,
+            // 8-cell CPML on every outer face (matches the yee-fdtd driver's
+            // `cpml_thickness_cells: 8`). Open domain: the walls absorb so the
+            // microstrip fringing fields neither get confined nor set up box
+            // modes (the PR #1 PEC-box failure modes — ADR-0108).
+            cpml_thickness_cells: 8,
         }
     }
 }
@@ -403,8 +421,10 @@ pub struct CoupledRunResult {
 /// which was fragile (sidelobe combs, a collapsing second peak — PR #1 iters
 /// 1–5). Clean single-peak extraction per mode is robust by construction.
 ///
-/// Each sub-run uses the default [`WalkingSkeletonSolver::new`] (hard-PEC outer
-/// walls), a broadband [`SourceWaveform::GaussianPulse`] centred on
+/// Each sub-run builds the solver with [`WalkingSkeletonSolver::with_cpml`]
+/// (CPML absorbing boundaries on all six outer faces — an **open** domain, the
+/// PR #1 / ADR-0108 fix for the PEC-box confinement/cavity failure modes), a
+/// broadband [`SourceWaveform::GaussianPulse`] centred on
 /// [`CoupledRunConfig::f0_hz`], and a large series resistance to keep the loaded
 /// Q high so the modal resonance stays sharp. The probe `E_z` is summed over
 /// both port cells (both are driven now — there is no separate passive probe).
@@ -475,7 +495,20 @@ fn dominant_resonance(layout: &Layout, cfg: &CoupledRunConfig, anti_phase: bool)
     let cell1 = model.port_cells[1];
 
     let dt = model.grid.dt;
-    let mut solver = WalkingSkeletonSolver::new(model.grid);
+
+    // Open domain: CPML absorbing boundaries on all six outer faces. A hard-PEC
+    // box (`WalkingSkeletonSolver::new`) fails for a radiating microstrip in two
+    // opposite ways (PR #1 root cause, ADR-0108): a small box *confines* the
+    // fringing/air-gap fields that set the even/odd εeff split (split → ~0), and
+    // a large box becomes a resonant *cavity* whose box modes swamp the
+    // microstrip resonances (argmax picks box modes → split collapses). CPML
+    // absorbs at the walls so neither happens. `CpmlParams::for_grid` sizes the
+    // grading to this grid's `dx`; the per-face thickness is
+    // `cfg.cpml_thickness_cells`. The step body below already routes its outer-
+    // boundary calls through the solver's CPML state (`apply_cpml_h` /
+    // `apply_cpml_e` dispatch to the real CPML update when one is configured).
+    let cpml = CpmlParams::for_grid(&model.grid, cfg.cpml_thickness_cells);
+    let mut solver = WalkingSkeletonSolver::with_cpml(model.grid, cpml);
 
     // --- 2. Ports: TWO Gaussian drives, in-phase or anti-phase. -------------
     //
@@ -513,12 +546,17 @@ fn dominant_resonance(layout: &Layout, cfg: &CoupledRunConfig, anti_phase: bool)
 
     // --- 3. Time-step with a custom body; record the PARITY-MATCHED probe E_z.
     //
-    // The body mirrors the cavity_resonance.rs custom step: H half-step + PEC
-    // outer-wall clamp (the no-CPML fall-through of `apply_cpml_h`), then both
-    // lumped-port corrections between H and E, then the E half-step + clamp,
-    // then advance the clock. Each port `correct_e` runs after `update_e_only`
-    // (it overwrites the standard Yee E_z estimate at its port cell), matching
-    // its documented call site.
+    // The body mirrors the `yee-fdtd` driver's custom step (`driver.rs`): H
+    // half-step + CPML H-correction, then both lumped-port corrections between H
+    // and E, then the E half-step + CPML E-correction, then advance the clock.
+    // Because the solver was built with `with_cpml` above, `apply_cpml_h` /
+    // `apply_cpml_e` advance the real CPML auxiliary state on the six outer
+    // faces (an open, absorbing domain) — not the PEC fall-through. `apply_cpml_e`
+    // also re-applies the interior PEC mask (the trace/ground metal) after the
+    // outer-boundary update, so the strips stay perfectly conducting. Each port
+    // `correct_e` runs after `update_e_only` and before `apply_cpml_e` (it
+    // overwrites the standard Yee E_z estimate at its interior port cell, away
+    // from the CPML region), matching its documented call site.
     //
     // Probe combination MUST match the excitation parity, else the mode of
     // interest cancels: for the antisymmetric (odd-mode) run, E_z(cell0) ≈
