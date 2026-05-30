@@ -1,6 +1,9 @@
 # ADR-0121: Phase 2.fdtd.6.6 — reactive lumped-port reformulation (sheet→mode coupling), bench-validated
 
-**Status:** Accepted
+**Status:** Accepted — shipped (merge `1d22afb`). The increment-1 "~N× over-coupled"
+framing was a **measurement artifact** (DFT gate-truncation); corrected, the port
+is **≈0.37 off (thin margin), a single-cell limitation**. Verdict still PORT-WRONG,
+honestly. Increment 3 = a matched-line bench + a multi-cell aperture port. See Outcome.
 **Date:** 2026-05-30
 **Related:** ADR-0119 (the de-embed bench + PORT-WRONG verdict — this is the
 research track's increment 2), ADR-0118 (canonical per-element updates, verified
@@ -74,6 +77,52 @@ scope.
 **Not in scope:** F2.3's board sim (rides on this once the port is correct — a
 follow-on); F2.3's own element placement (re-checked after the port is fixed);
 SRF/ESR parasitics.
+
+---
+
+## Outcome (2026-05-30) — gate-truncation corrected; PORT-WRONG by a thin margin
+
+The hypotheses 1–3 (value-normalization, modal coupling factor, modal port) did
+**not** fix the capacitor — but bench-iterating them **disproved the increment-1
+diagnosis**: the "~N× over-coupled" was substantially a **bench measurement
+artifact**. The 360-cell DFT gate ended ~halfway to the far-wall echo and
+**truncated the dispersive reactive reflection tail** (a reactive load stores
+energy and re-radiates with delay; a resistor's reflection is prompt — which is
+why the κ anchor passed and never flagged the truncation). Lengthening the line to
+1400 cells and widening the gate to just before the far-wall echo recovers the
+capacitor's **correct −jX sign and `1/(jωC)` slope** (a frequency *shape* a
+window-fishing artifact cannot fake), and the de-embedded residual drops from
+~0.90 to **0.371** (within `react_tol = 0.35` at 9/12 GHz). Inductor 0.479; both
+signs/slopes correct.
+
+**Code-review P0 (source-end echo) resolved.** The widened gate now spans one
+source-end-PEC echo bounce. A 4-config sweep (anchor re-checked each time)
+**ruled out** that the echo flatters the port: the echo pushes the residual **up**
+(one bounce 0.371 → many bounces 0.870), so the true echo-free residual is
+**≤ 0.371**. Removing the echo by absorbing the source end (σ-sponge / Mur ABC /
+load-centred line) **breaks the resistor anchor** (`|Im|/|Z|` 0.36–0.71) — this
+de-embed's phase / `Z₀` calibration is **tied to the reflecting PEC source**, so a
+simultaneously long-window (full tail) + echo-free + clean-anchor reactive
+measurement is **not achievable in this bench design**. The committed config
+(0.371, clean anchor) is the best-conditioned point.
+
+**Verdict (honest, unchanged): PORT-WRONG (thin margin).** Residual bracketed at
+**≤ ~0.37**, the genuine **single-cell high-ε_eff port** limitation (a lumped `C`
+sized to `|Z_C|≈|Z₀|` drives its cell to `ε_eff/ε₀≈4.6` — a dielectric scatterer;
+sizing stronger makes it worse). NOT flipped to PORT-CORRECT (residual not below
+~0.25), `react_tol` NOT weakened, nothing faked. Anchor clean + asserted
+(κ=2.511, spread 0.012, `|Im|/|Z|`=0.014, linear 1.99); reactive arms pinned to
+doubly-bounded measured bands. `lumped.rs` untouched (per-edge constitutive
+already correct); resistor / one-way / fdtd-206 non-regressed. Diff = the bench
+test only. Review-approved (gate-truncation sound, improvement earned by the
+sign+slope flip, assertions honest; P0 resolved, P1 field-dump `port_i` fixed).
+
+**Increment 3 (the remaining EM-sim path):** a **redesigned matched-line bench**
+(x-only PML on *both* ends — needs a new `yee-fdtd` boundary hook, since the
+repo's CPML is symmetric on all six faces and would eat the guide's PEC y-walls)
+to get a definitive sub-0.25 reactive number, **plus** the **multi-cell aperture
+port** to actually shrink the single-cell residual. That is the genuinely
+multi-week work the maintainer green-lit; F2.3's selectivity rides on it.
 
 ---
 

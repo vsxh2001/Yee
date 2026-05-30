@@ -104,6 +104,16 @@ inversion is not ill-conditioned noise — it is decisive on its own. This
 **contradicts the port-local proxy** (which was misleading): the canonical
 two-way lumped port genuinely mis-loads the line.
 
+> **Correction (ADR-0121, 2026-05-30):** the *magnitude* reported here (capacitor
+> `Z_in≈94 Ω`, "over-coupled ~N×") was **overstated by a DFT gate-truncation
+> artifact** in this 360-cell bench — the gate ended ~halfway to the wall echo and
+> truncated the *dispersive* reactive reflection tail (the resistor anchor is
+> prompt, so it never flagged it). On the corrected 1400-cell wide-gate bench
+> (ADR-0121), the capacitor de-embeds to the **correct −jX sign and `1/(jωC)`
+> slope** with a residual of only **≈0.37** (single-cell `ε_eff` limitation),
+> **not** N×. The qualitative verdict (PORT-WRONG → reformulation) stands; the
+> *degree* of wrongness is much smaller than this section first reported.
+
 **Decision:** increment 2 of the research track is a **port reformulation**
 (multi-cell aperture / TL-based Z₀ de-embedding into the line currents), **not** a
 measurement/calibration + F2.3-placement fix. The de-risk paid off — it
