@@ -147,7 +147,11 @@ jobs:
   fdtd-coupling-gate:
     name: FDTD coupled-resonator gate (fdtd-coupling-001, release)
     runs-on: ubuntu-latest
-    needs: lint-test
+    # No `needs: lint-test`: this gate builds only the yee-voxel tree in
+    # `--release` and is independent of the workspace lint-test job (whose
+    # debug-mode mom-001 solve runs 60-90 min, CLAUDE.md §10). Running it in
+    # parallel returns the FDTD verdict in ~20-30 min instead of serializing
+    # behind the slow lint-test.
     steps:
       - name: Checkout
         uses: actions/checkout@v4
