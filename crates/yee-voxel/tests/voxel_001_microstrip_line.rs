@@ -69,12 +69,14 @@ fn voxel_001_microstrip_line() {
     // --- Hand-computed dims. ---
     // x extent: bbox.x ∈ [0, 3mm], padded ±2mm -> [-2, 5]mm = 7mm -> 14 cells.
     // y extent: bbox.y ∈ [0, 20mm], padded ±2mm -> [-2, 22]mm = 24mm -> 48 cells.
-    // n_sub = round(1.6/0.5) = 3; k_top = 1 + 3 = 4; nz = 4 + 1 + 8 = 13.
+    // n_sub = round(1.6/0.5) = 3; trace at k_top = n_sub = 3 (so the ground-to-
+    // trace gap is n_sub·dx = h, all dielectric — no air series gap, ADR-0108);
+    // nz = k_top + 1 + 8 = 12.
     let exp_nx = 14;
     let exp_ny = 48;
     let n_sub = 3;
-    let k_top = 1 + n_sub; // 4
-    let exp_nz = k_top + 1 + AIR_ABOVE; // 13
+    let k_top = n_sub; // 3
+    let exp_nz = k_top + 1 + AIR_ABOVE; // 12
     assert_eq!(
         model.dims,
         (exp_nx, exp_ny, exp_nz),
