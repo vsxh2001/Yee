@@ -196,8 +196,13 @@ pub fn lumped_board(
     let clearance = CLEARANCE_FRAC * (pad.pitch_m + pad.pad_w_m).max(w_line);
     let rail_h = w_line.max(pad.pad_len_m); // ground rail thickness
     let shunt_span_y = pad.pitch_m + pad.pad_w_m; // y-extent of a stacked footprint
-    // Signal-line centreline: rail top + clearance + shunt span + clearance.
-    let y_sig = rail_h + clearance + shunt_span_y + clearance + w_line / 2.0;
+    // Signal-line centreline. The shunt stub must CONNECT the signal line to the
+    // ground rail: its two stacked pads span exactly from the rail top
+    // (`rail_h`) up to the signal-line bottom (`y_sig - w_line/2`). So that span
+    // equals `shunt_span_y`, giving `y_sig = rail_h + shunt_span_y + w_line/2`.
+    // (No y-clearance in the stub — the pads are meant to abut line and rail, so
+    // the shunt element's ground terminal actually reaches the ground plane.)
+    let y_sig = rail_h + shunt_span_y + w_line / 2.0;
 
     // --- Horizontal layout (x) ----------------------------------------------
     // Each resonator owns a slot wide enough for two side-by-side footprints
@@ -260,8 +265,11 @@ pub fn lumped_board(
             LcBranch::Shunt => {
                 // L and C footprints side by side in x; each stacks its two pads
                 // along y, bridging the signal line down to the ground rail. The
-                // footprint centre sits midway in the stub region.
-                let stub_cy = y_sig - w_line / 2.0 - clearance - shunt_span_y / 2.0;
+                // footprint centre sits midway in the stub span [rail_h ..
+                // y_sig - w_line/2], so the bottom pad's lower edge touches the
+                // rail top and the top pad's upper edge touches the line bottom —
+                // electrically connecting the shunt element to ground.
+                let stub_cy = rail_h + shunt_span_y / 2.0;
                 let l_cx = slot_cx - (pad.pad_len_m / 2.0 + clearance / 2.0);
                 let c_cx = slot_cx + (pad.pad_len_m / 2.0 + clearance / 2.0);
                 for (cx, ref_des) in [(l_cx, format!("L{resnum}")), (c_cx, format!("C{resnum}"))] {

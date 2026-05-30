@@ -125,10 +125,11 @@ fn lumped_pcb_001() {
     );
 
     // --- (2) pad count -----------------------------------------------------
-    // Each footprint is two pads; the signal line + ground rail add more rects.
+    // Each footprint is two pads; the signal line (>=1 segment) + ground rail
+    // add at least two more rects, so traces >= 2*placements + 2.
     assert!(
-        board.layout.traces.len() >= 2 * board.placements.len(),
-        "expected >= 2 pads per placement ({} traces, {} placements)",
+        board.layout.traces.len() >= 2 * board.placements.len() + 2,
+        "expected >= 2 pads per placement + line + rail ({} traces, {} placements)",
         board.layout.traces.len(),
         board.placements.len()
     );
@@ -210,5 +211,34 @@ fn lumped_pcb_001() {
             );
             assert!(hy > 0.0, "shunt footprint y must be above the rail: {hy}");
         }
+    }
+
+    // --- (6) shunt footprints REACH the ground rail (spec DoD) ------------
+    // The ground rail is the full-board-width copper rect at the bottom; its
+    // top edge is `rail_top`. Each shunt footprint's bottom pad lower edge =
+    // center_y - shunt_span_y/2 must touch/overlap the rail (≤ rail_top), so the
+    // shunt element's ground terminal is electrically connected — not floating.
+    let pad = Footprint::Smd0603.pad();
+    let shunt_span_y = pad.pitch_m + pad.pad_w_m;
+    let rail_top = rects
+        .iter()
+        .max_by(|a, b| {
+            (a.max.x - a.min.x)
+                .partial_cmp(&(b.max.x - b.min.x))
+                .unwrap()
+        })
+        .map(|r| r.max.y)
+        .expect("board has a ground-rail rect");
+    for p in board
+        .placements
+        .iter()
+        .filter(|p| p.kind == BranchKind::Shunt)
+    {
+        let bottom_edge = p.center_m.1 - shunt_span_y / 2.0;
+        assert!(
+            bottom_edge <= rail_top + 1e-9,
+            "shunt footprint {} bottom edge {bottom_edge} must reach the ground rail top {rail_top}",
+            p.ref_des
+        );
     }
 }
