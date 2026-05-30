@@ -95,6 +95,24 @@ jobs:
       - name: cargo build (yee-studio, wasm32, no-default-features)
         run: cargo build -p yee-studio --no-default-features --target wasm32-unknown-unknown
 
+      # Web bundle gate (App.1.2b, ADR-0107): builds the deployable static
+      # bundle (HTML + JS glue + .wasm) for the full `--features web` UI via
+      # trunk. jetli/trunk-action also fetches a matching wasm-bindgen-cli, so
+      # no separate install step is needed.
+      - name: Install trunk
+        uses: jetli/trunk-action@v0.5.0
+        with:
+          version: "latest"
+
+      - name: trunk build (yee-studio web bundle, release)
+        run: trunk build --release crates/yee-studio/index.html
+
+      - name: Upload yee-studio web bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: yee-studio-web
+          path: crates/yee-studio/dist
+
   python-bindings:
     runs-on: ubuntu-latest
     needs: lint-test
