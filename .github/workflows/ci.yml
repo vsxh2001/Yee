@@ -244,3 +244,36 @@ jobs:
       # `mom-001` `--release --ignored` release-gate idiom (CLAUDE.md §4).
       - name: reactive-deembed-001 (V+I de-embed bench, release, ignored)
         run: cargo test -p yee-fdtd --release --test reactive_deembed_001 reactive_deembed_001 -- --ignored --nocapture
+
+  fdtd-per-axis-cpml-gate:
+    name: FDTD per-axis CPML gate (cpml-per-axis-001, release)
+    runs-on: ubuntu-latest
+    # No `needs: lint-test`: builds only the yee-fdtd tree in `--release`, in
+    # parallel with the other FDTD release gates (CLAUDE.md §10).
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.92"
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # Phase 2.fdtd.6.7 (ADR-0122): per-axis CPML face selection. The gate
+      # drives an x-travelling pulse down a guide with x-only CPML (both
+      # x-ends) and PEC on the transverse (y, z) walls, and asserts (a) the
+      # x-end reflection is ≥30 dB below an all-PEC control (the same target
+      # as the all-faces `cpml_reflection` gate) and (b) the transverse PEC
+      # walls stay intact (tangential E ≈ 0) so the guide mode is preserved,
+      # not absorbed. `#[ignore]`'d for default `cargo test` (a few seconds of
+      # FDTD in release) and run here. Mirrors the `fdtd-lumped-rlc-gate` /
+      # `mom-001` `--release --ignored` release-gate idiom (CLAUDE.md §4).
+      - name: cpml-per-axis-001 (x-only CPML + transverse PEC, release, ignored)
+        run: cargo test -p yee-fdtd --release --test cpml_per_axis_001 -- --ignored --nocapture
+      # No-regression guard: the existing all-six-faces CPML gate must stay
+      # green under the new default axis mask (`[true; 3]` is byte-identical).
+      - name: cpml-reflection no-regression (all faces, release)
+        run: cargo test -p yee-fdtd --release --test cpml_reflection -- --include-ignored
