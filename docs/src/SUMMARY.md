@@ -156,3 +156,4 @@
 - [ADR-0110: Yee Filter Studio redesign — Dioxus view layer (POC-first)](decisions/0110-studio-redesign-dioxus.md)
 - [ADR-0111: Filter Phase F2.0 — lumped-element LC ladder synthesis](decisions/0111-f2-0-lumped-lc-synthesis.md)
 - [ADR-0112: Filter Phase F2.1 — component selection + BOM](decisions/0112-f2-1-component-selection-bom.md)
+- [ADR-0113: Filter Phase F2.4 — tolerance / yield (Monte-Carlo)](decisions/0113-f2-4-tolerance-yield.md)
