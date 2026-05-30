@@ -75,6 +75,11 @@ pub use tolerance::{YieldResult, monte_carlo_yield};
 pub mod parts;
 pub use parts::{Bom, BomLine, CompKind, ESeries, select_components};
 
+/// Lumped-LC PCB board generator (Filter Phase F2.2): place an LC ladder's
+/// resonators as SMD footprints + pads + traces on a [`yee_layout::Layout`].
+pub mod board;
+pub use board::{BranchKind, Footprint, LumpedBoard, PadSpec, Placement, lumped_board};
+
 pub use yee_synth::Approximation;
 use yee_synth::{Prototype, coupling_design, lowpass_to_bandpass, min_order, prototype};
 
