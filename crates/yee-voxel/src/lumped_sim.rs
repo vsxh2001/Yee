@@ -34,6 +34,14 @@
 //! A small finite series resistance ([`SERIES_ESR_OHM`]) is used on every
 //! element because [`LumpedRlcPort::series_rlc`] requires `r > 0`.
 //!
+//! Every filter element opts into the **stable two-way** port
+//! ([`LumpedRlcPort::with_two_way`], Phase 2.fdtd.6.2): the lumped branch
+//! current is solved implicitly with the field and feeds back into `E_z`, so a
+//! source-free inductor is not inert and the L‖C resonates (the legacy one-way
+//! path left the inductor inert and was unstable for a low-loss capacitor). The
+//! matched drive/load resistors stay on the validated one-way `pure_resistor`
+//! path (a pure resistor reflects identically under either update).
+//!
 //! # S21 extraction (thru-normalized)
 //!
 //! The single drive port (a modulated-Gaussian series EMF through a `Z0`
@@ -53,7 +61,7 @@
 //! transmission *relative to the matched thru*, exactly the quantity
 //! [`yee_filter::ladder_s21`] computes for the ideal circuit. This thru
 //! calibration is robust against the lumped-port `E_z` voltage convention and
-//! the one-way circuit→field coupling (see [`yee_fdtd::LumpedRlcPort`]).
+//! the residual feed/line coupling (see [`yee_fdtd::LumpedRlcPort`]).
 
 use std::f64::consts::PI;
 
@@ -316,13 +324,19 @@ fn run_board_solve(
                     let cx = 0.5 * (l_pl.center_m.0 + c_pl.center_m.0);
                     let cy = 0.5 * (l_pl.center_m.1 + c_pl.center_m.1);
                     let cell = cell_for(cx, cy, k_elem);
-                    elements.push(LumpedRlcPort::series_rlc(
-                        cell,
-                        SERIES_ESR_OHM,
-                        res.l_henry,
-                        res.c_farad,
-                        SourceWaveform::None,
-                    ));
+                    // Two-way (Phase 2.fdtd.6.2): the lumped current feeds back
+                    // into E_z so the L-C resonates and is unconditionally
+                    // stable — the one-way path leaves the inductor inert.
+                    elements.push(
+                        LumpedRlcPort::series_rlc(
+                            cell,
+                            SERIES_ESR_OHM,
+                            res.l_henry,
+                            res.c_farad,
+                            SourceWaveform::None,
+                        )
+                        .with_two_way(),
+                    );
                 }
                 LcBranch::Shunt => {
                     // Parallel L‖C from line to ground: two elements at the SAME
@@ -331,20 +345,29 @@ fn run_board_solve(
                     let cx = 0.5 * (l_pl.center_m.0 + c_pl.center_m.0);
                     let cy = 0.5 * (l_pl.center_m.1 + c_pl.center_m.1);
                     let cell = cell_for(cx, cy, k_elem);
-                    elements.push(LumpedRlcPort::series_rlc(
-                        cell,
-                        SERIES_ESR_OHM,
-                        res.l_henry,
-                        f64::INFINITY,
-                        SourceWaveform::None,
-                    ));
-                    elements.push(LumpedRlcPort::series_rlc(
-                        cell,
-                        SERIES_ESR_OHM,
-                        0.0,
-                        res.c_farad,
-                        SourceWaveform::None,
-                    ));
+                    // Two-way (Phase 2.fdtd.6.2) for both arms: a source-free
+                    // pure-L (c=∞) and pure-C (l=0) at the same shunt cell, whose
+                    // back-coupled currents sum into the parallel L‖C admittance.
+                    elements.push(
+                        LumpedRlcPort::series_rlc(
+                            cell,
+                            SERIES_ESR_OHM,
+                            res.l_henry,
+                            f64::INFINITY,
+                            SourceWaveform::None,
+                        )
+                        .with_two_way(),
+                    );
+                    elements.push(
+                        LumpedRlcPort::series_rlc(
+                            cell,
+                            SERIES_ESR_OHM,
+                            0.0,
+                            res.c_farad,
+                            SourceWaveform::None,
+                        )
+                        .with_two_way(),
+                    );
                 }
             }
         }
