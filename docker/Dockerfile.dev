@@ -1,0 +1,23 @@
+# Yee development container.
+#
+# A bounded build/test/FDTD sandbox: run heavy work (release builds, the
+# multi-minute mom-001 / fdtd-coupling-001 gates) inside `docker run` with
+# `--memory` / `--cpus` caps so a runaway build can never OOM-kill the HOST —
+# worst case the container is killed and the host is untouched. See
+# `scripts/yee-box.sh` and `docs/` for usage.
+#
+# Pins Rust 1.92 (matches rust-toolchain.toml) and the native build deps the
+# plotters-backed crates need (libfontconfig1-dev + pkg-config, CLAUDE.md §7).
+FROM rust:1.92-bookworm
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libfontconfig1-dev \
+        pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# The repo is bind-mounted at /work at runtime; the cargo registry and the
+# build target/ are mounted as named volumes so the cache persists across runs
+# (and the container's target/ never collides with the host's).
+WORKDIR /work
+ENV CARGO_TERM_COLOR=always
