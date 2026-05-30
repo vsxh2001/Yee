@@ -1,0 +1,6 @@
+# Trunk bundle config for the `yee-studio` browser app (App.1.2b; ADR-0107).
+# Feature/bin selection lives in the `data-trunk rel="rust"` link in
+# `index.html`; this file just names the entry HTML and the output dir.
+[build]
+target = "index.html"
+dist = "dist"
