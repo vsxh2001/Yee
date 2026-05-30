@@ -62,6 +62,11 @@ pub use lumped::{LcBranch, LcResonator, LumpedError, LumpedLadder, synthesize_lu
 #[doc(hidden)]
 pub use lumped::ladder_s21;
 
+/// E-series component selection + bill of materials (Filter Phase F2.1): ideal
+/// LC ladder values → nearest IEC 60063 standard parts + a grouped [`Bom`].
+pub mod parts;
+pub use parts::{Bom, BomLine, CompKind, ESeries, select_components};
+
 pub use yee_synth::Approximation;
 use yee_synth::{Prototype, coupling_design, lowpass_to_bandpass, min_order, prototype};
 
