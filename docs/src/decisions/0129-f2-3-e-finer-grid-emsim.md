@@ -1,6 +1,10 @@
 # ADR-0129: Filter Phase F2.3-e — finer-grid lumped EM sim (toward the 20 dB gate)
 
-**Status:** Accepted
+**Status:** Investigated — **finer dx DISPROVEN**: the notch COLLAPSES (2.4 GHz rej
+5.1→0.19 dB at dx 0.4→0.2 mm), it does not climb toward 20 dB. The residual is the
+**short-board DUT/thru de-embed + port accuracy in the board geometry**, not grid
+resolution. `fdtd_lumped_001` RED, not weakened. The maintainer's finer-grid choice
+empirically failed → re-surfaced for decision. Branch `9c57e5f` (unmerged). See Outcome.
 **Date:** 2026-05-31
 **Related:** ADR-0128 (F2.3-d — coarse grid saturates the notch at ~5 dB; the
 maintainer chose to invest in a finer grid, keeping the strict gate), ADR-0125
@@ -58,6 +62,40 @@ runtime, so the path/cost stays visible.
 
 **Not in scope (this increment):** the higher-accuracy port (only if dx-refinement
 alone is insufficient); tight beyond 20 dB; the studio UI (Track B).
+
+---
+
+## Outcome (2026-05-31) — finer dx DISPROVEN; the notch collapses
+
+dx-sweep (bounded container, gate freqs, CW DUT/thru):
+
+| dx (mm) | 2.4 GHz rej (dB) | 2.0 GHz \|S21\| (dB) | wall |
+|---------|------------------|----------------------|------|
+| 0.40 | **5.12** | +4.12 (over-unity) | ~5.3 min |
+| 0.20 | **0.19** (collapsed) | −4.48 (loss) | ~40 min |
+
+Finer dx makes it **worse**: the L‖C notch nearly vanishes (5.1 → 0.19 dB) and the
+passband flips from over-unity to loss — the **short-board DUT/thru de-embed does
+not converge to a physical response** as dx shrinks, and the board-geometry tank
+contribution degrades. (0.1 mm not run: ~22 h, and the collapse trend is
+unambiguous.) ADR-0129's hypothesis (dx-stable port ⇒ finer dx sharpens) is
+disproven by experiment. **The residual is the short-board measurement + the
+aperture-port accuracy in the board geometry, NOT grid resolution** — note the
+aperture port is dx-stable *in isolation* (aperture_port_001), so the failure is in
+how the F2.3 *board* couples + de-embeds, not the port primitive itself.
+
+`fdtd_lumped_001` RED, **not weakened**; gate tol unchanged; `dx_m` default left at
+0.4 mm (no principled finer default); scratch test removed; lane held to
+`crates/yee-voxel/**`. Branch `9c57e5f` (unmerged).
+
+**The maintainer-chosen finer-grid path empirically FAILED** → re-surfaced
+(AskUserQuestion, 2026-05-31). The remaining EM-sim options: (a) a higher-accuracy
+aperture port (sub-cell reactance) + a **matched/longer-board de-embed** (more
+multi-week, and the matched-line de-embed was a dead end at 6.8 — CPML≠matched at
+DC); (b) re-scope `fdtd_lumped_001`'s 20 dB bar to a physically-achievable
+band-structure cross-validation (now that finer-grid is ruled out, the pragmatic
+honest ship); (c) accept the band-structured response / defer EM-sim (the goal is
+5/6 with the polished UI now shipped).
 
 ---
 
