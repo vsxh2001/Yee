@@ -149,3 +149,4 @@
 - [ADR-0103: Filter Phase F1.4.1a — yee-export Gerber board outline (Edge.Cuts)](decisions/0103-filter-f1-4-1-gerber-board-outline.md)
 - [ADR-0104: Filter — register coupled/dim/gerber gates in the validation aggregator](decisions/0104-filter-validation-aggregator-gates.md)
 - [ADR-0105: Filter Phase F1.4.1b — yee-export KiCad .kicad_pcb export](decisions/0105-filter-f1-4-1b-kicad-pcb-export.md)
+- [ADR-0106: Filter — `yee filter synth --kicad-pcb` export wiring](decisions/0106-filter-cli-kicad-pcb-export.md)
