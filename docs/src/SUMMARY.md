@@ -152,3 +152,4 @@
 - [ADR-0106: Filter — `yee filter synth --kicad-pcb` export wiring](decisions/0106-filter-cli-kicad-pcb-export.md)
 - [ADR-0107: App.1.2b — trunk web bundle + CI build for yee-studio](decisions/0107-app-1-2b-trunk-web-bundle.md)
 - [ADR-0108: F1.1b.1 — FDTD coupled-resonator driver (full filter simulation)](decisions/0108-f1-1b-1-fdtd-coupled-resonator-driver.md)
+- [ADR-0109: F1.2.2 — hairpin dimensional synthesis](decisions/0109-f1-2-2-hairpin-dimensional-synthesis.md)
