@@ -118,10 +118,44 @@
 //! `ε_eff/ε₀≈4.6`, so the cell behaves partly as a high-`ε` dielectric scatterer
 //! (a spurious real part in the de-embedded `Z_L`, and a ~3–7 % over-tol bias at
 //! the weakly-coupled low band). Sizing the shunt *stronger* makes this WORSE
-//! (confirmed), so it is a genuine single-cell-port limitation, not a residual
-//! gating effect. Closing the last ~10 % needs a multi-cell / aperture-de-embed
-//! reactive port (ADR-0121 hypothesis 3 — a larger track). The capacitor's
-//! *reactance shape* is now correct and the residual is quantified, not faked.
+//! (confirmed), so it is a genuine single-cell-port limitation. Closing the last
+//! ~10 % needs a multi-cell / aperture-de-embed reactive port (ADR-0121
+//! hypothesis 3 — a larger track). The capacitor's *reactance shape* is now
+//! correct and the residual is quantified, not faked.
+//!
+//! ## Source-end echo investigation (code-review P0, ADR-0121)
+//!
+//! Review flagged that this lengthened, widened gate `[≈717, n_echo−20)` now
+//! contains the **source-end echo**: the load's −x reflection bounces off the
+//! low-x source/PEC region and returns to the load plane at ≈ `n_arrive +
+//! 2·port_i` cells (≈ step 2297 here, ~41 % into the gate). A 4-config sweep
+//! (all on this harness, resistor anchor re-checked each time) settled it:
+//!
+//! - **(a) committed** (port@400, NX=1400, gate→far-wall, *one* source-echo
+//!   bounce inside): cap worst **0.371**, anchor clean (`|Im|/|Z|`=0.014).
+//! - **(b) gate capped *before* the source echo** (≈[717, 2257)): cap worst
+//!   **0.546** — WORSE, because the shorter window re-truncates the dispersive
+//!   tail (the confound the widening fixed). Anchor clean (0.008).
+//! - **(c) ultra-wide gate** (port@400, NX=4000, gate spans *many* echo
+//!   bounces): cap worst **0.870** — WORSE; the prompt resistor anchor stays
+//!   clean (0.033) but the accumulated echo bounces bias the *dispersive*
+//!   capacitor measurement upward.
+//! - **(d) echo-free geometry** (load centered, NX=4000 port@2000, OR a low-x
+//!   conductivity-sponge / Mur source absorber): **breaks the resistor anchor**
+//!   (`|Im|/|Z|` 0.36–0.71 — the de-embed's phase/`Z₀` calibration is tied to
+//!   the reflecting source region), so those configs are INVALID and issue no
+//!   verdict, by design.
+//!
+//! Conclusion: the echo is present but it pushes the capacitor residual *up*
+//! (a→c: 0.37→0.87 as more bounces enter), so the committed 0.371 is **not** an
+//! echo artifact making the port look good — if anything the true echo-free
+//! residual is **≤ 0.371**. A *simultaneously* long (full-tail), echo-free, and
+//! clean-anchor measurement is not achievable in this PEC-source de-embed design
+//! (removing the source reflection breaks the anchor); the committed config is
+//! the **best-conditioned** point (clean anchor + least echo among tail-
+//! resolving windows). The residual is therefore bracketed (≤ ~0.37, a genuine
+//! single-cell-port limitation), not pinned to a sub-0.25 clean pass — so the
+//! verdict stays honestly PORT-WRONG and `react_tol` is not weakened.
 
 use std::f64::consts::PI;
 
@@ -353,7 +387,9 @@ fn run_line(
 #[ignore = "diagnostic: field-structure dump for the de-embed bench"]
 fn deembed_field_dump() {
     let src_i = 20;
-    let port_i = 240;
+    // Match the real bench geometry (Phase 2.fdtd.6.6: load at i=400 on the
+    // lengthened 1400-cell line), not the pre-6.6 i=240.
+    let port_i = 400;
     let grid = YeeGrid::vacuum(NX, NY, NZ, DX);
     let dt = grid.dt;
     let mut solver = WalkingSkeletonSolver::new(grid);
@@ -441,9 +477,21 @@ fn reactive_deembed_001() {
     // wall echo (`n_echo − 20`), capturing the FULL dispersive reactive tail
     // rather than the original `(n_arrive+n_echo)/2 + …` window that stopped
     // roughly half-way and truncated a reactive load's slow reflection. With
-    // the line lengthened to 1400 cells this is a ~2000-step-wide window — long
+    // the line lengthened to 1400 cells this is a ~3.9k-step window — long
     // enough for the capacitor's reactance to register at its `1/(jωC)` value
     // instead of a near-short prompt-reflection bias.
+    //
+    // Ending at the FAR-wall echo (`n_echo−20`) also bounds the *source-end*
+    // echo to a single bounce: that bounce returns at ≈ `n_arrive + 2·port_i`
+    // cells (≈ step 2297), inside the gate. A 4-config review sweep (ADR-0121,
+    // see the module Outcome) showed this echo pushes the capacitor residual
+    // *up* with more bounces (one bounce → 0.37; many → 0.87), so the committed
+    // single-bounce window is the best-conditioned choice that still resolves
+    // the dispersive tail; removing the echo entirely either re-truncates the
+    // tail (shorter gate → 0.55) or breaks the resistor anchor (source-end
+    // absorber / load-centered geometry). The committed point keeps the anchor
+    // clean AND the least echo bias — the residual is bracketed ≤ ~0.37, not an
+    // echo artifact.
     let gate_lo = n_arrive.saturating_sub(40);
     let gate_hi = (n_echo - 20).max(gate_lo + 1);
     let n_steps = n_echo + 20;
