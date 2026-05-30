@@ -170,3 +170,4 @@
 - [ADR-0124: Filter Phase F2.3-b — full-width-sheet lumped-element placement](decisions/0124-f2-3-full-width-sheet-placement.md)
 - [ADR-0125: Phase 2.fdtd.6.9 — multi-cell aperture lumped port](decisions/0125-fdtd-6-9-aperture-lumped-port.md)
 - [ADR-0126: Filter Phase F2.3-c — wire F2.3 onto the aperture lumped port](decisions/0126-f2-3-c-aperture-port-driver.md)
+- [ADR-0127: Phase 2.fdtd.6.10 — CW capacitor steady-state diagnostic](decisions/0127-fdtd-6-10-cw-capacitor-diagnostic.md)
