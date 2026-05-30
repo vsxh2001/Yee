@@ -96,8 +96,8 @@ pub type Status = CaseStatus;
 /// `mom-*` cases map to [`Solver::Mom`]; the FDTD family
 /// (`cpml-*` / `ntff-*` / `dispersive-*` / `fdtd-*`) maps to
 /// [`Solver::Fdtd`]; `fem-*` cases map to [`Solver::Fem`]; the
-/// filter-synthesis family (`synth-*` / `filt-*`) maps to
-/// [`Solver::Synth`].
+/// filter-synthesis / filter-pipeline family (`synth-*` / `filt-*` /
+/// `coupled-*` / `dim-*` / `gerber-*`) maps to [`Solver::Synth`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Solver {
     /// Method-of-moments planar solver (`mom-*`).
@@ -107,11 +107,15 @@ pub enum Solver {
     Fdtd,
     /// Finite-element eigenmode suite (`fem-*`).
     Fem,
-    /// Filter-synthesis (pure-math) gates (`synth-*` / `filt-*`).
+    /// Filter-synthesis and filter-pipeline (pure-math) gates
+    /// (`synth-*` / `filt-*` / `coupled-*` / `dim-*` / `gerber-*`).
     ///
     /// Phase F0.1 (ADR-0085): the F0 synthesis core (`yee-synth` /
     /// `yee-filter`) ships no EM, so these gates recompute closed-form
-    /// published references in milliseconds.
+    /// published references in milliseconds. Phase F1.4 (ADR-0104) adds
+    /// the downstream pipeline gates (`coupled-*` coupled-line model,
+    /// `dim-*` dimensional-synthesis inversion, `gerber-*` Gerber export),
+    /// which are likewise pure-math/text.
     Synth,
 }
 
@@ -497,6 +501,40 @@ fn case_registry() -> Vec<(CaseDescriptor, fn() -> CaseResult)> {
                 policy: ExecutionPolicy::Run,
             },
             run_filt_001 as fn() -> CaseResult,
+        ),
+        // ADR-0104: the filter-design pipeline gates beyond synthesis —
+        // coupled-line model, edge-coupled dimensioning, Gerber export.
+        // Pure-math/text, ms-scale; all `Run`. Same `Solver::Synth` family
+        // (the case ids distinguish them; no new `Solver` variant).
+        (
+            CaseDescriptor {
+                id: "coupled-001",
+                solver: Solver::Synth,
+                description: "Coupled microstrip Z0e/Z0o vs Steer Ex 5.6.1 \
+                              (eps_r=10, W/h=1, s/h=0.5; 59/37 Ohm, <=5%)",
+                policy: ExecutionPolicy::Run,
+            },
+            run_coupled_001 as fn() -> CaseResult,
+        ),
+        (
+            CaseDescriptor {
+                id: "dim-001",
+                solver: Solver::Synth,
+                description: "Edge-coupled dimensioning inversion round-trip: each \
+                              realized gap reproduces target_k within 1% (cheb N=5, FR-4)",
+                policy: ExecutionPolicy::Run,
+            },
+            run_dim_001 as fn() -> CaseResult,
+        ),
+        (
+            CaseDescriptor {
+                id: "gerber-001",
+                solver: Solver::Synth,
+                description: "layout_to_gerber RS-274X structure: %FSLAX46Y46*% header, \
+                              one G36/G37 region per polygon, M02* footer",
+                policy: ExecutionPolicy::Run,
+            },
+            run_gerber_001 as fn() -> CaseResult,
         ),
     ]
 }
@@ -2925,6 +2963,313 @@ pub fn run_filt_001() -> CaseResult {
             description,
             status: CaseStatus::Failed,
             notes: format!("mask FAIL: {}", report.failures.join("; ")),
+            wall_time_seconds,
+            plot_paths: Vec::new(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// ADR-0104: filter-design pipeline gates beyond synthesis —
+// coupled-001 (coupled-line model), dim-001 (edge-coupled dimensioning
+// inversion round-trip), gerber-001 (Gerber export structure). Pure
+// math/text, ms-scale; they re-exercise the shipped crate-test checks
+// inside the aggregator. References are read from the shipped crate
+// tests (`coupled_001_vs_published.rs`, `dim_001_inversion_roundtrip.rs`,
+// the `layout_to_gerber` doc-contract) — do NOT invent numbers.
+// ---------------------------------------------------------------------
+
+/// Steer Example 5.6.1 geometry (alumina `ε_r = 10`, `h = 500 µm`,
+/// `W = 500 µm` so `W/h = 1`, `s = 250 µm` so `s/h = 0.5`), matching
+/// `crates/yee-layout/tests/coupled_001_vs_published.rs`.
+const COUPLED_001_EPS_R: f64 = 10.0;
+/// Coupled-001 substrate height (m).
+const COUPLED_001_H_M: f64 = 500.0e-6;
+/// Coupled-001 strip width (m), `W/h = 1`.
+const COUPLED_001_W_M: f64 = 500.0e-6;
+/// Coupled-001 inter-strip gap (m), `s/h = 0.5`.
+const COUPLED_001_S_M: f64 = 250.0e-6;
+/// Published even-mode impedance (Steer Ex 5.6.1), Ω.
+const COUPLED_001_Z0E_REF: f64 = 59.0;
+/// Published odd-mode impedance (Steer Ex 5.6.1), Ω.
+const COUPLED_001_Z0O_REF: f64 = 37.0;
+/// Relative tolerance, matching the shipped crate gate (well inside the
+/// Kirschning-Jansen ≈ 1.4 % model accuracy).
+const COUPLED_001_REL_TOL: f64 = 0.05;
+
+/// `coupled-001`: evaluate [`yee_layout::coupled_microstrip`] at the
+/// Steer Example 5.6.1 point and compare `Z₀ₑ`/`Z₀ₒ` against the
+/// published `59 Ω`/`37 Ω` (mirroring
+/// `crates/yee-layout/tests/coupled_001_vs_published.rs`).
+///
+/// [`CaseStatus::Passed`] iff both `Z₀ₑ` and `Z₀ₒ` land within
+/// [`COUPLED_001_REL_TOL`] of their published values; otherwise
+/// [`CaseStatus::Failed`] with the worse relative error reported.
+/// Measured = computed `Z₀ₑ`/`Z₀ₒ`; reference = the published values.
+/// Pure math, microsecond-scale.
+pub fn run_coupled_001() -> CaseResult {
+    let id = "coupled-001";
+    let description = "Coupled microstrip Z0e/Z0o vs Steer Ex 5.6.1 (59/37 Ohm, <=5%)".to_string();
+    let start = Instant::now();
+
+    let m = yee_layout::coupled_microstrip(
+        COUPLED_001_W_M,
+        COUPLED_001_S_M,
+        COUPLED_001_H_M,
+        COUPLED_001_EPS_R,
+    );
+    let rel_e = (m.z0e_ohm - COUPLED_001_Z0E_REF).abs() / COUPLED_001_Z0E_REF;
+    let rel_o = (m.z0o_ohm - COUPLED_001_Z0O_REF).abs() / COUPLED_001_Z0O_REF;
+    let max_rel = rel_e.max(rel_o);
+
+    let wall_time_seconds = start.elapsed().as_secs_f64();
+    if max_rel < COUPLED_001_REL_TOL {
+        CaseResult {
+            id: id.into(),
+            description,
+            status: CaseStatus::Passed,
+            notes: format!(
+                "measured Z0e={:.3} Ohm (ref {COUPLED_001_Z0E_REF:.1}, {:.2}%), \
+                 Z0o={:.3} Ohm (ref {COUPLED_001_Z0O_REF:.1}, {:.2}%); \
+                 max rel {:.2}% < {:.0}%",
+                m.z0e_ohm,
+                rel_e * 100.0,
+                m.z0o_ohm,
+                rel_o * 100.0,
+                max_rel * 100.0,
+                COUPLED_001_REL_TOL * 100.0
+            ),
+            wall_time_seconds,
+            plot_paths: Vec::new(),
+        }
+    } else {
+        CaseResult {
+            id: id.into(),
+            description,
+            status: CaseStatus::Failed,
+            notes: format!(
+                "measured Z0e={:.3} Ohm (ref {COUPLED_001_Z0E_REF:.1}, {:.2}%), \
+                 Z0o={:.3} Ohm (ref {COUPLED_001_Z0O_REF:.1}, {:.2}%); \
+                 max rel {:.2}% >= {:.0}%",
+                m.z0e_ohm,
+                rel_e * 100.0,
+                m.z0o_ohm,
+                rel_o * 100.0,
+                max_rel * 100.0,
+                COUPLED_001_REL_TOL * 100.0
+            ),
+            wall_time_seconds,
+            plot_paths: Vec::new(),
+        }
+    }
+}
+
+/// FR-4 substrate for `dim-001` (`ε_r = 4.4`, `h = 1.6 mm`), matching the
+/// shipped `crates/yee-filter/tests/dim_001_inversion_roundtrip.rs` fixture.
+const DIM_001_EPS_R: f64 = 4.4;
+/// `dim-001` substrate height (m).
+const DIM_001_H_M: f64 = 1.6e-3;
+/// `dim-001` inversion round-trip tolerance: each realized gap must
+/// reproduce its `target_k` to within 1 % relative.
+const DIM_001_REL_TOL: f64 = 0.01;
+
+/// `dim-001`: synthesize the committed Chebyshev 0.5 dB N=5 BPF
+/// (`f0 = 2 GHz`, `FBW = 0.10`, `Z0 = 50 Ω`) via
+/// [`yee_filter::synthesize`], dimension it on FR-4 with
+/// [`yee_filter::dimension_edge_coupled`], then re-evaluate the
+/// coupled-microstrip model on each solved gap and assert the recovered
+/// coupling coefficient reproduces its `target_k` within
+/// [`DIM_001_REL_TOL`] (mirroring
+/// `crates/yee-filter/tests/dim_001_inversion_roundtrip.rs`).
+///
+/// [`CaseStatus::Passed`] iff the max relative error over all
+/// inter-resonator gaps is `< 1 %`; otherwise [`CaseStatus::Failed`].
+/// Measured = max relative error; reference = `< 0.01`. Pure math,
+/// microsecond-scale.
+pub fn run_dim_001() -> CaseResult {
+    let id = "dim-001";
+    let description =
+        "Edge-coupled dimensioning inversion round-trip: realized k vs target_k <1% (cheb N=5, FR-4)"
+            .to_string();
+    let start = Instant::now();
+
+    let spec = yee_filter::FilterSpec {
+        response: yee_filter::Response::Bandpass,
+        approximation: yee_filter::Approximation::Chebyshev { ripple_db: 0.5 },
+        f0_hz: 2.0e9,
+        fbw: 0.10,
+        order: Some(5),
+        z0_ohm: 50.0,
+        mask: yee_filter::SpecMask {
+            passband_ripple_db: 0.5,
+            return_loss_db: 10.0,
+            stopband: vec![(2.4e9, 30.0)],
+        },
+    };
+    let substrate = yee_layout::Substrate {
+        eps_r: DIM_001_EPS_R,
+        height_m: DIM_001_H_M,
+        loss_tangent: 0.02,
+        metal_thickness_m: 35e-6,
+    };
+
+    let proj = yee_filter::synthesize(&spec);
+    let dims = match yee_filter::dimension_edge_coupled(&proj, &substrate) {
+        Ok(d) => d,
+        Err(e) => {
+            return CaseResult {
+                id: id.into(),
+                description,
+                status: CaseStatus::Failed,
+                notes: format!("dimension_edge_coupled failed: {e}"),
+                wall_time_seconds: start.elapsed().as_secs_f64(),
+                plot_paths: Vec::new(),
+            };
+        }
+    };
+
+    // N=5 → 4 inter-resonator gaps (mirrors the `dims.gaps_m.len() == 4`
+    // assertion in the crate gate). Guard so the round-trip below cannot
+    // silently pass on a degenerate/empty gap list after a coupler-count
+    // API change.
+    if dims.gaps_m.len() != 4 {
+        return CaseResult {
+            id: id.into(),
+            description,
+            status: CaseStatus::Failed,
+            notes: format!(
+                "expected 4 inter-resonator gaps (N=5), got {}",
+                dims.gaps_m.len()
+            ),
+            wall_time_seconds: start.elapsed().as_secs_f64(),
+            plot_paths: Vec::new(),
+        };
+    }
+
+    let mut max_rel = 0.0_f64;
+    let mut worst = String::new();
+    for (i, (&gap, &target)) in dims.gaps_m.iter().zip(dims.target_k.iter()).enumerate() {
+        let realized = yee_layout::coupling_coefficient(&yee_layout::coupled_microstrip(
+            dims.line_width_m,
+            gap,
+            substrate.height_m,
+            substrate.eps_r,
+        ));
+        let rel = (realized - target).abs() / target.abs();
+        if rel > max_rel {
+            max_rel = rel;
+            worst = format!(
+                "gap[{i}] = {gap:.6e} m realizes k = {realized:.6}, target_k = {target:.6}"
+            );
+        }
+    }
+
+    let wall_time_seconds = start.elapsed().as_secs_f64();
+    if max_rel < DIM_001_REL_TOL {
+        CaseResult {
+            id: id.into(),
+            description,
+            status: CaseStatus::Passed,
+            notes: format!(
+                "{} inter-resonator gaps inverted; max rel error {:.4}% < {:.0}%",
+                dims.gaps_m.len(),
+                max_rel * 100.0,
+                DIM_001_REL_TOL * 100.0
+            ),
+            wall_time_seconds,
+            plot_paths: Vec::new(),
+        }
+    } else {
+        CaseResult {
+            id: id.into(),
+            description,
+            status: CaseStatus::Failed,
+            notes: format!(
+                "max rel error {:.4}% >= {:.0}% at {worst}",
+                max_rel * 100.0,
+                DIM_001_REL_TOL * 100.0
+            ),
+            wall_time_seconds,
+            plot_paths: Vec::new(),
+        }
+    }
+}
+
+/// `gerber-001`: emit an RS-274X Gerber via
+/// [`yee_export::layout_to_gerber`] for a small two-rectangle layout and
+/// assert the structural invariants of the format (ADR-0100): the
+/// `%FSLAX46Y46*%` format-statement header, exactly one `G36*`/`G37*`
+/// region per fillable polygon, and the `M02*` footer.
+///
+/// [`CaseStatus::Passed`] iff all four checks hold and the region count
+/// equals the polygon count; otherwise [`CaseStatus::Failed`].
+/// Measured = region count; reference = polygon count. Pure text,
+/// microsecond-scale.
+pub fn run_gerber_001() -> CaseResult {
+    let id = "gerber-001";
+    let description =
+        "layout_to_gerber RS-274X structure: header, one G36/G37 per polygon, M02* footer"
+            .to_string();
+    let start = Instant::now();
+
+    // Small deterministic layout: two axis-aligned rectangles (each four
+    // vertices, so each is a fillable region). Built directly so the
+    // polygon count is fixed and independent of any synthesis path.
+    let traces = vec![
+        yee_layout::Polygon::rect(0.0, 0.0, 5.0e-3, 0.5e-3),
+        yee_layout::Polygon::rect(0.0, 1.0e-3, 5.0e-3, 0.5e-3),
+    ];
+    let n_polys = traces.len();
+    let substrate = yee_layout::Substrate {
+        eps_r: DIM_001_EPS_R,
+        height_m: DIM_001_H_M,
+        loss_tangent: 0.02,
+        metal_thickness_m: 35e-6,
+    };
+    let bbox = yee_layout::BBox::from_polygons(&traces);
+    let layout = yee_layout::Layout {
+        substrate,
+        traces,
+        ports: Vec::new(),
+        bbox,
+    };
+
+    let gerber = yee_export::layout_to_gerber(&layout, &yee_export::GerberOptions::default());
+
+    let mut failures: Vec<String> = Vec::new();
+    if !gerber.starts_with("%FSLAX46Y46*%") {
+        failures.push("missing %FSLAX46Y46*% format-statement header".into());
+    }
+    let g36 = gerber.matches("G36*").count();
+    let g37 = gerber.matches("G37*").count();
+    if g36 != n_polys {
+        failures.push(format!("{g36} G36* region-opens != {n_polys} polygons"));
+    }
+    if g37 != n_polys {
+        failures.push(format!("{g37} G37* region-closes != {n_polys} polygons"));
+    }
+    if !gerber.trim_end().ends_with("M02*") {
+        failures.push("missing M02* footer".into());
+    }
+
+    let wall_time_seconds = start.elapsed().as_secs_f64();
+    if failures.is_empty() {
+        CaseResult {
+            id: id.into(),
+            description,
+            status: CaseStatus::Passed,
+            notes: format!(
+                "RS-274X OK: %FSLAX46Y46*% header, {g36} G36*/G37* regions (== {n_polys} polygons), M02* footer"
+            ),
+            wall_time_seconds,
+            plot_paths: Vec::new(),
+        }
+    } else {
+        CaseResult {
+            id: id.into(),
+            description,
+            status: CaseStatus::Failed,
+            notes: format!("Gerber structure FAIL: {}", failures.join("; ")),
             wall_time_seconds,
             plot_paths: Vec::new(),
         }
