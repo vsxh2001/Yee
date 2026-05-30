@@ -1,14 +1,17 @@
 //! # yee-export
 //!
 //! Manufacturing-file emitters for the Yee filter-design studio (Filter Phase
-//! F1.4). This first brick is a **single-copper-layer RS-274X Gerber** emitter:
-//! it turns a [`yee_layout::Layout`]'s top-metal polygons into filled
-//! [Gerber][ucamco] regions (`G36*`/`G37*`).
+//! F1.4). Two RS-274X [Gerber][ucamco] emitters are provided:
+//!
+//! - [`layout_to_gerber`] — single-copper-layer: a [`yee_layout::Layout`]'s
+//!   top-metal polygons as filled regions (`G36*`/`G37*`) — F1.4.0.
+//! - [`layout_to_gerber_outline`] — board-outline (Edge.Cuts): a single
+//!   **stroked** rectangular contour around the layout `bbox`, expanded by a
+//!   margin — F1.4.1a.
 //!
 //! Pure text, no EM, no native dependency — **WASM-safe** so the studio can
-//! export client-side (ADR-0089). The walking skeleton is deliberately minimal:
-//! one copper layer, one aperture, no drill / board-outline / soldermask /
-//! multi-layer (those are F1.4.1+).
+//! export client-side (ADR-0089). Drill, soldermask, silkscreen, and
+//! multi-layer stack-ups are F1.4.1b+.
 //!
 //! ## Coordinate model
 //!
