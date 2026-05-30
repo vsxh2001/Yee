@@ -62,7 +62,8 @@
 //! ```
 
 use ndarray::Array3;
-use yee_fdtd::YeeGrid;
+use yee_fdtd::{LumpedRlcPort, SourceWaveform, WalkingSkeletonSolver, YeeGrid};
+use yee_filter::extract_coupling;
 use yee_layout::{Layout, Point2, Polygon};
 
 /// Voxelization parameters for [`voxelize_microstrip`].
@@ -239,4 +240,265 @@ fn point_in_polygon(p: Point2, poly: &Polygon) -> bool {
         j = i;
     }
     inside
+}
+
+// ===========================================================================
+// FDTD coupled-resonator driver (Filter Phase F1.1b.1, ADR-0108)
+// ===========================================================================
+//
+// `run_coupled_pair` is the first full-wave EM solve in the filter-design
+// pipeline. It voxelizes a two-resonator microstrip [`Layout`], drives one
+// resonator with a weakly-coupled lumped port carrying a broadband
+// Gaussian-modulated pulse, probes the second resonator's vertical `E_z`,
+// single-bin-DFTs the probe time series to a magnitude spectrum, and inverts
+// the two split resonance peaks to a coupling coefficient `k` via the shipped
+// [`yee_filter::extract_coupling`] (`k = (f_odd² − f_even²)/(f_odd² + f_even²)`).
+//
+// The validation gate (`tests/fdtd_coupling_001.rs`, `#[ignore]`'d) cross-checks
+// the FDTD `k` against the analytic Kirschning-Jansen coupled-line reference
+// (`yee_layout::coupled_microstrip` / `coupling_coefficient`). The FDTD run is
+// multi-minute, so the gate runs only in a dedicated CI `--release` job — never
+// in the default `cargo test`. See ADR-0108.
+
+/// Configuration for the [`run_coupled_pair`] FDTD coupled-resonator driver.
+///
+/// The defaults target a *walking-skeleton* run: a coarse cubic grid and a
+/// modest step count chosen for a tractable CI wall-time rather than tight
+/// accuracy (the gate tolerance is loose, ≤ 15 %). The physics knobs
+/// (resolution, step count, drive bandwidth) are deliberately conservative and
+/// documented; they have **not** been FDTD-tuned on the dev box (memory- and
+/// CPU-constrained — see ADR-0108), so CI is the first place the chosen values
+/// are exercised end to end.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CoupledRunConfig {
+    /// Isotropic Yee cell size `dx = dy = dz`, metres. Smaller is more accurate
+    /// but quadratically (×3 in 3-D) more expensive; the default is a coarse
+    /// resolution sufficient to resolve the split resonances on a tractable
+    /// grid.
+    pub dx_m: f64,
+    /// Air margin (in cells) around the layout bounding box in `x`/`y`
+    /// (forwarded to [`VoxelOptions::xy_margin_cells`]).
+    pub xy_margin_cells: usize,
+    /// Air layers above the top metal (forwarded to
+    /// [`VoxelOptions::air_above_cells`]).
+    pub air_above_cells: usize,
+    /// Synchronous resonator centre frequency `f0` (Hz). The DFT magnitude
+    /// spectrum is scanned over `[f0·(1 − span), f0·(1 + span)]`; the two split
+    /// resonances of a coupled pair straddle `f0`, so the scan window must
+    /// bracket both.
+    pub f0_hz: f64,
+    /// Fractional half-width of the DFT scan window around `f0`
+    /// (`f_lo = f0·(1 − span)`, `f_hi = f0·(1 + span)`). Wide enough to capture
+    /// both split peaks for the coupling levels this driver targets.
+    pub freq_span: f64,
+    /// Number of linearly-spaced candidate frequencies in the single-bin DFT
+    /// scan. Sets the frequency resolution `Δf = (f_hi − f_lo)/(n_freq_bins−1)`
+    /// and hence the precision with which the two split peaks are located.
+    pub n_freq_bins: usize,
+    /// Total number of FDTD time steps. The simulated time `n_steps · dt` sets
+    /// the DFT frequency resolution floor `1/(n_steps · dt)`; the run must be
+    /// long enough for the two split resonances to separate cleanly.
+    pub n_steps: usize,
+    /// Series resistance (Ω) of both lumped ports. A *large* value makes the
+    /// ports weakly coupled probes (high loaded Q, sharp split peaks) rather
+    /// than matched loads that would damp the resonances away.
+    pub port_resistance_ohm: f64,
+    /// Peak drive voltage (V) of the Gaussian-modulated pulse fed into the
+    /// driven port's series EMF.
+    pub drive_v0: f64,
+}
+
+impl Default for CoupledRunConfig {
+    /// Walking-skeleton defaults (coarse grid, modest step count). See the
+    /// per-field docs for the rationale; these are CI-validated, not
+    /// dev-box-tuned (ADR-0108).
+    fn default() -> Self {
+        Self {
+            // Coarse: ~0.4 mm cells. For a ~1.6 mm FR-4 substrate this is ~4
+            // cells through the dielectric (n_sub), enough to seat the slab and
+            // the vertical E_z drive while keeping the cell budget small.
+            dx_m: 0.4e-3,
+            xy_margin_cells: 6,
+            air_above_cells: 8,
+            // 2.4 GHz synchronous centre (the project's canonical ISM band; the
+            // gate builds its resonators around this).
+            f0_hz: 2.4e9,
+            // ±35 % brackets both split peaks for k up to a few tenths.
+            freq_span: 0.35,
+            n_freq_bins: 600,
+            // Modest: enough simulated time for the split peaks to resolve at
+            // 2.4 GHz on a coarse grid, while staying within a CI wall-time
+            // budget. Coarse + modest is a documented blind choice (ADR-0108);
+            // CI stresses whether it is sufficient.
+            n_steps: 40_000,
+            // Weak coupling: ~10× a 50 Ω system impedance keeps loaded Q high.
+            port_resistance_ohm: 500.0,
+            drive_v0: 1.0,
+        }
+    }
+}
+
+/// Result of a [`run_coupled_pair`] FDTD coupled-resonator solve.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CoupledRunResult {
+    /// Extracted inter-resonator coupling coefficient
+    /// `k = (f_odd² − f_even²)/(f_odd² + f_even²)` (from
+    /// [`yee_filter::extract_coupling`]).
+    pub k: f64,
+    /// Even-mode split-resonance frequency (Hz) — the **lower** of the two
+    /// peaks (the even mode has the higher effective permittivity, hence the
+    /// lower frequency).
+    pub f_even: f64,
+    /// Odd-mode split-resonance frequency (Hz) — the **upper** of the two peaks.
+    pub f_odd: f64,
+}
+
+/// Run a full-wave FDTD solve on a coupled microstrip-resonator [`Layout`] and
+/// extract its inter-resonator coupling coefficient `k`.
+///
+/// This is the integration driver for Filter Phase F1.1b.1 (ADR-0108): it
+/// composes primitives that all already ship —
+/// [`voxelize_microstrip`] (the layout→grid bridge), `yee-fdtd`'s
+/// [`LumpedRlcPort`] drive/probe + [`WalkingSkeletonSolver`] time-stepping, and
+/// [`yee_filter::extract_coupling`] (the split-peak `k` inversion).
+///
+/// # Method
+///
+/// 1. **Voxelize** the two-resonator layout into a material-assigned grid
+///    (PEC ground + PEC traces + substrate slab). The default
+///    [`WalkingSkeletonSolver::new`] gives hard-PEC outer walls, i.e. a closed
+///    resonant box — appropriate for a weak-coupling resonance measurement.
+/// 2. **Drive** the first layout port with a [`LumpedRlcPort`] carrying a
+///    broadband [`SourceWaveform::GaussianPulse`] centred on
+///    [`CoupledRunConfig::f0_hz`]; the second port is a passive (open-EMF)
+///    probe of the same large resistance. Both ports act on the vertical `E_z`
+///    edge between trace and ground at their cell — the natural microstrip
+///    feed orientation. A *large* series resistance keeps the loaded Q high so
+///    the two split resonances stay sharp.
+/// 3. **Time-step** with a custom step body (`update_h_only` → `apply_cpml_h`
+///    → port `correct_e` → `update_e_only` → `apply_cpml_e` → `advance_clock`),
+///    recording the probe-port `E_z` each step.
+/// 4. **DFT** the probe time series with a single-bin (Goertzel-style)
+///    frequency scan over `[f0·(1 − span), f0·(1 + span)]` — the same idiom as
+///    `yee-fdtd`'s `cavity_resonance.rs` / `ntff.rs` accumulators; no FFT
+///    dependency.
+/// 5. **Extract** the two split peaks and invert them to `k` via
+///    [`yee_filter::extract_coupling`].
+///
+/// # Performance
+///
+/// The FDTD run is multi-minute even on the coarse default grid; do **not**
+/// call this on a constrained machine. Its validation gate
+/// (`fdtd-coupling-001`) is `#[ignore]`'d and runs only in a dedicated CI
+/// `--release` job (ADR-0108).
+///
+/// # Panics
+///
+/// Panics if the layout has fewer than two ports (a coupled-pair drive needs a
+/// drive port and a probe port), or if [`extract_coupling`] cannot find two
+/// distinct split peaks in the scanned spectrum (the run did not resolve the
+/// resonance split — usually too coarse a grid, too few steps, or a scan window
+/// that does not bracket both peaks).
+pub fn run_coupled_pair(layout: &Layout, cfg: &CoupledRunConfig) -> CoupledRunResult {
+    assert!(
+        layout.ports.len() >= 2,
+        "run_coupled_pair: need ≥ 2 ports (a drive port and a probe port); got {}",
+        layout.ports.len()
+    );
+
+    // --- 1. Voxelize: layout -> material-assigned grid + port cells. --------
+    let opts = VoxelOptions {
+        dx_m: cfg.dx_m,
+        xy_margin_cells: cfg.xy_margin_cells,
+        air_above_cells: cfg.air_above_cells,
+    };
+    let model = voxelize_microstrip(layout, &opts);
+    let drive_cell = model.port_cells[0];
+    let probe_cell = model.port_cells[1];
+
+    let dt = model.grid.dt;
+    let mut solver = WalkingSkeletonSolver::new(model.grid);
+
+    // --- 2. Ports: a weakly-coupled Gaussian drive + a passive probe. -------
+    //
+    // The drive carries a broadband Gaussian-modulated pulse centred on f0 with
+    // a spectral FWHM covering the whole scan window, so it excites both split
+    // resonances. The probe is the same large-R port with no EMF — its
+    // `correct_e` still applies the resistive back-reaction (a weak load), and
+    // we read the probe-cell `E_z` directly from the grid each step.
+    let bw = 2.0 * cfg.freq_span * cfg.f0_hz;
+    let drive_wave = SourceWaveform::GaussianPulse {
+        v0: cfg.drive_v0,
+        f0: cfg.f0_hz,
+        bw,
+        // Centre the pulse a few characteristic times in so its t=0 tail is
+        // negligible. The Gaussian time constant is τ = √(2 ln2)/(π·bw); place
+        // t0 at ~3.5 τ expressed in steps.
+        t0_steps: ((3.5 * (2.0_f64 * std::f64::consts::LN_2).sqrt() / (std::f64::consts::PI * bw))
+            / dt)
+            .ceil() as usize,
+    };
+    let mut drive_port =
+        LumpedRlcPort::pure_resistor(drive_cell, cfg.port_resistance_ohm, drive_wave);
+    let mut probe_port =
+        LumpedRlcPort::pure_resistor(probe_cell, cfg.port_resistance_ohm, SourceWaveform::None);
+
+    // --- 3. Time-step with a custom body; record the probe E_z. -------------
+    //
+    // The body mirrors the cavity_resonance.rs custom step: H half-step + PEC
+    // outer-wall clamp (the no-CPML fall-through of `apply_cpml_h`), then the
+    // lumped-port corrections between H and E, then the E half-step + clamp,
+    // then advance the clock. The port `correct_e` runs after `update_e_only`
+    // (it overwrites the standard Yee E_z estimate at the port cell), matching
+    // its documented call site.
+    let mut probe_series: Vec<f64> = Vec::with_capacity(cfg.n_steps);
+    for n in 0..cfg.n_steps {
+        solver.update_h_only();
+        solver.apply_cpml_h();
+
+        solver.update_e_only();
+        drive_port.correct_e(solver.grid_mut(), n, dt);
+        probe_port.correct_e(solver.grid_mut(), n, dt);
+        solver.apply_cpml_e();
+
+        solver.advance_clock();
+
+        let ez = solver.grid().ez[probe_cell];
+        probe_series.push(ez);
+    }
+
+    // --- 4. Single-bin DFT scan over the split-resonance window. ------------
+    let f_lo = cfg.f0_hz * (1.0 - cfg.freq_span);
+    let f_hi = cfg.f0_hz * (1.0 + cfg.freq_span);
+    let n_bins = cfg.n_freq_bins.max(5);
+    let df = (f_hi - f_lo) / (n_bins - 1) as f64;
+
+    let mut freqs = Vec::with_capacity(n_bins);
+    let mut mag = Vec::with_capacity(n_bins);
+    for bin in 0..n_bins {
+        let f = f_lo + bin as f64 * df;
+        let omega = 2.0 * std::f64::consts::PI * f;
+        let mut re = 0.0_f64;
+        let mut im = 0.0_f64;
+        for (m, &x) in probe_series.iter().enumerate() {
+            let phase = omega * m as f64 * dt;
+            re += x * phase.cos();
+            im -= x * phase.sin();
+        }
+        freqs.push(f);
+        mag.push((re * re + im * im).sqrt());
+    }
+
+    // --- 5. Invert the two split peaks to k. --------------------------------
+    let extraction = extract_coupling(&freqs, &mag).expect(
+        "run_coupled_pair: extract_coupling found < 2 split peaks in the scanned spectrum; \
+         the FDTD run did not resolve the resonance split (grid too coarse, too few steps, \
+         or scan window does not bracket both peaks)",
+    );
+
+    CoupledRunResult {
+        k: extraction.k,
+        f_even: extraction.f_lo_hz,
+        f_odd: extraction.f_hi_hz,
+    }
 }
