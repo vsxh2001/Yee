@@ -493,6 +493,25 @@ pub fn run_coupled_pair(layout: &Layout, cfg: &CoupledRunConfig) -> CoupledRunRe
         mag.push((re * re + im * im).sqrt());
     }
 
+    // --- 4b. DIAGNOSTIC (ADR-0108 tuning): dump the spectrum's local maxima so
+    // CI shows whether the even/odd pair is actually present and which two peaks
+    // the extractor sees. Temporary instrumentation for the fdtd-coupling-001
+    // physics-tuning loop; remove once the gate is green.
+    {
+        let max_mag = mag.iter().cloned().fold(0.0_f64, f64::max).max(1e-300);
+        let mut peaks: Vec<(f64, f64)> = Vec::new();
+        for i in 1..mag.len() - 1 {
+            if mag[i] > mag[i - 1] && mag[i] >= mag[i + 1] {
+                peaks.push((freqs[i], mag[i] / max_mag));
+            }
+        }
+        peaks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        eprintln!("[fdtd-coupling-001 DIAG] {} local maxima in scan window:", peaks.len());
+        for (f, rel) in peaks.iter().take(10) {
+            eprintln!("[fdtd-coupling-001 DIAG]   f = {:.5} GHz  rel_mag = {:.4}", f * 1e-9, rel);
+        }
+    }
+
     // --- 5. Invert the two split peaks to k. --------------------------------
     let extraction = extract_coupling(&freqs, &mag).expect(
         "run_coupled_pair: extract_coupling found < 2 split peaks in the scanned spectrum; \
