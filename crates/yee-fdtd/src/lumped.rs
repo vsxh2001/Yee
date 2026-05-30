@@ -395,11 +395,29 @@ impl LumpedRlcPort {
         let e0 = self.e_z_prev;
         let v_src = self.source_voltage.value(n_step, dt);
 
-        let e1 = if self.inductance > 0.0 || self.capacitance.is_finite() {
+        let has_l = self.inductance > 0.0;
+        let has_c = self.capacitance.is_finite();
+        let e1 = if has_l || has_c {
             if self.two_way {
-                // Stable two-way semi-implicit series-RLC (Phase 2.fdtd.6.2):
-                // the lumped current couples back into E_z (S-parameter ports).
-                self.update_series_rlc_two_way(e1_star, e0, v_src, dz, area, dt)
+                // Two-way S-parameter ports (Phase 2.fdtd.6.4, ADR-0118): the
+                // canonical Taflove–Hagness *per-element* lumped updates. These
+                // couple to the field correctly per timestep so a shunt inductor
+                // presents `jωL` and a shunt capacitor presents `1/(jωC)` — not
+                // the instantaneous-`K` loading that ADR-0117 proved defective.
+                match (has_l, has_c) {
+                    // Pure capacitor (L = 0): effective-permittivity update.
+                    (false, true) => self.update_pure_capacitor_two_way(e1_star, e0, dz, area),
+                    // Pure inductor (C = ∞): accumulated branch current.
+                    (true, false) => {
+                        self.update_pure_inductor_two_way(e1_star, e0, v_src, dz, area, dt)
+                    }
+                    // Series R-L-C: combined accumulated-current + V_C update.
+                    (true, true) => {
+                        self.update_series_rlc_two_way(e1_star, e0, v_src, dz, area, dt)
+                    }
+                    // has_l || has_c guarantees at least one reactive term.
+                    (false, false) => unreachable!(),
+                }
             } else {
                 // Default one-way series-RLC (circuit→field; fdtd-206 ring-down).
                 self.update_series_rlc(e1_star, e0, v_src, dz, area, dt)
@@ -525,49 +543,124 @@ impl LumpedRlcPort {
         }
     }
 
-    /// Series-RLC update — stable, **two-way** semi-implicit scheme
-    /// (Phase 2.fdtd.6.2; Piket-May, Taflove & Baron 1994). Used only when the
-    /// port is built with [`LumpedRlcPort::with_two_way`].
+    /// Pure-capacitor two-way update — **canonical Taflove effective
+    /// permittivity** (Phase 2.fdtd.6.4, ADR-0118). Used when `two_way` and
+    /// `L = 0`, `C` finite.
     ///
-    /// Solves the branch current `I^{n+1/2}` and the `E_z^{n+1}` field update
-    /// **together** so the lumped current couples back into the field. The
-    /// scheme is unconditionally stable for any `R ≥ 0`, `L ≥ 0`, `C > 0`.
-    ///
-    /// # Derivation
-    ///
-    /// The standard Yee update has already produced `E_z^{n+1,*}` (`e1_star`).
-    /// The lumped current `I` adds to Ampère's law:
+    /// A lumped capacitor `C` bridging an `E_z` edge augments that cell's
+    /// natural free-space capacitance. The textbook result (Taflove & Hagness
+    /// §15.10; Piket-May, Taflove & Baron 1994) is a *local effective
+    /// permittivity*
     ///
     /// ```text
-    /// E_z^{n+1} = e1_star − (dt/(ε₀·dA))·I            (field, two-way)
+    /// ε_eff = ε₀ + C·dz/dA
     /// ```
     ///
-    /// The series-RLC KVL at the half-step `n+1/2`, with trapezoidal L and C
-    /// (`V_T = E_z·dz`, source `V_src`, positive current `+z`):
+    /// so the cell's Ampère update runs at `ε_eff` instead of `ε₀`. The
+    /// standard Yee step has already produced `E_z^{n+1,*}` at `ε₀`:
     ///
     /// ```text
-    /// (E_z^{n+1}+e0)·dz/2 = V_src + R·I + L·(I − I_old)/dt + V_C + (dt/2C)·I
+    /// E_z^{n+1,*} = E_z^n + (dt/ε₀)·(∇×H)_z
+    /// ⇒ (∇×H)_z = (ε₀/dt)·(E_z^{n+1,*} − E_z^n)
     /// ```
     ///
-    /// Substituting the field update and collecting `I`:
+    /// Re-running that same curl term at `ε_eff` gives the canonical capacitor
+    /// update purely in terms of the already-computed `E_z^{n+1,*}`:
     ///
     /// ```text
-    /// K  = R + L/dt + dt/(2C)         (branch operational impedance, Ω)
-    /// β  = dt·dz / (2·ε₀·dA)          (FDTD half back-action impedance, Ω)
-    /// I  = [ (e1_star+e0)·dz/2 − V_src − V_C + (L/dt)·I_old ] / (K + β)
+    /// E_z^{n+1} = E_z^n + (dt/ε_eff)·(∇×H)_z
+    ///           = E_z^n + (ε₀/ε_eff)·(E_z^{n+1,*} − E_z^n)
     /// ```
     ///
-    /// Then `E_z^{n+1} = e1_star − (dt/(ε₀·dA))·I` and
-    /// `V_C^{n+1} = V_C + (dt/C)·I`, and `I_old ← I`.
+    /// Because `ε_eff ≥ ε₀`, the update can only *raise* the cell capacitance,
+    /// so it is unconditionally stable (no CFL penalty). The element presents
+    /// `Z_C = 1/(jωC)` to the line: at high frequency the term `ε₀/ε_eff → 0`
+    /// freezes the field (near-short), at low frequency `→ 1` (near-open),
+    /// exactly the `1/(jωC)` reactance. An optional series ESR is ignored here
+    /// (the gate's reactive case drives `R → 0`); a lossy capacitor uses the
+    /// series-RLC arm.
+    fn update_pure_capacitor_two_way(&mut self, e1_star: f64, e0: f64, dz: f64, area: f64) -> f64 {
+        let c = self.capacitance;
+        // ε_eff = ε₀ + C·dz/dA. C is finite & > 0 by construction here.
+        let eps_eff = EPS0 + c * dz / area;
+        let ratio = EPS0 / eps_eff; // ε₀/ε_eff ∈ (0, 1]
+        // E_z^{n+1} = E_z^n + (ε₀/ε_eff)·(E_z^{n+1,*} − E_z^n).
+        e0 + ratio * (e1_star - e0)
+    }
+
+    /// Pure-inductor two-way update — **canonical Taflove accumulated branch
+    /// current** (Phase 2.fdtd.6.4, ADR-0118). Used when `two_way` and `L > 0`,
+    /// `C = ∞`.
     ///
-    /// `K + β > 0` for all admissible R/L/C, so the implicit solve is always
-    /// well-conditioned: the `β` term is the on-diagonal damping that makes
-    /// the coupled update **unconditionally stable**, removing the old
-    /// explicit pure-capacitor `≥ η₀/√3 ≈ 196 Ω` instability.
+    /// A lumped inductor `L` bridging an `E_z` edge carries an auxiliary branch
+    /// current that *accumulates* the terminal voltage `V = E_z·dz` (the
+    /// textbook lumped-L FDTD source, Taflove & Hagness §15.10):
     ///
-    /// Limits: `L=0,C=∞ ⇒ K=R` (semi-implicit resistor); `L=0 ⇒ K=R+dt/2C`
-    /// (pure C, stable for any ESR); `C=∞ ⇒ K=R+L/dt` (pure L, not inert);
-    /// `R=∞ ⇒ I=0` (open, no-op).
+    /// ```text
+    /// I_L^{n+1/2} = I_L^{n−1/2} + (dt·dz/L)·E_z^n           (Faraday: dI/dt = V/L)
+    /// E_z^{n+1}   = E_z^{n+1,*} − (dt/(ε₀·dA))·I_L^{n+1/2}  (Ampère: −J back-action)
+    /// ```
+    ///
+    /// The current is integrated **explicitly** from the *present* field `E_z^n`
+    /// (`e0`), so — unlike the defective instantaneous-`K` scheme (ADR-0117) —
+    /// the inductor is NOT loaded by the huge `L/dt` term in a single step; the
+    /// accumulated `I_L` builds over many steps and presents the physical
+    /// `Z_L = jωL` to the line. Stable: an inductor adds no CFL constraint.
+    /// An optional series ESR is ignored here (the gate drives `R → 0`); a
+    /// lossy inductor uses the series-RLC arm. `V_src` enters as a series EMF
+    /// (`V = E_z·dz − V_src`).
+    fn update_pure_inductor_two_way(
+        &mut self,
+        e1_star: f64,
+        e0: f64,
+        v_src: f64,
+        dz: f64,
+        area: f64,
+        dt: f64,
+    ) -> f64 {
+        let l = self.inductance;
+        // Accumulate the terminal voltage onto the branch current:
+        //   I_L^{n+1/2} = I_L^{n−1/2} + (dt·dz/L)·E_z^n − (dt/L)·V_src.
+        // (V across the inductor = E_z·dz − V_src for a series EMF.)
+        let v_term = e0 * dz - v_src;
+        self.inductor_current += (dt / l) * v_term;
+        // Ampère back-action: feed the branch current into E_z.
+        e1_star - (dt / (EPS0 * area)) * self.inductor_current
+    }
+
+    /// Series-RLC two-way update — **canonical Taflove combined lumped-RLC `E`
+    /// update** (Phase 2.fdtd.6.4, ADR-0118). Used when `two_way` and both
+    /// `L > 0` and `C` finite.
+    ///
+    /// One branch current `I` flows through `R`, `L`, `C` in series, driven by
+    /// the terminal voltage `V_T = E_z·dz` (minus any series EMF `V_src`). The
+    /// canonical discretisation accumulates the inductor current explicitly
+    /// (as in the pure-L arm) while carrying the capacitor voltage `V_C` as a
+    /// state and treating `R` semi-implicitly for stability. KVL at step `n`:
+    ///
+    /// ```text
+    /// L·dI/dt = V_T − R·I − V_C − V_src,     dV_C/dt = I/C
+    /// ```
+    ///
+    /// Discretising `L·dI/dt` with the leapfrog increment, `R·I` with the
+    /// step-centred average `(I^{n+1/2}+I^{n−1/2})/2`, and `V_C`, `V_T` at the
+    /// integer step `n`:
+    ///
+    /// ```text
+    /// (L/dt)(I^{n+1/2} − I^{n−1/2}) = E_z^n·dz − V_src − V_C^n
+    ///                                 − (R/2)(I^{n+1/2}+I^{n−1/2})
+    /// ⇒ I^{n+1/2} = [ (L/dt − R/2)·I^{n−1/2}
+    ///                 + E_z^n·dz − V_src − V_C^n ] / (L/dt + R/2)
+    /// ```
+    ///
+    /// then the Ampère back-action `E_z^{n+1} = E_z^{n+1,*} −
+    /// (dt/(ε₀·dA))·I^{n+1/2}` and the trapezoidal capacitor charge
+    /// `V_C^{n+1} = V_C^n + (dt/C)·I^{n+1/2}`. The branch presents
+    /// `R + jωL + 1/(jωC)` to the line. Reductions: `R→0` recovers the LC
+    /// resonator; `R=∞` blocks the branch (open, no-op). `R ≥ 0` keeps the
+    /// `L/dt + R/2` denominator strictly positive, so the solve is always
+    /// well-conditioned; the explicit-from-`E_z^n` coupling presents the
+    /// physical reactance rather than the instantaneous-`K` loading (ADR-0117).
     fn update_series_rlc_two_way(
         &mut self,
         e1_star: f64,
@@ -584,47 +677,28 @@ impl LumpedRlcPort {
         // Open resistor: no current can flow through the series branch.
         if r_branch.is_infinite() {
             self.inductor_current = 0.0;
-            // V_C holds its DC value (an open branch can't (dis)charge it);
-            // leave capacitor_voltage untouched.
+            // V_C holds its DC value (an open branch can't (dis)charge it).
             return e1_star;
         }
 
-        // Branch operational impedance K = R + L/dt + dt/(2C).
-        //
-        // Solving directly for the branch current `I = I^{n+1/2}` (not the
-        // step-average), the trapezoidal inductor `L·(I−I_old)/dt` contributes
-        // `L/dt` to the diagonal and `(L/dt)·I_old` to the RHS — discrete
-        // reactance `(2/dt)tan(ωdt/2)·L ≈ jωL`. (The one-way scheme uses
-        // `2L/dt` because it solves for the average current instead.)
         let l_over_dt = l / dt;
-        let c_term = if c.is_finite() && c > 0.0 {
-            dt / (2.0 * c)
-        } else {
-            // C = ∞ shorts the capacitor: no 1/(jωC) term.
-            0.0
-        };
-        let k_branch = r_branch + l_over_dt + c_term;
-
-        // FDTD half back-action impedance β = dt·dz / (2·ε₀·dA).
-        let beta = dt * dz / (2.0 * EPS0 * area);
-
+        // Semi-implicit resistor: R/2 on the diagonal, (L/dt − R/2) on I_old.
+        let r_half = 0.5 * r_branch;
         let v_c = self.capacitor_voltage;
         let i_old = self.inductor_current;
 
-        // Semi-implicit branch current I^{n+1/2}; the (e1_star+e0)·dz/2
-        // terminal-voltage term and the implicit β denominator are what make
-        // this TWO-WAY and stable (cf. the one-way fdtd-206 scheme).
-        let i_half =
-            ((e1_star + e0) * dz / 2.0 - v_src - v_c + l_over_dt * i_old) / (k_branch + beta);
+        // Branch current accumulated from the present terminal voltage E_z^n·dz
+        // (explicit field coupling → physical reactance, not instantaneous-K).
+        let v_term = e0 * dz - v_src - v_c;
+        let i_half = ((l_over_dt - r_half) * i_old + v_term) / (l_over_dt + r_half);
 
-        // Carry I_old = I^{n−1/2} ← I^{n+1/2} for the inductor's trapezoid.
         self.inductor_current = i_half;
         // Trapezoidal capacitor charge update.
         if c.is_finite() && c > 0.0 {
             self.capacitor_voltage = v_c + (dt / c) * i_half;
         }
 
-        // Two-way FDTD correction: feed the lumped current back into E_z.
+        // Ampère back-action: feed the branch current into E_z.
         e1_star - (dt / (EPS0 * area)) * i_half
     }
 
