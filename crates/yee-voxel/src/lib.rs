@@ -314,10 +314,14 @@ impl Default for CoupledRunConfig {
     /// dev-box-tuned (ADR-0108).
     fn default() -> Self {
         Self {
-            // Coarse: ~0.4 mm cells. For a ~1.6 mm FR-4 substrate this is ~4
-            // cells through the dielectric (n_sub), enough to seat the slab and
-            // the vertical E_z drive while keeping the cell budget small.
-            dx_m: 0.4e-3,
+            // ~0.2 mm cells. For a ~1.6 mm FR-4 substrate this is ~8 cells
+            // through the dielectric (n_sub) and ~5 across a 1 mm coupling gap.
+            // The first CI run at 0.4 mm (4 substrate / 2.5 gap cells) measured
+            // εeff ≈ 2.5 (vs analytic 3.56) and a 2.1 % split (vs ~19 %) → k
+            // 0.021 vs 0.173 (88 % err): the coarse grid under-resolved both the
+            // dielectric loading and the gap fields. 0.2 mm roughly doubles the
+            // resolution of both; CI re-stresses whether it lands within 15 %.
+            dx_m: 0.2e-3,
             xy_margin_cells: 6,
             air_above_cells: 8,
             // 2.4 GHz synchronous centre (the project's canonical ISM band; the
@@ -326,11 +330,11 @@ impl Default for CoupledRunConfig {
             // ±35 % brackets both split peaks for k up to a few tenths.
             freq_span: 0.35,
             n_freq_bins: 600,
-            // Modest: enough simulated time for the split peaks to resolve at
-            // 2.4 GHz on a coarse grid, while staying within a CI wall-time
-            // budget. Coarse + modest is a documented blind choice (ADR-0108);
-            // CI stresses whether it is sufficient.
-            n_steps: 40_000,
+            // Halving dx halves the CFL-stable dt, so the step count is doubled
+            // (vs the original 40k at 0.4 mm) to preserve the simulated time
+            // window — the DFT resolution floor 1/(n_steps·dt) — that lets the
+            // two split peaks resolve. CI stresses whether it is sufficient.
+            n_steps: 80_000,
             // Weak coupling: ~10× a 50 Ω system impedance keeps loaded Q high.
             port_resistance_ohm: 500.0,
             drive_v0: 1.0,
