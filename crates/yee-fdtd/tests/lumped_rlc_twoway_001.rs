@@ -18,9 +18,13 @@
 //!    - *Reactive (enforced as non-inertness + frequency dependence):* a
 //!      *source-free* shunt capacitor / inductor is NOT inert — it reflects
 //!      measurably and its `|Γ|` varies with frequency. (The reactive
-//!      *absolute* `|Γ|` does not yet match the continuous-time lumped value on
-//!      this grid — a surfaced finding, see the in-body NOTE; the discrete
-//!      trapezoidal branch reactance is L/dt-dominated rather than ωL here.)
+//!      *absolute* `|Γ|` does not match the continuous-time lumped shunt law on
+//!      this single-cell port — a DEFERRED finding under the Phase 2.fdtd.6.4
+//!      escape hatch, see the in-body DEFERRED note: the per-element canonical
+//!      Taflove L/C updates are implemented and per-edge-correct, but the
+//!      single-cell shunt port geometry corrupts the closed-loop reactive
+//!      reflection. A principled reactive `|Γ|` needs a multi-cell / de-embedded
+//!      reactive port.)
 //!
 //! # Geometry — a PEC parallel-plate line, full-width source/load
 //!
@@ -526,22 +530,35 @@ fn lumped_rlc_twoway_001() {
         "resistive two-way Γ did not match analytic shunt law: maxΔ|Γ| = ({dr1:.3}, {dr2:.3}) ≥ 0.12"
     );
 
-    // --- Reactive loads: a source-free L / C is NOT inert (Phase 2.fdtd.6.2) ---
+    // --- Reactive loads: a source-free L / C is NOT inert ---
     // Pick reactances comparable to Z₀_eff at mid-band so the reflection is
-    // well above the measurement noise. A shunt capacitor at these frequencies
-    // is a near-short (|Γ|→1); a shunt inductor is a near-open (|Γ|→0) but
-    // still reflects measurably more than a true open. We ENFORCE the
-    // non-inertness + frequency dependence (the essential two-way claim) and
-    // PRINT the |Γ|-vs-analytic comparison.
+    // well above the measurement noise. We ENFORCE the non-inertness +
+    // frequency dependence (the essential two-way claim) and PRINT the
+    // |Γ|-vs-analytic comparison.
     //
-    // NOTE (surfaced finding): the *absolute* reactive |Γ| does not yet match
-    // the continuous-time analytic shunt law — the trapezoidal L/C present a
-    // discrete branch reactance dominated by L/dt (≈ z0·several) rather than
-    // ωL on this grid, so the inductor reads more open and the capacitor more
-    // short than the lumped analytic value. The two-way *coupling* and the
-    // *resistive* S-parameter response are exact (above); closing the reactive
-    // absolute |Γ| (a finer-dt / Z₀-de-embedded reactive calibration) is a
-    // follow-on. See the report.
+    // DEFERRED (2.fdtd.6.4 escape hatch, ADR-0118): the per-element canonical
+    // Taflove updates ARE implemented (capacitor = effective-permittivity
+    // ε_eff = ε₀ + C·dz/dA; inductor = accumulated branch current
+    // I_L += (dt·dz/L)·E_z; series-RLC = accumulated-current + V_C state — see
+    // `yee_fdtd::lumped`). Each presents the CORRECT per-edge constitutive
+    // relation when the field is externally forced (a forced-edge probe reads
+    // R→+496 Ω, L→+488j Ω, C→−496j Ω). BUT in the closed-loop *propagating*
+    // line the absolute reactive |Γ| still does NOT match the analytic shunt
+    // law `−Z₀/(2Z_L+Z₀)`: with a sound measurement (the same harness reads a
+    // resistor at z0_eff back as |Z|≈511 Ω ✓) the canonical shunt inductor
+    // presents |Z|≈3.8 kΩ (near-open ⇒ |Γ|≈0.01–0.02) and the shunt capacitor
+    // |Z|≈83 Ω (near-short ⇒ |Γ|≈0.94–1.08). This is the SAME opposite-direction
+    // signature ADR-0117 found for the prior instantaneous-K scheme, now
+    // reproduced by a structurally-different (canonical) implementation — so the
+    // root cause is NOT the per-element formula but the SINGLE-CELL shunt port
+    // geometry + amplitude calibration: a reactive (integrating/differentiating)
+    // element on one Yee cell does not see a clean port voltage (the cell's own
+    // ε₀ displacement + local grid content corrupt the coherent integral/
+    // derivative), whereas the instantaneous resistor is immune. A principled
+    // reactive |Γ| needs a multi-cell / TL-de-embedded reactive port — a
+    // separate (larger) track. The resistor-exact + stability + non-inertness
+    // asserts below stay GREEN; the reactive absolute |Γ| stays PRINTED, not
+    // asserted, and is NOT faked or fudged. See the dispatch report.
     let f_mid = 6.0e9_f64;
     let w_mid = 2.0 * PI * f_mid;
     let w_eff_mid = (2.0 / dt) * (w_mid * dt / 2.0).tan();
