@@ -733,9 +733,21 @@ fn reactive_deembed_001() {
             "capacitor verdict regressed: rel {cap_rel:.3} sign {cap_sign}"
         );
     } else {
+        // PORT-WRONG verdict (ADR-0119). Pin BOTH reactive arms as genuinely
+        // outside the correct range — per-arm, not the (vacuous) disjunction of
+        // the negated conjunction. If a future increment silently improves EITHER
+        // arm into the matching range, the corresponding assert fires *before*
+        // `port_correct` flips, flagging that the verdict must be re-derived and
+        // ADR-0119 updated (rather than the failure passing unnoticed).
         assert!(
-            !inductor_matches || !capacitor_matches,
-            "reactive arms now BOTH match — the port verdict changed; update ADR-0119"
+            !ind_sign || ind_rel >= react_tol,
+            "inductor verdict silently improved: rel {ind_rel:.3} (tol {react_tol}), \
+             sign_ok {ind_sign} — re-run the bench and update ADR-0119"
+        );
+        assert!(
+            !cap_sign || cap_rel >= react_tol,
+            "capacitor verdict silently improved: rel {cap_rel:.3} (tol {react_tol}), \
+             sign_ok {cap_sign} — re-run the bench and update ADR-0119"
         );
     }
 
