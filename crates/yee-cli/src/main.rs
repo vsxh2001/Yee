@@ -307,6 +307,10 @@ enum FilterCommand {
         /// Gerber to this path (F1.4.0 `yee_export::layout_to_gerber`).
         #[arg(long)]
         gerber: Option<PathBuf>,
+        /// Also write the synthesized edge-coupled layout as a KiCad 7 board
+        /// (`.kicad_pcb`) to this path (F1.4.1b `yee_export::layout_to_kicad_pcb`).
+        #[arg(long)]
+        kicad_pcb: Option<PathBuf>,
     },
 }
 
@@ -469,6 +473,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 h_mm,
                 layout_svg,
                 gerber,
+                kicad_pcb,
             } => filter::run_synth(
                 &spec,
                 output.as_deref(),
@@ -477,6 +482,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 h_mm,
                 layout_svg.as_deref(),
                 gerber.as_deref(),
+                kicad_pcb.as_deref(),
             ),
         },
         Command::Design {

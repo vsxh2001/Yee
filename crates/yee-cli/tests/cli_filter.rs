@@ -211,6 +211,53 @@ fn cli_gerber() {
     let _ = std::fs::remove_file(&gbr);
 }
 
+/// F1.4.1b (ADR-0106): `yee filter synth --kicad-pcb` writes a KiCad 7 board
+/// file for the committed Chebyshev 0.5 dB N=5 fixture on the default FR-4
+/// substrate, via `yee_export::layout_to_kicad_pcb`. Pure closed-form math (no
+/// EM/FDTD), so NOT `#[ignore]`'d.
+#[test]
+fn cli_kicad_pcb() {
+    let s2p = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cli_kicad_pcb.s2p");
+    let pcb = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cli_kicad_pcb.kicad_pcb");
+    let _ = std::fs::remove_file(&s2p);
+    let _ = std::fs::remove_file(&pcb);
+
+    // FR-4 defaults (eps_r=4.4, h=1.6 mm) are supplied by the CLI — exercise
+    // them implicitly by omitting --eps-r/--h-mm.
+    let output = Command::new(env!("CARGO_BIN_EXE_yee"))
+        .args(["filter", "synth"])
+        .arg(fixture())
+        .arg("--output")
+        .arg(&s2p)
+        .arg("--kicad-pcb")
+        .arg(&pcb)
+        .output()
+        .expect("invoke yee");
+
+    assert!(
+        output.status.success(),
+        "yee filter synth --kicad-pcb exited non-zero; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // The board must be a structurally-valid KiCad PCB: the top-level
+    // `(kicad_pcb` form and an `Edge.Cuts` board-outline layer.
+    assert!(pcb.exists(), "KiCad PCB {} was not written", pcb.display());
+    let board = std::fs::read_to_string(&pcb).expect("read KiCad PCB");
+    assert!(
+        board.starts_with("(kicad_pcb"),
+        "KiCad PCB missing the `(kicad_pcb` opening form; got:\n{}",
+        &board[..board.len().min(200)]
+    );
+    assert!(
+        board.contains("Edge.Cuts"),
+        "KiCad PCB missing the Edge.Cuts board-outline layer"
+    );
+
+    let _ = std::fs::remove_file(&s2p);
+    let _ = std::fs::remove_file(&pcb);
+}
+
 /// Pull the first SI-metres value out of a dimensions line whose text starts
 /// with `label` and has the shape `... = <value> m  (<mm> mm) ...`.
 fn parse_si_after(stdout: &str, label: &str) -> f64 {
