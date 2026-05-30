@@ -44,11 +44,12 @@ use serde::{Deserialize, Serialize};
 pub mod extract;
 pub use extract::{CouplingExtraction, extract_coupling, extract_q_ringdown};
 
-/// Closed-form edge-coupled dimensional synthesis (Filter Phase F1.2.0):
-/// coupling matrix → physical microstrip dimensions.
+/// Closed-form dimensional synthesis (Filter Phases F1.2.0 / F1.2.2): coupling
+/// matrix → physical microstrip dimensions (edge-coupled and hairpin).
 pub mod dimension;
 pub use dimension::{
-    DimError, EdgeCoupledDimensions, dimension_edge_coupled, dimension_edge_coupled_layout,
+    DimError, EdgeCoupledDimensions, HairpinDimensions, dimension_edge_coupled,
+    dimension_edge_coupled_layout, dimension_hairpin, dimension_hairpin_layout,
 };
 
 pub use yee_synth::Approximation;
