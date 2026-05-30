@@ -477,6 +477,26 @@ pub fn run_coupled_pair(layout: &Layout, cfg: &CoupledRunConfig) -> CoupledRunRe
     let n_bins = cfg.n_freq_bins.max(5);
     let df = (f_hi - f_lo) / (n_bins - 1) as f64;
 
+    // A Hann window over the probe record suppresses the rectangular-window
+    // sinc sidelobes that otherwise dominate a long high-Q ringdown spectrum
+    // (the iter#3 diagnostic showed a sidelobe comb at the 1/(N·dt) spacing
+    // masquerading as split peaks). Windowing reveals the true resonances so
+    // extract_coupling sees physical even/odd lobes, not sidelobes.
+    let n_samp = probe_series.len();
+    let windowed: Vec<f64> = probe_series
+        .iter()
+        .enumerate()
+        .map(|(m, &x)| {
+            let w = if n_samp > 1 {
+                0.5 * (1.0
+                    - (2.0 * std::f64::consts::PI * m as f64 / (n_samp as f64 - 1.0)).cos())
+            } else {
+                1.0
+            };
+            x * w
+        })
+        .collect();
+
     let mut freqs = Vec::with_capacity(n_bins);
     let mut mag = Vec::with_capacity(n_bins);
     for bin in 0..n_bins {
@@ -484,7 +504,7 @@ pub fn run_coupled_pair(layout: &Layout, cfg: &CoupledRunConfig) -> CoupledRunRe
         let omega = 2.0 * std::f64::consts::PI * f;
         let mut re = 0.0_f64;
         let mut im = 0.0_f64;
-        for (m, &x) in probe_series.iter().enumerate() {
+        for (m, &x) in windowed.iter().enumerate() {
             let phase = omega * m as f64 * dt;
             re += x * phase.cos();
             im -= x * phase.sin();
