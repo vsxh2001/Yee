@@ -113,7 +113,7 @@ impl std::fmt::Display for DimError {
         match self {
             DimError::UnsupportedTopology => write!(
                 f,
-                "edge-coupled dimensioning supports only Topology::CoupledResonator"
+                "dimensional synthesis supports only Topology::CoupledResonator"
             ),
             DimError::OrderTooSmall => write!(
                 f,
