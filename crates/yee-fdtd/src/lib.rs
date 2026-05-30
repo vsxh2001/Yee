@@ -53,7 +53,7 @@ pub use cpml::{CpmlParams, CpmlState};
 pub use dispersive::DispersiveState;
 pub use driver::{FdtdDriver, FdtdDriverConfig, RadiationPattern};
 pub use grid::YeeGrid;
-pub use lumped::{LumpedRlcPort, SourceWaveform};
+pub use lumped::{ApertureSpec, LumpedRlcPort, SourceWaveform};
 pub use material::{Material, MaterialMap};
 pub use ntff::{NtffParams, NtffState};
 pub use sources::{PlaneWaveDirection, PlaneWaveSource};
