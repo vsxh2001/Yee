@@ -1,0 +1,9 @@
+# Dioxus build config for the yee-studio-web POC (App.D.0, ADR-0110).
+# `dx build --platform web --release` reads this. The design-system stylesheet
+# is bundled via the `asset!` macro in `main.rs`, so no extra web resources are
+# listed here.
+[application]
+name = "yee-studio-web"
+
+[web.app]
+title = "Yee Filter Studio"
