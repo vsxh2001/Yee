@@ -1,6 +1,11 @@
 # ADR-0128: Filter Phase F2.3-d — CW per-frequency drive for the lumped EM sim
 
-**Status:** Accepted
+**Status:** Investigated — the CW drive WORKS (a 2.4 GHz notch forms, settle-converged
+passband), but the coarse-grid lumped-FDTD **saturates at ~5 dB rejection** (gate
+needs 20 dB) and the passband measures **over-unity** (short-board de-embed
+artifact). `fdtd_lumped_001` RED, not weakened. The remaining levers (a much finer
+grid, or re-scoping the 20 dB gate) are a **maintainer decision** — surfaced. Branch
+`6373bc7` (unmerged). See Outcome.
 **Date:** 2026-05-31
 **Related:** ADR-0127 (the CW diagnostic VERDICT — the cap/port is correct; F2.3
 needs a CW drive), ADR-0126 (F2.3-c — pulse drive can't settle the resonance),
@@ -52,6 +57,46 @@ the lumped/CPML/aperture gates non-regressed. Never weakened.
 
 **Not in scope:** a fine CW sweep (cost — gate points + a few suffice); tight-tol
 EM; SRF/ESR; the studio UI.
+
+---
+
+## Outcome (2026-05-31) — CW works; coarse-grid port saturates the notch → maintainer decision
+
+The CW per-frequency drive (HannSine, ramp 12 / settle 140 / measure 16; freq set
+{1.6,1.8,2.0,2.2,2.4,2.6} GHz; DUT/thru) shipped to the F2.3 branch (`6373bc7`).
+It is a genuine step: a **2.4 GHz notch now forms** (flat under the pulse), and the
+passband amplitude is settle-converged. But the gate is RED:
+
+- `|S21|(2.0 GHz) ≈ 1.6` (−4.3 dB "IL" = **over-unity / gain** — unphysical for a
+  passive filter ⇒ a short-board DUT/thru de-embed artifact, not real transmission);
+- `|S21|(2.4 GHz)` rejection only ≈ 5 dB (gate needs ≥ 20).
+
+**Settle-convergence sweep (the decisive check)** — 2.4 GHz rejection at
+`cw_settle_cycles` = 140 / 300 / 600 = **5.1 / 6.2 / 3.4 dB** (non-monotonic,
+wobbles, does NOT climb toward 20); 2.0 GHz `|S21|` = 1.61 / 1.64 / 1.64
+(converged). So the shallow notch is **NOT settle-limited** — it is
+**port-accuracy-saturated** on the coarse grid: the aperture port's ~25–75%
+reactance accuracy (ADR-0125) degrades the L‖C tank Q, capping the notch at a few
+dB, and the short-board de-embed over-corrects the passband to over-unity.
+
+**Verdict (honest, gate NOT weakened):** the coarse-grid lumped-FDTD **cannot reach
+the 20 dB cross-validation gate**. The physics is correct (ADR-0127), the
+measurement is correct in principle (CW, settled), but the discretisation accuracy
+(port reactance + short-board de-embed) is the floor. EM-sim has now had 11
+reactive-port increments (6.2–6.10 + F2.3-b/c/d + investigations), each shipping
+real capability or a decisive finding — the lumped board loads the line and forms a
+band-structured response — but the 20 dB bar is unreachable without either a much
+finer grid (N⁴ compute, multi-week) and/or a higher-accuracy port + a matched
+de-embed.
+
+**This is a maintainer decision** (re-scoping a validation gate is not mine to make
+unilaterally — CLAUDE.md §4 "never weaken"). Surfaced via AskUserQuestion: (a)
+re-scope `fdtd_lumped_001` to a physically-achievable qualitative band-structure
+cross-validation (a notch forms at f_stop, monotone-ish passband) — a principled
+achievable bar; (b) invest in a much finer grid + higher-accuracy port + matched
+de-embed (multi-week, large compute); or (c) accept the current band-structured
+full-wave response as the EM-sim deliverable, documented with its coarse-grid
+accuracy limit. The F2.3 branch (`6373bc7`, CW drive) stands ready under any of (a)/(c).
 
 ---
 
