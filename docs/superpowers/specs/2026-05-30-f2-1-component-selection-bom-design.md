@@ -48,9 +48,11 @@ the realized-value response).
 2. `cargo clippy -p yee-filter --all-targets -- -D warnings` exit 0.
 3. `cargo test -p yee-filter` exit 0 — incl. a new gate `bom_001`:
    - **E-series correctness** (textbook anchors): `ESeries::E24.nearest(1.0)==1.0`,
-     `nearest(4.5e-9)` ∈ {4.3e-9, 4.7e-9} picking the log-nearest, `nearest(1.05e3)`
-     → 1.0e3 not 1.1e3 (log-nearest), and a handful more known cases; E96 picks a
-     finer value. Every `nearest` result is an actual E-series member.
+     `nearest(4.5e-9)` ∈ {4.3e-9, 4.7e-9} picking the log-nearest (→ 4.7e-9),
+     `nearest(1.04e3)` → 1.0e3 (1.04 < the geometric midpoint √1.1 ≈ 1.0488;
+     note `nearest(1.05e3)` → 1.1e3 since 1.05 > that midpoint — log-nearest, not
+     linear), and a handful more known cases; E96 picks a finer value. Every
+     `nearest` result is an actual E-series member.
    - **Selection bound:** for the F2.0 cheb N=5 lumped ladder (E24), every chosen
      value is within the E24 quantization bound (≤ ~5.1 %) of its ideal.
    - **BOM completeness:** `total_parts() == 2·N` (an L + a C per resonator);
