@@ -443,7 +443,10 @@ in-browser front-end; heavy EM goes behind a native `yee-server`. See §5a.
   merge `51de3bf`) — `layout_to_kicad_pcb(&Layout, &KicadPcbOptions)` emits a
   KiCad 7 S-expr board (copper traces as `gr_poly` on F.Cu + outline on
   Edge.Cuts; mm floats via `xy_mm`); opens directly in the KiCad PCB editor.
-  Gates kicad-001/002; WASM-safe. **NEXT F1.4.1c+** = drill layer, multi-layer
-  stack, footprints/pads, STEP/3-D + consumer wiring (CLI `--kicad-pcb` flag /
-  studio export buttons). **App.2** (`yee-server`) once F1.1+ exist.
+  Gates kicad-001/002; WASM-safe. **CLI `--kicad-pcb` ✅ SHIPPED** (ADR-0106,
+  merge `bdc03c1`): `yee filter synth --kicad-pcb out.kicad_pcb` writes the board
+  (thin mirror of `--gerber`; SVG/Gerber/KiCad all share ONE Layout). Gate
+  cli_kicad_pcb. KiCad export now reachable end-to-end. **NEXT F1.4.1c+** = drill
+  layer, multi-layer stack, footprints/pads, STEP/3-D + studio export buttons.
+  **App.2** (`yee-server`) once F1.1+ exist.
   (Tutorial 17 — filter design via CLI + Studio — shipped, merge `c6e477c`.)
