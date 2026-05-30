@@ -9,8 +9,11 @@
 //! comes out of [`Designed`].
 
 use yee_filter::{
-    Approximation, CouplingMatrix, FilterProject, FilterSpec, MaskReport, Response, SpecMask,
-    check_mask, dimension_edge_coupled, dimension_edge_coupled_layout, ideal_response, synthesize,
+    Approximation, Bom, BranchKind, CompKind, CouplingMatrix, ESeries, FilterProject, FilterSpec,
+    Footprint, LcBranch, LumpedBoard, LumpedLadder, MaskReport, MaskVerdict, Response, SpecMask,
+    check_mask, dimension_edge_coupled, dimension_edge_coupled_layout, ideal_response, ladder_s21,
+    lumped_board, mask_verdict, monte_carlo_yield, select_components, synthesize,
+    synthesize_lumped,
 };
 use yee_layout::{BBox, CoupledMicrostrip, Layout, Substrate, coupled_microstrip, eps_eff};
 
@@ -269,6 +272,308 @@ fn mask_bands(spec: &FilterSpec) -> Vec<MaskBand> {
     bands
 }
 
+// ===========================================================================
+// Lumped-LC adapter (App.D.1L — F2.0 / F2.1 / F2.4 / F2.2)
+// ===========================================================================
+
+/// Fixed Monte-Carlo seed so the rendered yield is reproducible across reloads.
+const YIELD_SEED: u64 = 0x59_45_45_5f_4c_43_30; // "YEE_LC0"
+/// Number of Monte-Carlo trials for the tolerance/yield card (≈500 per ADR-0120).
+const YIELD_TRIALS: usize = 500;
+/// SMD footprint family used by the lumped board (the F2.2 default).
+const LUMPED_FOOTPRINT: Footprint = Footprint::Smd0603;
+
+/// One rendered resonator row of the lumped LC ladder (Synthesis stage).
+#[derive(Clone, Copy)]
+pub struct LumpedResonatorRow {
+    /// Resonator index, 1-based (ladder order).
+    pub index: usize,
+    /// `true` if a series-arm resonator, `false` if a shunt-arm resonator.
+    pub is_series: bool,
+    /// Resonator inductance, nanohenries.
+    pub l_nh: f64,
+    /// Resonator capacitance, picofarads.
+    pub c_pf: f64,
+}
+
+/// One rendered BOM line (Components + BOM stage), pre-formatted for display.
+#[derive(Clone)]
+pub struct BomRow {
+    /// Reference designator class, e.g. `"L"` / `"C"`.
+    pub ref_kind: &'static str,
+    /// Whether this is an inductor or a capacitor.
+    pub is_inductor: bool,
+    /// Pretty ideal value with unit (e.g. `"2.34 nH"`).
+    pub ideal_disp: String,
+    /// Pretty chosen E-series value with unit.
+    pub chosen_disp: String,
+    /// Signed deviation of chosen from ideal, percent.
+    pub deviation_pct: f64,
+    /// Series tolerance, percent (±).
+    pub tolerance_pct: f64,
+    /// Quantity of this grouped part.
+    pub qty: usize,
+}
+
+/// One rendered placement row (Layout stage), pre-formatted for display.
+#[derive(Clone)]
+pub struct PlacementRow {
+    /// Reference designator (e.g. `"L1"`).
+    pub ref_des: String,
+    /// Footprint name (e.g. `"0603"`).
+    pub footprint: &'static str,
+    /// Branch role (`"series"` / `"shunt"`).
+    pub kind: &'static str,
+    /// Board-frame centre `x`, mm.
+    pub cx_mm: f64,
+    /// Board-frame centre `y`, mm.
+    pub cy_mm: f64,
+}
+
+/// A BOM plus its derived display rows + summary, for one E-series.
+pub struct BomView {
+    /// Pretty series name (`"E24"` / `"E96"`).
+    pub series_name: &'static str,
+    /// Per-part tolerance, percent (the series tolerance).
+    pub tolerance_pct: f64,
+    /// Display-ready BOM rows (grouped, in first-encountered order).
+    pub rows: Vec<BomRow>,
+    /// Total physical part count (sum of all `qty`).
+    pub total_parts: usize,
+    /// Worst-case (largest magnitude) deviation across the BOM, percent.
+    pub worst_deviation_pct: f64,
+}
+
+/// A yield result for one E-series, pre-extracted for the tolerance card.
+#[derive(Clone, Copy, PartialEq)]
+pub struct YieldView {
+    /// Pretty series name (`"E24"` / `"E96"`).
+    pub series_name: &'static str,
+    /// Per-part tolerance, percent (±).
+    pub tolerance_pct: f64,
+    /// Yield as a percentage in `[0, 100]`.
+    pub yield_pct: f64,
+    /// Worst-case in-band return loss across all trials, dB.
+    pub worst_rl_db: f64,
+    /// Worst-case stopband rejection across all trials, dB.
+    pub worst_rej_db: f64,
+}
+
+/// Everything the four lumped stages render — all from the live F2.x engine.
+pub struct LumpedDesigned {
+    /// The synthesized ideal LC ladder.
+    pub ladder: LumpedLadder,
+    /// Display-ready resonator rows.
+    pub resonators: Vec<LumpedResonatorRow>,
+    /// The swept ideal `ladder_s21` response (reuses [`SweepPoint`]).
+    pub sweep: Vec<SweepPoint>,
+    /// Forbidden mask regions for the response plot (shared with the
+    /// distributed flow).
+    pub mask_bands: Vec<MaskBand>,
+    /// The realized-response spec-mask verdict on the ideal ladder.
+    pub verdict: MaskVerdict,
+    /// The E24 BOM view.
+    pub bom_e24: BomView,
+    /// The E96 BOM view.
+    pub bom_e96: BomView,
+    /// The E24 Monte-Carlo yield.
+    pub yield_e24: YieldView,
+    /// The E96 Monte-Carlo yield.
+    pub yield_e96: YieldView,
+    /// The placed lumped board (geometry + placements).
+    pub board: LumpedBoard,
+    /// Display-ready placement rows.
+    pub placements: Vec<PlacementRow>,
+    /// Board bounding box, mm (`(width, height)`).
+    pub board_size_mm: (f64, f64),
+    /// Number of trials the yield was run over.
+    pub yield_trials: usize,
+}
+
+impl LumpedDesigned {
+    /// The ladder order `N` (number of resonators).
+    pub fn order(&self) -> usize {
+        self.ladder.resonators.len()
+    }
+}
+
+/// Pretty-print an inductance (henries) with an engineering unit.
+fn fmt_henry(l: f64) -> String {
+    if l >= 1e-6 {
+        format!("{:.3} µH", l * 1e6)
+    } else if l >= 1e-9 {
+        format!("{:.3} nH", l * 1e9)
+    } else {
+        format!("{:.3} pH", l * 1e12)
+    }
+}
+
+/// Pretty-print a capacitance (farads) with an engineering unit.
+fn fmt_farad(c: f64) -> String {
+    if c >= 1e-9 {
+        format!("{:.3} nF", c * 1e9)
+    } else if c >= 1e-12 {
+        format!("{:.3} pF", c * 1e12)
+    } else {
+        format!("{:.3} fF", c * 1e15)
+    }
+}
+
+/// Build a [`BomView`] for one E-series from the ladder.
+fn bom_view(ladder: &LumpedLadder, series: ESeries) -> BomView {
+    let bom: Bom = select_components(ladder, series);
+    let series_name = match series {
+        ESeries::E24 => "E24",
+        ESeries::E96 => "E96",
+    };
+    let mut worst_deviation_pct: f64 = 0.0;
+    let rows: Vec<BomRow> = bom
+        .lines
+        .iter()
+        .map(|l| {
+            worst_deviation_pct = worst_deviation_pct.max(l.deviation_pct.abs());
+            let (ref_kind, is_inductor, ideal_disp, chosen_disp) = match l.kind {
+                CompKind::Inductor => (
+                    "L",
+                    true,
+                    fmt_henry(l.ideal_value),
+                    fmt_henry(l.chosen_value),
+                ),
+                CompKind::Capacitor => (
+                    "C",
+                    false,
+                    fmt_farad(l.ideal_value),
+                    fmt_farad(l.chosen_value),
+                ),
+            };
+            BomRow {
+                ref_kind,
+                is_inductor,
+                ideal_disp,
+                chosen_disp,
+                deviation_pct: l.deviation_pct,
+                tolerance_pct: l.tolerance_pct,
+                qty: l.qty,
+            }
+        })
+        .collect();
+    BomView {
+        series_name,
+        tolerance_pct: series.tolerance_pct(),
+        rows,
+        total_parts: bom.total_parts(),
+        worst_deviation_pct,
+    }
+}
+
+/// Run the Monte-Carlo yield for one E-series and pack it for display.
+fn yield_view(ladder: &LumpedLadder, series: ESeries, mask: &SpecMask) -> YieldView {
+    let r = monte_carlo_yield(ladder, series, mask, YIELD_TRIALS, YIELD_SEED);
+    let series_name = match series {
+        ESeries::E24 => "E24",
+        ESeries::E96 => "E96",
+    };
+    YieldView {
+        series_name,
+        tolerance_pct: series.tolerance_pct(),
+        yield_pct: r.yield_fraction * 100.0,
+        worst_rl_db: r.worst_inband_rl_db,
+        worst_rej_db: r.worst_stopband_rej_db,
+    }
+}
+
+/// Run the full live lumped-LC pipeline on the same demo spec the distributed
+/// flow uses: synthesize → LC ladder → swept realized response → spec-mask
+/// verdict → E24/E96 component selection + BOM → Monte-Carlo yield → SMD board
+/// placement. Every value is real F2.x engine output.
+pub fn design_lumped() -> LumpedDesigned {
+    let spec = demo_spec();
+    let project = synthesize(&spec);
+    let ladder = synthesize_lumped(&project).expect("demo spec is a realizable band-pass ladder");
+
+    // ---- display rows -----------------------------------------------------
+    let resonators: Vec<LumpedResonatorRow> = ladder
+        .resonators
+        .iter()
+        .enumerate()
+        .map(|(i, r)| LumpedResonatorRow {
+            index: i + 1,
+            is_series: r.branch == LcBranch::Series,
+            l_nh: r.l_henry * 1e9,
+            c_pf: r.c_farad * 1e12,
+        })
+        .collect();
+
+    // ---- swept realized (ABCD) response + mask verdict --------------------
+    let freqs = sweep_freqs(spec.f0_hz, spec.fbw);
+    let sweep: Vec<SweepPoint> = freqs
+        .iter()
+        .map(|&f| {
+            let s21_mag = ladder_s21(&ladder, f).norm().min(1.0);
+            let s11_sq = (1.0 - s21_mag * s21_mag).max(0.0);
+            SweepPoint {
+                f_hz: f,
+                s21_db: 20.0 * s21_mag.max(1e-12).log10(),
+                s11_db: 10.0 * s11_sq.max(1e-12).log10(),
+            }
+        })
+        .collect();
+    let mask_bands = mask_bands(&spec);
+    let verdict = mask_verdict(&ladder, &spec.mask, spec.f0_hz, spec.fbw, &freqs, 0.0);
+
+    // ---- E24 / E96 component selection + BOM ------------------------------
+    let bom_e24 = bom_view(&ladder, ESeries::E24);
+    let bom_e96 = bom_view(&ladder, ESeries::E96);
+
+    // ---- Monte-Carlo tolerance / yield ------------------------------------
+    let yield_e24 = yield_view(&ladder, ESeries::E24, &spec.mask);
+    let yield_e96 = yield_view(&ladder, ESeries::E96, &spec.mask);
+
+    // ---- SMD board placement ----------------------------------------------
+    let board = lumped_board(&ladder, &SUBSTRATE, LUMPED_FOOTPRINT);
+    let placements: Vec<PlacementRow> = board
+        .placements
+        .iter()
+        .map(|p| PlacementRow {
+            ref_des: p.ref_des.clone(),
+            footprint: footprint_name(p.footprint),
+            kind: match p.kind {
+                BranchKind::Series => "series",
+                BranchKind::Shunt => "shunt",
+            },
+            cx_mm: p.center_m.0 * 1e3,
+            cy_mm: p.center_m.1 * 1e3,
+        })
+        .collect();
+    let board_size_mm = board_size_mm(&board.layout.bbox);
+
+    LumpedDesigned {
+        ladder,
+        resonators,
+        sweep,
+        mask_bands,
+        verdict,
+        bom_e24,
+        bom_e96,
+        yield_e24,
+        yield_e96,
+        board,
+        placements,
+        board_size_mm,
+        yield_trials: YIELD_TRIALS,
+    }
+}
+
+/// The `lumped_board` requires a `Footprint` import via `yee_filter`; this is
+/// the human-readable family name for the placement table.
+fn footprint_name(fp: Footprint) -> &'static str {
+    match fp {
+        Footprint::Smd0402 => "0402",
+        Footprint::Smd0603 => "0603",
+        Footprint::Smd0805 => "0805",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,5 +598,34 @@ mod tests {
                 assert!((rk - tk).abs() / tk < 1e-2, "realized k near target");
             }
         }
+    }
+
+    #[test]
+    fn lumped_design_is_real() {
+        let d = design_lumped();
+        // Order-5 ladder → 5 resonators, shunt-first alternating.
+        assert_eq!(d.order(), 5);
+        assert_eq!(d.resonators.len(), 5);
+        assert!(d.resonators[0].l_nh > 0.0 && d.resonators[0].c_pf > 0.0);
+        assert!(!d.resonators[0].is_series, "shunt-first");
+        assert!(d.resonators[1].is_series, "second is series");
+        // Swept response is populated and finite.
+        assert_eq!(d.sweep.len(), SWEEP_POINTS);
+        assert!(d.sweep.iter().all(|s| s.s21_db.is_finite()));
+        // Each resonator emits an L and a C → 10 BOM parts (before grouping
+        // they total 10; grouping may collapse symmetric duplicates).
+        assert_eq!(d.bom_e24.total_parts, 10);
+        assert_eq!(d.bom_e96.total_parts, 10);
+        assert!(!d.bom_e24.rows.is_empty() && !d.bom_e96.rows.is_empty());
+        // E96 deviation is tighter than E24 (finer grid).
+        assert!(d.bom_e96.worst_deviation_pct <= d.bom_e24.worst_deviation_pct + 1e-9);
+        // Yield is a percentage; same seed → reproducible.
+        assert!((0.0..=100.0).contains(&d.yield_e24.yield_pct));
+        assert!((0.0..=100.0).contains(&d.yield_e96.yield_pct));
+        let again = design_lumped();
+        assert_eq!(d.yield_e24.yield_pct, again.yield_e24.yield_pct);
+        // Board placed every component (2 per resonator).
+        assert_eq!(d.placements.len(), 10);
+        assert!(d.board_size_mm.0 > 0.0 && d.board_size_mm.1 > 0.0);
     }
 }

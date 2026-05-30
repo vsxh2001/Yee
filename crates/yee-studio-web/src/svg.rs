@@ -5,6 +5,7 @@
 //! The board view re-uses the *real* [`yee_layout::Layout`] polygons; the
 //! response plot the *real* swept [`SweepPoint`]s + mask bands.
 
+use yee_filter::LumpedBoard;
 use yee_layout::Layout;
 
 use crate::engine::{MaskBand, SweepPoint};
@@ -219,6 +220,116 @@ pub fn board_svg(layout: &Layout) -> String {
         min_y + h_mm - 0.8,
         layout.bbox.width() * MM,
         layout.bbox.height() * MM
+    ));
+
+    s.push_str("</svg>\n");
+    s
+}
+
+/// Render the lumped-LC board top-view from the real [`LumpedBoard`]: the
+/// substrate, the ground rail + signal line + every SMD pad as copper polygons
+/// (all to scale, in mm), ref-des labels at each placement centre, port markers,
+/// and overall dimension callouts (board width × height). Inline SVG, design-
+/// system palette.
+pub fn lumped_board_svg(board: &LumpedBoard) -> String {
+    const MM: f64 = 1.0e3;
+    let layout = &board.layout;
+    // Extra bottom margin for the width dimension line + label.
+    let margin = 1.2; // mm sides/top
+    let dim_pad = 2.4; // mm bottom (dimension line room)
+    let min_x = layout.bbox.min.x * MM - margin;
+    let min_y = layout.bbox.min.y * MM - margin;
+    let bw = layout.bbox.width() * MM;
+    let bh = layout.bbox.height() * MM;
+    let w_mm = bw + 2.0 * margin;
+    let h_mm = bh + margin + dim_pad;
+
+    let mut s = String::new();
+    s.push_str(&format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"{min_x:.3} {min_y:.3} {w_mm:.3} {h_mm:.3}\" preserveAspectRatio=\"xMidYMid meet\" role=\"img\" aria-label=\"dimensioned lumped-LC board top view with SMD footprints\">\n"
+    ));
+
+    // Substrate rect (board outline).
+    s.push_str(&format!(
+        "<rect x=\"{:.3}\" y=\"{:.3}\" width=\"{:.3}\" height=\"{:.3}\" fill=\"{SUBSTRATE}\" stroke=\"{SUBSTRATE_EDGE}\" stroke-width=\"0.12\" rx=\"0.4\"/>\n",
+        layout.bbox.min.x * MM,
+        layout.bbox.min.y * MM,
+        bw,
+        bh
+    ));
+
+    // Faint grid (~ every 2 mm — the board is small).
+    let step = 2.0;
+    let mut gx = (min_x / step).ceil() * step;
+    while gx < min_x + w_mm {
+        s.push_str(&format!(
+            "<line x1=\"{gx:.2}\" y1=\"{:.2}\" x2=\"{gx:.2}\" y2=\"{:.2}\" stroke=\"#ffffff\" stroke-opacity=\"0.05\" stroke-width=\"0.06\"/>\n",
+            layout.bbox.min.y * MM,
+            layout.bbox.min.y * MM + bh
+        ));
+        gx += step;
+    }
+    let mut gy = (layout.bbox.min.y * MM / step).ceil() * step;
+    while gy < layout.bbox.min.y * MM + bh {
+        s.push_str(&format!(
+            "<line x1=\"{:.2}\" y1=\"{gy:.2}\" x2=\"{:.2}\" y2=\"{gy:.2}\" stroke=\"#ffffff\" stroke-opacity=\"0.05\" stroke-width=\"0.06\"/>\n",
+            min_x, min_x + w_mm
+        ));
+        gy += step;
+    }
+
+    // All copper (ground rail, signal-line segments, pads) — to scale.
+    for poly in &layout.traces {
+        let pts: Vec<String> = poly
+            .verts
+            .iter()
+            .map(|p| format!("{:.4},{:.4}", p.x * MM, p.y * MM))
+            .collect();
+        s.push_str(&format!(
+            "<polygon points=\"{}\" fill=\"{COPPER}\" stroke=\"{COPPER_EDGE}\" stroke-width=\"0.04\"/>\n",
+            pts.join(" ")
+        ));
+    }
+
+    // Ref-des labels at each placement centre (e.g. L1, C1, …).
+    for p in &board.placements {
+        let (cx, cy) = p.center_m;
+        s.push_str(&format!(
+            "<text x=\"{:.3}\" y=\"{:.3}\" fill=\"{TEXT}\" font-size=\"0.9\" font-family=\"monospace\" text-anchor=\"middle\" paint-order=\"stroke\" stroke=\"#0b0d11\" stroke-width=\"0.18\">{}</text>\n",
+            cx * MM,
+            cy * MM + 0.3,
+            p.ref_des
+        ));
+    }
+
+    // Port markers at the two signal-line ends.
+    for port in &layout.ports {
+        s.push_str(&format!(
+            "<circle cx=\"{:.4}\" cy=\"{:.4}\" r=\"{:.4}\" fill=\"none\" stroke=\"{ACCENT}\" stroke-width=\"0.12\"/>\n",
+            port.at.x * MM,
+            port.at.y * MM,
+            (port.width_m * MM * 0.5).max(0.4)
+        ));
+    }
+
+    // Width dimension line + label along the bottom.
+    let dim_y = layout.bbox.min.y * MM + bh + 1.2;
+    let x0 = layout.bbox.min.x * MM;
+    let x1 = layout.bbox.min.x * MM + bw;
+    s.push_str(&format!(
+        "<line x1=\"{x0:.3}\" y1=\"{dim_y:.3}\" x2=\"{x1:.3}\" y2=\"{dim_y:.3}\" stroke=\"{MUTED}\" stroke-width=\"0.06\"/>\n"
+    ));
+    for x in [x0, x1] {
+        s.push_str(&format!(
+            "<line x1=\"{x:.3}\" y1=\"{:.3}\" x2=\"{x:.3}\" y2=\"{:.3}\" stroke=\"{MUTED}\" stroke-width=\"0.06\"/>\n",
+            dim_y - 0.5,
+            dim_y + 0.5
+        ));
+    }
+    s.push_str(&format!(
+        "<text x=\"{:.3}\" y=\"{:.3}\" fill=\"{TEXT}\" font-size=\"1.0\" font-family=\"monospace\" text-anchor=\"middle\">{bw:.1} mm</text>\n",
+        (x0 + x1) / 2.0,
+        dim_y + 1.5
     ));
 
     s.push_str("</svg>\n");
