@@ -23,6 +23,11 @@ yee-plotters = { workspace = true }
 # pure-math synthesis crates.
 yee-synth    = { workspace = true }
 yee-filter   = { workspace = true }
+# ADR-0104: the coupled-001 / dim-001 / gerber-001 aggregator gates
+# re-exercise the shipped filter-design pipeline (coupled-line model,
+# edge-coupled dimensioning, Gerber export) via these crates' public APIs.
+yee-layout   = { workspace = true }
+yee-export   = { workspace = true }
 # Phase 3.nl.0 R6: the `nl-001` production gate consumes `DesignIntent`,
 # the offline parser and the deterministic emitter from `yee-design`.
 yee-design   = { workspace = true }

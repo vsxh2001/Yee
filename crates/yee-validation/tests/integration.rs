@@ -232,3 +232,61 @@ fn synth_filt_cases_registered_and_pass() {
         );
     }
 }
+
+/// Filter ADR-0104: the coupled-line / dimensioning / Gerber gates beyond
+/// synthesis are registered and pass. NOT `#[ignore]`'d — the drivers are
+/// pure-math/text (microsecond scale), so calling them directly is cheap
+/// and avoids `Report::run_all` (which would pull the ~8 min mom-001 solve).
+///
+/// Asserts (DoD item 4): `run_coupled_001()`, `run_dim_001()`,
+/// `run_gerber_001()` each return [`CaseStatus::Passed`]; and `list_cases()`
+/// contains `coupled-001`, `dim-001`, `gerber-001`, each with
+/// `solver == Solver::Synth` and `policy == ExecutionPolicy::Run`.
+#[test]
+fn coupled_dim_gerber_cases_registered_and_pass() {
+    let coupled_001 = yee_validation::run_coupled_001();
+    assert_eq!(
+        coupled_001.status,
+        CaseStatus::Passed,
+        "coupled-001 did not pass: {}",
+        coupled_001.notes
+    );
+    assert_eq!(coupled_001.id, "coupled-001");
+
+    let dim_001 = yee_validation::run_dim_001();
+    assert_eq!(
+        dim_001.status,
+        CaseStatus::Passed,
+        "dim-001 did not pass: {}",
+        dim_001.notes
+    );
+    assert_eq!(dim_001.id, "dim-001");
+
+    let gerber_001 = yee_validation::run_gerber_001();
+    assert_eq!(
+        gerber_001.status,
+        CaseStatus::Passed,
+        "gerber-001 did not pass: {}",
+        gerber_001.notes
+    );
+    assert_eq!(gerber_001.id, "gerber-001");
+
+    // The three cases are registered under `Solver::Synth` with `Run` policy.
+    let cases = list_cases();
+    for id in ["coupled-001", "dim-001", "gerber-001"] {
+        let d = cases
+            .iter()
+            .find(|d| d.id == id)
+            .unwrap_or_else(|| panic!("list_cases() must contain {id}"));
+        assert_eq!(
+            d.solver,
+            Solver::Synth,
+            "{id} should be categorized as Solver::Synth"
+        );
+        assert_eq!(
+            d.policy,
+            ExecutionPolicy::Run,
+            "{id} should carry ExecutionPolicy::Run"
+        );
+    }
+}
