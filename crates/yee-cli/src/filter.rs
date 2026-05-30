@@ -28,7 +28,8 @@ const SWEEP_POINTS: usize = 401;
 const SPAN_MULT: f64 = 6.0;
 
 /// Run `yee filter synth <spec> [--output <out.s2p>] [--plot <out.png>]
-/// [--eps-r <εr>] [--h-mm <h>] [--layout-svg <out.svg>] [--gerber <out.gbr>]`.
+/// [--eps-r <εr>] [--h-mm <h>] [--layout-svg <out.svg>] [--gerber <out.gbr>]
+/// [--kicad-pcb <out.kicad_pcb>]`.
 ///
 /// `eps_r` / `h_mm` describe the substrate used for the F1.2.0 physical
 /// dimensioning (FR-4 defaults `4.4` / `1.6 mm` are supplied by the CLI). When
@@ -36,9 +37,13 @@ const SPAN_MULT: f64 = 6.0;
 /// prints a diagnostic and returns a non-zero [`ExitCode`] — it is never
 /// silently skipped.
 ///
-/// `--layout-svg` / `--gerber` both emit the same edge-coupled [`Layout`]; it is
-/// built **once** (via `dimension_edge_coupled_layout`) when either flag is set,
-/// so the SVG and the Gerber can never diverge.
+/// `--layout-svg` / `--gerber` / `--kicad-pcb` all emit the same edge-coupled
+/// [`Layout`]; it is built **once** (via `dimension_edge_coupled_layout`) when
+/// any of them is set, so the SVG, Gerber, and KiCad board can never diverge.
+// The CLI options are a flat thread-through of independent `synth` flags; a
+// builder/struct here would only obscure the one-to-one mapping with the clap
+// `Synth` variant.
+#[allow(clippy::too_many_arguments)]
 pub fn run_synth(
     spec_path: &Path,
     output: Option<&Path>,
@@ -47,6 +52,7 @@ pub fn run_synth(
     h_mm: f64,
     layout_svg: Option<&Path>,
     gerber: Option<&Path>,
+    kicad_pcb: Option<&Path>,
 ) -> Result<ExitCode> {
     let text = std::fs::read_to_string(spec_path)
         .with_context(|| format!("failed to read filter spec {}", spec_path.display()))?;
@@ -180,10 +186,10 @@ pub fn run_synth(
         );
     }
 
-    // ---- optional layout exports (SVG / Gerber) --------------------------
-    // Build the edge-coupled layout ONCE when either exporter is requested, so
-    // the `--layout-svg` and `--gerber` outputs can never diverge.
-    if layout_svg.is_some() || gerber.is_some() {
+    // ---- optional layout exports (SVG / Gerber / KiCad) ------------------
+    // Build the edge-coupled layout ONCE when any exporter is requested, so the
+    // `--layout-svg`, `--gerber`, and `--kicad-pcb` outputs can never diverge.
+    if layout_svg.is_some() || gerber.is_some() || kicad_pcb.is_some() {
         let layout = dimension_edge_coupled_layout(&proj, &substrate)
             .map_err(|e| anyhow::anyhow!("failed to build layout: {e}"))?;
         if let Some(svg_path) = layout_svg {
@@ -198,6 +204,13 @@ pub fn run_synth(
                 format!("failed to write layout Gerber {}", gerber_path.display())
             })?;
             println!("  wrote layout Gerber: {}", gerber_path.display());
+        }
+        if let Some(kicad_path) = kicad_pcb {
+            let text =
+                yee_export::layout_to_kicad_pcb(&layout, &yee_export::KicadPcbOptions::default());
+            std::fs::write(kicad_path, text)
+                .with_context(|| format!("failed to write KiCad PCB {}", kicad_path.display()))?;
+            println!("  wrote KiCad PCB: {}", kicad_path.display());
         }
     }
 
