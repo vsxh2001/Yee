@@ -167,3 +167,4 @@
 - [ADR-0121: Phase 2.fdtd.6.6 — reactive lumped-port reformulation (sheet→mode coupling)](decisions/0121-fdtd-6-6-reactive-port-reformulation.md)
 - [ADR-0122: Phase 2.fdtd.6.7 — per-axis CPML face selection](decisions/0122-fdtd-6-7-per-axis-cpml.md)
 - [ADR-0123: Phase 2.fdtd.6.8 — matched-line reactive de-embed bench](decisions/0123-fdtd-6-8-matched-line-deembed-bench.md)
+- [ADR-0124: Filter Phase F2.3-b — full-width-sheet lumped-element placement](decisions/0124-f2-3-full-width-sheet-placement.md)

@@ -1,6 +1,13 @@
 # ADR-0123: Phase 2.fdtd.6.8 — matched-line reactive de-embed bench
 
-**Status:** Accepted
+**Status:** Investigated — the matched-line premise is **false for a TEM guide**
+(CPML ≠ matched at DC → a trapped quasi-static mode → window-dependent Z₀ +
+unphysical negative-real Z_in). The bench's *quantitative* reactive number is
+**corrupted / not trustworthy**; **not merged** (would pin corrupted numbers). The
+trustworthy reactive verdict remains 2.fdtd.6.6's ≈0.37 single-cell limit. Branch
+`feature/fdtd-6-8-matched-bench` (`cae6e09`) kept as the documented record. The
+next move pivots to the cheaper **F2.3 full-width-sheet placement** (ADR-0124).
+See Outcome.
 **Date:** 2026-05-30
 **Related:** ADR-0122 (per-axis CPML — the enabling brick 1, just shipped),
 ADR-0121/0119 (the PEC-source de-embed bench + its ≈0.37 PORT-WRONG verdict and
@@ -69,6 +76,46 @@ arms asserted to the pinned result); the existing lumped + CPML gates non-regres
 **Not in scope:** the multi-cell aperture port (brick 3, only if this confirms the
 limit); F2.3 re-run (follow-on, once the verdict is PORT-CORRECT or the port is
 fixed); the studio UI (Track B).
+
+---
+
+## Outcome (2026-05-30) — matched-line TEM de-embed is a dead end; verdict rests on 6.6
+
+The bench was built (branch `cae6e09`, gate green, resistor anchor honest:
+κ=2.581, spread 0.061, |Im|/|Z| 0.114, linear 1.999) — but the **central premise
+failed**: a CPML is **not a matched termination at DC** (its conductivity → 0 as
+ω → 0), so the soft source excites a **trapped quasi-static mode the CPML cannot
+drain** (Σ|E_z|² plateaus, never decays). Consequences:
+
+- the open-run `Z₀(ω)` is **window-length dependent** (≈800 → 3300 Ω as the DFT
+  window grows 200 → 2000 steps; a clean TEM mode would be window-independent
+  ≈ η₀·gap/width) — a Hann taper, a DC-free source, and a weak bulk conductivity
+  all failed to remove it;
+- the shunt **capacitor de-embeds to an unphysical negative-real `Z_in`**
+  (−73 −444j at 4 GHz) — a passive shunt cannot have Re < 0, so the **matched-line
+  reactive measurement is corrupted**. Its residual *magnitude* is therefore
+  bracketed, not pinned.
+
+**What survives:** the resistor anchor is honest (the de-embed *math* is sound),
+and the *qualitative* verdict — the reactive port over-couples (capacitor toward a
+short), not transparent — is consistent with the prior benches. But the
+**trustworthy quantitative reactive verdict is 2.fdtd.6.6's ≈0.37** (well-conditioned
+capacitor, correct −jX slope, gate-truncation + source-echo both ruled out,
+reviewed). The matched-line approach **adds no trustworthy quantitative evidence**;
+its value is the **recorded lesson**: a clean quantitative reactive de-embed needs
+a *true* matched lumped termination (not CPML) at the line ends, a non-TEM
+measurement, or the port fix tried directly.
+
+**Decision: not merged** (a gate pinning corrupted numbers is worse than none);
+branch kept as the record. The reactive port is genuinely off (single-cell ε_eff
+limit, ≈0.37 from 6.6) → it needs a multi-cell fix. **But** F2.3's *own* flatness
+is dominated by a separate, cheaper issue: it places each element on a **single
+cell** under a multi-cell-wide trace (≈inert), whereas a **full-width sheet** does
+couple (the benches show this). So the **next move (ADR-0124) is the cheap test
+first**: fix F2.3 to place each lumped element as a value-distributed full-width
+sheet and re-run `fdtd_lumped_001` — selectivity within its loose tol would ship
+the EM-sim component without a multi-week FDTD-core port rewrite. The multi-cell
+aperture port stays the fallback if sheet placement is insufficient.
 
 ---
 
