@@ -1,6 +1,11 @@
 # ADR-0124: Filter Phase F2.3-b — full-width-sheet lumped-element placement
 
-**Status:** Accepted
+**Status:** Investigated — sheet placement was **necessary + correct** (and fixed a
+real placement bug) but **insufficient**: F2.3 now loads the line (real
+frequency-dependent |S21|) yet the Q≈10 tanks don't resonate (≈1.8 dB stopband vs
+20 dB). The ≈0.37 single-cell port accuracy is the confirmed limit → the multi-cell
+aperture port is genuinely required. Gate **not weakened**; fix kept on the F2.3
+branch (`bbc7e26`, unmerged, gate RED). The cheap path is exhausted. See Outcome.
 **Date:** 2026-05-30
 **Related:** ADR-0115 (F2.3 lumped FDTD EM sim — the gate this targets), ADR-0119/
 0121/0123 (the reactive-port benches: the port is ≈0.37-accurate per-element on a
@@ -65,6 +70,43 @@ merge; the existing lumped/CPML gates non-regressed. Never weakened.
 
 **Not in scope:** the multi-cell aperture *port* (the FDTD-core fallback, only if
 sheet placement is insufficient); a tight-tol EM match; SRF/ESR parasitics.
+
+---
+
+## Outcome (2026-05-30) — necessary, found a bug, but insufficient → multi-cell port
+
+The fix landed on the F2.3 branch (`bbc7e26`; main merged in at `224f1b7`, all 5
+FDTD CI gate jobs kept). Two findings:
+
+1. **A real placement bug, beyond the brief's diagnosis:** the shunt elements were
+   placed at `j=18` — the **air gap between** the signal line (`j=22..29`) and the
+   ground rail (`j=8..15`), bridging *neither* → doubly inert. The fix reads the
+   line band from the top-metal `Ex` PEC mask at the drive-port column (contiguous
+   copper run → `N=8` = trace width in cells) and places a value-distributed sheet
+   (shunt C→`C/N`, L→`N·L`, series→`N·R,N·L,C/N`) across that band on `k_elem`.
+2. **The result:** BEFORE = dead-flat `|S21|≈1.0004` (inert). AFTER = a **real
+   frequency-dependent** curve (elements genuinely couple). But the gate points are
+   `|S21|(2.0G)≈0.75`, `(2.4G)≈0.81` (~1.8 dB rejection) and a wide 0.5–4 GHz sweep
+   is **monotone** (−13→−1 dB) with **no passband peak and no stopband notch** —
+   the Q≈10 (10 % FBW) tanks never resonate. Extending the record to 8k/16k steps
+   did not produce selectivity, so the limit is the **≈0.37 single-cell reactance
+   accuracy** (ADR-0121), not the time window.
+
+**Verdict (honest, gate NOT weakened):** `fdtd_lumped_001` still **fails** (~1.8 dB
+vs the 20 dB requirement, no band-pass). The placement fix was necessary and is
+kept on the F2.3 branch, but **the ≈0.37 single-cell port cannot present the sharp
+reactance swing a Q≈10 resonance needs** — so the **multi-cell aperture port (the
+FDTD-core brick) is genuinely required** to ship the EM-sim component. ADR-0124's
+*second* honest outcome.
+
+**Cheap paths now exhausted** (placement ✓, per-axis CPML ✓, two de-embed benches,
+sheet distribution ✓). The remaining EM-sim work is the multi-cell aperture port —
+a genuinely multi-week, **uncertain** FDTD-core formulation (the width-sheet did
+*not* recover accuracy, so it is more than a width distribution: it needs proper
+modal/aperture weighting, and may hit a coarse-grid Q-accuracy floor at this
+`dx`). **Next step before implementing: a design-investigation** (de-risk like the
+de-embed bench did) to produce a concrete formulation or conclude a fundamental
+limit — rather than dispatch an under-specified implementation that would flail.
 
 ---
 

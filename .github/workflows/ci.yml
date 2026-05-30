@@ -308,3 +308,42 @@ jobs:
       # green under the new default axis mask (`[true; 3]` is byte-identical).
       - name: cpml-reflection no-regression (all faces, release)
         run: cargo test -p yee-fdtd --release --test cpml_reflection -- --include-ignored
+
+  fdtd-aperture-port-gate:
+    name: FDTD aperture-port dx-stability gate (aperture-port-001, release)
+    runs-on: ubuntu-latest
+    # No `needs: lint-test`: builds only the yee-fdtd tree in `--release`, in
+    # parallel with the other FDTD release gates (CLAUDE.md §10).
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.92"
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # Phase 2.fdtd.6.9 (ADR-0125): multi-cell APERTURE lumped port. The gate
+      # de-embeds pure-L / pure-C / series-RLC aperture ports on a parallel-plate
+      # guide at TWO dx (1.0 & 0.5 mm — a 2× refinement, physical geometry held
+      # fixed) and asserts
+      # (a) the resistor anchor de-embeds to Z_L ≈ R (honest, never weakened),
+      # (b) the reactive Z_L(ω) is within a loose tol of R+jωL+1/(jωC), and
+      # (c) the DECISIVE dx-STABILITY check — the reactive Z_L at the two dx agree
+      # within a loose tol, i.e. the O(dx²) single-cell reactance collapse
+      # (ADR-0124) is GONE. Reuses the trustworthy `reactive_deembed_001`
+      # PEC-source de-embed harness (NOT the matched-line bench, ADR-0123).
+      # `#[ignore]`'d for default `cargo test` (a few minutes of FDTD in release)
+      # and run here. Mirrors the `fdtd-per-axis-cpml-gate` release-gate idiom
+      # (CLAUDE.md §4).
+      - name: aperture-port-001 (dx-stability, release, ignored)
+        run: cargo test -p yee-fdtd --release --test aperture_port_001 -- --ignored --nocapture
+      # No-regression guard: the single-edge two-way port + the resistor-exact
+      # path must stay green under the additive aperture API.
+      - name: reactive-deembed no-regression (single-edge port, release)
+        run: cargo test -p yee-fdtd --release --test reactive_deembed_001 -- --include-ignored
+      - name: lumped-rlc-twoway no-regression (single-edge two-way, release)
+        run: cargo test -p yee-fdtd --release --test lumped_rlc_twoway_001 -- --include-ignored
