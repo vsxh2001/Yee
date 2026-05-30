@@ -1,40 +1,58 @@
-//! Validation gate **fdtd-coupling-001** — FDTD-extracted inter-resonator
-//! coupling `k` of a coupled microstrip-resonator pair, cross-checked against
-//! the shipped analytic Kirschning-Jansen coupled-line reference
-//! (Filter Phase F1.1b.1, ADR-0108).
+//! Validation gate **fdtd-coupling-001** — FDTD-extracted even/odd modal
+//! resonant split of a coupled microstrip-resonator pair, cross-checked against
+//! the analytic **εeff-split** of the shipped Kirschning-Jansen coupled-line
+//! model (Filter Phase F1.1b.1, ADR-0108).
 //!
 //! # What this gate proves
 //!
 //! It is the first *full-wave* EM solve in the filter-design pipeline. Every
 //! step before it is closed-form (synthesis → dimensional synthesis → layout →
 //! manufacturing files); this gate confirms that a *dimensioned coupled pair*
-//! actually realizes its *target coupling* by running an FDTD simulation
-//! ([`yee_voxel::run_coupled_pair`]) and comparing the extracted `k` to the
-//! analytic [`yee_layout::coupling_coefficient`] of the same geometry.
+//! actually realizes its even/odd modal split by running an FDTD simulation
+//! ([`yee_voxel::run_coupled_pair`]) with even/odd modal excitation and
+//! comparing the extracted `k = (f_odd² − f_even²)/(f_odd² + f_even²)` to the
+//! analytic εeff-split of the same geometry.
 //!
 //! # Geometry
 //!
 //! Two parallel, edge-coupled half-wave microstrip resonators on FR-4
 //! (`εr = 4.4`, `h = 1.6 mm`), each of width `W` and length `L ≈ λ_g/2` at the
 //! synchronous centre `f0 = 2.4 GHz`, separated by an edge-to-edge gap `S`.
-//! The analytic even/odd impedances come from [`yee_layout::coupled_microstrip`]
-//! `(W, S, h, εr)`, and the analytic coupling from
-//! [`yee_layout::coupling_coefficient`].
+//! The analytic even/odd effective permittivities come from
+//! [`yee_layout::coupled_microstrip`] `(W, S, h, εr)`.
 //!
 //! The half-wave length is `L = c / (2·f0·√εeff)`. Using the even-mode
 //! effective permittivity as a representative `εeff` keeps the resonator near
 //! the synchronous frequency the driver scans around. The exact length is not
 //! load-bearing for the *coupling* comparison (the driver scans a ±35 % window
-//! and reads the split, not the absolute resonance), so a closed-form estimate
-//! is used directly — no FDTD tuning (ADR-0108).
+//! and reads each mode's dominant peak, not the absolute resonance), so a
+//! closed-form estimate is used directly — no FDTD tuning (ADR-0108).
+//!
+//! # Reference: the εeff-split, NOT the impedance coupling
+//!
+//! This geometry is two *full-length* coupled λ/2 resonators (coupled over
+//! their entire length). Their even/odd resonant frequencies split by the
+//! even/odd *phase-velocity* difference — `√εeff,e` vs `√εeff,o` — so the
+//! physically-correct frequency-split reference is the **εeff-split**
+//!
+//! ```text
+//! k_ref = (εeff_e − εeff_o) / (εeff_e + εeff_o).
+//! ```
+//!
+//! The PR #1 root-cause analysis (5 CI iterations) established that the prior
+//! reference [`yee_layout::coupling_coefficient`] =
+//! `(z0e − z0o)/(z0e + z0o)` is the **impedance** coupling of a λ/4-overlap
+//! parallel-coupled-line BPF *section* — the wrong quantity for the resonant
+//! split of two full-length coupled lines. The FDTD even/odd modal split is
+//! `(f_odd² − f_even²)/(f_odd² + f_even²)`, which is an εeff-split by
+//! construction, so the apples-to-apples reference is `k_ref` above.
 //!
 //! # Tolerance
 //!
-//! The gate asserts the FDTD `k` matches the analytic `k` within **≤ 15 %
-//! relative** — a deliberately loose walking-skeleton band: coarse-grid FDTD is
-//! approximate, the two extraction models differ (split-peak inversion vs
-//! coupled-line `(Z₀ₑ − Z₀ₒ)/(Z₀ₑ + Z₀ₒ)`), and this is the first end-to-end
-//! run. Tightening is a follow-on once the skeleton is green.
+//! The gate asserts the FDTD `k` matches the analytic εeff-split within
+//! **≤ 15 % relative** — a deliberately loose walking-skeleton band: coarse-grid
+//! FDTD is approximate (under-resolved εeff, finite air box) and this is the
+//! first end-to-end run. Tightening is a follow-on once the skeleton is green.
 //!
 //! # Why `#[ignore]`'d + CI-routed
 //!
@@ -50,9 +68,7 @@
 //! cargo test -p yee-voxel --release -- --ignored fdtd_coupling_001 --nocapture
 //! ```
 
-use yee_layout::{
-    BBox, Layout, Point2, Polygon, PortRef, Substrate, coupled_microstrip, coupling_coefficient,
-};
+use yee_layout::{BBox, Layout, Point2, Polygon, PortRef, Substrate, coupled_microstrip};
 use yee_voxel::{CoupledRunConfig, run_coupled_pair};
 
 const C0_M_S: f64 = 299_792_458.0;
@@ -69,15 +85,22 @@ const S_M: f64 = 1.0e-3;
 /// Synchronous resonator centre frequency (Hz).
 const F0_HZ: f64 = 2.4e9;
 
-/// `fdtd-coupling-001`: FDTD `k` vs analytic coupled-line `k`, ≤ 15 % relative.
+/// `fdtd-coupling-001`: FDTD modal-split `k` vs analytic εeff-split, ≤ 15 % rel.
 #[test]
 #[ignore = "slow: multi-minute FDTD; fdtd-coupling-001 coupled-resonator k gate (F1.1b.1, ADR-0108); run with --release --ignored"]
 fn fdtd_coupling_001_matches_analytic_within_fifteen_percent() {
     // ------------------------------------------------------------------
-    // Analytic reference: Kirschning-Jansen even/odd model -> coupling k.
+    // Analytic reference: the εeff-split of the Kirschning-Jansen even/odd
+    // model. For two FULL-LENGTH coupled λ/2 resonators the even/odd resonant
+    // frequencies split by the even/odd phase-velocity difference (√εeff,e vs
+    // √εeff,o), so the physically-correct frequency-split reference is
+    //   k_ref = (εeff_e − εeff_o)/(εeff_e + εeff_o),
+    // NOT the impedance coupling (z0e − z0o)/(z0e + z0o) — which is the
+    // λ/4-overlap coupled-line-SECTION quantity and the wrong reference for this
+    // geometry (PR #1 5-iteration root-cause analysis, ADR-0108).
     // ------------------------------------------------------------------
     let model = coupled_microstrip(W_M, S_M, H_M, EPS_R);
-    let k_analytic = coupling_coefficient(&model);
+    let k_ref = (model.eps_eff_e - model.eps_eff_o) / (model.eps_eff_e + model.eps_eff_o);
 
     // ------------------------------------------------------------------
     // Build the coupled-pair Layout: two parallel half-wave resonators
@@ -125,17 +148,16 @@ fn fdtd_coupling_001_matches_analytic_within_fifteen_percent() {
     };
 
     // ------------------------------------------------------------------
-    // Run the FDTD coupled-resonator driver (walking-skeleton defaults,
-    // synchronous centre = F0_HZ).
+    // Run the FDTD coupled-resonator driver with even/odd modal excitation
+    // (synchronous centre = F0_HZ). The driver does two sub-runs: in-phase
+    // (even supermode) and anti-phase (odd supermode), each giving a single
+    // dominant resonance, then forms k = (f_odd² − f_even²)/(f_odd² + f_even²).
     // ------------------------------------------------------------------
-    // Hypothesis (ADR-0108 iter#5): the iter#1-#4 split (~2.2%) is suppressed
-    // ~4x below even the εeff-difference prediction (0.091) and is
-    // grid-independent. Root cause hypothesis: WalkingSkeletonSolver::new puts
-    // HARD-PEC outer walls, and the air box is tiny (air_above 8 cells, xy
-    // margin 6 cells ≈ 1-3 mm). A close PEC ceiling/walls confine the microstrip
-    // fringing + air-gap fields that SET the even/odd εeff difference, collapsing
-    // the split — a box-size (mm) effect, hence grid-independent. Test it with a
-    // much larger air box (coarser 0.4 mm cells to afford the cell budget).
+    // A large air box is retained from the PR #1 iter#5 finding: hard-PEC
+    // outer walls (WalkingSkeletonSolver::new) confine the microstrip fringing
+    // + air-gap fields that SET the even/odd εeff difference, suppressing the
+    // split — a box-size (mm) effect, hence grid-independent. dx = 0.4 mm with
+    // air_above 48 / xy margin 24 cells affords a much larger open region.
     let cfg = CoupledRunConfig {
         f0_hz: F0_HZ,
         dx_m: 0.4e-3,
@@ -146,14 +168,14 @@ fn fdtd_coupling_001_matches_analytic_within_fifteen_percent() {
     };
     let result = run_coupled_pair(&layout, &cfg);
 
-    let rel_err = (result.k - k_analytic).abs() / k_analytic.abs();
+    let rel_err = (result.k - k_ref).abs() / k_ref.abs();
 
     eprintln!(
         "\nfdtd-coupling-001 coupled-resonator k gate (F1.1b.1, ADR-0108)
   geometry:      W = {:.3} mm, S = {:.3} mm, h = {:.3} mm, εr = {EPS_R}
   half-wave L:   {:.3} mm  (εeff,e = {:.4}, f0 = {:.3} GHz)
-  analytic:      Z0e = {:.2} Ω, Z0o = {:.2} Ω  ->  k = {:.5}
-  FDTD:          f_even = {:.5} GHz, f_odd = {:.5} GHz  ->  k = {:.5}
+  analytic:      εeff,e = {:.4}, εeff,o = {:.4}  ->  εeff-split k_ref = {:.5}
+  FDTD modal:    f_even = {:.5} GHz, f_odd = {:.5} GHz  ->  k = {:.5}
   relative err:  {:.3} %  (threshold ≤ 15 %)
 ",
         W_M * 1e3,
@@ -162,9 +184,9 @@ fn fdtd_coupling_001_matches_analytic_within_fifteen_percent() {
         l_m * 1e3,
         eps_eff,
         F0_HZ * 1e-9,
-        model.z0e_ohm,
-        model.z0o_ohm,
-        k_analytic,
+        model.eps_eff_e,
+        model.eps_eff_o,
+        k_ref,
         result.f_even * 1e-9,
         result.f_odd * 1e-9,
         result.k,
@@ -173,11 +195,10 @@ fn fdtd_coupling_001_matches_analytic_within_fifteen_percent() {
 
     assert!(
         rel_err <= 0.15,
-        "fdtd-coupling-001 FAILED: FDTD k = {:.5}, analytic k = {:.5}, \
-         relative error = {:.3} % (threshold ≤ 15 %)",
+        "fdtd-coupling-001 FAILED: FDTD modal-split k = {:.5}, analytic \
+         εeff-split k_ref = {:.5}, relative error = {:.3} % (threshold ≤ 15 %)",
         result.k,
-        k_analytic,
+        k_ref,
         rel_err * 100.0,
     );
 }
-

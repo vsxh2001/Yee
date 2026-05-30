@@ -63,7 +63,6 @@
 
 use ndarray::Array3;
 use yee_fdtd::{LumpedRlcPort, SourceWaveform, WalkingSkeletonSolver, YeeGrid};
-use yee_filter::extract_coupling;
 use yee_layout::{Layout, Point2, Polygon};
 
 /// Voxelization parameters for [`voxelize_microstrip`].
@@ -247,18 +246,34 @@ fn point_in_polygon(p: Point2, poly: &Polygon) -> bool {
 // ===========================================================================
 //
 // `run_coupled_pair` is the first full-wave EM solve in the filter-design
-// pipeline. It voxelizes a two-resonator microstrip [`Layout`], drives one
-// resonator with a weakly-coupled lumped port carrying a broadband
-// Gaussian-modulated pulse, probes the second resonator's vertical `E_z`,
-// single-bin-DFTs the probe time series to a magnitude spectrum, and inverts
-// the two split resonance peaks to a coupling coefficient `k` via the shipped
-// [`yee_filter::extract_coupling`] (`k = (f_odd² − f_even²)/(f_odd² + f_even²)`).
+// pipeline. It voxelizes a two-resonator microstrip [`Layout`] and isolates the
+// two coupled supermodes with **even/odd modal excitation** — two FDTD
+// sub-runs, each driving the structure into a single dominant supermode:
+//
+//   * even-mode run  — both ports driven with the SAME Gaussian pulse (+v0, +v0)
+//   * odd-mode run    — ports driven anti-phase (+v0, −v0)
+//
+// A symmetric drive couples only the symmetric (even) supermode; an
+// antisymmetric drive couples only the antisymmetric (odd) supermode. So each
+// run's windowed single-bin-DFT spectrum has ONE dominant peak — the
+// argmax-magnitude frequency bin is `f_even` / `f_odd` respectively. The
+// coupling coefficient is then `k = (f_odd² − f_even²)/(f_odd² + f_even²)`.
+//
+// This replaces the original single-strip-drive + fragile two-peak "split"
+// extraction (PR #1 iters 1–5): driving one strip and reading two adjacent
+// peaks off one spectrum was unreliable (sidelobe combs, collapsing second
+// peak). Clean single-peak extraction per mode is robust by construction.
 //
 // The validation gate (`tests/fdtd_coupling_001.rs`, `#[ignore]`'d) cross-checks
-// the FDTD `k` against the analytic Kirschning-Jansen coupled-line reference
-// (`yee_layout::coupled_microstrip` / `coupling_coefficient`). The FDTD run is
-// multi-minute, so the gate runs only in a dedicated CI `--release` job — never
-// in the default `cargo test`. See ADR-0108.
+// the FDTD `k` against the **εeff-split** of the analytic Kirschning-Jansen
+// coupled-line model — `(εeff_e − εeff_o)/(εeff_e + εeff_o)` from
+// `yee_layout::coupled_microstrip`. That is the physically-correct resonant-split
+// reference for two *full-length* coupled λ/2 lines (PR #1 root-cause analysis):
+// the even/odd resonant frequencies split by the even/odd phase-velocity
+// difference √εeff,e vs √εeff,o, NOT by the impedance coupling
+// `(z0e−z0o)/(z0e+z0o)` (which is the λ/4-overlap coupled-line-section
+// quantity). The FDTD run is multi-minute, so the gate runs only in a dedicated
+// CI `--release` job — never in the default `cargo test`. See ADR-0108.
 
 /// Configuration for the [`run_coupled_pair`] FDTD coupled-resonator driver.
 ///
@@ -346,70 +361,109 @@ impl Default for CoupledRunConfig {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CoupledRunResult {
     /// Extracted inter-resonator coupling coefficient
-    /// `k = (f_odd² − f_even²)/(f_odd² + f_even²)` (from
-    /// [`yee_filter::extract_coupling`]).
+    /// `k = (f_odd² − f_even²)/(f_odd² + f_even²)`, computed from the two modal
+    /// sub-runs' dominant resonances.
     pub k: f64,
-    /// Even-mode split-resonance frequency (Hz) — the **lower** of the two
-    /// peaks (the even mode has the higher effective permittivity, hence the
-    /// lower frequency).
+    /// Even-mode (symmetric-drive) dominant resonance (Hz) — the **lower** of
+    /// the two modal frequencies (the even mode has the higher effective
+    /// permittivity, hence the lower frequency).
     pub f_even: f64,
-    /// Odd-mode split-resonance frequency (Hz) — the **upper** of the two peaks.
+    /// Odd-mode (anti-phase-drive) dominant resonance (Hz) — the **upper** of
+    /// the two modal frequencies.
     pub f_odd: f64,
 }
 
 /// Run a full-wave FDTD solve on a coupled microstrip-resonator [`Layout`] and
-/// extract its inter-resonator coupling coefficient `k`.
+/// extract its inter-resonator coupling coefficient `k` by **even/odd modal
+/// excitation**.
 ///
 /// This is the integration driver for Filter Phase F1.1b.1 (ADR-0108): it
-/// composes primitives that all already ship —
-/// [`voxelize_microstrip`] (the layout→grid bridge), `yee-fdtd`'s
-/// [`LumpedRlcPort`] drive/probe + [`WalkingSkeletonSolver`] time-stepping, and
-/// [`yee_filter::extract_coupling`] (the split-peak `k` inversion).
+/// composes primitives that all already ship — [`voxelize_microstrip`] (the
+/// layout→grid bridge) and `yee-fdtd`'s [`LumpedRlcPort`] drive +
+/// [`WalkingSkeletonSolver`] time-stepping.
 ///
 /// # Method
 ///
-/// 1. **Voxelize** the two-resonator layout into a material-assigned grid
-///    (PEC ground + PEC traces + substrate slab). The default
-///    [`WalkingSkeletonSolver::new`] gives hard-PEC outer walls, i.e. a closed
-///    resonant box — appropriate for a weak-coupling resonance measurement.
-/// 2. **Drive** the first layout port with a [`LumpedRlcPort`] carrying a
-///    broadband [`SourceWaveform::GaussianPulse`] centred on
-///    [`CoupledRunConfig::f0_hz`]; the second port is a passive (open-EMF)
-///    probe of the same large resistance. Both ports act on the vertical `E_z`
-///    edge between trace and ground at their cell — the natural microstrip
-///    feed orientation. A *large* series resistance keeps the loaded Q high so
-///    the two split resonances stay sharp.
-/// 3. **Time-step** with a custom step body (`update_h_only` → `apply_cpml_h`
-///    → port `correct_e` → `update_e_only` → `apply_cpml_e` → `advance_clock`),
-///    recording the probe-port `E_z` each step.
-/// 4. **DFT** the probe time series with a single-bin (Goertzel-style)
-///    frequency scan over `[f0·(1 − span), f0·(1 + span)]` — the same idiom as
-///    `yee-fdtd`'s `cavity_resonance.rs` / `ntff.rs` accumulators; no FFT
-///    dependency.
-/// 5. **Extract** the two split peaks and invert them to `k` via
-///    [`yee_filter::extract_coupling`].
+/// Two FDTD sub-runs, each isolating one coupled supermode (see
+/// [`dominant_resonance`]):
+///
+/// 1. **Even-mode run** — drive *both* ports with the same in-phase Gaussian
+///    pulse (`+v0`, `+v0`). The symmetric drive couples only the symmetric
+///    (even) supermode, so the windowed single-bin-DFT spectrum has ONE
+///    dominant peak; `f_even` is its argmax-magnitude frequency.
+/// 2. **Odd-mode run** — drive the two ports anti-phase (`+v0`, `−v0`). The
+///    antisymmetric drive couples only the antisymmetric (odd) supermode →
+///    one dominant peak; `f_odd` is its argmax-magnitude frequency.
+/// 3. **Coupling** — `k = (f_odd² − f_even²)/(f_odd² + f_even²)`. The even
+///    supermode has the higher effective permittivity (lower frequency), so
+///    normally `f_even ≤ f_odd`; the two are ordered so this holds regardless
+///    of which sub-run came out higher.
+///
+/// This replaces the original single-strip-drive + two-peak "split" extraction,
+/// which was fragile (sidelobe combs, a collapsing second peak — PR #1 iters
+/// 1–5). Clean single-peak extraction per mode is robust by construction.
+///
+/// Each sub-run uses the default [`WalkingSkeletonSolver::new`] (hard-PEC outer
+/// walls), a broadband [`SourceWaveform::GaussianPulse`] centred on
+/// [`CoupledRunConfig::f0_hz`], and a large series resistance to keep the loaded
+/// Q high so the modal resonance stays sharp. The probe `E_z` is summed over
+/// both port cells (both are driven now — there is no separate passive probe).
+/// A Hann window suppresses the rectangular-window sinc sidelobes that dominate
+/// a long high-Q ringdown spectrum.
 ///
 /// # Performance
 ///
-/// The FDTD run is multi-minute even on the coarse default grid; do **not**
-/// call this on a constrained machine. Its validation gate
+/// Two voxelize+FDTD runs — multi-minute even on the coarse default grid; do
+/// **not** call this on a constrained machine. Its validation gate
 /// (`fdtd-coupling-001`) is `#[ignore]`'d and runs only in a dedicated CI
 /// `--release` job (ADR-0108).
 ///
 /// # Panics
 ///
-/// Panics if the layout has fewer than two ports (a coupled-pair drive needs a
-/// drive port and a probe port), or if [`extract_coupling`] cannot find two
-/// distinct split peaks in the scanned spectrum (the run did not resolve the
-/// resonance split — usually too coarse a grid, too few steps, or a scan window
-/// that does not bracket both peaks).
+/// Panics if the layout has fewer than two ports (a coupled-pair drive needs
+/// two drive ports).
 pub fn run_coupled_pair(layout: &Layout, cfg: &CoupledRunConfig) -> CoupledRunResult {
     assert!(
         layout.ports.len() >= 2,
-        "run_coupled_pair: need ≥ 2 ports (a drive port and a probe port); got {}",
+        "run_coupled_pair: need ≥ 2 ports (two drive ports); got {}",
         layout.ports.len()
     );
 
+    // Even mode: in-phase drive (+v0, +v0). Odd mode: anti-phase (+v0, −v0).
+    let f_sym = dominant_resonance(layout, cfg, false);
+    let f_asym = dominant_resonance(layout, cfg, true);
+
+    // The even (symmetric) supermode sees the higher effective permittivity, so
+    // it resonates LOWER. Order the pair so f_even ≤ f_odd regardless of which
+    // sub-run reported the higher frequency (robust to mode-frequency surprises).
+    let (f_even, f_odd) = if f_sym <= f_asym {
+        (f_sym, f_asym)
+    } else {
+        (f_asym, f_sym)
+    };
+
+    let k = (f_odd * f_odd - f_even * f_even) / (f_odd * f_odd + f_even * f_even);
+
+    CoupledRunResult { k, f_even, f_odd }
+}
+
+/// Drive a coupled microstrip pair into a single supermode and return its
+/// dominant (argmax-magnitude) windowed-DFT resonance frequency, in Hz.
+///
+/// Both layout ports are driven by a broadband Gaussian pulse. With
+/// `anti_phase = false` the two drives are in phase (`+v0`, `+v0`) — a symmetric
+/// excitation that couples the even supermode. With `anti_phase = true` the
+/// second port's amplitude is negated (`+v0`, `−v0`) — an antisymmetric
+/// excitation that couples the odd supermode. Each polarity drives the
+/// structure into a *single* dominant supermode, so the magnitude spectrum has
+/// one clear peak (rather than the fragile two-peak split of a one-strip drive).
+///
+/// Steps: voxelize → build both drive ports (the second with `±v0` per
+/// `anti_phase`) → time-step the shipped custom-body loop → record the summed
+/// probe `E_z` over both port cells → Hann-window → single-bin DFT over the
+/// `[f0·(1 − span), f0·(1 + span)]` scan window → return the argmax-magnitude
+/// frequency.
+fn dominant_resonance(layout: &Layout, cfg: &CoupledRunConfig, anti_phase: bool) -> f64 {
     // --- 1. Voxelize: layout -> material-assigned grid + port cells. --------
     let opts = VoxelOptions {
         dx_m: cfg.dx_m,
@@ -417,61 +471,71 @@ pub fn run_coupled_pair(layout: &Layout, cfg: &CoupledRunConfig) -> CoupledRunRe
         air_above_cells: cfg.air_above_cells,
     };
     let model = voxelize_microstrip(layout, &opts);
-    let drive_cell = model.port_cells[0];
-    let probe_cell = model.port_cells[1];
+    let cell0 = model.port_cells[0];
+    let cell1 = model.port_cells[1];
 
     let dt = model.grid.dt;
     let mut solver = WalkingSkeletonSolver::new(model.grid);
 
-    // --- 2. Ports: a weakly-coupled Gaussian drive + a passive probe. -------
+    // --- 2. Ports: TWO Gaussian drives, in-phase or anti-phase. -------------
     //
-    // The drive carries a broadband Gaussian-modulated pulse centred on f0 with
-    // a spectral FWHM covering the whole scan window, so it excites both split
-    // resonances. The probe is the same large-R port with no EMF — its
-    // `correct_e` still applies the resistive back-reaction (a weak load), and
-    // we read the probe-cell `E_z` directly from the grid each step.
+    // Both ports carry a broadband Gaussian-modulated pulse centred on f0 with a
+    // spectral FWHM covering the whole scan window. Port 0 always drives +v0;
+    // port 1 drives +v0 (even / symmetric) or −v0 (odd / antisymmetric). Driving
+    // the structure symmetrically excites only the even supermode; driving it
+    // antisymmetrically excites only the odd supermode — a clean single-mode
+    // run. `SourceWaveform::GaussianPulse` is linear in `v0`, so a negative `v0`
+    // is simply the phase-flipped drive. Both ports act on the vertical `E_z`
+    // edge between trace and ground at their cell — the natural microstrip feed
+    // orientation. A *large* series resistance keeps the loaded Q high so the
+    // modal resonance stays sharp.
     let bw = 2.0 * cfg.freq_span * cfg.f0_hz;
-    let drive_wave = SourceWaveform::GaussianPulse {
-        v0: cfg.drive_v0,
+    // Centre the pulse a few characteristic times in so its t=0 tail is
+    // negligible. The Gaussian time constant is τ = √(2 ln2)/(π·bw); place
+    // t0 at ~3.5 τ expressed in steps.
+    let t0_steps = ((3.5 * (2.0_f64 * std::f64::consts::LN_2).sqrt() / (std::f64::consts::PI * bw))
+        / dt)
+        .ceil() as usize;
+    let make_wave = |v0: f64| SourceWaveform::GaussianPulse {
+        v0,
         f0: cfg.f0_hz,
         bw,
-        // Centre the pulse a few characteristic times in so its t=0 tail is
-        // negligible. The Gaussian time constant is τ = √(2 ln2)/(π·bw); place
-        // t0 at ~3.5 τ expressed in steps.
-        t0_steps: ((3.5 * (2.0_f64 * std::f64::consts::LN_2).sqrt() / (std::f64::consts::PI * bw))
-            / dt)
-            .ceil() as usize,
+        t0_steps,
     };
-    let mut drive_port =
-        LumpedRlcPort::pure_resistor(drive_cell, cfg.port_resistance_ohm, drive_wave);
-    let mut probe_port =
-        LumpedRlcPort::pure_resistor(probe_cell, cfg.port_resistance_ohm, SourceWaveform::None);
+    let v1 = if anti_phase {
+        -cfg.drive_v0
+    } else {
+        cfg.drive_v0
+    };
+    let mut port0 =
+        LumpedRlcPort::pure_resistor(cell0, cfg.port_resistance_ohm, make_wave(cfg.drive_v0));
+    let mut port1 = LumpedRlcPort::pure_resistor(cell1, cfg.port_resistance_ohm, make_wave(v1));
 
-    // --- 3. Time-step with a custom body; record the probe E_z. -------------
+    // --- 3. Time-step with a custom body; record the summed probe E_z. ------
     //
     // The body mirrors the cavity_resonance.rs custom step: H half-step + PEC
-    // outer-wall clamp (the no-CPML fall-through of `apply_cpml_h`), then the
+    // outer-wall clamp (the no-CPML fall-through of `apply_cpml_h`), then both
     // lumped-port corrections between H and E, then the E half-step + clamp,
-    // then advance the clock. The port `correct_e` runs after `update_e_only`
-    // (it overwrites the standard Yee E_z estimate at the port cell), matching
-    // its documented call site.
+    // then advance the clock. Each port `correct_e` runs after `update_e_only`
+    // (it overwrites the standard Yee E_z estimate at its port cell), matching
+    // its documented call site. We sum the two port-cell E_z as the probe.
     let mut probe_series: Vec<f64> = Vec::with_capacity(cfg.n_steps);
     for n in 0..cfg.n_steps {
         solver.update_h_only();
         solver.apply_cpml_h();
 
         solver.update_e_only();
-        drive_port.correct_e(solver.grid_mut(), n, dt);
-        probe_port.correct_e(solver.grid_mut(), n, dt);
+        port0.correct_e(solver.grid_mut(), n, dt);
+        port1.correct_e(solver.grid_mut(), n, dt);
         solver.apply_cpml_e();
 
         solver.advance_clock();
 
-        let ez = solver.grid().ez[probe_cell];
-        probe_series.push(ez);
+        let grid = solver.grid();
+        probe_series.push(grid.ez[cell0] + grid.ez[cell1]);
     }
 
-    // --- 4. Single-bin DFT scan over the split-resonance window. ------------
+    // --- 4. Single-bin DFT scan over the resonance window. ------------------
     let f_lo = cfg.f0_hz * (1.0 - cfg.freq_span);
     let f_hi = cfg.f0_hz * (1.0 + cfg.freq_span);
     let n_bins = cfg.n_freq_bins.max(5);
@@ -479,17 +543,15 @@ pub fn run_coupled_pair(layout: &Layout, cfg: &CoupledRunConfig) -> CoupledRunRe
 
     // A Hann window over the probe record suppresses the rectangular-window
     // sinc sidelobes that otherwise dominate a long high-Q ringdown spectrum
-    // (the iter#3 diagnostic showed a sidelobe comb at the 1/(N·dt) spacing
-    // masquerading as split peaks). Windowing reveals the true resonances so
-    // extract_coupling sees physical even/odd lobes, not sidelobes.
+    // (the PR #1 iter#3 diagnostic showed a sidelobe comb at the 1/(N·dt)
+    // spacing masquerading as peaks). Windowing reveals the true resonance.
     let n_samp = probe_series.len();
     let windowed: Vec<f64> = probe_series
         .iter()
         .enumerate()
         .map(|(m, &x)| {
             let w = if n_samp > 1 {
-                0.5 * (1.0
-                    - (2.0 * std::f64::consts::PI * m as f64 / (n_samp as f64 - 1.0)).cos())
+                0.5 * (1.0 - (2.0 * std::f64::consts::PI * m as f64 / (n_samp as f64 - 1.0)).cos())
             } else {
                 1.0
             };
@@ -514,10 +576,16 @@ pub fn run_coupled_pair(layout: &Layout, cfg: &CoupledRunConfig) -> CoupledRunRe
     }
 
     // --- 4b. DIAGNOSTIC (ADR-0108 tuning): dump the spectrum's local maxima so
-    // CI shows whether the even/odd pair is actually present and which two peaks
-    // the extractor sees. Temporary instrumentation for the fdtd-coupling-001
-    // physics-tuning loop; remove once the gate is green.
+    // CI shows whether a single dominant modal peak is present and where. The
+    // even/odd modal scheme should give ONE clear peak per sub-run. Temporary
+    // instrumentation for the fdtd-coupling-001 physics-tuning loop; remove
+    // once the gate is green.
     {
+        let mode = if anti_phase {
+            "odd (anti-phase)"
+        } else {
+            "even (in-phase)"
+        };
         let max_mag = mag.iter().cloned().fold(0.0_f64, f64::max).max(1e-300);
         let mut peaks: Vec<(f64, f64)> = Vec::new();
         for i in 1..mag.len() - 1 {
@@ -526,22 +594,25 @@ pub fn run_coupled_pair(layout: &Layout, cfg: &CoupledRunConfig) -> CoupledRunRe
             }
         }
         peaks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        eprintln!("[fdtd-coupling-001 DIAG] {} local maxima in scan window:", peaks.len());
+        eprintln!(
+            "[fdtd-coupling-001 DIAG] {mode}: {} local maxima in scan window:",
+            peaks.len()
+        );
         for (f, rel) in peaks.iter().take(10) {
-            eprintln!("[fdtd-coupling-001 DIAG]   f = {:.5} GHz  rel_mag = {:.4}", f * 1e-9, rel);
+            eprintln!(
+                "[fdtd-coupling-001 DIAG]   f = {:.5} GHz  rel_mag = {:.4}",
+                f * 1e-9,
+                rel
+            );
         }
     }
 
-    // --- 5. Invert the two split peaks to k. --------------------------------
-    let extraction = extract_coupling(&freqs, &mag).expect(
-        "run_coupled_pair: extract_coupling found < 2 split peaks in the scanned spectrum; \
-         the FDTD run did not resolve the resonance split (grid too coarse, too few steps, \
-         or scan window does not bracket both peaks)",
-    );
-
-    CoupledRunResult {
-        k: extraction.k,
-        f_even: extraction.f_lo_hz,
-        f_odd: extraction.f_hi_hz,
-    }
+    // --- 5. Dominant (argmax-magnitude) resonance frequency. ----------------
+    let (i_max, _) =
+        mag.iter()
+            .enumerate()
+            .fold((0usize, f64::NEG_INFINITY), |(i_best, m_best), (i, &m)| {
+                if m > m_best { (i, m) } else { (i_best, m_best) }
+            });
+    freqs[i_max]
 }
