@@ -1,6 +1,11 @@
 # ADR-0118: Phase 2.fdtd.6.4 — canonical per-element Taflove lumped L/C updates
 
-**Status:** Accepted
+**Status:** Investigated — the canonical per-element updates were implemented and
+verified per-edge-correct, but the closed-loop **single-cell reactive port** fails
+identically to the prior formulation; reactive lumped *loading* is **deferred to a
+new reactive-port-formulation track** (see Outcome). The branch
+`feature/fdtd-6-4-canonical-lc` (`021bed2`) is the documented per-element
+foundation; **not merged** (passes no stronger gate than `main`).
 **Date:** 2026-05-30
 **Related:** ADR-0117 (2.fdtd.6.3 — found the reactive defect is structural, not a
 coefficient), ADR-0116 (2.fdtd.6.2 — the stable two-way *resistor* port stands),
@@ -64,6 +69,52 @@ weaken or fake. The shunt L/C alone is the increment's floor.
 
 **Not in scope:** SRF/ESR vendor parasitics (F2.1b); the F2.3 board sim itself
 (rides on this); multi-port S-params beyond S21.
+
+## Outcome (investigated 2026-05-30)
+
+The canonical per-element updates were implemented (branch `021bed2`) and verified
+**per-edge-correct in isolation** (forced-edge probe: R → +496 Ω, L → +488j Ω,
+C → −496j Ω):
+
+- **Capacitor** (L=0): `ε_eff = ε₀ + C·dz/dA` → `E_z^{n+1} = E_z^n +
+  (ε₀/ε_eff)(E_z^* − E_z^n)`.
+- **Inductor** (C=∞): `I_L^{n+1/2} = I_L^{n−1/2} + (dt/L)(E_z^n·dz − V_src)`, then
+  `E_z^{n+1} = E_z^* − (dt/(ε₀·dA))·I_L^{n+1/2}`.
+- **Series-RLC**: `I = [(L/dt − R/2)I_old + E_z^n·dz − V_src − V_C]/(L/dt + R/2)`,
+  `E_z^{n+1} = E_z^* − (dt/(ε₀·dA))I`, `V_C += (dt/C)I`.
+
+**Yet the closed-loop gate fails identically to the prior instantaneous-K scheme**:
+with the harness reading a z0_eff resistor back at |Z| ≈ 511 Ω (≈ 496 ✓), the
+canonical shunt inductor presents |Z| ≈ 3.8 kΩ (near-open) and the shunt capacitor
+|Z| ≈ 83 Ω (near-short) — the **same opposite-direction signature** ADR-0117
+reported. Two structurally-different element formulations → the same failure.
+
+A **decisive cross-check** ruled out a measurement artifact of the single-load
+gate: F2.3's gate `fdtd_lumped_001` uses a completely independent measurement
+(thru-normalized 2-port S21, no single-load de-embed), and with the canonical
+`lumped.rs` it produces a |S21| sweep **byte-identical to the digit** (1.00047…)
+to the prior run — i.e. the reactive elements' back-action on the microstrip line
+is **≈ zero**, regardless of element formulation. Two formulations × two
+independent measurements all agree.
+
+**Root cause (refined):** the **single-cell reactive lumped port** is inadequate.
+An integrating (L) / differentiating (C) element on one Yee `E_z` edge does not see
+a clean terminal voltage — its coherent ∫/d-dt of the local field is corrupted by
+the cell's own ε₀ displacement current and neighbouring grid content (the
+instantaneous resistor is immune, which is why R calibrates perfectly and absorbs
+any constant coupling scale). A correct reactive port needs a **new formulation** —
+a multi-cell port aperture, or TL-based Z₀ de-embedding from the line currents —
+not a different per-element constitutive law. This is bounded by discretization
+(not the ill-posedness that defers the MoM microstrip port, ADR-0064), but it is a
+**separate, larger track**.
+
+**Decision:** reactive lumped *loading* (hence F2.3's lumped-filter EM "selectivity"
+and the goal's lumped "EM simulation" component) is **deferred** to that new
+reactive-port track. ADR-0116's stable two-way **resistor** port stands and is
+shipped; the canonical per-element updates are preserved on `021bed2` as the
+foundation for the future port. **Nothing was weakened or faked**: both
+`lumped_rlc_twoway_001` (resistor-exact + stability) and F2.3's
+`fdtd_lumped_001` (correctly RED, unmerged) tell the truth.
 
 ---
 
