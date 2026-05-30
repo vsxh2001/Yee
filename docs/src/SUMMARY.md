@@ -151,3 +151,4 @@
 - [ADR-0105: Filter Phase F1.4.1b — yee-export KiCad .kicad_pcb export](decisions/0105-filter-f1-4-1b-kicad-pcb-export.md)
 - [ADR-0106: Filter — `yee filter synth --kicad-pcb` export wiring](decisions/0106-filter-cli-kicad-pcb-export.md)
 - [ADR-0107: App.1.2b — trunk web bundle + CI build for yee-studio](decisions/0107-app-1-2b-trunk-web-bundle.md)
+- [ADR-0108: F1.1b.1 — FDTD coupled-resonator driver (full filter simulation)](decisions/0108-f1-1b-1-fdtd-coupled-resonator-driver.md)
