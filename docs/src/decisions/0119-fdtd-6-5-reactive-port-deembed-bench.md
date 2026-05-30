@@ -1,6 +1,8 @@
 # ADR-0119: Phase 2.fdtd.6.5 — reactive lumped-port V+I de-embedding bench (research-track increment 1)
 
-**Status:** Accepted
+**Status:** Accepted — **VERDICT: PORT-WRONG** (increment 2 = a port reformulation,
+not a measurement/placement fix). Bench shipped (`reactive_deembed_001`, merged).
+See Outcome.
 **Date:** 2026-05-30
 **Related:** ADR-0116/0117/0118 (the two-way port + the two disproven reactive
 attempts), ADR-0115 (F2.3, blocked), the lumped-LC → PCB goal (maintainer chose
@@ -68,6 +70,48 @@ container-iterated; the reactive verdict recorded in this ADR's follow-up.
 
 **Not in scope:** the port reformulation itself (increment 2, gated on this
 verdict); F2.3's element placement (increment 2+); the studio UI (Track B).
+
+## Outcome (2026-05-30) — VERDICT: PORT-WRONG
+
+Increment 1 shipped (`reactive_deembed_001`, merged via the 2.fdtd.6.5 merge). A
+VNA-style bench measures the canonical two-way lumped port's effective shunt
+`Z_L(ω)` directly from voltage and current at a reference plane on the
+parallel-plate TEM line:
+
+- **V(ω)** = `∫E_z·dz` across the plate gap; **I(ω)** = `∫H_y·dy`, the single-pass
+  modal surface current (a *closed* `∮H·dl` nets to zero — the closed guide
+  carries no net axial transport current; a field dump confirmed the mode is an
+  `E_z` half-sine across the PEC y-walls, uniform in z, with `H_y ∝ ∂E_z/∂x`). The
+  `I` phasor is advanced `+ω·dt/2` to undo the Yee E/H half-step stagger
+  (a pure phase fix applied identically to every measurement, so it cannot
+  manufacture a match). **Z₀(ω)** = `V_inc/I_inc` *measured* (not fitted) from the
+  load-free incident wave: ≈ 820 Ω, nearly real, mildly dispersive.
+- **Resistor anchor (honesty guarantee, asserted):** the de-embedded `Z_L` of a
+  known resistor recovers a real, frequency-flat (spread 0.5 %), R-linear (`Z_L(2R)
+  /Z_L(R) = 1.998`) impedance with a fixed real transfer `κ = 2.573`. A
+  mis-measuring bench would fail these.
+
+**Result:** the canonical port does **not** present `R + jωL + 1/(jωC)`:
+
+| load | `Z_in` a correct port gives (4 GHz) | `Z_in` **measured** | verdict |
+|------|--------------------------------------|---------------------|---------|
+| inductor (21.85 nH) | 612+361j | **834+13j** (≈Z₀, transparent) | reactance ~30× too small |
+| capacitor (32.2 fF) | 775−197j | **73−45j** (near-short, \|Γ\|≈0.83) | ~10× over-coupled |
+
+The capacitor case is well-conditioned (it loads the line strongly), so the
+inversion is not ill-conditioned noise — it is decisive on its own. This
+**confirms the line-reflection finding (ADR-0117) at the impedance level** and
+**contradicts the port-local proxy** (which was misleading): the canonical
+two-way lumped port genuinely mis-loads the line.
+
+**Decision:** increment 2 of the research track is a **port reformulation**
+(multi-cell aperture / TL-based Z₀ de-embedding into the line currents), **not** a
+measurement/calibration + F2.3-placement fix. The de-risk paid off — it
+conclusively ruled out the cheap path. The bench + the canonical per-element port
+are now on `main` as increment 2's foundation; a `deembed_field_dump` helper
+documents the mode structure. Resistor + one-way + fdtd-206 paths non-regressed;
+`lumped_rlc_twoway_001` assertions unweakened; code-review approved (verdict
+earned, one P1 vacuous-assert fixed into a per-arm partial-fix tripwire).
 
 ---
 
