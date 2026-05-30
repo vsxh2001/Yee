@@ -379,6 +379,18 @@ build on F1.
   an `egui_plot` top-view canvas of the trace polygons. Gate studio_state_layout.
 - **CLI `--gerber`** (ADR-0102, merge `97fbd8a`): `yee filter synth --gerber` writes
   the F1.4.0 layout Gerber (Layout shared with `--layout-svg`). Gate cli_gerber.
+- **F1.4.1a board outline** (ADR-0103, merge `1b3d0da`): `yee-export::
+  layout_to_gerber_outline(&Layout, &OutlineOptions)` emits a **stroked**
+  rectangular Edge.Cuts contour (bbox ± `margin_mm`, default 1.0; layer
+  "Edge.Cuts") — a cut path, NOT a G36/G37 region — so KiCad imports it as the
+  board profile. Shares the 4.6 fixed-point path via private `coord_word_xy`.
+  WASM-safe pure text; gates gerber-003 (structure) / gerber-004 (geometry).
+- **F1.4 aggregator gates** (ADR-0104, merge `c36b6dc`): `yee-validation`
+  registers `coupled-001` / `dim-001` / `gerber-001` in `case_registry()` under
+  `Solver::Synth` (no new variant), so `yee validate --list` / `Report::run_all`
+  now cover the whole pipeline (synthesis → coupled-line → dimensions → Gerber).
+  Pure-math/text; references read from the shipped crate tests. Gate
+  coupled_dim_gerber_cases_registered_and_pass + the registry↔list invariant.
 
 **Final goal: a desktop + web APP** (ADR-0089) — one `egui`/`eframe` codebase,
 native + WASM. The shipped light flow (F0/F0.1/F0.2/F1.0) is WASM-safe and is the
@@ -426,7 +438,9 @@ in-browser front-end; heavy EM goes behind a native `yee-server`. See §5a.
   (consumes F1.1b.1's FDTD k/Qe to refine the F1.2.0 seed) + `qe`→I/O feed
   dimensioning. Then **F1.3** verify + mask gate. **F1.4.0 `yee-export` Gerber
   ✅ SHIPPED** (ADR-0100, merge `21614fe`) — `layout_to_gerber` single-copper-layer
-  RS-274X; **NEXT F1.4.1+** = drill/board-outline, multi-layer, KiCad footprint/PCB,
-  STEP/3-D + consumer wiring (CLI/studio export buttons). **App.2** (`yee-server`)
-  once F1.1+ exist.
+  RS-274X. **F1.4.1a board-outline ✅ SHIPPED** (ADR-0103, `1b3d0da`) —
+  Edge.Cuts stroked contour. **NEXT F1.4.1b+** = drill layer, multi-layer stack,
+  KiCad-native footprint/`.kicad_pcb` S-expr, STEP/3-D + consumer wiring
+  (CLI/studio "export Edge.Cuts" buttons). **App.2** (`yee-server`) once F1.1+
+  exist.
   (Tutorial 17 — filter design via CLI + Studio — shipped, merge `c6e477c`.)
