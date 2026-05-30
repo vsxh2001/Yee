@@ -162,3 +162,5 @@
 - [ADR-0116: Phase 2.fdtd.6.2 — stable two-way lumped RLC port](decisions/0116-fdtd-6-2-two-way-lumped-rlc.md)
 - [ADR-0117: Phase 2.fdtd.6.3 — reactive-magnitude correctness of the two-way lumped port](decisions/0117-fdtd-6-3-reactive-magnitude.md)
 - [ADR-0118: Phase 2.fdtd.6.4 — canonical per-element Taflove lumped L/C updates](decisions/0118-fdtd-6-4-canonical-lumped-lc.md)
+- [ADR-0119: Phase 2.fdtd.6.5 — reactive lumped-port V+I de-embedding bench](decisions/0119-fdtd-6-5-reactive-port-deembed-bench.md)
+- [ADR-0120: App.D.1L — lumped-LC studio stages on the Dioxus shell](decisions/0120-app-d1-lumped-studio-stages.md)
