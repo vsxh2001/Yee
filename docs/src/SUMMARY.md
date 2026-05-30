@@ -165,3 +165,4 @@
 - [ADR-0119: Phase 2.fdtd.6.5 — reactive lumped-port V+I de-embedding bench](decisions/0119-fdtd-6-5-reactive-port-deembed-bench.md)
 - [ADR-0120: App.D.1L — lumped-LC studio stages on the Dioxus shell](decisions/0120-app-d1-lumped-studio-stages.md)
 - [ADR-0121: Phase 2.fdtd.6.6 — reactive lumped-port reformulation (sheet→mode coupling)](decisions/0121-fdtd-6-6-reactive-port-reformulation.md)
+- [ADR-0122: Phase 2.fdtd.6.7 — per-axis CPML face selection](decisions/0122-fdtd-6-7-per-axis-cpml.md)
