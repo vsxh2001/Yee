@@ -431,10 +431,19 @@ in-browser front-end; heavy EM goes behind a native `yee-server`. See §5a.
   coupler `k=(z0e−z0o)/(z0e+z0o)`); gates coupled_001 vs Steer Ex 5.6.1 (≤0.21%) +
   coupled_002 5-gap monotonic k; pure f64, WASM-safe. This is the validatable `k`
   reference for F1.1b.1 and the initial-dimensioning model for F1.2.
-  **NEXT = F1.1b.1** — the FDTD coupled-resonator DRIVER: `yee-voxel` voxelize a
-  coupled pair → `LumpedRlcPort`s → run `yee-fdtd` → single-bin DFT → `extract_*`,
-  gated against the F1.1b.gate even/odd `k`/split-frequency reference. HEAVY
-  (multi-min FDTD). **F1.2.0 dimensional synthesis ✅ SHIPPED** (ADR-0097, merge
+  **F1.1b.1 ✅ SHIPPED** (ADR-0108, merge `afd1eff`) — the FIRST full-wave EM gate
+  in the filter pipeline (the "full filter simulation" goal component). After a
+  7-iteration saga, the planned resonant coupled-resonator split was abandoned
+  (no box is both high-Q and non-confining) and the real bug was found: a
+  `voxelize_microstrip` one-cell ground/dielectric air-gap dragging ε_eff ~20%
+  low (fixed; `voxel_001` pins the corrected z-stack). Shipped instead: a
+  **propagation** ε_eff gate — `yee-voxel::run_line_eeff` drives a line, time-gated
+  phase-velocity → ε_eff; gates `fdtd-line-eeff-001` (single line vs
+  Hammerstad-Jensen, **0.13%**) + `fdtd-line-eeff-coupled-001` (even/odd ε_eff, ≤5%),
+  ≤15% tol, CI `--release`. Found via the bounded Docker dev container
+  (`scripts/yee-box.sh`, `6bcd026`) that runs FDTD locally host-safe. **NEXT =
+  F1.1b.2** — extend the propagation gate to the inter-resonator coupling `k`/`Qe`
+  the F1.2.1 BO loop consumes (the εeff/even-odd machinery is now validated). **F1.2.0 dimensional synthesis ✅ SHIPPED** (ADR-0097, merge
   `1d5dd05`): `yee-filter::dimension_edge_coupled` inverts the validated
   `coupled_microstrip` + HJ models (bisection on the monotone gap→k) to map a
   `CouplingMatrix` → physical edge-coupled microstrip dims (width/length/gaps) —

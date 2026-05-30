@@ -69,3 +69,49 @@ full Swanson-hairpin end-to-end filter gate, GPU FDTD.
 - ADR-0091 / ADR-0093 / ADR-0094 (the primitives this integrates).
 - `docs/superpowers/specs/2026-05-30-f1-1b-1-fdtd-coupled-resonator-driver-design.md`;
   `docs/superpowers/plans/2026-05-30-f1-1b-1-fdtd-coupled-resonator-driver.md`.
+
+---
+
+## Update (2026-05-30) — what actually SHIPPED (resonant → propagation)
+
+The originally-planned **resonant coupled-resonator split** method above proved
+unworkable, and the investigation uncovered a deeper bug. What merged to `main`
+(`afd1eff`) is a **propagation-based** ε_eff gate. Full blow-by-blow on PR #1.
+
+**Root cause found (the real bug behind the whole saga):** `yee-voxel::
+voxelize_microstrip` left a **one-cell air gap between the ground plane and the
+dielectric** (trace PEC at `k = 1 + n_sub`, dielectric only at `k = 1..=n_sub`).
+That series air capacitance dragged the FDTD microstrip ε_eff ~20 % low (≈2.5 vs
+the analytic 3.33), silently corrupting every resonance/coupling measurement.
+**Fixed:** dielectric fills `k = 0..n_sub`, trace PEC at `k_top = n_sub`, so
+ground→trace is `n_sub·dx = h` of pure dielectric. `voxel_001` pins the corrected
+z-stack.
+
+**Why resonant-split was abandoned:** no box is simultaneously high-Q and
+non-confining. A small closed PEC box confines the fringing/air-gap fields that
+set the even/odd ε_eff difference (split too small); a large PEC box becomes a
+resonant cavity (box modes swamp the spectrum); an open CPML box collapses the
+resonator Q (no detectable peaks). Also `CpmlParams::for_grid` (all-six-face) is
+late-time unstable for a microstrip whose PEC ground / high-ε substrate run into
+the boundary.
+
+**What shipped (the gate):** a driven, **time-gated propagation** measurement of
+the microstrip phase velocity → ε_eff. `run_line_eeff` drives one end of a long
+straight line, records `Ez` at two probe planes Δx apart (Δx < λ_g, so no 2π
+phase ambiguity), extracts the phase advance via a single-bin DFT gated to the
+forward pulse before the far-wall reflection returns: `v_p = ω·Δx/Δφ`,
+`ε_eff = (c/v_p)²`. `run_coupled_line_eeff` does the same in-phase (even) /
+anti-phase (odd) for the coupled even/odd ε_eff. Gates (both `#[ignore]`'d, ≤15 %,
+CI `--release`): **`fdtd-line-eeff-001`** (single-line ε_eff vs Hammerstad-Jensen:
+measured 3.329 vs 3.325, **0.13 %**) and **`fdtd-line-eeff-coupled-001`** (even
+4.74 %, odd 1.25 %). This is the first validated full-wave EM solve in the filter
+pipeline — the "full filter simulation" product-goal component.
+
+**Enabler:** the bounded Docker dev container (`scripts/yee-box.sh`, main
+`6bcd026`) let the multi-minute FDTD gate be iterated **locally** (host-safe),
+which is how the voxelizer bug was found. The earlier "never run FDTD locally"
+constraint is superseded by the box.
+
+**Tooling note:** the spec/plan filenames still carry the original
+`-coupled-resonator-driver` name; their *content* is the resonant approach — read
+this Update + PR #1 for the shipped propagation method.
