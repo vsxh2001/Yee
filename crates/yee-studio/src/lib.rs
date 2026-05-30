@@ -1,14 +1,14 @@
-//! `yee-studio` — App.0 filter-design studio state (logic layer).
+//! `yee-studio` — filter-design studio state (the egui-free logic layer).
 //!
 //! This crate holds the **egui-free, headless-testable** application state for
-//! the Yee Filter Studio desktop app (ADR-0090). It wires the shipped light
-//! flow — spec → synthesis → ideal response → spec-mask verdict — into a single
-//! [`StudioState`] value that the `eframe` shell (`src/app.rs`) edits and
-//! re-derives on every change.
+//! the Yee Filter Studio (ADR-0090). It wires the shipped light flow — spec →
+//! synthesis → ideal response → spec-mask verdict → dimensioning — into a
+//! single [`StudioState`] value.
 //!
-//! Keeping [`StudioState`] free of any `egui`/`eframe` types is deliberate: it
-//! keeps the logic WASM-safe (App.1) and unit-testable without a GUI runtime.
-//! Only `src/app.rs` and `src/main.rs` depend on `egui`/`eframe`.
+//! The eframe/egui desktop+web **view** was retired in App.D.2 (ADR-0130): the
+//! pure-Rust **Dioxus** `yee-studio-web` is now the studio. This crate keeps
+//! only [`StudioState`] — the headless, WASM-safe pipeline + its tests — so the
+//! logic survives and stays reusable. Nothing here depends on `egui`/`eframe`.
 //!
 //! ## Pipeline ([`StudioState::recompute`])
 //!
@@ -28,21 +28,6 @@ use yee_filter::{
     dimension_edge_coupled_layout, ideal_response, synthesize,
 };
 use yee_layout::Substrate;
-
-/// The `eframe` shell (spec editor + synthesis panel + `|S21|`/mask plot).
-///
-/// Lives in its own module so this crate root stays egui-free and WASM-safe;
-/// only [`app`] and the binary entry depend on `egui`/`eframe`.
-///
-/// Gated behind either the `desktop` (native) or `web` (wasm32 browser) Cargo
-/// feature, both of which pull in `eframe`/`egui`/`egui_plot` (App.1.0/1.2a;
-/// ADR-0092/0096): a `--no-default-features` build compiles [`StudioState`] with
-/// **no** `eframe`/`egui`/`wgpu` in the dep graph, satisfying the ADR-0089
-/// WASM-safety constraint. The `web` feature compiles this same UI for
-/// `wasm32-unknown-unknown` behind the `WebRunner` entry in `src/main.rs`; the
-/// `trunk` bundle + deploy remain for App.1.2b (they need the wasm toolchain).
-#[cfg(any(feature = "desktop", feature = "web"))]
-pub mod app;
 
 /// Number of points in the response sweep (mirrors `yee-cli`'s `SWEEP_POINTS`).
 const SWEEP_POINTS: usize = 401;
@@ -71,8 +56,8 @@ pub struct MaskRegionView {
 /// Editable design state plus everything derived from the current spec.
 ///
 /// The `spec` field is the single source of truth; every other field is a
-/// cached derivation produced by [`StudioState::recompute`]. The `eframe` shell
-/// mutates `spec` on edits and calls `recompute` to refresh the rest.
+/// cached derivation produced by [`StudioState::recompute`]. A consumer mutates
+/// `spec` on edits and calls `recompute` to refresh the rest.
 #[derive(Debug, Clone)]
 pub struct StudioState {
     /// The editable filter specification (the design intent).

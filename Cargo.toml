@@ -19,6 +19,7 @@ members = [
     "crates/yee-synth",
     "crates/yee-filter",
     "crates/yee-studio",
+    "crates/yee-studio-web",
     "crates/yee-layout",
     "crates/yee-voxel",
     "crates/yee-export",
@@ -128,3 +129,13 @@ debug         = "line-tables-only"
 
 [profile.dev]
 opt-level = 1
+
+[profile.wasm-dev]
+inherits = "dev"
+opt-level = 1
+
+[profile.server-dev]
+inherits = "dev"
+
+[profile.android-dev]
+inherits = "dev"

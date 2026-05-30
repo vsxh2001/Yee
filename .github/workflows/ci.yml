@@ -73,7 +73,7 @@ jobs:
         run: cargo doc --workspace --no-default-features --no-deps
 
   wasm-build:
-    name: WASM build (yee-studio, --no-default-features)
+    name: WASM build (yee-studio-web, Dioxus)
     runs-on: ubuntu-latest
     needs: lint-test
     steps:
@@ -85,33 +85,42 @@ jobs:
         with:
           toolchain: "1.92"
           targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
 
       - name: Cache cargo build artifacts
         uses: Swatinem/rust-cache@v2
 
-      # Web-readiness gate (App.1.1, ADR-0095): proves the eframe-free
-      # `StudioState` flow (+ yee-synth/yee-filter) compiles to WASM with the
-      # `desktop` feature off. Guards against a native-only dep leaking in.
-      - name: cargo build (yee-studio, wasm32, no-default-features)
-        run: cargo build -p yee-studio --no-default-features --target wasm32-unknown-unknown
+      # App.D.2 (ADR-0130): the pure-Rust Dioxus studio is now THE studio (the
+      # eframe `yee-studio` view was retired). These gates keep it green:
+      # fmt + clippy on the crate, then a wasm32 build, then the deployable
+      # `dx` bundle.
+      - name: cargo fmt --check (yee-studio-web)
+        run: cargo fmt --check -p yee-studio-web
 
-      # Web bundle gate (App.1.2b, ADR-0107): builds the deployable static
-      # bundle (HTML + JS glue + .wasm) for the full `--features web` UI via
-      # trunk. jetli/trunk-action also fetches a matching wasm-bindgen-cli, so
-      # no separate install step is needed.
-      - name: Install trunk
-        uses: jetli/trunk-action@v0.5.0
-        with:
-          version: "latest"
+      - name: cargo clippy (yee-studio-web, wasm32)
+        run: cargo clippy -p yee-studio-web --all-targets --target wasm32-unknown-unknown -- -D warnings
 
-      - name: trunk build (yee-studio web bundle, release)
-        run: trunk build --release crates/yee-studio/index.html
+      # Web-readiness gate: proves the Dioxus studio (+ yee-synth / yee-filter /
+      # yee-layout / yee-export) compiles to WASM. Guards against a native-only
+      # dep leaking into the client-side studio (ADR-0089).
+      - name: cargo build (yee-studio-web, wasm32)
+        run: cargo build -p yee-studio-web --target wasm32-unknown-unknown
 
-      - name: Upload yee-studio web bundle
+      # Web bundle gate: builds the deployable static bundle (HTML + JS glue +
+      # fingerprinted .wasm + CSS) via the Dioxus CLI `dx`, mirroring the local
+      # `dx build --platform web --release` flow.
+      - name: Install Dioxus CLI (dx 0.6.3)
+        run: cargo install dioxus-cli --version 0.6.3 --locked
+
+      - name: dx build (yee-studio-web web bundle, release)
+        working-directory: crates/yee-studio-web
+        run: dx build --platform web --release
+
+      - name: Upload yee-studio-web bundle
         uses: actions/upload-artifact@v4
         with:
           name: yee-studio-web
-          path: crates/yee-studio/dist
+          path: target/dx/yee-studio-web/release/web/public
 
   python-bindings:
     runs-on: ubuntu-latest
