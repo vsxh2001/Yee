@@ -6766,6 +6766,7 @@ version = "0.0.0"
 dependencies = [
  "ndarray",
  "yee-fdtd",
+ "yee-filter",
  "yee-layout",
 ]
 

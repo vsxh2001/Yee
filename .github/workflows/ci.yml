@@ -179,3 +179,34 @@ jobs:
         run: cargo test -p yee-voxel --release --test fdtd_line_eeff_001 -- --ignored --nocapture
       - name: fdtd-line-eeff-coupled-001 (coupled even/odd, release, ignored)
         run: cargo test -p yee-voxel --release --test fdtd_line_eeff_coupled_001 -- --ignored --nocapture
+
+  fdtd-lumped-gate:
+    name: FDTD lumped-LC EM gate (fdtd-lumped-001, release)
+    runs-on: ubuntu-latest
+    # No `needs: lint-test`: like fdtd-coupling-gate, this builds only the
+    # yee-voxel tree in `--release` and is independent of the slow workspace
+    # lint-test job; running it in parallel returns the FDTD verdict in a few
+    # minutes (CLAUDE.md §10).
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.92"
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # Filter Phase F2.3 (ADR-0115): full-wave FDTD EM simulation of a
+      # synthesized lumped-LC filter board (yee_voxel::simulate_lumped_board),
+      # cross-validated against the analytic circuit response
+      # yee_filter::ladder_s21. The `#[ignore]`'d gate runs two multi-minute
+      # FDTD solves (DUT + thru) and asserts the FDTD |S21| reproduces the
+      # band-pass shape (in-band ≈ 0 dB within a few dB, ≥ ~20 dB stopband
+      # rejection at 2.4 GHz). Mirrors the fdtd-line-eeff / mom-001 / gpu-nightly
+      # `--release --ignored` release-gate idiom (CLAUDE.md §4: never merge an
+      # unrun solver gate).
+      - name: fdtd-lumped-001 (lumped-LC EM, release, ignored)
+        run: cargo test -p yee-voxel --release --test fdtd_lumped_001 -- --ignored --nocapture
