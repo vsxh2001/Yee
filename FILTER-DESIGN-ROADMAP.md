@@ -439,8 +439,11 @@ in-browser front-end; heavy EM goes behind a native `yee-server`. See §5a.
   dimensioning. Then **F1.3** verify + mask gate. **F1.4.0 `yee-export` Gerber
   ✅ SHIPPED** (ADR-0100, merge `21614fe`) — `layout_to_gerber` single-copper-layer
   RS-274X. **F1.4.1a board-outline ✅ SHIPPED** (ADR-0103, `1b3d0da`) —
-  Edge.Cuts stroked contour. **NEXT F1.4.1b+** = drill layer, multi-layer stack,
-  KiCad-native footprint/`.kicad_pcb` S-expr, STEP/3-D + consumer wiring
-  (CLI/studio "export Edge.Cuts" buttons). **App.2** (`yee-server`) once F1.1+
-  exist.
+  Edge.Cuts stroked contour. **F1.4.1b KiCad `.kicad_pcb` ✅ SHIPPED** (ADR-0105,
+  merge `51de3bf`) — `layout_to_kicad_pcb(&Layout, &KicadPcbOptions)` emits a
+  KiCad 7 S-expr board (copper traces as `gr_poly` on F.Cu + outline on
+  Edge.Cuts; mm floats via `xy_mm`); opens directly in the KiCad PCB editor.
+  Gates kicad-001/002; WASM-safe. **NEXT F1.4.1c+** = drill layer, multi-layer
+  stack, footprints/pads, STEP/3-D + consumer wiring (CLI `--kicad-pcb` flag /
+  studio export buttons). **App.2** (`yee-server`) once F1.1+ exist.
   (Tutorial 17 — filter design via CLI + Studio — shipped, merge `c6e477c`.)
