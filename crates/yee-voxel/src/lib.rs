@@ -511,14 +511,20 @@ fn dominant_resonance(layout: &Layout, cfg: &CoupledRunConfig, anti_phase: bool)
         LumpedRlcPort::pure_resistor(cell0, cfg.port_resistance_ohm, make_wave(cfg.drive_v0));
     let mut port1 = LumpedRlcPort::pure_resistor(cell1, cfg.port_resistance_ohm, make_wave(v1));
 
-    // --- 3. Time-step with a custom body; record the summed probe E_z. ------
+    // --- 3. Time-step with a custom body; record the PARITY-MATCHED probe E_z.
     //
     // The body mirrors the cavity_resonance.rs custom step: H half-step + PEC
     // outer-wall clamp (the no-CPML fall-through of `apply_cpml_h`), then both
     // lumped-port corrections between H and E, then the E half-step + clamp,
     // then advance the clock. Each port `correct_e` runs after `update_e_only`
     // (it overwrites the standard Yee E_z estimate at its port cell), matching
-    // its documented call site. We sum the two port-cell E_z as the probe.
+    // its documented call site.
+    //
+    // Probe combination MUST match the excitation parity, else the mode of
+    // interest cancels: for the antisymmetric (odd-mode) run, E_z(cell0) ≈
+    // -E_z(cell1) by symmetry, so a SUM would be identically zero and the DFT
+    // peak would be pure noise. Use `cell0 - cell1` for the odd run (reconstructs
+    // the odd mode) and `cell0 + cell1` for the even run (doubles the even mode).
     let mut probe_series: Vec<f64> = Vec::with_capacity(cfg.n_steps);
     for n in 0..cfg.n_steps {
         solver.update_h_only();
@@ -532,7 +538,12 @@ fn dominant_resonance(layout: &Layout, cfg: &CoupledRunConfig, anti_phase: bool)
         solver.advance_clock();
 
         let grid = solver.grid();
-        probe_series.push(grid.ez[cell0] + grid.ez[cell1]);
+        let probe = if anti_phase {
+            grid.ez[cell0] - grid.ez[cell1]
+        } else {
+            grid.ez[cell0] + grid.ez[cell1]
+        };
+        probe_series.push(probe);
     }
 
     // --- 4. Single-bin DFT scan over the resonance window. ------------------
