@@ -1,0 +1,496 @@
+/* ===========================================================================
+   Yee Filter Studio — design system (App.D.0, ADR-0110)
+
+   The "slick" foundation: theme tokens (palette / type scale / spacing /
+   radius) + base components, applied app-wide. Dark, flat, teal accent, copper
+   + substrate-green for the board. Matches the approved brainstorm mockups
+   (.superpowers/brainstorm/.../{end-to-end-flow,topology-gallery,board-materials}.html).
+   =========================================================================== */
+
+:root {
+  /* --- palette -------------------------------------------------------------- */
+  --bg: #0b0d11;            /* app background          */
+  --panel: #10151b;         /* card / panel surface    */
+  --panel-2: #0f141a;       /* alt panel surface       */
+  --panel-3: #0c1116;       /* sunken surface          */
+  --border: #222a33;        /* default border          */
+  --border-2: #1c222a;      /* subtle divider          */
+  --border-3: #2a313b;      /* control border          */
+
+  --text: #e6edf3;          /* primary text            */
+  --text-2: #c9d1d9;        /* body text               */
+  --muted: #6b7480;         /* labels / captions       */
+  --muted-2: #8b95a1;       /* secondary muted         */
+  --faint: #3a434e;         /* faintest (stage nums)   */
+
+  --accent: #2dd4bf;        /* teal accent             */
+  --accent-bg: #0e2b29;     /* teal tinted fill        */
+  --accent-soft: #79e2cf;   /* light teal (dim text)   */
+  --copper: #e6b24d;        /* copper traces           */
+  --copper-2: #c4882f;      /* copper shadow / edge    */
+  --substrate: #3f9e72;     /* substrate green         */
+  --substrate-bg: #0a2218;  /* board fill              */
+  --substrate-edge: #1f5138;
+  --fail: #e35d6a;          /* fail red                */
+  --fail-bg: #2b1416;
+
+  /* --- type ---------------------------------------------------------------- */
+  --font: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* --- spacing / radius ---------------------------------------------------- */
+  --r-sm: 6px;
+  --r: 10px;
+  --r-lg: 12px;
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text-2);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+#main, .app { height: 100%; }
+
+/* ===========================================================================
+   Shell A — top bar + stage rail + canvas
+   =========================================================================== */
+
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+/* ---- top bar ------------------------------------------------------------- */
+.topbar {
+  height: 52px;
+  flex: 0 0 52px;
+  background: #0f1318;
+  border-bottom: 1px solid var(--border-2);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 0 var(--sp-4);
+}
+.topbar .dot {
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+}
+.topbar .brand {
+  color: var(--text);
+  font-weight: 650;
+  font-size: 15px;
+  letter-spacing: 0.2px;
+}
+.topbar .spec-chip {
+  color: var(--muted-2);
+  font-size: 12px;
+  font-family: var(--mono);
+}
+.topbar .spacer { margin-left: auto; }
+
+/* status chips (PASS / FAIL) */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: var(--r-sm);
+  padding: 4px 11px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+.chip.pass {
+  background: var(--accent-bg);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+}
+.chip.fail {
+  background: var(--fail-bg);
+  border: 1px solid var(--fail);
+  color: var(--fail);
+}
+.chip .dot-sm { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+
+/* ---- body: rail + canvas ------------------------------------------------- */
+.body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* stage rail */
+.rail {
+  width: 78px;
+  flex: 0 0 78px;
+  background: #0d1116;
+  border-right: 1px solid var(--border-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3) 0;
+  align-items: center;
+}
+.rail .item {
+  width: 60px;
+  height: 56px;
+  border-radius: var(--r);
+  background: #161b22;
+  border: 1px solid transparent;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.rail .item:hover { color: var(--text-2); background: #1a2029; }
+.rail .item.on {
+  background: var(--accent-bg);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.rail .item .ic { font-size: 18px; line-height: 1; }
+.rail .item .lab { font-size: 9px; font-weight: 600; letter-spacing: 0.3px; }
+
+/* canvas */
+.canvas {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: auto;
+  padding: var(--sp-5);
+}
+.canvas-head { margin-bottom: var(--sp-4); }
+.canvas-head h1 {
+  margin: 0 0 4px;
+  font-size: 20px;
+  font-weight: 650;
+  color: var(--text);
+  letter-spacing: 0.2px;
+}
+.canvas-head .sub {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* ===========================================================================
+   Base components — cards, panels, tables, labels, badges
+   =========================================================================== */
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: var(--sp-4);
+}
+.card.sunken { background: var(--panel-3); }
+.card h2.card-title {
+  margin: 0 0 var(--sp-3);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.card h2.card-title .k {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--muted);
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0.3px;
+}
+
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-4); }
+.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--sp-4); }
+.row { display: flex; gap: var(--sp-4); align-items: stretch; }
+
+.lab {
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  margin: 0 0 var(--sp-2);
+  font-weight: 600;
+}
+
+.badge {
+  font-size: 9px;
+  border-radius: 5px;
+  padding: 2px 7px;
+  background: var(--accent-bg);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+.badge.soon {
+  background: #1b2027;
+  border-color: var(--border-3);
+  color: var(--muted-2);
+}
+
+/* tables */
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border-2); }
+th { color: var(--muted); font-weight: 600; font-size: 11px; }
+td { color: var(--text-2); }
+.mono { font-family: var(--mono); color: var(--text); }
+.ok-mark { color: var(--accent); }
+
+/* ===========================================================================
+   Coupling-matrix grid
+   =========================================================================== */
+.matrix {
+  display: inline-grid;
+  gap: 4px;
+  background: var(--panel-3);
+  padding: var(--sp-3);
+  border-radius: var(--r);
+  border: 1px solid var(--border-2);
+}
+.matrix .cell {
+  min-width: 62px;
+  padding: 7px 8px;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 12px;
+  border-radius: var(--r-sm);
+  background: #11171f;
+  color: var(--muted-2);
+}
+.matrix .cell.diag { color: var(--faint); background: #0e131a; }
+.matrix .cell.coupled {
+  color: var(--accent);
+  background: var(--accent-bg);
+  font-weight: 600;
+}
+
+/* small stat readouts */
+.stats { display: flex; flex-wrap: wrap; gap: var(--sp-4); }
+.stat {
+  background: var(--panel-3);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r);
+  padding: var(--sp-3) var(--sp-4);
+  min-width: 120px;
+}
+.stat .v { font-family: var(--mono); font-size: 18px; color: var(--text); }
+.stat .l { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+.gvals { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.gval {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: #11171f;
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-sm);
+  padding: 5px 9px;
+  color: var(--text-2);
+}
+.gval b { color: var(--accent); font-weight: 600; }
+
+/* ===========================================================================
+   SVG plot frame
+   =========================================================================== */
+.plot {
+  background: var(--panel-3);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r);
+  padding: var(--sp-3);
+}
+.plot svg { display: block; width: 100%; height: auto; }
+.legend { display: flex; gap: var(--sp-4); margin-top: var(--sp-2); font-size: 11px; color: var(--muted); }
+.legend .swatch { display: inline-block; width: 14px; height: 3px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+
+/* ===========================================================================
+   Board top-view + stackup (layout stage)
+   =========================================================================== */
+.board-frame {
+  background: var(--substrate-bg);
+  border: 1px solid var(--substrate-edge);
+  border-radius: var(--r);
+  padding: 0;
+  overflow: hidden;
+}
+.board-frame svg { display: block; width: 100%; height: auto; }
+
+.stack-layer { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
+.stack-layer .lbl { width: 64px; font-size: 10px; color: var(--muted-2); text-align: right; }
+.stack-layer .swatch {
+  flex: 1;
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  padding: 0 9px;
+  font-size: 10px;
+  color: #00000099;
+  font-weight: 600;
+}
+.editrow {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border-2);
+  font-size: 12px;
+}
+.editrow .v {
+  font-family: var(--mono);
+  color: var(--text);
+  background: #161b22;
+  border: 1px solid var(--border-3);
+  border-radius: 5px;
+  padding: 2px 9px;
+  font-size: 11px;
+}
+.editrow .pill-sel {
+  background: var(--accent-bg);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  border-radius: var(--r-sm);
+  padding: 3px 9px;
+  font-size: 11px;
+}
+
+.legend-row { margin-top: var(--sp-3); display: flex; gap: var(--sp-4); font-size: 11px; color: var(--muted); align-items: center; }
+.legend-row .sw-cu { color: var(--copper); }
+.legend-row .sw-sub { color: var(--substrate); }
+
+/* ===========================================================================
+   Topology gallery (Technique stub) + generic stub cards
+   =========================================================================== */
+.tgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--sp-3); }
+.tcard {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: var(--sp-3);
+  position: relative;
+}
+.tcard:not(.soon) { cursor: pointer; transition: border-color 0.12s, transform 0.12s; }
+.tcard:not(.soon):hover { border-color: var(--accent-soft); transform: translateY(-1px); }
+.tcard.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.tcard.soon { opacity: 0.45; }
+.tcard .badge { position: absolute; top: 10px; right: 10px; }
+.tcard .glyph {
+  height: 56px;
+  background: var(--panel-3);
+  border: 1px solid var(--border-2);
+  border-radius: 7px;
+}
+.tcard .glyph svg { width: 100%; height: 100%; }
+.tcard .name { font-weight: 600; color: var(--text); margin-top: var(--sp-2); font-size: 13px; }
+.tcard .desc { color: var(--muted); font-size: 11px; }
+
+.note {
+  margin-top: var(--sp-4);
+  font-size: 12px;
+  color: var(--muted);
+  border-left: 2px solid var(--border-3);
+  padding-left: var(--sp-3);
+}
+.note.honest { border-left-color: var(--copper); color: var(--muted-2); }
+
+.fields .field {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-2);
+}
+.fields .field .name { color: var(--muted-2); font-size: 12px; }
+.fields .field .val { font-family: var(--mono); color: var(--text); font-size: 12px; }
+
+.export-row { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-top: var(--sp-3); }
+.export-row .btn {
+  background: #161b22;
+  border: 1px solid var(--border-3);
+  border-radius: var(--r-sm);
+  padding: 7px 13px;
+  font-size: 12px;
+  color: var(--text-2);
+  font-family: var(--font);
+}
+.export-row .btn.dl {
+  cursor: pointer;
+  transition: border-color 0.12s, color 0.12s, background 0.12s;
+}
+.export-row .btn.dl:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-bg);
+}
+
+/* ===========================================================================
+   Spec stage — live editable number inputs
+   =========================================================================== */
+.spec-input {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  background: #161b22;
+  border: 1px solid var(--border-3);
+  border-radius: 5px;
+  padding: 3px 8px;
+  width: 110px;
+  text-align: right;
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+.spec-input:hover { border-color: var(--muted-2); }
+.spec-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+/* the spec form re-uses .field rows; align the editable control to the right */
+.fields .field .seg { margin: -3px 0; }
+
+/* ===========================================================================
+   Segmented toggle (lumped Components + BOM — E24 / E96 switch, App.D.1L)
+   =========================================================================== */
+.seg {
+  display: inline-flex;
+  background: var(--panel-3);
+  border: 1px solid var(--border-3);
+  border-radius: var(--r-sm);
+  padding: 3px;
+  gap: 3px;
+}
+.seg-btn {
+  background: transparent;
+  border: none;
+  color: var(--muted-2);
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 6px 16px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.seg-btn:hover { color: var(--text-2); }
+.seg-btn.on {
+  background: var(--accent-bg);
+  color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
