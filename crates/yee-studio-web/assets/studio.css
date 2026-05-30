@@ -430,7 +430,41 @@ td { color: var(--text-2); }
   padding: 7px 13px;
   font-size: 12px;
   color: var(--text-2);
+  font-family: var(--font);
 }
+.export-row .btn.dl {
+  cursor: pointer;
+  transition: border-color 0.12s, color 0.12s, background 0.12s;
+}
+.export-row .btn.dl:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-bg);
+}
+
+/* ===========================================================================
+   Spec stage — live editable number inputs
+   =========================================================================== */
+.spec-input {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  background: #161b22;
+  border: 1px solid var(--border-3);
+  border-radius: 5px;
+  padding: 3px 8px;
+  width: 110px;
+  text-align: right;
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+.spec-input:hover { border-color: var(--muted-2); }
+.spec-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+/* the spec form re-uses .field rows; align the editable control to the right */
+.fields .field .seg { margin: -3px 0; }
 
 /* ===========================================================================
    Segmented toggle (lumped Components + BOM — E24 / E96 switch, App.D.1L)

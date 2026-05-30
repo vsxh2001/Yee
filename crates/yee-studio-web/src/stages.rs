@@ -1,9 +1,14 @@
 //! Stage definitions + per-stage renderers for the Shell A canvas.
 //!
-//! Two stages are **real** (driven by the live [`crate::engine`]):
-//! [`synthesis_stage`] and [`layout_stage`]. The rest ([`spec_stage`],
-//! [`technique_stage`], [`verify_stage`], [`export_stage`]) are styled-but-
-//! static stubs that prove the shell, per the POC scope.
+//! Almost every stage is **real** (driven by the live [`crate::engine`]):
+//! [`spec_stage`] (a live editable form), [`technique_stage`] (the topology
+//! gallery — Edge-coupled + Lumped LC live, the rest honest "Soon"),
+//! [`synthesis_stage`] / [`layout_stage`] (distributed), the lumped quartet
+//! ([`lumped_synthesis_stage`], [`lumped_components_stage`],
+//! [`lumped_tolerance_stage`], [`lumped_layout_stage`]), and [`export_stage`]
+//! (a real parameter sheet + Gerber/KiCad/BOM downloads). Only
+//! [`verify_stage`] is an honest "Soon" placeholder (it rides on the Track A
+//! FDTD-in-loop work).
 
 use dioxus::prelude::*;
 
@@ -273,8 +278,36 @@ pub fn synthesis_stage(designed: ReadOnlySignal<Designed>) -> Element {
 /// `k`).
 pub fn layout_stage(designed: ReadOnlySignal<Designed>) -> Element {
     let d = designed.read();
-    let board = board_svg(&d.layout);
-    let sub = &d.layout.substrate;
+    // The layout is `None` when the live spec over-couples beyond what FR-4 can
+    // realize; show an honest note instead of an empty board.
+    let Some(layout) = d.layout.as_ref() else {
+        let msg = d
+            .dim_error
+            .clone()
+            .unwrap_or_else(|| "geometry not realizable on FR-4".into());
+        return rsx! {
+            div { class: "canvas-head",
+                h1 { "Layout + Materials" }
+                p { class: "sub", "Dimensioned edge-coupled board — derived live from the synthesized coupling matrix." }
+            }
+            div { class: "card",
+                h2 { class: "card-title",
+                    "Geometry not realizable"
+                    span { class: "chip fail", style: "margin-left:auto", "FR-4" }
+                }
+                div { class: "note honest",
+                    "The current spec over-couples the edge-coupled resonators beyond what an "
+                    "FR-4 microstrip can physically realize (gaps would go non-positive). The "
+                    "synthesized prototype + ideal response on the Synthesis stage stay valid — "
+                    "raise the order, narrow the fractional bandwidth, or switch to the Lumped LC "
+                    "technique. Engine note: "
+                    span { class: "mono", "{msg}" }
+                }
+            }
+        };
+    };
+    let board = board_svg(layout);
+    let sub = &layout.substrate;
     let (bw, bh) = d.board_size_mm;
 
     rsx! {
@@ -393,46 +426,234 @@ pub fn layout_stage(designed: ReadOnlySignal<Designed>) -> Element {
 // Styled-but-static stubs — Spec / Technique / Verify / Export
 // ===========================================================================
 
-/// Spec stage stub: the design-intent fields, statically rendered from the
-/// demo spec.
-pub fn spec_stage(designed: ReadOnlySignal<Designed>) -> Element {
+/// Spec stage: a **live editable** design-intent form. Every control writes
+/// back into the shared [`yee_filter::FilterSpec`] signal; the whole studio (synthesis,
+/// dimensioning, BOM, yield, board) re-derives on every edit. A live PASS/FAIL
+/// chip + realizability note close the loop without leaving the stage.
+///
+/// `designed`/`lumped` are read-only views of the current re-derivation, used
+/// for the live verdict + the realizability hints.
+pub fn spec_stage(
+    mut spec: Signal<yee_filter::FilterSpec>,
+    designed: ReadOnlySignal<Designed>,
+    lumped: ReadOnlySignal<Option<LumpedDesigned>>,
+) -> Element {
+    let s = spec.read().clone();
     let d = designed.read();
-    let s = &d.spec;
-    let stop = s
+    let chebyshev = matches!(s.approximation, yee_filter::Approximation::Chebyshev { .. });
+    let ripple = match s.approximation {
+        yee_filter::Approximation::Chebyshev { ripple_db } => ripple_db,
+        yee_filter::Approximation::Butterworth => 0.5,
+    };
+    // First stopband point (the form edits a single point; the engine supports
+    // a vector and the verdict grades every point).
+    let (stop_f_ghz, stop_rej_db) = s
         .mask
         .stopband
-        .iter()
-        .map(|(f, r)| format!("{:.2} GHz ≥ {r:.0} dB", f / 1e9))
-        .collect::<Vec<_>>()
-        .join(", ");
+        .first()
+        .map(|&(f, r)| (f / 1e9, r))
+        .unwrap_or((2.4, 40.0));
+
+    // Live realizability: the lumped flow may be unrealizable; the distributed
+    // flow surfaces a dim_error. Show both honestly.
+    let lumped_ok = lumped.read().is_some();
+    let dist_dim_err = d.dim_error.clone();
+
     rsx! {
         div { class: "canvas-head",
             h1 { "Spec" }
-            p { class: "sub", "The design intent the synthesis consumes. (POC: read-only; full editing is App.D.1.)" }
+            p { class: "sub", "The design intent the synthesis consumes — edit any field and the whole studio (synthesis, components, tolerance, board) re-derives live." }
         }
         div { class: "row",
+            // ---- requirements ------------------------------------------------
             div { class: "card", style: "flex:1",
                 h2 { class: "card-title", "Requirements" }
                 div { class: "fields",
-                    div { class: "field", span { class: "name", "Response" } span { class: "val", "Bandpass" } }
-                    div { class: "field", span { class: "name", "Approximation" } span { class: "val", "Chebyshev 0.5 dB" } }
-                    div { class: "field", span { class: "name", "Centre f0" } span { class: "val", "{s.f0_hz/1e9:.3} GHz" } }
-                    div { class: "field", span { class: "name", "Fractional bandwidth" } span { class: "val", "{s.fbw*100.0:.0}%" } }
-                    div { class: "field", span { class: "name", "Order N" } span { class: "val", "{d.order()}" } }
-                    div { class: "field", span { class: "name", "System Z0" } span { class: "val", "{s.z0_ohm:.0} Ω" } }
+                    div { class: "field",
+                        span { class: "name", "Response" }
+                        span { class: "val", "Bandpass" }
+                    }
+                    // approximation toggle
+                    div { class: "field",
+                        span { class: "name", "Approximation" }
+                        div { class: "seg",
+                            button {
+                                class: if chebyshev { "seg-btn on" } else { "seg-btn" },
+                                onclick: move |_| {
+                                    spec.write().approximation =
+                                        yee_filter::Approximation::Chebyshev { ripple_db: 0.5 };
+                                },
+                                "Chebyshev"
+                            }
+                            button {
+                                class: if !chebyshev { "seg-btn on" } else { "seg-btn" },
+                                onclick: move |_| {
+                                    spec.write().approximation =
+                                        yee_filter::Approximation::Butterworth;
+                                },
+                                "Butterworth"
+                            }
+                        }
+                    }
+                    {num_field(
+                        "Centre f0 (GHz)", s.f0_hz / 1e9, 0.001, 0.1, 100.0,
+                        move |v| spec.write().f0_hz = v * 1e9,
+                    )}
+                    {num_field(
+                        "Fractional bandwidth (%)", s.fbw * 100.0, 0.1, 0.5, 80.0,
+                        move |v| spec.write().fbw = (v / 100.0).max(1e-4),
+                    )}
+                    {int_field(
+                        "Order N", s.order.unwrap_or(5), 1, 11,
+                        move |n| spec.write().order = Some(n),
+                    )}
+                    {num_field(
+                        "System Z0 (Ω)", s.z0_ohm, 1.0, 10.0, 200.0,
+                        move |v| spec.write().z0_ohm = v,
+                    )}
                 }
             }
+            // ---- spec mask ---------------------------------------------------
             div { class: "card", style: "flex:1",
-                h2 { class: "card-title", "Spec mask" }
-                div { class: "fields",
-                    div { class: "field", span { class: "name", "Passband ripple" } span { class: "val", "≤ {s.mask.passband_ripple_db:.2} dB" } }
-                    div { class: "field", span { class: "name", "Return loss" } span { class: "val", "≥ {s.mask.return_loss_db:.0} dB" } }
-                    div { class: "field", span { class: "name", "Stopband" } span { class: "val", "{stop}" } }
+                h2 { class: "card-title",
+                    "Spec mask"
+                    if d.report.pass {
+                        span { class: "chip pass", style: "margin-left:auto", "PASS" }
+                    } else {
+                        span { class: "chip fail", style: "margin-left:auto", "FAIL" }
+                    }
                 }
-                div { class: "note", "Live realizability check + editable fields land in App.D.1." }
+                div { class: "fields",
+                    if chebyshev {
+                        {num_field(
+                            "Passband ripple (dB)", ripple, 0.01, 0.01, 3.0,
+                            move |v| {
+                                let v = v.max(1e-3);
+                                spec.write().approximation =
+                                    yee_filter::Approximation::Chebyshev { ripple_db: v };
+                                spec.write().mask.passband_ripple_db = v;
+                            },
+                        )}
+                    } else {
+                        div { class: "field",
+                            span { class: "name", "Passband ripple" }
+                            span { class: "val", "— (maximally flat)" }
+                        }
+                    }
+                    {num_field(
+                        "Return loss (dB)", s.mask.return_loss_db, 0.1, 1.0, 30.0,
+                        move |v| spec.write().mask.return_loss_db = v,
+                    )}
+                    {num_field(
+                        "Stopband f (GHz)", stop_f_ghz, 0.001, 0.1, 100.0,
+                        move |v| set_stopband(&mut spec, Some(v * 1e9), None),
+                    )}
+                    {num_field(
+                        "Stopband rejection (dB)", stop_rej_db, 0.5, 5.0, 90.0,
+                        move |v| set_stopband(&mut spec, None, Some(v)),
+                    )}
+                }
+                // live realizability
+                div { class: "stats", style: "margin-top:12px",
+                    div { class: "stat",
+                        div { class: "v", "{d.report.worst_return_loss_db:.2} dB" }
+                        div { class: "l", "achieved in-band RL" }
+                    }
+                    div { class: "stat",
+                        div {
+                            class: "v",
+                            style: if lumped_ok { "color:#2dd4bf" } else { "color:#e35d6a" },
+                            if lumped_ok { "yes" } else { "no" }
+                        }
+                        div { class: "l", "lumped realizable" }
+                    }
+                }
+                if let Some(err) = dist_dim_err {
+                    div { class: "note honest",
+                        "Edge-coupled geometry note: " span { class: "mono", "{err}" }
+                        " — the Lumped LC technique may still realize this spec."
+                    }
+                } else {
+                    div { class: "note",
+                        "Both techniques realize this spec. Edits flow straight into synthesis — "
+                        "watch the PASS/FAIL chip and the downstream stages update live."
+                    }
+                }
             }
         }
     }
+}
+
+/// A labelled numeric input row that parses on every keystroke and calls
+/// `on_set(parsed)` with the clamped value. Unparseable / out-of-range input is
+/// ignored (the field keeps the last good value on re-render).
+fn num_field(
+    label: &'static str,
+    value: f64,
+    step: f64,
+    min: f64,
+    max: f64,
+    mut on_set: impl FnMut(f64) + 'static,
+) -> Element {
+    rsx! {
+        div { class: "field",
+            span { class: "name", "{label}" }
+            input {
+                class: "spec-input",
+                r#type: "number",
+                step: "{step}",
+                min: "{min}",
+                max: "{max}",
+                value: "{value}",
+                oninput: move |e| {
+                    if let Ok(v) = e.value().parse::<f64>()
+                        && v.is_finite()
+                        && (min..=max).contains(&v)
+                    {
+                        on_set(v);
+                    }
+                },
+            }
+        }
+    }
+}
+
+/// A labelled integer input row (clamped to `[min, max]`).
+fn int_field(
+    label: &'static str,
+    value: usize,
+    min: usize,
+    max: usize,
+    mut on_set: impl FnMut(usize) + 'static,
+) -> Element {
+    rsx! {
+        div { class: "field",
+            span { class: "name", "{label}" }
+            input {
+                class: "spec-input",
+                r#type: "number",
+                step: "1",
+                min: "{min}",
+                max: "{max}",
+                value: "{value}",
+                oninput: move |e| {
+                    if let Ok(v) = e.value().parse::<usize>()
+                        && (min..=max).contains(&v)
+                    {
+                        on_set(v);
+                    }
+                },
+            }
+        }
+    }
+}
+
+/// Update the (single) stopband point in the spec, overriding the frequency
+/// and/or rejection while keeping the other component.
+fn set_stopband(spec: &mut Signal<yee_filter::FilterSpec>, f_hz: Option<f64>, rej_db: Option<f64>) {
+    let mut w = spec.write();
+    let (cur_f, cur_r) = w.mask.stopband.first().copied().unwrap_or((2.4e9, 40.0));
+    w.mask.stopband = vec![(f_hz.unwrap_or(cur_f), rej_db.unwrap_or(cur_r))];
 }
 
 /// One Technique gallery card's static descriptor (the topology it selects, or
@@ -558,45 +779,469 @@ pub fn verify_stage() -> Element {
     }
 }
 
-/// Export stage stub: the manufacturable-output buttons + a parameter-sheet
-/// teaser.
-pub fn export_stage(designed: ReadOnlySignal<Designed>) -> Element {
+/// Trigger a client-side file download of `contents` as `filename` with the
+/// given MIME `mime` type. Builds a `Blob` URL in the browser and clicks a
+/// synthetic anchor, then revokes the URL. WASM-safe (`dioxus::document::eval`
+/// + a small JS shim; no native dep).
+fn download_file(filename: &str, mime: &str, contents: &str) {
+    // Pass the payload as JSON to the eval so the (possibly multi-line) file
+    // body never has to be escaped into the script source by hand.
+    let payload = serde_json::json!({
+        "name": filename,
+        "mime": mime,
+        "body": contents,
+    });
+    let eval = document::eval(
+        r#"
+        const { name, mime, body } = await dioxus.recv();
+        const blob = new Blob([body], { type: mime });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        "#,
+    );
+    // Best-effort: a failed send (no JS runtime, e.g. SSR) is a no-op.
+    let _ = eval.send(payload);
+}
+
+/// A download button wired to [`download_file`]. `make` is invoked on click to
+/// produce `(filename, mime, contents)` lazily (so the file is only emitted
+/// when the user actually asks for it).
+#[component]
+fn download_btn(label: String, make: EventHandler<()>) -> Element {
+    rsx! {
+        button {
+            class: "btn dl",
+            onclick: move |_| make.call(()),
+            "⤓ {label}"
+        }
+    }
+}
+
+/// Export stage: a real, topology-aware parameter sheet + working client-side
+/// downloads. The distributed flow emits Gerber (F.Cu + Edge.Cuts) and a KiCad
+/// `.kicad_pcb` from the **real** dimensioned layout via `yee-export`, plus a
+/// parameter sheet; the lumped flow emits a BOM CSV + a netlist-style parameter
+/// sheet, plus Gerber/KiCad from the placed SMD board. Each file is generated
+/// on demand from live engine output — nothing is canned.
+pub fn export_stage(
+    topology: ReadOnlySignal<Topology>,
+    designed: ReadOnlySignal<Designed>,
+    lumped: ReadOnlySignal<Option<LumpedDesigned>>,
+) -> Element {
+    if topology() == Topology::LumpedLc {
+        export_lumped(lumped)
+    } else {
+        export_distributed(designed)
+    }
+}
+
+/// Distributed (edge-coupled) export panel: real Gerber/KiCad from the layout +
+/// a parameter sheet.
+fn export_distributed(designed: ReadOnlySignal<Designed>) -> Element {
     let d = designed.read();
     let (bw, bh) = d.board_size_mm;
+    let approx = approx_label(&d.spec.approximation);
+    let realizable = d.layout.is_some();
+
     rsx! {
         div { class: "canvas-head",
             h1 { "Export" }
-            p { class: "sub", "Manufacturable files + the final parameter sheet — the end state. (POC: stubbed; wiring is App.D.4.)" }
+            p { class: "sub", "The final parameter sheet + manufacturable files, generated live from the dimensioned edge-coupled layout — Gerber and KiCad are written client-side by the shipped `yee-export` emitters." }
         }
         div { class: "card",
-            h2 { class: "card-title", "Design summary" }
+            h2 { class: "card-title",
+                "Design summary"
+                span { class: "k", "edge-coupled ½λ microstrip" }
+            }
             div { class: "fields",
                 div { class: "field", span { class: "name", "Topology" } span { class: "val", "edge-coupled ½λ · N={d.order()}" } }
-                div { class: "field", span { class: "name", "Response" } span { class: "val", "Chebyshev 0.5 dB" } }
+                div { class: "field", span { class: "name", "Approximation" } span { class: "val", "{approx}" } }
                 div { class: "field", span { class: "name", "f0 / FBW" } span { class: "val", "{d.spec.f0_hz/1e9:.3} GHz / {d.spec.fbw*100.0:.0}%" } }
-                div { class: "field", span { class: "name", "Substrate" } span { class: "val", "FR-4 · εr {d.layout.substrate.eps_r:.1} · h {d.layout.substrate.height_m*1e3:.2} mm" } }
+                div { class: "field", span { class: "name", "System Z0" } span { class: "val", "{d.spec.z0_ohm:.0} Ω" } }
+                div { class: "field",
+                    span { class: "name", "Substrate" }
+                    if let Some(layout) = d.layout.as_ref() {
+                        span { class: "val", "FR-4 · εr {layout.substrate.eps_r:.1} · h {layout.substrate.height_m*1e3:.2} mm" }
+                    } else {
+                        span { class: "val", "FR-4 (geometry not realizable)" }
+                    }
+                }
                 div { class: "field", span { class: "name", "Board" } span { class: "val", "{bw:.1} × {bh:.1} mm" } }
+                div { class: "field",
+                    span { class: "name", "Spec verdict" }
+                    if d.report.pass {
+                        span { class: "val", style: "color:#2dd4bf", "PASS" }
+                    } else {
+                        span { class: "val", style: "color:#e35d6a", "FAIL" }
+                    }
+                }
             }
-            div { class: "export-row",
-                span { class: "btn", "⤓ Gerber" }
-                span { class: "btn", "⤓ KiCad .kicad_pcb" }
-                span { class: "btn", "⤓ Touchstone .s2p" }
-                span { class: "btn", "⤓ STEP" }
+            if realizable {
+                div { class: "export-row",
+                    download_btn {
+                        label: "Gerber F.Cu",
+                        make: move |_| {
+                            if let Some(layout) = designed.read().layout.as_ref() {
+                                let g = yee_export::layout_to_gerber(layout, &Default::default());
+                                download_file("filter-F_Cu.gbr", "application/vnd.gerber", &g);
+                            }
+                        },
+                    }
+                    download_btn {
+                        label: "Gerber Edge.Cuts",
+                        make: move |_| {
+                            if let Some(layout) = designed.read().layout.as_ref() {
+                                let g = yee_export::layout_to_gerber_outline(layout, &Default::default());
+                                download_file("filter-Edge_Cuts.gbr", "application/vnd.gerber", &g);
+                            }
+                        },
+                    }
+                    download_btn {
+                        label: "KiCad .kicad_pcb",
+                        make: move |_| {
+                            if let Some(layout) = designed.read().layout.as_ref() {
+                                let k = yee_export::layout_to_kicad_pcb(layout, &Default::default());
+                                download_file("filter.kicad_pcb", "application/octet-stream", &k);
+                            }
+                        },
+                    }
+                    download_btn {
+                        label: "Parameter sheet",
+                        make: move |_| {
+                            let sheet = distributed_param_sheet(&designed.read());
+                            download_file("filter-parameters.txt", "text/plain", &sheet);
+                        },
+                    }
+                }
+                div { class: "note honest",
+                    "Gerber + KiCad are written by the shipped `yee-export` emitters from the same "
+                    "`Layout` the board view draws — single copper layer + Edge.Cuts outline. "
+                    "Drill / soldermask / silkscreen and a Touchstone .s2p (post EM-verify) are "
+                    "documented follow-ons."
+                }
+            } else {
+                div { class: "note honest",
+                    "Geometry is not realizable on FR-4 for the current spec, so the board exporters "
+                    "are unavailable — adjust the spec (Spec stage) or switch to the Lumped LC "
+                    "technique. The parameter sheet (synthesis-only) is still available:"
+                }
+                div { class: "export-row",
+                    download_btn {
+                        label: "Parameter sheet",
+                        make: move |_| {
+                            let sheet = distributed_param_sheet(&designed.read());
+                            download_file("filter-parameters.txt", "text/plain", &sheet);
+                        },
+                    }
+                }
             }
-            div { class: "note", "Each exporter already exists in `yee-export` / `yee-io`; App.D.4 wires the download buttons to them." }
         }
     }
+}
+
+/// Lumped-LC export panel: a BOM CSV + a netlist-style parameter sheet + real
+/// Gerber/KiCad from the placed SMD board.
+fn export_lumped(lumped: ReadOnlySignal<Option<LumpedDesigned>>) -> Element {
+    let guard = lumped.read();
+    let Some(d) = guard.as_ref() else {
+        return rsx! {
+            div { class: "canvas-head",
+                h1 { "Export" }
+                p { class: "sub", "Manufacturable files + the final parameter sheet." }
+            }
+            div { class: "card",
+                h2 { class: "card-title", "Ladder not realizable" }
+                div { class: "note honest",
+                    "The current spec does not map to a realizable band-pass LC ladder — adjust "
+                    "the order / fractional bandwidth on the Spec stage."
+                }
+            }
+        };
+    };
+    let (bw, bh) = d.board_size_mm;
+    let parts = d.bom_e24.total_parts;
+
+    rsx! {
+        div { class: "canvas-head",
+            h1 { "Export" }
+            p { class: "sub", "The final parameter sheet + manufacturable files for the lumped LC realization — a BOM CSV, a netlist-style parameter sheet, and Gerber/KiCad of the placed SMD board, all generated live." }
+        }
+        div { class: "card",
+            h2 { class: "card-title",
+                "Design summary"
+                span { class: "k", "lumped LC ladder · SMD" }
+            }
+            div { class: "fields",
+                div { class: "field", span { class: "name", "Topology" } span { class: "val", "lumped LC ladder · N={d.order()}" } }
+                div { class: "field", span { class: "name", "Components" } span { class: "val", "{parts} parts · 0603 SMD" } }
+                div { class: "field", span { class: "name", "E24 yield" } span { class: "val", "{d.yield_e24.yield_pct:.1}%" } }
+                div { class: "field", span { class: "name", "E96 yield" } span { class: "val", "{d.yield_e96.yield_pct:.1}%" } }
+                div { class: "field", span { class: "name", "Board" } span { class: "val", "{bw:.1} × {bh:.1} mm" } }
+                div { class: "field",
+                    span { class: "name", "Spec verdict" }
+                    if d.verdict.pass {
+                        span { class: "val", style: "color:#2dd4bf", "PASS" }
+                    } else {
+                        span { class: "val", style: "color:#e35d6a", "FAIL" }
+                    }
+                }
+            }
+            div { class: "export-row",
+                download_btn {
+                    label: "BOM (E24, CSV)",
+                    make: move |_| {
+                        if let Some(d) = lumped.read().as_ref() {
+                            let csv = bom_csv(&d.bom_e24);
+                            download_file("filter-bom-e24.csv", "text/csv", &csv);
+                        }
+                    },
+                }
+                download_btn {
+                    label: "BOM (E96, CSV)",
+                    make: move |_| {
+                        if let Some(d) = lumped.read().as_ref() {
+                            let csv = bom_csv(&d.bom_e96);
+                            download_file("filter-bom-e96.csv", "text/csv", &csv);
+                        }
+                    },
+                }
+                download_btn {
+                    label: "Gerber F.Cu",
+                    make: move |_| {
+                        if let Some(d) = lumped.read().as_ref() {
+                            let g = yee_export::layout_to_gerber(&d.board.layout, &Default::default());
+                            download_file("filter-lumped-F_Cu.gbr", "application/vnd.gerber", &g);
+                        }
+                    },
+                }
+                download_btn {
+                    label: "KiCad .kicad_pcb",
+                    make: move |_| {
+                        if let Some(d) = lumped.read().as_ref() {
+                            let k = yee_export::layout_to_kicad_pcb(&d.board.layout, &Default::default());
+                            download_file("filter-lumped.kicad_pcb", "application/octet-stream", &k);
+                        }
+                    },
+                }
+                download_btn {
+                    label: "Parameter sheet",
+                    make: move |_| {
+                        if let Some(d) = lumped.read().as_ref() {
+                            let sheet = lumped_param_sheet(d);
+                            download_file("filter-lumped-parameters.txt", "text/plain", &sheet);
+                        }
+                    },
+                }
+            }
+            div { class: "note honest",
+                "The BOM CSV is the grouped E-series selection (the Components stage); the Gerber + "
+                "KiCad come from the placed SMD `Layout` (the Layout stage) via the shipped "
+                "`yee-export` emitters. Footprint pad geometry + a parasitic-aware land library are "
+                "documented follow-ons (F2.2b)."
+            }
+        }
+    }
+}
+
+/// Human-readable approximation label (e.g. `"Chebyshev 0.5 dB"`).
+fn approx_label(a: &yee_filter::Approximation) -> String {
+    match a {
+        yee_filter::Approximation::Chebyshev { ripple_db } => {
+            format!("Chebyshev {ripple_db:.2} dB")
+        }
+        yee_filter::Approximation::Butterworth => "Butterworth".to_string(),
+    }
+}
+
+/// Build the distributed (edge-coupled) parameter sheet: the spec, the
+/// synthesized prototype + coupling matrix, and the realized per-resonator
+/// geometry — all live engine values.
+fn distributed_param_sheet(d: &Designed) -> String {
+    let mut s = String::new();
+    s.push_str("# Yee Filter Studio — edge-coupled microstrip parameter sheet\n\n");
+    s.push_str("## Specification\n");
+    s.push_str("response          : Bandpass\n");
+    s.push_str(&format!(
+        "approximation     : {}\n",
+        approx_label(&d.spec.approximation)
+    ));
+    s.push_str(&format!("order N           : {}\n", d.order()));
+    s.push_str(&format!(
+        "f0                : {:.6} GHz\n",
+        d.spec.f0_hz / 1e9
+    ));
+    s.push_str(&format!(
+        "fractional BW     : {:.3} %\n",
+        d.spec.fbw * 100.0
+    ));
+    s.push_str(&format!("system Z0         : {:.1} ohm\n", d.spec.z0_ohm));
+    s.push_str(&format!(
+        "spec mask         : ripple <= {:.3} dB, RL >= {:.1} dB\n",
+        d.spec.mask.passband_ripple_db, d.spec.mask.return_loss_db
+    ));
+    for (f, r) in &d.spec.mask.stopband {
+        s.push_str(&format!(
+            "  stopband        : {:.4} GHz >= {:.1} dB\n",
+            f / 1e9,
+            r
+        ));
+    }
+    s.push_str(&format!(
+        "\nverdict           : {} (worst RL {:.2} dB, worst ripple {:.3} dB)\n",
+        if d.report.pass { "PASS" } else { "FAIL" },
+        d.report.worst_return_loss_db,
+        d.report.worst_passband_ripple_db
+    ));
+
+    s.push_str("\n## Prototype g-values\n");
+    for (i, g) in d.g_values.iter().enumerate() {
+        s.push_str(&format!("g{i:<2} = {g:.6}\n"));
+    }
+    s.push_str(&format!(
+        "\nQe(in) = {:.4}   Qe(out) = {:.4}\n",
+        d.coupling.qe_in, d.coupling.qe_out
+    ));
+
+    s.push_str("\n## Coupling matrix M\n");
+    for row in &d.coupling.m {
+        let cells: Vec<String> = row.iter().map(|v| format!("{v:+.5}")).collect();
+        s.push_str(&format!("{}\n", cells.join("  ")));
+    }
+
+    if !d.resonators.is_empty() {
+        let (bw, bh) = d.board_size_mm;
+        s.push_str(&format!(
+            "\n## Realized geometry (FR-4, board {bw:.2} x {bh:.2} mm)\n"
+        ));
+        s.push_str("id  W(mm)   L(mm)   gap(mm)  Z0e(ohm) Z0o(ohm)  k_target k_real\n");
+        for r in &d.resonators {
+            s.push_str(&format!(
+                "R{:<2} {:<7.3} {:<7.2} {:<8} {:<8} {:<9} {:<8} {}\n",
+                r.id,
+                r.width_mm,
+                r.length_mm,
+                r.gap_to_next_mm
+                    .map(|g| format!("{g:.3}"))
+                    .unwrap_or_else(|| "-".into()),
+                r.z0e_ohm
+                    .map(|v| format!("{v:.1}"))
+                    .unwrap_or_else(|| "-".into()),
+                r.z0o_ohm
+                    .map(|v| format!("{v:.1}"))
+                    .unwrap_or_else(|| "-".into()),
+                r.target_k
+                    .map(|v| format!("{v:.4}"))
+                    .unwrap_or_else(|| "-".into()),
+                r.realized_k
+                    .map(|v| format!("{v:.4}"))
+                    .unwrap_or_else(|| "-".into()),
+            ));
+        }
+    } else if let Some(err) = &d.dim_error {
+        s.push_str(&format!(
+            "\n## Realized geometry\nNOT REALIZABLE on FR-4: {err}\n"
+        ));
+    }
+    s
+}
+
+/// Build the lumped-LC parameter sheet: the spec, the ideal LC ladder
+/// (SPICE-ish netlist), and the yield summary — all live engine values.
+fn lumped_param_sheet(d: &LumpedDesigned) -> String {
+    let mut s = String::new();
+    s.push_str("# Yee Filter Studio — lumped LC parameter sheet\n\n");
+    s.push_str("## Ideal LC ladder (tuned to f0)\n");
+    s.push_str("index  branch  L(nH)     C(pF)\n");
+    for r in &d.resonators {
+        s.push_str(&format!(
+            "{:<6} {:<7} {:<9.4} {:<.4}\n",
+            r.index,
+            if r.is_series { "series" } else { "shunt" },
+            r.l_nh,
+            r.c_pf
+        ));
+    }
+    s.push_str(&format!(
+        "\nverdict : {} (worst RL {:.2} dB, worst rejection {:.1} dB)\n",
+        if d.verdict.pass { "PASS" } else { "FAIL" },
+        d.verdict.worst_return_loss_db,
+        d.verdict.worst_stopband_rej_db
+    ));
+    s.push_str("\n## Tolerance / yield (Monte-Carlo)\n");
+    s.push_str(&format!(
+        "E24 (+/-{:.0}%) : {:.1}% yield over {} trials\n",
+        d.yield_e24.tolerance_pct, d.yield_e24.yield_pct, d.yield_trials
+    ));
+    s.push_str(&format!(
+        "E96 (+/-{:.0}%) : {:.1}% yield over {} trials\n",
+        d.yield_e96.tolerance_pct, d.yield_e96.yield_pct, d.yield_trials
+    ));
+    let (bw, bh) = d.board_size_mm;
+    s.push_str(&format!(
+        "\n## Board\n0603 SMD, {bw:.2} x {bh:.2} mm, {} placements\n",
+        d.placements.len()
+    ));
+    s
+}
+
+/// Render a [`BomView`] as CSV (ref kind, value, deviation, tolerance, qty).
+fn bom_csv(bom: &BomView) -> String {
+    let mut s = String::new();
+    s.push_str(&format!(
+        "# {} BOM (+/-{:.0}%)\n",
+        bom.series_name, bom.tolerance_pct
+    ));
+    s.push_str("kind,ideal,chosen,deviation_pct,tolerance_pct,qty\n");
+    for r in &bom.rows {
+        s.push_str(&format!(
+            "{},{},{},{:.3},{:.1},{}\n",
+            r.ref_kind, r.ideal_disp, r.chosen_disp, r.deviation_pct, r.tolerance_pct, r.qty
+        ));
+    }
+    s.push_str(&format!("# total parts: {}\n", bom.total_parts));
+    s
 }
 
 // ===========================================================================
 // REAL lumped-LC stages (App.D.1L) — Synthesis / Components / Tolerance / Layout
 // ===========================================================================
 
+/// A "ladder not realizable" placeholder for the lumped stages when the current
+/// spec does not map to a band-pass LC ladder.
+fn lumped_unrealizable(title: &str) -> Element {
+    rsx! {
+        div { class: "canvas-head",
+            h1 { "{title}" }
+            p { class: "sub", "Lumped LC realization of the current spec." }
+        }
+        div { class: "card",
+            h2 { class: "card-title",
+                "Ladder not realizable"
+                span { class: "chip fail", style: "margin-left:auto", "lumped LC" }
+            }
+            div { class: "note honest",
+                "The current spec does not map to a realizable band-pass LC ladder (e.g. a "
+                "degenerate fractional bandwidth or order). Adjust the order / fractional "
+                "bandwidth on the Spec stage, or use the distributed Edge-coupled technique."
+            }
+        }
+    }
+}
+
 /// Lumped Synthesis stage: the LC ladder resonator table (index, series/shunt,
-/// L [nH], C [pF]) + the **ideal** `ladder_s21` |S21| vs the spec mask (inline
+/// L in nH, C in pF) + the **ideal** `ladder_s21` |S21| vs the spec mask (inline
 /// SVG, reusing the response plot) + a PASS/FAIL chip from the realized verdict.
-pub fn lumped_synthesis_stage(designed: ReadOnlySignal<LumpedDesigned>) -> Element {
-    let d = designed.read();
+pub fn lumped_synthesis_stage(designed: ReadOnlySignal<Option<LumpedDesigned>>) -> Element {
+    let guard = designed.read();
+    let Some(d) = guard.as_ref() else {
+        return lumped_unrealizable("Synthesis · Lumped LC");
+    };
     let plot = response_plot(&d.sweep, &d.mask_bands);
     let v = &d.verdict;
     rsx! {
@@ -695,10 +1340,13 @@ pub fn lumped_synthesis_stage(designed: ReadOnlySignal<LumpedDesigned>) -> Eleme
 /// (ref kind, ideal value, chosen E-series value, deviation %, tolerance %,
 /// qty), deviation colour-coded against the series tolerance.
 pub fn lumped_components_stage(
-    designed: ReadOnlySignal<LumpedDesigned>,
+    designed: ReadOnlySignal<Option<LumpedDesigned>>,
     mut series_e96: Signal<bool>,
 ) -> Element {
-    let d = designed.read();
+    let guard = designed.read();
+    let Some(d) = guard.as_ref() else {
+        return lumped_unrealizable("Components + BOM");
+    };
     let use_e96 = series_e96();
     let bom: &BomView = if use_e96 { &d.bom_e96 } else { &d.bom_e24 };
     rsx! {
@@ -803,8 +1451,11 @@ pub fn lumped_components_stage(
 /// Lumped Tolerance / yield stage: side-by-side E24 vs E96 Monte-Carlo yield
 /// cards (yield %, worst-case return loss + stopband rejection) plus the honest
 /// narrowband-yield note when yield is low.
-pub fn lumped_tolerance_stage(designed: ReadOnlySignal<LumpedDesigned>) -> Element {
-    let d = designed.read();
+pub fn lumped_tolerance_stage(designed: ReadOnlySignal<Option<LumpedDesigned>>) -> Element {
+    let guard = designed.read();
+    let Some(d) = guard.as_ref() else {
+        return lumped_unrealizable("Tolerance / yield");
+    };
     let trials = d.yield_trials;
     let lowest = d.yield_e24.yield_pct.min(d.yield_e96.yield_pct);
     rsx! {
@@ -874,8 +1525,11 @@ fn yield_card(v: YieldView) -> Element {
 
 /// Lumped Layout stage: the dimensioned SMD board (footprints to scale, pads,
 /// signal trace, ground rail — inline SVG) + the placement/footprint table.
-pub fn lumped_layout_stage(designed: ReadOnlySignal<LumpedDesigned>) -> Element {
-    let d = designed.read();
+pub fn lumped_layout_stage(designed: ReadOnlySignal<Option<LumpedDesigned>>) -> Element {
+    let guard = designed.read();
+    let Some(d) = guard.as_ref() else {
+        return lumped_unrealizable("Layout · Lumped board");
+    };
     let board = lumped_board_svg(&d.board);
     let sub = &d.board.layout.substrate;
     let (bw, bh) = d.board_size_mm;

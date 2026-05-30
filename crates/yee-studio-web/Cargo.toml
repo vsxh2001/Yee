@@ -17,11 +17,20 @@ path = "src/main.rs"
 # dioxus-web launcher used by `main`.
 dioxus = { version = "0.6.3", features = ["web"] }
 
-# Engine crates the POC drives live (all serde-only / WASM-safe — no egui,
+# Engine crates the studio drives live (all serde-only / WASM-safe — no egui,
 # eframe, wgpu, FDTD or surrogate in the dep graph; ADR-0089/0099).
 yee-synth  = { workspace = true }
 yee-filter = { workspace = true }
 yee-layout = { workspace = true }
+# Manufacturing-file emitters (Gerber F.Cu + Edge.Cuts, KiCad .kicad_pcb). Pure
+# text, depends only on `yee-layout` — WASM-safe, so the Export stage can emit
+# the real files client-side (ADR-0089).
+yee-export = { workspace = true }
+
+# Used to hand the (multi-line) export-file payload to the `dioxus::document::eval`
+# download shim as structured JSON rather than escaping it into the script
+# source. Already in the dependency graph via dioxus; WASM-safe.
+serde_json = { workspace = true }
 
 [lints.rust]
 unsafe_code  = "forbid"

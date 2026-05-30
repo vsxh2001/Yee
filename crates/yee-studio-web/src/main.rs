@@ -1,32 +1,35 @@
 //! # yee-studio-web
 //!
-//! Yee Filter Studio — **App.D.0 Dioxus (web) proof-of-concept** (ADR-0110).
+//! Yee Filter Studio — the pure-Rust, web-first **Dioxus** filter-design studio
+//! (App.D.2, ADR-0130; grew out of the App.D.0 POC, ADR-0110). This is *the*
+//! studio: it replaces the retired eframe `yee-studio` view as the goal's
+//! polished-UI component.
 //!
-//! A pure-Rust, web-first rebuild of the filter-design studio's view layer in
-//! [Dioxus]. This POC validates three things before the full build is
-//! committed: (a) Dioxus delivers SaaS-class polish (real DOM + CSS, the
-//! ceiling egui can't reach), (b) the Rust→WASM **engine bridge** works, and
-//! (c) it builds + serves on web.
+//! A pure-Rust view layer in [Dioxus] (real DOM + CSS) that drives the live
+//! `yee-synth` / `yee-filter` / `yee-layout` / `yee-export` engines entirely
+//! client-side in WASM (no native / FDTD / wgpu in the dep graph — ADR-0089).
 //!
-//! It renders **Shell A** — a top bar + a stage rail over a central canvas —
-//! and drives the live `yee-synth` / `yee-filter` / `yee-layout` engine on the
-//! committed Chebyshev N=5 fixture (see [`engine`]). The **Technique** stage
-//! offers two live topologies that route the downstream flow:
+//! It renders **Shell A** — a top bar + a stage rail over a central canvas. The
+//! editable [`yee_filter::FilterSpec`] is the single source of
+//! truth: the **Spec** stage edits it and the whole studio re-derives live. The
+//! **Technique** stage offers two live topologies that route the flow:
 //!
-//! - **Edge-coupled (distributed)** — the POC's original flow: the real
-//!   coupling matrix `M`, g-values / external Q, the swept ideal `|S21|`/`|S11|`
-//!   vs the shaded spec mask + PASS/FAIL (**Synthesis**), and the real
-//!   dimensioned board top-view + material stackup + per-resonator table
-//!   (**Layout + Materials**).
+//! - **Edge-coupled (distributed)** — the real coupling matrix `M`, g-values /
+//!   external Q, the swept ideal `|S21|`/`|S11|` vs the shaded spec mask +
+//!   PASS/FAIL (**Synthesis**), and the real dimensioned board top-view +
+//!   material stackup + per-resonator table (**Layout + Materials**).
 //! - **Lumped LC** — the App.D.1L flow (ADR-0120), all from the shipped F2.x
 //!   engine: the synthesized LC **ladder** + ideal `ladder_s21` vs mask
 //!   (**Synthesis**), E24/E96 **component selection + BOM** (**Components**),
 //!   the Monte-Carlo **yield** analysis (**Tolerance**), and the placed SMD
 //!   **board** SVG + placement table (**Layout**).
 //!
-//! Spec / Verify / Export are styled-but-static stubs (prove the shell, not
-//! full interactivity). `StudioState`, the engine crates, and the eframe
-//! `yee-studio` are all untouched — this crate is additive.
+//! **Spec** and **Export** are real: Spec is a live editable form driving
+//! synthesis; Export emits a parameter sheet, a BOM CSV (lumped), and Gerber /
+//! KiCad files from the real layout via the shipped `yee-export` emitters,
+//! downloaded client-side. **Verify (EM)** stays an honest "Soon" placeholder
+//! (it rides on the Track A FDTD-in-loop work). The remaining distributed
+//! topologies (Hairpin, Combline, …) are honestly labelled "Soon".
 //!
 //! [Dioxus]: https://dioxuslabs.com/
 
@@ -36,8 +39,12 @@ mod svg;
 
 use dioxus::prelude::*;
 
-use engine::{Designed, LumpedDesigned, design_demo, design_lumped};
+use engine::{
+    Designed, LumpedDesigned, demo_spec, design_demo, design_demo_from, design_lumped,
+    design_lumped_from,
+};
 use stages::{Stage, Topology};
+use yee_filter::FilterSpec;
 
 /// The design-system stylesheet (tokens + base components). Embedded via the
 /// `asset!` macro so the web build bundles it and `dx`/trunk fingerprints it.
@@ -47,14 +54,28 @@ fn main() {
     dioxus::launch(App);
 }
 
-/// Root component: builds the live design once, holds the active-stage signal,
-/// and lays out Shell A (top bar + rail + canvas).
+/// Root component: holds the editable [`FilterSpec`] as the single source of
+/// truth, re-derives both engine pipelines whenever it changes, holds the
+/// active-stage signal, and lays out Shell A (top bar + rail + canvas).
+///
+/// The Spec stage edits `spec`; a [`use_effect`] re-runs `design_*_from(spec)`
+/// into `designed` / `lumped` so every stage updates live. `lumped` is an
+/// `Option` because some specs are not realizable as a band-pass LC ladder.
 #[component]
 fn App() -> Element {
-    // Run both real engine pipelines once at startup; every stage reads from
-    // the one its active topology selects.
-    let designed = use_signal(design_demo);
-    let lumped = use_signal(design_lumped);
+    // The editable design intent. Everything else derives from it.
+    let spec = use_signal(demo_spec);
+
+    // Derived engine output, recomputed reactively on every spec edit. Seeded
+    // from the demo spec; the `use_effect` re-derives on every subsequent edit.
+    let mut designed = use_signal(design_demo);
+    let mut lumped = use_signal(|| Some(design_lumped()));
+    use_effect(move || {
+        let s: FilterSpec = spec();
+        designed.set(design_demo_from(s.clone()));
+        lumped.set(design_lumped_from(s).ok());
+    });
+
     let topology = use_signal(|| Topology::EdgeCoupled);
     let active = use_signal(|| Stage::Synthesis);
     // E24 (false) / E96 (true) toggle for the lumped Components + BOM stage.
@@ -71,6 +92,7 @@ fn App() -> Element {
                         stage: active(),
                         topology,
                         active,
+                        spec,
                         designed,
                         lumped,
                         series_e96,
@@ -148,13 +170,14 @@ fn StageCanvas(
     stage: Stage,
     topology: Signal<Topology>,
     active: Signal<Stage>,
+    spec: Signal<FilterSpec>,
     designed: ReadOnlySignal<Designed>,
-    lumped: ReadOnlySignal<LumpedDesigned>,
+    lumped: ReadOnlySignal<Option<LumpedDesigned>>,
     series_e96: Signal<bool>,
 ) -> Element {
     let lumped_flow = topology() == Topology::LumpedLc;
     match stage {
-        Stage::Spec => stages::spec_stage(designed),
+        Stage::Spec => stages::spec_stage(spec, designed, lumped),
         Stage::Technique => stages::technique_stage(topology, active),
         Stage::Synthesis if lumped_flow => stages::lumped_synthesis_stage(lumped),
         Stage::Synthesis => stages::synthesis_stage(designed),
@@ -163,6 +186,6 @@ fn StageCanvas(
         Stage::Layout if lumped_flow => stages::lumped_layout_stage(lumped),
         Stage::Layout => stages::layout_stage(designed),
         Stage::Verify => stages::verify_stage(),
-        Stage::Export => stages::export_stage(designed),
+        Stage::Export => stages::export_stage(topology.into(), designed, lumped),
     }
 }

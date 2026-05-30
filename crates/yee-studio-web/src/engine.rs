@@ -1,12 +1,12 @@
-//! Engine bridge — drives the live Yee filter engine for the POC.
+//! Engine bridge — drives the live Yee filter engine for the studio.
 //!
-//! The POC hard-codes the committed `cheb_bpf.toml` fixture as a
-//! [`FilterSpec`] (no file IO in WASM) and runs the **real** synthesis /
-//! dimensioning / response-sweep / spec-mask paths through `yee-synth`,
-//! `yee-filter`, and `yee-layout` — the same calls the `yee filter synth` CLI
-//! makes ([`yee_cli::filter::run_synth`], mirrored here). Nothing on these
-//! stages is faked: every number rendered by the Synthesis and Layout stages
-//! comes out of [`Designed`].
+//! Seeds from the committed `cheb_bpf.toml` fixture as a
+//! [`yee_filter::FilterSpec`] (no file IO in WASM); the Spec stage then edits a
+//! live spec that re-drives the **real** synthesis / dimensioning /
+//! response-sweep / spec-mask / lumped paths through `yee-synth`, `yee-filter`,
+//! and `yee-layout` — the same calls the `yee filter synth` CLI makes, mirrored
+//! here. Nothing is faked: every number the stages render comes out of
+//! [`Designed`] / [`LumpedDesigned`].
 
 use yee_filter::{
     Approximation, Bom, BranchKind, CompKind, CouplingMatrix, ESeries, FilterProject, FilterSpec,
@@ -123,14 +123,21 @@ pub struct Designed {
     pub mask_bands: Vec<MaskBand>,
     /// The real spec-mask verdict.
     pub report: MaskReport,
-    /// The dimensioned edge-coupled board layout.
-    pub layout: Layout,
-    /// Per-resonator realized geometry + electricals.
+    /// The dimensioned edge-coupled board layout, or `None` when the coupling
+    /// is not realizable on FR-4 (see [`dim_error`](Designed::dim_error)).
+    pub layout: Option<Layout>,
+    /// Per-resonator realized geometry + electricals (empty when geometry is
+    /// not realizable).
     pub resonators: Vec<ResonatorRow>,
-    /// Single-line effective permittivity at the synthesized width.
+    /// Single-line effective permittivity at the synthesized width (`0.0` when
+    /// geometry is not realizable).
     pub line_eps_eff: f64,
-    /// Board bounding box, mm (`(width, height)`).
+    /// Board bounding box, mm (`(width, height)`); `(0, 0)` when not realizable.
     pub board_size_mm: (f64, f64),
+    /// The edge-coupled dimensioning error string when the coupling could not
+    /// be realized on FR-4, else `None`. The synthesis / response / verdict
+    /// stay real even when this is `Some`.
+    pub dim_error: Option<String>,
 }
 
 impl Designed {
@@ -142,12 +149,26 @@ impl Designed {
 
 /// Run the full live engine pipeline on the hard-coded demo spec.
 ///
+/// Convenience wrapper around [`design_demo_from`] for the initial boot state
+/// (the Spec stage edits a live spec that re-drives [`design_demo_from`]).
+pub fn design_demo() -> Designed {
+    design_demo_from(demo_spec())
+}
+
+/// Run the full live engine pipeline on an arbitrary [`yee_filter::FilterSpec`].
+///
 /// Mirrors `yee_cli::filter::run_synth`: synthesize → sweep the ideal response
 /// → grade against the spec mask → dimension the edge-coupled board → derive
 /// the per-resonator even/odd electricals from the solved gaps. Every value is
 /// real engine output.
-pub fn design_demo() -> Designed {
-    let spec = demo_spec();
+///
+/// The edge-coupled dimensioning can fail when the requested coupling is not
+/// realizable on FR-4 (e.g. an over-wide bandwidth at a low order); in that
+/// case the geometry-derived fields fall back to empty (no resonator rows, a
+/// zero board size) while the synthesized prototype / coupling / response /
+/// mask verdict remain real. The Spec form surfaces that as a "geometry not
+/// realizable" note rather than panicking the whole app.
+pub fn design_demo_from(spec: FilterSpec) -> Designed {
     let project = synthesize(&spec);
     let g_values = project.prototype.g.clone();
     let coupling = project.coupling.clone();
@@ -173,51 +194,11 @@ pub fn design_demo() -> Designed {
     let report = check_mask(&project, &freqs);
 
     // ---- physical dimensioning (FR-4 substrate, edge-coupled) -------------
-    let dims =
-        dimension_edge_coupled(&project, &SUBSTRATE).expect("demo spec is realizable on FR-4");
-    let layout = dimension_edge_coupled_layout(&project, &SUBSTRATE)
-        .expect("demo spec layout is realizable on FR-4");
-
-    let w_m = dims.line_width_m;
-    let line_eps_eff = eps_eff(w_m, SUBSTRATE.height_m, SUBSTRATE.eps_r);
-
-    let n = project.coupling.m.len();
-    let resonators: Vec<ResonatorRow> = (0..n)
-        .map(|i| {
-            // Gaps + couplings exist for i in 0..n-1 (the i-th gap is to i+1).
-            let (gap, z0e, z0o, eff_e, eff_o, rk, tk) = if i < n - 1 {
-                let s = dims.gaps_m[i];
-                let cm: CoupledMicrostrip =
-                    coupled_microstrip(w_m, s, SUBSTRATE.height_m, SUBSTRATE.eps_r);
-                let realized_k = (cm.z0e_ohm - cm.z0o_ohm) / (cm.z0e_ohm + cm.z0o_ohm);
-                (
-                    Some(s * 1e3),
-                    Some(cm.z0e_ohm),
-                    Some(cm.z0o_ohm),
-                    Some(cm.eps_eff_e),
-                    Some(cm.eps_eff_o),
-                    Some(realized_k),
-                    Some(dims.target_k[i]),
-                )
-            } else {
-                (None, None, None, None, None, None, None)
-            };
-            ResonatorRow {
-                id: i + 1,
-                width_mm: w_m * 1e3,
-                length_mm: dims.resonator_length_m * 1e3,
-                gap_to_next_mm: gap,
-                z0e_ohm: z0e,
-                z0o_ohm: z0o,
-                eps_eff_e: eff_e,
-                eps_eff_o: eff_o,
-                realized_k: rk,
-                target_k: tk,
-            }
-        })
-        .collect();
-
-    let board_size_mm = board_size_mm(&layout.bbox);
+    // Fallible: an unrealizable coupling (e.g. a wide FBW at a low order from
+    // the Spec form) returns a `DimError`. We keep the synthesized prototype /
+    // response / verdict real and degrade only the geometry-derived fields,
+    // surfacing the error through `dim_error` instead of panicking the app.
+    let geom = derive_geometry(&project);
 
     Designed {
         spec,
@@ -227,10 +208,97 @@ pub fn design_demo() -> Designed {
         sweep,
         mask_bands,
         report,
-        layout,
-        resonators,
-        line_eps_eff,
-        board_size_mm,
+        layout: geom.layout,
+        resonators: geom.resonators,
+        line_eps_eff: geom.line_eps_eff,
+        board_size_mm: geom.board_size_mm,
+        dim_error: geom.dim_error,
+    }
+}
+
+/// The geometry-derived fields of [`Designed`], bundled so the fallible
+/// dimensioning path returns one value (and the unrealizable case degrades
+/// every field coherently).
+struct Geometry {
+    layout: Option<Layout>,
+    resonators: Vec<ResonatorRow>,
+    line_eps_eff: f64,
+    board_size_mm: (f64, f64),
+    dim_error: Option<String>,
+}
+
+/// Dimension the synthesized project onto FR-4, returning the geometry fields
+/// or — when the coupling is not realizable — an empty geometry carrying the
+/// error string.
+fn derive_geometry(project: &FilterProject) -> Geometry {
+    let dims_res = dimension_edge_coupled(project, &SUBSTRATE);
+    let layout_res = dimension_edge_coupled_layout(project, &SUBSTRATE);
+
+    match (dims_res, layout_res) {
+        (Ok(dims), Ok(layout)) => {
+            let w_m = dims.line_width_m;
+            let line_eps_eff = eps_eff(w_m, SUBSTRATE.height_m, SUBSTRATE.eps_r);
+
+            let n = project.coupling.m.len();
+            let resonators: Vec<ResonatorRow> = (0..n)
+                .map(|i| {
+                    // Gaps + couplings exist for i in 0..n-1 (gap i is to i+1).
+                    let (gap, z0e, z0o, eff_e, eff_o, rk, tk) = if i < n - 1 {
+                        let s = dims.gaps_m[i];
+                        let cm: CoupledMicrostrip =
+                            coupled_microstrip(w_m, s, SUBSTRATE.height_m, SUBSTRATE.eps_r);
+                        let realized_k = (cm.z0e_ohm - cm.z0o_ohm) / (cm.z0e_ohm + cm.z0o_ohm);
+                        (
+                            Some(s * 1e3),
+                            Some(cm.z0e_ohm),
+                            Some(cm.z0o_ohm),
+                            Some(cm.eps_eff_e),
+                            Some(cm.eps_eff_o),
+                            Some(realized_k),
+                            Some(dims.target_k[i]),
+                        )
+                    } else {
+                        (None, None, None, None, None, None, None)
+                    };
+                    ResonatorRow {
+                        id: i + 1,
+                        width_mm: w_m * 1e3,
+                        length_mm: dims.resonator_length_m * 1e3,
+                        gap_to_next_mm: gap,
+                        z0e_ohm: z0e,
+                        z0o_ohm: z0o,
+                        eps_eff_e: eff_e,
+                        eps_eff_o: eff_o,
+                        realized_k: rk,
+                        target_k: tk,
+                    }
+                })
+                .collect();
+
+            let board_size_mm = board_size_mm(&layout.bbox);
+            Geometry {
+                layout: Some(layout),
+                resonators,
+                line_eps_eff,
+                board_size_mm,
+                dim_error: None,
+            }
+        }
+        (dims_res, layout_res) => {
+            // Prefer the dimensioning error, else the layout error.
+            let msg = dims_res
+                .err()
+                .map(|e| e.to_string())
+                .or_else(|| layout_res.err().map(|e| e.to_string()))
+                .unwrap_or_else(|| "edge-coupled geometry is not realizable on FR-4".into());
+            Geometry {
+                layout: None,
+                resonators: Vec::new(),
+                line_eps_eff: 0.0,
+                board_size_mm: (0.0, 0.0),
+                dim_error: Some(msg),
+            }
+        }
     }
 }
 
@@ -482,14 +550,25 @@ fn yield_view(ladder: &LumpedLadder, series: ESeries, mask: &SpecMask) -> YieldV
     }
 }
 
-/// Run the full live lumped-LC pipeline on the same demo spec the distributed
-/// flow uses: synthesize → LC ladder → swept realized response → spec-mask
-/// verdict → E24/E96 component selection + BOM → Monte-Carlo yield → SMD board
-/// placement. Every value is real F2.x engine output.
+/// Run the full live lumped-LC pipeline on the hard-coded demo spec.
+///
+/// Convenience wrapper around [`design_lumped_from`] for the initial boot
+/// state (the Spec stage edits a live spec that re-drives the pipeline).
 pub fn design_lumped() -> LumpedDesigned {
-    let spec = demo_spec();
+    design_lumped_from(demo_spec()).expect("demo spec is a realizable band-pass ladder")
+}
+
+/// Run the full live lumped-LC pipeline on an arbitrary
+/// [`yee_filter::FilterSpec`]: synthesize → LC ladder → swept realized response
+/// → spec-mask verdict → E24/E96 component selection + BOM → Monte-Carlo yield
+/// → SMD board placement. Every value is real F2.x engine output.
+///
+/// Returns the `LumpedError` display string when the prototype cannot be
+/// mapped to a realizable band-pass ladder (e.g. a degenerate FBW); the Spec
+/// form surfaces that rather than panicking.
+pub fn design_lumped_from(spec: FilterSpec) -> Result<LumpedDesigned, String> {
     let project = synthesize(&spec);
-    let ladder = synthesize_lumped(&project).expect("demo spec is a realizable band-pass ladder");
+    let ladder = synthesize_lumped(&project).map_err(|e| e.to_string())?;
 
     // ---- display rows -----------------------------------------------------
     let resonators: Vec<LumpedResonatorRow> = ladder
@@ -547,7 +626,7 @@ pub fn design_lumped() -> LumpedDesigned {
         .collect();
     let board_size_mm = board_size_mm(&board.layout.bbox);
 
-    LumpedDesigned {
+    Ok(LumpedDesigned {
         ladder,
         resonators,
         sweep,
@@ -561,7 +640,7 @@ pub fn design_lumped() -> LumpedDesigned {
         placements,
         board_size_mm,
         yield_trials: YIELD_TRIALS,
-    }
+    })
 }
 
 /// The `lumped_board` requires a `Footprint` import via `yee_filter`; this is
@@ -590,8 +669,10 @@ mod tests {
         assert_eq!(d.resonators.len(), 5);
         // The fixture is designed to PASS its mask.
         assert!(d.report.pass, "cheb_bpf fixture should PASS its spec mask");
-        // Board has positive extent.
+        // Board has positive extent and a realizable layout.
         assert!(d.board_size_mm.0 > 0.0 && d.board_size_mm.1 > 0.0);
+        assert!(d.layout.is_some(), "demo spec dimensions onto FR-4");
+        assert!(d.dim_error.is_none(), "no dimensioning error for the demo");
         // Realized k tracks the target within the bisection tolerance.
         for r in &d.resonators {
             if let (Some(rk), Some(tk)) = (r.realized_k, r.target_k) {
@@ -627,5 +708,45 @@ mod tests {
         // Board placed every component (2 per resonator).
         assert_eq!(d.placements.len(), 10);
         assert!(d.board_size_mm.0 > 0.0 && d.board_size_mm.1 > 0.0);
+    }
+
+    #[test]
+    fn design_from_edited_spec_drives_synthesis() {
+        // Editing the order from the Spec form re-drives synthesis: an order-3
+        // spec yields a 3×3 coupling matrix + 3-resonator ladder, distinct
+        // from the demo's order-5.
+        let mut spec = demo_spec();
+        spec.order = Some(3);
+        let d = design_demo_from(spec.clone());
+        assert_eq!(d.order(), 3, "edited order flows through synthesize");
+        assert_eq!(d.coupling.m.len(), 3);
+
+        let l = design_lumped_from(spec).expect("order-3 BPF is realizable");
+        assert_eq!(l.order(), 3, "edited order flows through synthesize_lumped");
+        assert_eq!(l.resonators.len(), 3);
+    }
+
+    #[test]
+    fn unrealizable_spec_degrades_gracefully() {
+        // A wide fractional bandwidth at a low order over-couples the edge-
+        // coupled gaps beyond what FR-4 can realize: the geometry should
+        // degrade (no layout / no resonator rows, a dim_error) while the
+        // synthesized prototype + response stay real, rather than panicking.
+        let mut spec = demo_spec();
+        spec.order = Some(2);
+        spec.fbw = 0.6;
+        let d = design_demo_from(spec);
+        // Synthesis is still real.
+        assert_eq!(d.order(), 2);
+        assert_eq!(d.sweep.len(), SWEEP_POINTS);
+        // Geometry degraded coherently.
+        if d.dim_error.is_some() {
+            assert!(d.layout.is_none());
+            assert!(d.resonators.is_empty());
+            assert_eq!(d.board_size_mm, (0.0, 0.0));
+        } else {
+            // If FR-4 happens to realize it, the layout must be present.
+            assert!(d.layout.is_some());
+        }
     }
 }

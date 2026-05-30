@@ -7596,13 +7596,6 @@ dependencies = [
 name = "yee-studio"
 version = "0.0.0"
 dependencies = [
- "console_error_panic_hook",
- "eframe",
- "egui",
- "egui_plot",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
  "yee-filter",
  "yee-layout",
  "yee-synth",
@@ -7613,6 +7606,8 @@ name = "yee-studio-web"
 version = "0.0.0"
 dependencies = [
  "dioxus",
+ "serde_json",
+ "yee-export",
  "yee-filter",
  "yee-layout",
  "yee-synth",
