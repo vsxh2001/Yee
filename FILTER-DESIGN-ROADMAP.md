@@ -408,10 +408,16 @@ in-browser front-end; heavy EM goes behind a native `yee-server`. See §5a.
   `HtmlCanvasElement` fetched via `web-sys`, not a string id — eframe 0.34.2; no
   RUSTFLAGS needed, wgpu 29 WebGL2 fallback compiles clean). Gate
   `cargo check -p yee-studio --target wasm32 --features web` exit 0; native +
-  headless-wasm unregressed. **NEXT = App.1.2b** = `trunk` bundle +
-  `index.html`/`Trunk.toml` + static deploy (needs `cargo install trunk` — HEAVIER;
-  riskiest = wgpu-WebGL2 at runtime; the web entry already expects
-  `<canvas id="the_canvas_id">`). Delivers the loadable in-browser app.
+  headless-wasm unregressed. **App.1.2b ✅ SHIPPED** (ADR-0107, merge `fa87cb5`):
+  `crates/yee-studio/index.html` (`<canvas id="the_canvas_id">` + a `data-trunk
+  rel="rust"` directive building the `yee-studio` bin `--no-default-features
+  --features web`) + `Trunk.toml` + an extension to the CI `wasm-build` job that
+  runs `trunk build --release` and uploads the `dist` bundle artifact. So `trunk
+  serve` gives a working in-browser filter-design UI and CI proves the bundle
+  builds — the heavy `trunk build` runs on the CI runner, not the local
+  (memory-constrained) box. The "working web UI" goal component is now runnable.
+  **NEXT = App.1.2c** = GitHub Pages / static hosting (must not clash with the
+  docs.yml mdBook Pages deploy) to make it publicly loadable.
 - *Engine (toward the Swanson-hairpin FDTD gate):* **F1.1a `yee-voxel` ✅ SHIPPED**
   (ADR-0091, merge `c4f3af4`): `voxelize_microstrip(&Layout) → YeeGrid` (ground
   PEC + substrate ε_r slab + trace PEC, point-in-polygon rasterized; tangential
