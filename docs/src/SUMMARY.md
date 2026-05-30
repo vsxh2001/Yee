@@ -154,3 +154,4 @@
 - [ADR-0108: F1.1b.1 — FDTD coupled-resonator driver (full filter simulation)](decisions/0108-f1-1b-1-fdtd-coupled-resonator-driver.md)
 - [ADR-0109: F1.2.2 — hairpin dimensional synthesis](decisions/0109-f1-2-2-hairpin-dimensional-synthesis.md)
 - [ADR-0110: Yee Filter Studio redesign — Dioxus view layer (POC-first)](decisions/0110-studio-redesign-dioxus.md)
+- [ADR-0111: Filter Phase F2.0 — lumped-element LC ladder synthesis](decisions/0111-f2-0-lumped-lc-synthesis.md)
