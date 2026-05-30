@@ -161,3 +161,4 @@
 - [ADR-0115: Filter Phase F2.3 — lumped-LC FDTD EM simulation](decisions/0115-f2-3-lumped-fdtd-sim.md)
 - [ADR-0116: Phase 2.fdtd.6.2 — stable two-way lumped RLC port](decisions/0116-fdtd-6-2-two-way-lumped-rlc.md)
 - [ADR-0117: Phase 2.fdtd.6.3 — reactive-magnitude correctness of the two-way lumped port](decisions/0117-fdtd-6-3-reactive-magnitude.md)
+- [ADR-0118: Phase 2.fdtd.6.4 — canonical per-element Taflove lumped L/C updates](decisions/0118-fdtd-6-4-canonical-lumped-lc.md)

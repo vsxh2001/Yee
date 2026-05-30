@@ -1,6 +1,8 @@
 # ADR-0117: Phase 2.fdtd.6.3 — reactive-magnitude correctness of the two-way lumped port
 
-**Status:** Accepted
+**Status:** Investigated — root cause is structural, not a coefficient; the
+coefficient-fix approach this ADR scoped is **superseded by ADR-0118**
+(Phase 2.fdtd.6.4, canonical per-element Taflove L/C updates). See Outcome below.
 **Date:** 2026-05-30
 **Related:** ADR-0116 (2.fdtd.6.2 two-way lumped port — this completes its punted
 reactive DoD), ADR-0115 (F2.3 lumped FDTD — still blocked on this), the
@@ -66,6 +68,41 @@ back to a print, and F2.3 stays unmerged. Faking a pass is forbidden.
 
 **Not in scope:** the F2.3 board sim itself (rides on this); SRF/ESR parasitics;
 multi-element parasitic coupling.
+
+## Outcome (investigated 2026-05-30)
+
+The coefficient-fix hypothesis was **disproved** by a derivation-first
+investigation (a bit-faithful replica of the gate's stepping, matched to the
+container run to the digit, gave ~3 s iterations):
+
+- **The per-frequency branch impedance is already correct.** Z-transforming the
+  implemented recurrences gives `Z_branch(z) = R + (L/dt)(1−z⁻¹) + dt/(2C) +
+  (dt/C)/(z−1)`, which → `R + jωL + 1/(jωC)` in the low-`ωdt` limit (only a tiny
+  `ω·dt²/(12C)` artifact). Confirmed three ways (resistor limit byte-identical to
+  the validated `pure_resistor`; open-loop sinusoid gives +494j Ω for L and
+  −502j Ω for C vs intended ±496j; the per-frequency reflection proxy is correct).
+- **Yet the closed-loop time-domain loading is wrong, and not by a measurement
+  artifact** (a narrowband CW source reproduces the failure). The single-step
+  semi-implicit coupling loads the line by the **instantaneous** `K = R + L/dt +
+  dt/(2C)`: a shunt inductor presents `K ≈ L/dt ≈ 7.6 kΩ` (huge → transparent,
+  |Γ|≈0.01) and a shunt capacitor presents `K ≈ dt/(2C) ≈ 16 Ω` (tiny →
+  near-short, |Γ|≈1.0), instead of the physical `jωL` / `1/(jωC)`. The gate's
+  analytic is the shunt law `Γ = −Z₀/(2Z_L+Z₀)` (z0_eff ≈ 496 Ω), which the
+  instantaneous-K behaviour misses in **opposite directions** for L and C.
+- **Therefore no single mis-scaled `dz`/`dA`/`ε₀`/`dt`/2 factor can fix it** —
+  any rescale that helps L hurts C. The `dz/dA` hypothesis is wrong. Several
+  principled variants (predicted-vs-corrected field, trapezoidal-vs-backward
+  C, full-implicit `K+2β`, dropping the `(L/dt)I_old` feedback) all leave,
+  invert, or destabilise. **The defect is structural in the RLC-in-one-implicit-K
+  formulation for reactive *loading*, not a coefficient.**
+
+The escape hatch was correctly invoked: gate **not** weakened, resistor-exact tol
+**not** relaxed, no fudge, no fake; the branch was left clean (no commit). The fix
+is a **reformulation** to the canonical per-element Taflove updates (shunt-L as an
+accumulated current source presenting `jωL`; shunt-C as a modified-permittivity
+displacement term presenting `1/(jωC)`) — bounded/textbook, **not** the
+ill-posedness that defers the MoM microstrip port (ADR-0064). Scoped as
+**ADR-0118 (Phase 2.fdtd.6.4)**. ADR-0116's stable two-way *resistor* port stands.
 
 ---
 
