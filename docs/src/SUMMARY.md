@@ -159,3 +159,4 @@
 - [ADR-0113: Filter Phase F2.4 — tolerance / yield (Monte-Carlo)](decisions/0113-f2-4-tolerance-yield.md)
 - [ADR-0114: Filter Phase F2.2 — lumped-LC PCB board generator](decisions/0114-f2-2-lumped-pcb.md)
 - [ADR-0115: Filter Phase F2.3 — lumped-LC FDTD EM simulation](decisions/0115-f2-3-lumped-fdtd-sim.md)
+- [ADR-0116: Phase 2.fdtd.6.2 — stable two-way lumped RLC port](decisions/0116-fdtd-6-2-two-way-lumped-rlc.md)
