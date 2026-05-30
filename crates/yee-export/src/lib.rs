@@ -1,30 +1,45 @@
 //! # yee-export
 //!
 //! Manufacturing-file emitters for the Yee filter-design studio (Filter Phase
-//! F1.4). Two RS-274X [Gerber][ucamco] emitters are provided:
+//! F1.4). Two RS-274X [Gerber][ucamco] emitters and one KiCad board emitter are
+//! provided:
 //!
 //! - [`layout_to_gerber`] — single-copper-layer: a [`yee_layout::Layout`]'s
 //!   top-metal polygons as filled regions (`G36*`/`G37*`) — F1.4.0.
 //! - [`layout_to_gerber_outline`] — board-outline (Edge.Cuts): a single
 //!   **stroked** rectangular contour around the layout `bbox`, expanded by a
 //!   margin — F1.4.1a.
+//! - [`layout_to_kicad_pcb`] — a KiCad 7 `.kicad_pcb` S-expression board file:
+//!   the top-metal polygons as filled `gr_poly` on the copper layer plus the
+//!   board outline on `Edge.Cuts`, so the user can open the layout directly in
+//!   the KiCad PCB editor — F1.4.1b.
 //!
 //! Pure text, no EM, no native dependency — **WASM-safe** so the studio can
-//! export client-side (ADR-0089). Drill, soldermask, silkscreen, and
-//! multi-layer stack-ups are F1.4.1b+.
+//! export client-side (ADR-0089). Drill, soldermask, silkscreen, footprints,
+//! pads, vias, zones, and multi-layer stack-ups are F1.4.1c+.
 //!
 //! ## Coordinate model
 //!
-//! `yee-layout` stores all coordinates in **metres**. RS-274X here uses
-//! millimetre units (`%MOMM*%`) with a 4-integer / 6-decimal fixed-point format
-//! (`%FSLAX46Y46*%`). The conversion is therefore
+//! `yee-layout` stores all coordinates in **metres**. The two coordinate
+//! encodings used by the emitters differ:
 //!
-//! ```text
-//! metres → mm:                  mm  = m * 1e3
-//! mm → 4.6 fixed-point integer: int = round(mm * 1e6)
-//! ```
+//! - **Gerber** (`layout_to_gerber` / `layout_to_gerber_outline`) uses
+//!   millimetre units (`%MOMM*%`) with a 4-integer / 6-decimal fixed-point
+//!   format (`%FSLAX46Y46*%`):
 //!
-//! For example `3.0590 mm → 3059000 → X3059000`. See [`mm_to_fixed46`].
+//!   ```text
+//!   metres → mm:                  mm  = m * 1e3
+//!   mm → 4.6 fixed-point integer: int = round(mm * 1e6)
+//!   ```
+//!
+//!   For example `3.0590 mm → 3059000 → X3059000`. See [`mm_to_fixed46`].
+//!
+//! - **KiCad** (`layout_to_kicad_pcb`) uses millimetre **floats** directly in
+//!   the S-expression (`(xy 3.059000 1.234000)`) — *not* fixed-point integers.
+//!   See [`xy_mm`].
+//!
+//! Neither emitter flips the `y` axis in this walking-skeleton scope; the
+//! studio, Gerber, and KiCad all share the layout's metre frame scaled to mm.
 //!
 //! ## Example
 //!
@@ -261,6 +276,145 @@ pub fn layout_to_gerber_outline(layout: &Layout, opts: &OutlineOptions) -> Strin
 
     // --- Footer -------------------------------------------------------------
     s.push_str("M02*\n");
+
+    s
+}
+
+/// Options controlling the KiCad `.kicad_pcb` board emission.
+///
+/// The skeleton emits the top-metal trace polygons as filled `gr_poly` on
+/// [`copper_layer`](Self::copper_layer) plus a board outline on `Edge.Cuts`
+/// expanded by [`outline_margin_mm`](Self::outline_margin_mm). The
+/// [`generator`](Self::generator) string is written into the board's
+/// `(generator …)` token.
+///
+/// `PartialEq` (not `Eq`) is derived because [`outline_margin_mm`] is an `f64`,
+/// which is not `Eq` — this mirrors [`OutlineOptions`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct KicadPcbOptions {
+    /// Copper layer the trace polygons are placed on, written verbatim into
+    /// each `(layer "…")` token. Defaults to `"F.Cu"` (KiCad front copper).
+    pub copper_layer: String,
+    /// Margin added on *each* side of the layout bounding box for the
+    /// `Edge.Cuts` board outline, in millimetres. The outline rectangle spans
+    /// `bbox` grown by this amount in `±x` and `±y`. Defaults to `1.0` mm.
+    pub outline_margin_mm: f64,
+    /// Value written into the board's `(generator "…")` token, identifying the
+    /// tool that produced the file. Defaults to `"yee-export"`.
+    pub generator: String,
+}
+
+impl Default for KicadPcbOptions {
+    fn default() -> Self {
+        Self {
+            copper_layer: "F.Cu".into(),
+            outline_margin_mm: 1.0,
+            generator: "yee-export".into(),
+        }
+    }
+}
+
+/// Format a raw `(x_m, y_m)` coordinate pair (metres) as a KiCad `(xy X Y)`
+/// S-expression element, converting metres → millimetres as a **float**.
+///
+/// KiCad `.kicad_pcb` coordinates are plain millimetre floating-point numbers,
+/// e.g. `(xy 3.059000 1.234000)` — *not* the integer 4.6 fixed-point words used
+/// by the Gerber emitters. This is why `xy_mm` is a separate helper from
+/// [`mm_to_fixed46`] / [`coord_word_xy`]: the two output formats encode
+/// coordinates differently and must not share a converter. Six decimal places
+/// give nanometre resolution (`1e-6 mm`), matching the Gerber 4.6 fixed-point
+/// precision while staying a human-readable float.
+fn xy_mm(x_m: f64, y_m: f64) -> String {
+    format!("(xy {:.6} {:.6})", x_m * 1.0e3, y_m * 1.0e3)
+}
+
+/// Emit a **KiCad 7 `.kicad_pcb`** S-expression board for a [`Layout`]: the
+/// top-metal trace polygons as filled `gr_poly` on `opts.copper_layer`, plus
+/// the board outline on `Edge.Cuts`.
+///
+/// Structure (see the module docs for the coordinate model):
+///
+/// - the `(kicad_pcb (version 20221018) (generator "<gen>") …)` header, a
+///   `(general (thickness <h>))` block carrying the substrate height in mm, a
+///   `(paper "A4")` token, a `(layers …)` table declaring `F.Cu` / `B.Cu` /
+///   `Edge.Cuts`, and an empty `(setup)` block;
+/// - per trace polygon (≥ 3 vertices): one filled
+///   `(gr_poly (pts (xy …) …) (layer "<copper_layer>") (width 0) (fill solid))`
+///   carrying the polygon's vertices in millimetres (see [`xy_mm`]). KiCad
+///   closes a `gr_poly` implicitly, so the first vertex is **not** repeated;
+/// - the board outline as a single
+///   `(gr_poly (pts (xy …)(xy …)(xy …)(xy …)) (layer "Edge.Cuts") (width 0.1)
+///   (fill none))` rectangle = `layout.bbox` expanded by
+///   `opts.outline_margin_mm` on each side, in CCW order from the lower-left
+///   corner (the same geometry as [`layout_to_gerber_outline`]);
+/// - the closing `)` for the top-level `(kicad_pcb …)` form.
+///
+/// Coordinates are KiCad millimetre floats (metres × 1e3, six decimals) via
+/// [`xy_mm`]. Polygons with fewer than three vertices are skipped (they have no
+/// fillable area).
+///
+/// The returned `String` is a complete, standalone `.kicad_pcb` file body.
+pub fn layout_to_kicad_pcb(layout: &Layout, opts: &KicadPcbOptions) -> String {
+    let mut s = String::new();
+
+    // --- Header -------------------------------------------------------------
+    s.push_str("(kicad_pcb\n");
+    s.push_str("  (version 20221018)\n");
+    s.push_str(&format!("  (generator \"{}\")\n", opts.generator));
+    // Board thickness from the substrate height, metres → mm.
+    s.push_str(&format!(
+        "  (general (thickness {:.6}))\n",
+        layout.substrate.height_m * 1.0e3
+    ));
+    s.push_str("  (paper \"A4\")\n");
+    // Layer table: front/back copper signal layers plus the board-profile
+    // (Edge.Cuts) user layer.
+    s.push_str("  (layers\n");
+    s.push_str("    (0 \"F.Cu\" signal)\n");
+    s.push_str("    (31 \"B.Cu\" signal)\n");
+    s.push_str("    (44 \"Edge.Cuts\" user)\n");
+    s.push_str("  )\n");
+    s.push_str("  (setup)\n");
+
+    // --- Copper polygons: one filled gr_poly per trace ----------------------
+    for poly in &layout.traces {
+        let verts = &poly.verts;
+        if verts.len() < 3 {
+            // Degenerate polygon: no area to fill, skip.
+            continue;
+        }
+        s.push_str("  (gr_poly (pts");
+        for v in verts {
+            s.push(' ');
+            s.push_str(&xy_mm(v.x, v.y));
+        }
+        s.push_str(&format!(
+            ") (layer \"{}\") (width 0) (fill solid))\n",
+            opts.copper_layer
+        ));
+    }
+
+    // --- Board outline on Edge.Cuts -----------------------------------------
+    // Rectangle corners = bbox expanded by `margin_m` on each side, CCW from
+    // the lower-left corner. KiCad closes the gr_poly implicitly, so corner 0
+    // is NOT repeated.
+    let m = opts.outline_margin_mm * 1.0e-3;
+    let (min, max) = (layout.bbox.min, layout.bbox.max);
+    let corners = [
+        (min.x - m, min.y - m),
+        (max.x + m, min.y - m),
+        (max.x + m, max.y + m),
+        (min.x - m, max.y + m),
+    ];
+    s.push_str("  (gr_poly (pts");
+    for &(x, y) in &corners {
+        s.push(' ');
+        s.push_str(&xy_mm(x, y));
+    }
+    s.push_str(") (layer \"Edge.Cuts\") (width 0.1) (fill none))\n");
+
+    // --- Close the top-level form -------------------------------------------
+    s.push_str(")\n");
 
     s
 }
