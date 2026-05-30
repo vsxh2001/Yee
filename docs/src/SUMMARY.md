@@ -150,3 +150,4 @@
 - [ADR-0104: Filter — register coupled/dim/gerber gates in the validation aggregator](decisions/0104-filter-validation-aggregator-gates.md)
 - [ADR-0105: Filter Phase F1.4.1b — yee-export KiCad .kicad_pcb export](decisions/0105-filter-f1-4-1b-kicad-pcb-export.md)
 - [ADR-0106: Filter — `yee filter synth --kicad-pcb` export wiring](decisions/0106-filter-cli-kicad-pcb-export.md)
+- [ADR-0107: App.1.2b — trunk web bundle + CI build for yee-studio](decisions/0107-app-1-2b-trunk-web-bundle.md)
