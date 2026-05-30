@@ -14,5 +14,4 @@ missing_docs = "warn"
 [dependencies]
 yee-layout = { workspace = true }
 yee-fdtd   = { workspace = true }
-yee-filter = { workspace = true }
 ndarray    = { workspace = true }
