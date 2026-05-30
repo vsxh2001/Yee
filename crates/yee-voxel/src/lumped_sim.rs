@@ -13,23 +13,54 @@
 //! against the analytic circuit response [`yee_filter::ladder_s21`] (the
 //! `fdtd_lumped_001` gate).
 //!
-//! # Series / shunt decomposition (the key subtlety)
+//! # Full-width-sheet placement (Filter Phase F2.3-b, ADR-0124)
 //!
-//! [`LumpedRlcPort::series_rlc`] is a **series** R-L-C at one `E_z` edge. The
-//! ladder's two resonator topologies map onto it differently:
+//! [`LumpedRlcPort::series_rlc`] bridges a **single** `E_z` Yee edge: its
+//! voltage is `V = E_z·dz` and its current crosses one cell face `dA = dx·dy`.
+//! The microstrip signal line is several cells **wide** in `y`, so the line's
+//! quasi-TEM admittance is spread over the whole transverse band of substrate
+//! `E_z` edges under the trace. A lumped element placed on a *single* edge taps
+//! a tiny fraction of that admittance and is **≈ inert** — the cause of the
+//! flat `|S21|` the F2.3 walking skeleton first produced (ADR-0123 Outcome).
 //!
-//! - A **series-branch** resonator (a series L–C in the through arm) is exactly
-//!   one [`LumpedRlcPort::series_rlc`]`(cell, r, L, C)` placed on the in-line
-//!   gap cell of that footprint: its impedance `Z = jωL + 1/(jωC)` is in series
-//!   with the signal path, as the ABCD model wants.
-//! - A **shunt-branch** resonator (a *parallel* L‖C from the line to ground)
-//!   cannot be one series element, so it becomes **two** ports at the *same*
-//!   shunt cell — a pure inductor [`LumpedRlcPort::series_rlc`]`(cell, r, L,
-//!   ∞)` (`c = ∞` shorts the capacitor) **in parallel with** a pure capacitor
-//!   [`LumpedRlcPort::series_rlc`]`(cell, r, 0, C)` (`l = 0` removes the
-//!   inductor). Both correct the *same* `E_z` edge each step, so the lattice
-//!   sees their currents summed → a parallel `L‖C` admittance
-//!   `Y = jωC + 1/(jωL)`, the correct shunt-resonator topology.
+//! So each ladder element is placed as a **value-distributed full-width sheet**:
+//! one [`LumpedRlcPort`] per transverse cell across the signal line width (the
+//! `N` substrate `E_z` edges spanning the trace in `y`, at the substrate edge
+//! `k_elem` just under the metal — the same column [`crate::run_line_eeff`]
+//! probes), with the per-cell values scaled so the `N` cells acting **in
+//! parallel** present the intended element to the line. The line band
+//! `[j_lo, j_hi)` (width `N`) is read directly off the voxel model's top-metal
+//! PEC mask at the drive-port column (the contiguous copper run containing the
+//! port row), so it tracks the trace width at any `dx` / `Z0`.
+//!
+//! `N` parallel copies of an admittance `Y` sum to `N·Y`; to make the sheet
+//! present the intended element we therefore scale **per cell** so the parallel
+//! sum is correct:
+//!
+//! - **Shunt capacitor** (`l = 0`): per cell `C/N` (N parallel caps → `C`).
+//! - **Shunt inductor** (`c = ∞`): per cell `N·L` (N parallel inductors,
+//!   `Y = 1/(jωL)`, sum to `1/(jω·L)`).
+//! - **Series R-L-C arm**: the through-arm element is also realised as a `z`
+//!   bridge (this planar driver has no `x`-oriented port), so its sheet is `N`
+//!   parallel copies of the series arm `Z = R + jωL + 1/(jωC)`. `N` parallel
+//!   copies give `Z/N`, so each cell carries `N·` the arm: `R → N·R`,
+//!   `L → N·L`, `C → C/N`, and the parallel sheet presents `Z`.
+//!
+//! Each resonator topology maps onto these as:
+//!
+//! - A **shunt-branch** resonator (a *parallel* L‖C from line to ground) becomes
+//!   **two** sheets at the same x-column: a pure-inductor sheet
+//!   (`series_rlc(cell, r, N·L, ∞)`, `c = ∞` shorts the cap) **in parallel
+//!   with** a pure-capacitor sheet (`series_rlc(cell, r, 0, C/N)`, `l = 0`
+//!   removes the inductor). The two sheets correct the same `E_z` edges each
+//!   step, so the lattice sees their currents summed → the parallel `L‖C`
+//!   admittance `Y = jωC + 1/(jωL)`, the correct shunt topology, loading the
+//!   *whole line width*.
+//! - A **series-branch** resonator (a series L–C in the through arm) becomes one
+//!   sheet of the series arm (`series_rlc(cell, N·r, N·L, C/N)`) across the line
+//!   width at the in-line gap column. The dominant **shunt** resonators (which
+//!   set the band-pass selectivity) are the sheets that matter most; the series
+//!   arm is the same value-distributed sheet for consistency.
 //!
 //! A small finite series resistance ([`SERIES_ESR_OHM`]) is used on every
 //! element because [`LumpedRlcPort::series_rlc`] requires `r > 0`.
@@ -69,7 +100,7 @@ use yee_fdtd::{LumpedRlcPort, SourceWaveform, WalkingSkeletonSolver};
 use yee_filter::{BranchKind, Footprint, LcBranch, LumpedLadder, Placement, lumped_board};
 use yee_layout::Substrate;
 
-use crate::{VoxelOptions, voxelize_microstrip};
+use crate::{MicrostripModel, VoxelOptions, voxelize_microstrip};
 
 /// Series ESR (Ω) used on every lumped element.
 ///
@@ -164,13 +195,54 @@ impl Bin {
     }
 }
 
+/// Find the transverse signal-line band `[j_lo, j_hi)` (a half-open `y`-row
+/// range, width `N = j_hi − j_lo`) at the drive-port column, over which a
+/// lumped element is spread as a full-width sheet (ADR-0124).
+///
+/// The signal line is the contiguous run of top-metal copper in `y` containing
+/// the drive port's row, read off the voxel model's `Ex` PEC mask at the
+/// top-metal plane `k_top` (`pec_mask_ex` is `true` where a trace covers the
+/// `Ex` node). Scanning the mask makes `N` track the Hammerstad-Jensen trace
+/// width at any `dx` / `Z0` without re-deriving it. If the grid carries no
+/// `Ex` PEC mask, fall back to the single port row (`[j, j+1)`), so the driver
+/// still produces a valid (if narrow) placement rather than panicking.
+fn line_band_at(model: &MicrostripModel, port_cell: (usize, usize, usize)) -> (usize, usize) {
+    let (i, j_port, k_top) = port_cell;
+    let (_nx, ny, _nz) = model.dims;
+    let Some(mask) = model.grid.pec_mask_ex.as_ref() else {
+        return (j_port, j_port + 1);
+    };
+    // `pec_mask_ex` shape is `(nx, ny+1, nz+1)`; the Ex node row index runs
+    // `0..=ny`. Clamp the port column / row into range defensively.
+    let (mnx, mny, mnz) = mask.dim();
+    let ic = i.min(mnx.saturating_sub(1));
+    let kc = k_top.min(mnz.saturating_sub(1));
+    let jp = j_port.min(mny.saturating_sub(1));
+    let covered = |j: usize| j < mny && mask[(ic, j, kc)];
+    if !covered(jp) {
+        // Port row not under copper (unexpected) — single-row fallback.
+        return (j_port, (j_port + 1).min(ny));
+    }
+    // Walk down then up from the port row to the contiguous-copper extent.
+    let mut lo = jp;
+    while lo > 0 && covered(lo - 1) {
+        lo -= 1;
+    }
+    let mut hi = jp + 1; // exclusive
+    while hi <= ny && covered(hi) {
+        hi += 1;
+    }
+    (lo, hi)
+}
+
 /// EM-simulate a synthesized lumped-LC filter board and return its forward
 /// transmission `|S21|(f)` over a frequency sweep.
 ///
 /// Builds the board ([`yee_filter::lumped_board`]), voxelizes it
-/// ([`crate::voxelize_microstrip`]), places each ladder element as
-/// [`LumpedRlcPort`](s) on the grid (series branch → one series-RLC; shunt
-/// branch → pure-L ‖ pure-C, see the [module docs](self)), drives the input
+/// ([`crate::voxelize_microstrip`]), places each ladder element as a
+/// **value-distributed full-width sheet** of [`LumpedRlcPort`]s across the
+/// signal-line width (series branch → one series-RLC sheet; shunt branch →
+/// pure-L ‖ pure-C sheets, see the [module docs](self)), drives the input
 /// port with a modulated-Gaussian source and matches the output port with a
 /// `Z0` resistor, time-steps the FDTD, and single-bin-DFTs the load voltage.
 /// A second, element-free *thru* solve normalizes the response, so the returned
@@ -277,6 +349,16 @@ fn run_board_solve(
         (i, j, k)
     };
 
+    // Transverse signal-line band `[j_lo, j_hi)` (width `N` cells) over which
+    // each lumped element is spread as a value-distributed full-width SHEET (so
+    // it loads the *whole* line admittance instead of a single ≈inert edge —
+    // ADR-0124). Read it from the top-metal PEC mask at the drive-port column:
+    // the contiguous copper run in `y` containing the port row IS the signal
+    // line. Falls back to the single port row if the mask is unavailable (so a
+    // mask-less grid still produces a valid, if narrow, placement).
+    let (j_lo, j_hi) = line_band_at(&model, model.port_cells[0]);
+    let n_sheet = (j_hi - j_lo).max(1);
+
     let z0 = ladder.z0_ohm;
 
     // --- 2. Drive (input port) + matched load (output port). ----------------
@@ -316,58 +398,67 @@ fn run_board_solve(
                 res.branch == LcBranch::Series
             );
 
+            // x-column of this resonator: the midpoint of its two footprint
+            // centres. The element is spread as a full-width SHEET across the
+            // signal-line rows `[j_lo, j_hi)` at this column, on the substrate
+            // edge `k_elem`. `N = n_sheet` parallel cells → per-cell values are
+            // scaled (below) so the sheet presents the intended element to the
+            // line (ADR-0124). Two-way (Phase 2.fdtd.6.2) on every cell: the
+            // lumped current feeds back into `E_z` so the L-C resonates and the
+            // scheme is unconditionally stable.
+            let cx = 0.5 * (l_pl.center_m.0 + c_pl.center_m.0);
+            let i_col = cell_for(cx, 0.0, k_elem).0;
+            let n = n_sheet as f64;
+
             match res.branch {
                 LcBranch::Series => {
-                    // One series R-L-C in the through arm, on the in-line gap
-                    // cell. Use the midpoint of the two footprint centres so the
-                    // single element sits in the middle of the broken line span.
-                    let cx = 0.5 * (l_pl.center_m.0 + c_pl.center_m.0);
-                    let cy = 0.5 * (l_pl.center_m.1 + c_pl.center_m.1);
-                    let cell = cell_for(cx, cy, k_elem);
-                    // Two-way (Phase 2.fdtd.6.2): the lumped current feeds back
-                    // into E_z so the L-C resonates and is unconditionally
-                    // stable — the one-way path leaves the inductor inert.
-                    elements.push(
-                        LumpedRlcPort::series_rlc(
-                            cell,
-                            SERIES_ESR_OHM,
-                            res.l_henry,
-                            res.c_farad,
-                            SourceWaveform::None,
-                        )
-                        .with_two_way(),
-                    );
+                    // Series R-L-C arm across the line width at the in-line gap
+                    // column. `N` parallel copies of the arm `Z` give `Z/N`, so
+                    // each cell carries `N·` the arm (`N·R, N·L, C/N`) → the
+                    // sheet presents `Z = R + jωL + 1/(jωC)`.
+                    for j in j_lo..j_hi {
+                        elements.push(
+                            LumpedRlcPort::series_rlc(
+                                (i_col, j, k_elem),
+                                n * SERIES_ESR_OHM,
+                                n * res.l_henry,
+                                res.c_farad / n,
+                                SourceWaveform::None,
+                            )
+                            .with_two_way(),
+                        );
+                    }
                 }
                 LcBranch::Shunt => {
-                    // Parallel L‖C from line to ground: two elements at the SAME
-                    // shunt cell — a pure inductor (c = ∞) and a pure capacitor
-                    // (l = 0). Their summed currents form the parallel admittance.
-                    let cx = 0.5 * (l_pl.center_m.0 + c_pl.center_m.0);
-                    let cy = 0.5 * (l_pl.center_m.1 + c_pl.center_m.1);
-                    let cell = cell_for(cx, cy, k_elem);
-                    // Two-way (Phase 2.fdtd.6.2) for both arms: a source-free
-                    // pure-L (c=∞) and pure-C (l=0) at the same shunt cell, whose
-                    // back-coupled currents sum into the parallel L‖C admittance.
-                    elements.push(
-                        LumpedRlcPort::series_rlc(
-                            cell,
-                            SERIES_ESR_OHM,
-                            res.l_henry,
-                            f64::INFINITY,
-                            SourceWaveform::None,
-                        )
-                        .with_two_way(),
-                    );
-                    elements.push(
-                        LumpedRlcPort::series_rlc(
-                            cell,
-                            SERIES_ESR_OHM,
-                            0.0,
-                            res.c_farad,
-                            SourceWaveform::None,
-                        )
-                        .with_two_way(),
-                    );
+                    // Parallel L‖C from line to ground, as TWO sheets across the
+                    // line width at the same column: a pure-inductor sheet
+                    // (c = ∞ shorts the cap; per cell `N·L` → N parallel → `L`)
+                    // in parallel with a pure-capacitor sheet (l = 0 removes the
+                    // inductor; per cell `C/N` → N parallel → `C`). Their
+                    // summed currents form the parallel admittance
+                    // `Y = jωC + 1/(jωL)` loading the whole line width.
+                    for j in j_lo..j_hi {
+                        elements.push(
+                            LumpedRlcPort::series_rlc(
+                                (i_col, j, k_elem),
+                                SERIES_ESR_OHM,
+                                n * res.l_henry,
+                                f64::INFINITY,
+                                SourceWaveform::None,
+                            )
+                            .with_two_way(),
+                        );
+                        elements.push(
+                            LumpedRlcPort::series_rlc(
+                                (i_col, j, k_elem),
+                                SERIES_ESR_OHM,
+                                0.0,
+                                res.c_farad / n,
+                                SourceWaveform::None,
+                            )
+                            .with_two_way(),
+                        );
+                    }
                 }
             }
         }
