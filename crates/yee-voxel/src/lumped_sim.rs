@@ -76,30 +76,51 @@
 //! drive/load resistors stay on the single-edge `pure_resistor` /
 //! [`LumpedRlcPort::correct_e`] path (a pure resistor reflects identically).
 //!
-//! # S21 extraction (thru-normalized)
+//! # CW per-frequency S21 extraction (thru-normalized, F2.3-d, ADR-0128)
 //!
-//! The single drive port (a modulated-Gaussian series EMF through a `Z0`
-//! resistor) launches a pulse down the signal line; the far port is a matched
-//! [`LumpedRlcPort::pure_resistor`]`(Z0)` load. The voltage `V = E_z · dz`
-//! sensed at the load cell is single-bin-DFT'd at each sweep frequency. To
-//! divide out the (frequency-dependent, coarse-grid-dependent) feed + line +
-//! port coupling, the **same** board is run a second time with the filter
-//! elements removed (a bare through line) and its load voltage `V_thru(f)`
-//! recorded; then
+//! The transmission is measured **one frequency at a time** with a CW
+//! steady-state drive — NOT a single broadband pulse. The earlier F2.3-c driver
+//! launched one modulated-Gaussian pulse and broadband-DFT'd the load voltage;
+//! ADR-0127 proved the aperture lumped port is correct (under CW the capacitor
+//! presents `1/(jωC)` and the shunt `L‖C` tank resonates), but a pulse + DFT
+//! measures an *unsettled transient* on a short standing-wave line, so the
+//! high-Q (Q≈10) tanks never reach steady state and no band-pass forms.
+//!
+//! So for each measured frequency `f`:
+//!
+//! 1. The drive port (a [`SourceWaveform::HannSine`] series EMF through a `Z0`
+//!    resistor) drives a pure CW sinusoid at `f`, **Hann-ramped** over the first
+//!    [`LumpedSimConfig::cw_ramp_cycles`] cycles to suppress the turn-on
+//!    transient; the far port is a matched [`LumpedRlcPort::pure_resistor`]`(Z0)`
+//!    load.
+//! 2. The solve runs [`LumpedSimConfig::cw_ramp_cycles`] +
+//!    [`LumpedSimConfig::cw_settle_cycles`] cycles so the highest-Q tank's
+//!    ring-up **and** the source→load line transit settle into a
+//!    single-frequency steady state.
+//! 3. The load voltage `V = E_z · dz` is single-bin-DFT'd at `f` over the final
+//!    [`LumpedSimConfig::cw_measure_cycles`] cycles (the **settled window only**,
+//!    not the whole record) → the steady-state amplitude `|V_ss(f)|`.
+//!
+//! To divide out the (frequency-dependent, coarse-grid-dependent) feed + line +
+//! port coupling and the line standing wave, the **same** board is run a second
+//! time with the filter elements removed (a bare through line); then
 //!
 //! ```text
-//! S21(f) = V_dut(f) / V_thru(f)
+//! S21(f) = |V_dut,ss(f)| / |V_thru,ss(f)|
 //! ```
 //!
 //! which is ≈ 1 (0 dB) in the passband and rolls off in the stopband — the
 //! transmission *relative to the matched thru*, exactly the quantity
 //! [`yee_filter::ladder_s21`] computes for the ideal circuit. This thru
 //! calibration is robust against the lumped-port `E_z` voltage convention and
-//! the residual feed/line coupling (see [`yee_fdtd::LumpedRlcPort`]).
+//! the residual feed/line coupling (see [`yee_fdtd::LumpedRlcPort`]). Each
+//! frequency costs two full FDTD solves (DUT + thru), so the frequency set
+//! ([`LumpedSimConfig::cw_freqs_hz`]) is deliberately small — the gate-check
+//! points plus a handful for the sweep shape, NOT a fine sweep.
 
 use std::f64::consts::PI;
 
-use yee_fdtd::{ApertureSpec, LumpedRlcPort, SourceWaveform, WalkingSkeletonSolver};
+use yee_fdtd::{ApertureSpec, LumpedRlcPort, SourceWaveform, WalkingSkeletonSolver, YeeGrid};
 use yee_filter::{BranchKind, Footprint, LcBranch, LumpedLadder, Placement, lumped_board};
 use yee_layout::Substrate;
 
@@ -115,11 +136,28 @@ pub const SERIES_ESR_OHM: f64 = 1.0e-3;
 /// Configuration for [`simulate_lumped_board`].
 ///
 /// The defaults target a ~2 GHz lumped band-pass filter on FR-4: a coarse but
-/// tractable cubic grid, a modulated-Gaussian drive centred in-band, enough
-/// time steps for the pulse to transit the board, and a frequency sweep that
-/// spans the passband and the stopband cross-check point. Heavy (multi-minute
-/// FDTD) → iterate in the bounded dev container (CLAUDE.md §10).
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// tractable cubic grid and a **CW per-frequency steady-state** drive (F2.3-d,
+/// ADR-0128) at the gate-check points plus a handful for the sweep shape. Heavy
+/// (multiple multi-minute FDTD solves) → iterate in the bounded dev container
+/// (CLAUDE.md §10).
+///
+/// # Why CW per frequency (F2.3-d, ADR-0128)
+///
+/// The earlier F2.3-c driver launched a *single* modulated-Gaussian pulse and
+/// broadband-DFT'd the load voltage. ADR-0127 proved the aperture lumped port is
+/// **correct** — under a CW drive the capacitor presents `1/(jωC)` and the shunt
+/// `L‖C` tank **resonates** — but a pulse + broadband DFT measures an *unsettled
+/// transient* on a short standing-wave line: the high-Q (Q≈10) tanks never reach
+/// the steady-state reactance the band-pass needs, so the response stays flat.
+///
+/// The fix is a CW measurement: at each measured frequency `f` drive a pure
+/// sinusoid (Hann-ramped over the first cycles to suppress the turn-on
+/// transient), run enough cycles for the highest-Q tank plus the source→load
+/// line transit to settle, then measure the **steady-state** load-voltage
+/// amplitude over the last few settled cycles (single-bin DFT over the settled
+/// window only). The same DUT/thru normalization divides out the line standing
+/// wave (see the [module docs](self#s21-extraction-thru-normalized)).
+#[derive(Debug, Clone, PartialEq)]
 pub struct LumpedSimConfig {
     /// Isotropic Yee cell size `dx = dy = dz`, metres.
     pub dx_m: f64,
@@ -132,52 +170,58 @@ pub struct LumpedSimConfig {
     /// SMD footprint the board is built with (forwarded to
     /// [`yee_filter::lumped_board`]).
     pub footprint: Footprint,
-    /// Total number of FDTD time steps per solve. Must be long enough for the
-    /// launched pulse to fully transit the board *and* for the lumped
-    /// capacitor's slow integrator tail to reach steady state — a band-pass
-    /// shaped by L‖C tanks needs the steady-state reactance, and ADR-0125
-    /// flagged that a single short pulse reads the cap as a near-short. The
-    /// linear-system DFT-of-pulse equals the transfer function only if the
-    /// record captures the full (slow) response, so the default is generous.
-    pub n_steps: usize,
-    /// Drive centre frequency `f0` (Hz) of the modulated-Gaussian pulse. Set
-    /// near the filter centre so the launched spectrum covers the passband.
-    pub drive_f0_hz: f64,
-    /// Fractional FWHM bandwidth of the modulated-Gaussian drive, as a fraction
-    /// of `drive_f0_hz` (`bw = drive_bw_frac · drive_f0_hz`). Wide enough to
-    /// cover the passband *and* the stopband cross-check point in one launch.
-    pub drive_bw_frac: f64,
-    /// Peak drive voltage (V) of the Gaussian-modulated pulse.
+    /// Peak drive voltage (V) of the CW sinusoid.
     pub drive_v0: f64,
-    /// Sweep lower frequency bound (Hz).
-    pub f_lo_hz: f64,
-    /// Sweep upper frequency bound (Hz).
-    pub f_hi_hz: f64,
-    /// Number of (linearly spaced) sweep points in `[f_lo_hz, f_hi_hz]`.
-    pub n_freq: usize,
+    /// Hann (raised-cosine) ramp length of the CW drive, in **carrier cycles**.
+    /// The first `cw_ramp_cycles` cycles ramp the amplitude from 0 to full to
+    /// suppress the turn-on transient; the source is a clean single tone
+    /// thereafter (matches the `cap_cw_001` diagnostic's ramp idiom).
+    pub cw_ramp_cycles: f64,
+    /// Settling time *after* the ramp, in **carrier cycles**, before the
+    /// steady-state measurement window opens. Must cover the highest-Q tank's
+    /// ring-up (Q≈10 ⇒ ~10–30 cycles) **plus** the source→load line transit, so
+    /// the measured amplitude is the true steady state rather than a transient.
+    pub cw_settle_cycles: f64,
+    /// Length of the steady-state measurement window, in **carrier cycles**.
+    /// The load voltage is single-bin-DFT'd at `f` over this settled window
+    /// only (a few clean cycles → one sharp single-tone bin).
+    pub cw_measure_cycles: f64,
+    /// The explicit set of CW measurement frequencies (Hz). Deliberately small
+    /// (the gate-check points + a handful for the sweep shape) because each
+    /// frequency costs two full FDTD solves (DUT + thru) — NOT a fine sweep.
+    pub cw_freqs_hz: Vec<f64>,
 }
 
 impl Default for LumpedSimConfig {
     /// Walking-skeleton defaults for a ~2 GHz lumped band-pass on FR-4. See the
-    /// per-field docs; container-validated to pass `fdtd_lumped_001` (ADR-0115).
+    /// per-field docs; container-validated to pass `fdtd_lumped_001` (ADR-0115,
+    /// F2.3-d CW drive ADR-0128). The default frequency set spans 1.6–2.6 GHz
+    /// and includes both gate-check points (2.0 GHz passband, 2.4 GHz stopband).
     fn default() -> Self {
         Self {
             dx_m: 0.4e-3,
             xy_margin_cells: 8,
             air_above_cells: 8,
             footprint: Footprint::Smd0603,
-            n_steps: 24_000,
-            drive_f0_hz: 2.0e9,
-            drive_bw_frac: 1.2,
             drive_v0: 1.0,
-            f_lo_hz: 1.0e9,
-            f_hi_hz: 3.0e9,
-            n_freq: 41,
+            cw_ramp_cycles: 12.0,
+            // The passband amplitude is settle-converged by ~60 cycles, but the
+            // high-Q stopband notch keeps deepening with more settling (the tank
+            // is still ringing up); 140 cycles measurably deepens the notch
+            // (2.4 GHz rejection 2.7 → 5.1 dB on the 0.4 mm grid). See ADR-0128.
+            cw_settle_cycles: 140.0,
+            cw_measure_cycles: 16.0,
+            cw_freqs_hz: vec![1.6e9, 1.8e9, 2.0e9, 2.2e9, 2.4e9, 2.6e9],
         }
     }
 }
 
 /// Single-bin DFT accumulator at one frequency: real/imag of `Σ x[n]·e^{-jωt}`.
+///
+/// Used to measure the **steady-state** load-voltage amplitude over the final
+/// settled cycles of a CW solve (the settled window only — NOT the whole
+/// record): `mag()` is the single-tone amplitude of `x[n]` at `ω` over the
+/// accumulated samples (F2.3-d, ADR-0128).
 #[derive(Clone, Copy)]
 struct Bin {
     omega: f64,
@@ -251,20 +295,23 @@ fn line_band_at(model: &MicrostripModel, port_cell: (usize, usize, usize)) -> (u
 /// **multi-cell aperture lumped port** ([`LumpedRlcPort::aperture`]) over the
 /// `(y, z)` port-face aperture (trace width × substrate height) at the
 /// element's x-column (series branch → one series-RLC aperture; shunt branch →
-/// pure-L ‖ pure-C apertures, see the [module docs](self)), drives the input
-/// port with a modulated-Gaussian source and matches the output port with a
-/// `Z0` resistor, time-steps the FDTD, and single-bin-DFTs the load voltage.
-/// A second, element-free *thru* solve normalizes the response, so the returned
-/// `|S21|` is the transmission relative to the matched thru (≈ 0 dB in-band).
+/// pure-L ‖ pure-C apertures, see the [module docs](self)), then measures the
+/// transmission **one frequency at a time** with a CW steady-state drive (F2.3-d,
+/// ADR-0128): a Hann-ramped CW sinusoid at the input port through a `Z0` resistor
+/// and a matched `Z0` load at the output, run until the high-Q tanks + line
+/// transit settle, with the load voltage single-bin-DFT'd over the settled window
+/// only. A second, element-free *thru* solve per frequency normalizes the
+/// response, so the returned `|S21|` is the steady-state transmission relative to
+/// the matched thru (≈ 0 dB in-band, rolling off in the stopband).
 ///
-/// Returns `(freq_hz, |S21|)` for each of [`LumpedSimConfig::n_freq`] linearly
-/// spaced points in `[f_lo_hz, f_hi_hz]`.
+/// Returns `(freq_hz, |S21|)` for each frequency in
+/// [`LumpedSimConfig::cw_freqs_hz`], in the order given.
 ///
 /// # Panics
 ///
 /// Panics if `ladder.resonators` is empty, if the board does not voxelize to at
 /// least two ports (a drive + a load), or if [`LumpedSimConfig`] has a
-/// non-positive `dx_m` / `n_freq`.
+/// non-positive `dx_m` or an empty `cw_freqs_hz`.
 pub fn simulate_lumped_board(
     ladder: &LumpedLadder,
     substrate: &Substrate,
@@ -279,52 +326,98 @@ pub fn simulate_lumped_board(
         "simulate_lumped_board: dx_m must be positive and finite"
     );
     assert!(
-        cfg.n_freq >= 1,
-        "simulate_lumped_board: n_freq must be >= 1"
+        !cfg.cw_freqs_hz.is_empty(),
+        "simulate_lumped_board: cw_freqs_hz must be non-empty"
     );
 
-    // Sweep frequencies (linear).
-    let freqs: Vec<f64> = if cfg.n_freq == 1 {
-        vec![0.5 * (cfg.f_lo_hz + cfg.f_hi_hz)]
-    } else {
-        (0..cfg.n_freq)
-            .map(|i| {
-                cfg.f_lo_hz + (cfg.f_hi_hz - cfg.f_lo_hz) * (i as f64) / (cfg.n_freq as f64 - 1.0)
-            })
-            .collect()
-    };
+    let freqs = &cfg.cw_freqs_hz;
 
     // DUT: filter elements present. THRU: elements removed (bare line) for the
-    // normalization. Both run the identical board geometry / grid / drive.
-    let dut = run_board_solve(ladder, substrate, cfg, &freqs, true);
-    let thru = run_board_solve(ladder, substrate, cfg, &freqs, false);
+    // normalization. Both run the identical board geometry / grid / CW drive at
+    // each measured frequency. Each entry is the steady-state load-voltage
+    // amplitude `|V_ss(f)|` measured over the settled window (F2.3-d, ADR-0128).
+    let dut = run_board_solve(ladder, substrate, cfg, freqs, true);
+    let thru = run_board_solve(ladder, substrate, cfg, freqs, false);
 
     freqs
         .iter()
         .enumerate()
         .map(|(fi, &f)| {
-            let v_dut = dut[fi].mag();
-            let v_thru = thru[fi].mag();
-            // S21 = transmission relative to the matched thru. A vanishing thru
-            // (outside the launched spectrum) maps to 0 transmission rather than
-            // a divide-by-zero blow-up.
+            let v_dut = dut[fi];
+            let v_thru = thru[fi];
+            // S21 = steady-state transmission relative to the matched thru. A
+            // vanishing thru maps to 0 transmission rather than a
+            // divide-by-zero blow-up.
             let s21 = if v_thru > 0.0 { v_dut / v_thru } else { 0.0 };
             (f, s21)
         })
         .collect()
 }
 
-/// One FDTD solve of the board (DUT if `place_elements`, else a bare thru line)
-/// returning the single-bin DFT of the *load* port voltage at each sweep
-/// frequency. Factored out so the DUT and thru runs share identical geometry,
-/// grid, drive, and step body.
+/// The lumped elements for one resonator, captured as reusable aperture-port
+/// build recipes (fixed geometry / values across all CW frequencies). One
+/// series branch → one [`Self::Series`] aperture; one shunt branch → a
+/// pure-inductor + pure-capacitor [`Self::Shunt`] aperture pair over the same
+/// face (the parallel `L‖C`). Materialized into fresh passive
+/// [`LumpedRlcPort`]s for every per-frequency CW solve (so each solve starts
+/// from a clean port state).
+enum ElementRecipe {
+    /// Series R-L-C arm: `(spec, l, c)`.
+    Series(ApertureSpec, f64, f64),
+    /// Shunt parallel `L‖C`: `(spec, l, c)` → a pure-L aperture (`c = ∞`) ‖ a
+    /// pure-C aperture (`l = 0`) over the same face.
+    Shunt(ApertureSpec, f64, f64),
+}
+
+impl ElementRecipe {
+    /// Materialize this recipe into fresh passive aperture ports.
+    fn build(&self) -> Vec<LumpedRlcPort> {
+        match self {
+            ElementRecipe::Series(spec, l, c) => vec![LumpedRlcPort::aperture(
+                spec.clone(),
+                SERIES_ESR_OHM,
+                *l,
+                *c,
+                SourceWaveform::None,
+            )],
+            ElementRecipe::Shunt(spec, l, c) => vec![
+                LumpedRlcPort::aperture(
+                    spec.clone(),
+                    SERIES_ESR_OHM,
+                    *l,
+                    f64::INFINITY,
+                    SourceWaveform::None,
+                ),
+                LumpedRlcPort::aperture(
+                    spec.clone(),
+                    SERIES_ESR_OHM,
+                    0.0,
+                    *c,
+                    SourceWaveform::None,
+                ),
+            ],
+        }
+    }
+}
+
+/// CW per-frequency steady-state solve of the board (DUT if `place_elements`,
+/// else a bare thru line), returning the **steady-state load-voltage amplitude**
+/// `|V_ss(f)|` at each measured frequency (F2.3-d, ADR-0128).
+///
+/// The board is voxelized once; then for every frequency `f` a fresh solver
+/// (cloned grid, zeroed fields) is driven with a Hann-ramped CW sinusoid at `f`,
+/// run for `ramp + settle + measure` cycles, and the load voltage is single-bin
+/// DFT'd over the **settled measurement window only** (the last
+/// `cw_measure_cycles` cycles) — so the returned amplitude is the steady-state
+/// response, not an unsettled transient. Factored out so the DUT and thru runs
+/// share identical geometry, grid, drive, and step body.
 fn run_board_solve(
     ladder: &LumpedLadder,
     substrate: &Substrate,
     cfg: &LumpedSimConfig,
     freqs: &[f64],
     place_elements: bool,
-) -> Vec<Bin> {
+) -> Vec<f64> {
     // --- 1. Board + voxelize. ----------------------------------------------
     let board = lumped_board(ladder, substrate, cfg.footprint);
     let opts = VoxelOptions {
@@ -339,7 +432,6 @@ fn run_board_solve(
         model.port_cells.len()
     );
     let dx = model.dx_m;
-    let dt = model.grid.dt;
     // The drive / load ports sit at the trace plane `k_top = n_sub` (ground at
     // `k = 0`, dielectric `E_z` edges `k = 0 .. n_sub`). The aperture lumped
     // ports span the full substrate height — the `E_z` edges `k = 0 .. k_top`
@@ -395,24 +487,10 @@ fn run_board_solve(
     let drive_cell = model.port_cells[0];
     let load_cell = *model.port_cells.last().unwrap();
 
-    let mut solver = WalkingSkeletonSolver::new(model.grid);
-
-    // Modulated-Gaussian drive centred in-band. Centre the pulse a few time
-    // constants in so its t = 0 tail is negligible.
-    let bw = cfg.drive_bw_frac * cfg.drive_f0_hz;
-    let t0_steps =
-        ((3.5 * (2.0_f64 * std::f64::consts::LN_2).sqrt() / (PI * bw)) / dt).ceil() as usize;
-    let wave = SourceWaveform::GaussianPulse {
-        v0: cfg.drive_v0,
-        f0: cfg.drive_f0_hz,
-        bw,
-        t0_steps,
-    };
-    let mut drive_port = LumpedRlcPort::pure_resistor(drive_cell, z0, wave);
-    let mut load_port = LumpedRlcPort::pure_resistor(load_cell, z0, SourceWaveform::None);
-
-    // --- 3. Per-branch lumped elements (DUT only). --------------------------
-    let mut elements: Vec<LumpedRlcPort> = Vec::new();
+    // --- 3. Per-branch lumped-element recipes (DUT only). -------------------
+    // Captured once (fixed geometry/values across frequencies) and materialized
+    // into fresh passive aperture ports for each per-frequency CW solve.
+    let mut recipes: Vec<ElementRecipe> = Vec::new();
     if place_elements {
         // `board.placements` is `L1, C1, L2, C2, …` — two footprints per
         // resonator (the inductor then the capacitor), in ladder order. The
@@ -446,52 +524,96 @@ fn run_board_solve(
             };
 
             match res.branch {
+                // Series R-L-C arm in the through path at the in-line gap column
+                // — one aperture port carrying `Z = R + jωL + 1/(jωC)` over the
+                // whole port face.
                 LcBranch::Series => {
-                    // Series R-L-C arm in the through path at the in-line gap
-                    // column — one aperture port carrying the aggregate
-                    // `Z = R + jωL + 1/(jωC)` over the whole port face.
-                    elements.push(LumpedRlcPort::aperture(
-                        spec,
-                        SERIES_ESR_OHM,
-                        res.l_henry,
-                        res.c_farad,
-                        SourceWaveform::None,
-                    ));
+                    recipes.push(ElementRecipe::Series(spec, res.l_henry, res.c_farad))
                 }
+                // Parallel L‖C from line to ground (built as a pure-L ‖ pure-C
+                // aperture pair over the same face — see [`ElementRecipe`]). The
+                // dominant shunt tanks set the band-pass selectivity.
                 LcBranch::Shunt => {
-                    // Parallel L‖C from line to ground, as TWO aperture ports
-                    // over the SAME port face: a pure-inductor aperture
-                    // (c = ∞ shorts the cap) in parallel with a pure-capacitor
-                    // aperture (l = 0 removes the inductor). Their summed
-                    // currents form the parallel admittance
-                    // `Y = jωC + 1/(jωL)` loading the line.
-                    elements.push(LumpedRlcPort::aperture(
-                        spec.clone(),
-                        SERIES_ESR_OHM,
-                        res.l_henry,
-                        f64::INFINITY,
-                        SourceWaveform::None,
-                    ));
-                    elements.push(LumpedRlcPort::aperture(
-                        spec,
-                        SERIES_ESR_OHM,
-                        0.0,
-                        res.c_farad,
-                        SourceWaveform::None,
-                    ));
+                    recipes.push(ElementRecipe::Shunt(spec, res.l_henry, res.c_farad))
                 }
             }
         }
     }
 
-    // Sense the load-port voltage `V = E_z · dz`; DFT at every sweep frequency.
-    let mut bins: Vec<Bin> = freqs.iter().map(|&f| Bin::new(2.0 * PI * f)).collect();
+    // --- 4. CW per-frequency steady-state loop (F2.3-d, ADR-0128). ----------
+    // For each measured frequency, drive a Hann-ramped CW sinusoid, let the
+    // high-Q tanks + the line transit settle, then single-bin DFT the load
+    // voltage over the settled measurement window ONLY → the steady-state
+    // amplitude `|V_ss(f)|`.
+    freqs
+        .iter()
+        .map(|&f| {
+            cw_steady_state_amplitude(
+                model.grid.clone(),
+                cfg,
+                f,
+                z0,
+                drive_cell,
+                load_cell,
+                &recipes,
+            )
+        })
+        .collect()
+}
 
-    // --- 4. Step loop. Custom body mirroring `run_line_eeff`: H + boundary,
-    //        E + boundary, then the drive/load single-edge `correct_e` and the
-    //        filter elements' multi-cell `correct_e_aperture`, then advance the
-    //        clock, then record. ---------------------------------------------
-    for n in 0..cfg.n_steps {
+/// Run one CW steady-state FDTD solve at frequency `f` on a fresh `grid` (zeroed
+/// fields) and return the steady-state load-voltage amplitude `|V_ss(f)|`.
+///
+/// Mirrors the `cap_cw_001` CW idiom: a Hann-ramped sinusoidal series EMF at the
+/// drive port suppresses the turn-on transient; after `cw_ramp_cycles +
+/// cw_settle_cycles` the fields reach a single-frequency steady state (the
+/// highest-Q tank ring-up + the source→load line transit); the load voltage is
+/// single-bin DFT'd over the final `cw_measure_cycles` (the settled window) into
+/// the steady-state amplitude. The step body matches `run_line_eeff`: H +
+/// boundary, E + boundary, the drive/load single-edge `correct_e`, the filter
+/// elements' multi-cell `correct_e_aperture`, then advance the clock and record.
+#[allow(clippy::too_many_arguments)]
+fn cw_steady_state_amplitude(
+    grid: YeeGrid,
+    cfg: &LumpedSimConfig,
+    f: f64,
+    z0: f64,
+    drive_cell: (usize, usize, usize),
+    load_cell: (usize, usize, usize),
+    recipes: &[ElementRecipe],
+) -> f64 {
+    let dt = grid.dt;
+    let mut solver = WalkingSkeletonSolver::new(grid);
+
+    // Cycle counts → step counts at THIS frequency.
+    let steps_per_cycle = (1.0 / (f * dt)).round().max(1.0) as usize;
+    let ramp_steps = (cfg.cw_ramp_cycles * steps_per_cycle as f64).round() as usize;
+    let settle_steps = (cfg.cw_settle_cycles * steps_per_cycle as f64).round() as usize;
+    let measure_steps = (cfg.cw_measure_cycles * steps_per_cycle as f64)
+        .round()
+        .max(1.0) as usize;
+    // The steady-state window opens after the ramp + settle and runs to the end.
+    let measure_start = ramp_steps + settle_steps;
+    let n_steps = measure_start + measure_steps;
+
+    // Hann-ramped CW sinusoid at `f` driving the input port through `Z0`; matched
+    // `Z0` load at the output port.
+    let wave = SourceWaveform::HannSine {
+        v0: cfg.drive_v0,
+        frequency: f,
+        ramp_steps,
+    };
+    let mut drive_port = LumpedRlcPort::pure_resistor(drive_cell, z0, wave);
+    let mut load_port = LumpedRlcPort::pure_resistor(load_cell, z0, SourceWaveform::None);
+
+    // Fresh passive aperture ports for this solve.
+    let mut elements: Vec<LumpedRlcPort> = recipes.iter().flat_map(ElementRecipe::build).collect();
+
+    // Single-bin DFT of the load voltage, accumulated over the SETTLED window
+    // only (not the whole record) → the steady-state single-tone amplitude.
+    let mut bin = Bin::new(2.0 * PI * f);
+
+    for n in 0..n_steps {
         solver.update_h_only();
         solver.apply_cpml_h();
 
@@ -506,13 +628,13 @@ fn run_board_solve(
 
         solver.advance_clock();
 
-        let grid = solver.grid();
-        let v_load = grid.ez[load_cell] * grid.dz;
-        let t = n as f64 * dt;
-        for b in bins.iter_mut() {
-            b.accumulate(v_load, t);
+        if n >= measure_start {
+            let grid = solver.grid();
+            let v_load = grid.ez[load_cell] * grid.dz;
+            let t = n as f64 * dt;
+            bin.accumulate(v_load, t);
         }
     }
 
-    bins
+    bin.mag()
 }

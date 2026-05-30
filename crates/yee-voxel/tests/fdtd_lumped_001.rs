@@ -115,15 +115,17 @@ fn fdtd_lumped_001_matches_analytic_bandpass_shape() {
     // ------------------------------------------------------------------
     // FDTD EM simulation of the placed board (DUT + thru normalization).
     // ------------------------------------------------------------------
+    // CW per-frequency steady-state drive (F2.3-d, ADR-0128): a small frequency
+    // set spanning the passband and stopband — the gate-check points (2.0 GHz
+    // passband, 2.4 GHz stopband) plus a handful for the sweep shape. Each
+    // frequency costs two full FDTD solves (DUT + thru), so this is NOT a fine
+    // sweep.
     let cfg = LumpedSimConfig {
-        drive_f0_hz: F0_HZ,
-        f_lo_hz: 1.4e9,
-        f_hi_hz: 2.8e9,
-        n_freq: 29,
+        cw_freqs_hz: vec![1.6e9, 1.8e9, F0_HZ, 2.2e9, F_STOP_HZ, 2.6e9],
         ..LumpedSimConfig::default()
     };
     let sweep = simulate_lumped_board(&ladder, &substrate, &cfg);
-    assert_eq!(sweep.len(), cfg.n_freq);
+    assert_eq!(sweep.len(), cfg.cw_freqs_hz.len());
 
     let fdtd_pass = s21_at(&sweep, F0_HZ);
     let fdtd_stop = s21_at(&sweep, F_STOP_HZ);
