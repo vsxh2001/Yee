@@ -35,10 +35,9 @@
 //! they pass at full strength. This is documented, not a weakening.
 
 use yee_filter::{
-    Approximation, FilterSpec, LcBranch, Response, SpecMask, ladder_s21, synthesize,
+    Approximation, FilterSpec, LcBranch, Response, SpecMask, mask_verdict, synthesize,
     synthesize_lumped,
 };
-use yee_synth::lowpass_to_bandpass;
 
 /// Realization margin on the in-band ripple bound, dB. Absorbs the
 /// arithmetic-vs-geometric band-edge mismatch of the narrow-band LC transform
@@ -124,51 +123,34 @@ fn lumped_001() {
     let fbw = spec.fbw;
     let freqs = linspace(f0 * (1.0 - 3.0 * fbw), f0 * (1.0 + 3.0 * fbw), 801);
 
-    // Same verdict logic as yee-cli/src/filter.rs / check_mask: grade in-band
-    // (|Ω| ≤ 1) ripple + return loss from the lossless |S11|² = 1 − |S21|².
-    let mut min_il = f64::INFINITY;
-    let mut max_il = f64::NEG_INFINITY;
-    let mut worst_rl = f64::INFINITY;
-    let mut saw_passband = false;
-    for &f in &freqs {
-        let omega = lowpass_to_bandpass(f, f0, fbw);
-        if omega.abs() > 1.0 {
-            continue; // out of band; graded by the stopband point instead
-        }
-        saw_passband = true;
-        let s21_mag = ladder_s21(&ladder, f).norm();
-        let s11_sq = (1.0 - s21_mag * s21_mag).max(0.0);
-        let il_db = -20.0 * s21_mag.max(1e-300).log10();
-        let rl_db = if s11_sq <= 0.0 {
-            f64::INFINITY
-        } else {
-            -10.0 * s11_sq.log10()
-        };
-        min_il = min_il.min(il_db);
-        max_il = max_il.max(il_db);
-        worst_rl = worst_rl.min(rl_db);
-    }
-    assert!(saw_passband, "no swept frequency fell in the passband");
-
-    let ripple = (max_il - min_il).max(0.0);
+    // Shared verdict logic (the F2.4 `mask_verdict`, mirroring
+    // yee-cli/src/filter.rs / check_mask) on the *realized* ladder response.
+    // The `REALIZATION_TOL_DB` slack on the ripple bound absorbs the
+    // arithmetic-vs-geometric band-edge mismatch of the narrow-band LC transform
+    // (see the module docs); the return-loss and stopband checks carry no slack.
+    let v = mask_verdict(&ladder, &spec.mask, f0, fbw, &freqs, REALIZATION_TOL_DB);
+    assert!(v.saw_passband, "no swept frequency fell in the passband");
     assert!(
-        ripple <= spec.mask.passband_ripple_db + REALIZATION_TOL_DB,
-        "in-band ripple {ripple:.6} dB exceeds spec {:.4} dB + realization tol {REALIZATION_TOL_DB:.0e} dB",
+        v.worst_passband_ripple_db <= spec.mask.passband_ripple_db + REALIZATION_TOL_DB,
+        "in-band ripple {:.6} dB exceeds spec {:.4} dB + realization tol {REALIZATION_TOL_DB:.0e} dB",
+        v.worst_passband_ripple_db,
         spec.mask.passband_ripple_db
     );
     assert!(
-        worst_rl + 1e-9 >= spec.mask.return_loss_db,
-        "in-band return loss {worst_rl:.4} dB below spec {:.4} dB",
+        v.worst_return_loss_db + 1e-9 >= spec.mask.return_loss_db,
+        "in-band return loss {:.4} dB below spec {:.4} dB",
+        v.worst_return_loss_db,
         spec.mask.return_loss_db
     );
-
-    // Stopband points: rejection (insertion loss) at each mask frequency.
-    for &(f_hz, required_db) in &spec.mask.stopband {
-        let s21_mag = ladder_s21(&ladder, f_hz).norm();
-        let rejection_db = -20.0 * s21_mag.max(1e-300).log10();
-        assert!(
-            rejection_db + 1e-9 >= required_db,
-            "stopband {f_hz:.3e} Hz rejection {rejection_db:.4} dB below required {required_db:.4} dB"
-        );
-    }
+    assert!(
+        v.worst_stopband_rej_db + 1e-9 >= 40.0,
+        "worst stopband rejection {:.4} dB below required 40 dB",
+        v.worst_stopband_rej_db
+    );
+    // With the realization slack applied, the realized ladder meets the mask.
+    assert!(
+        v.pass,
+        "realized ladder failed the spec mask: ripple={:.6} RL={:.4} rej={:.4}",
+        v.worst_passband_ripple_db, v.worst_return_loss_db, v.worst_stopband_rej_db
+    );
 }

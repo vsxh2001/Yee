@@ -56,11 +56,19 @@ pub use dimension::{
 /// prototype g-values → ideal series/shunt LC resonators for a band-pass
 /// filter.
 pub mod lumped;
-pub use lumped::{LcBranch, LcResonator, LumpedError, LumpedLadder, synthesize_lumped};
+pub use lumped::{
+    LcBranch, LcResonator, LumpedError, LumpedLadder, MaskVerdict, mask_verdict, synthesize_lumped,
+};
 // `ladder_s21` is `#[doc(hidden)] pub`: the realized-response ABCD helper, kept
 // out of the documented API surface but reachable by the `lumped_001` gate.
 #[doc(hidden)]
 pub use lumped::ladder_s21;
+
+/// Monte-Carlo tolerance / yield analysis (Filter Phase F2.4): snap each L/C to
+/// an E-series value, perturb within tolerance over many seeded trials, and
+/// report the fraction of realized ladders that meet the spec mask.
+pub mod tolerance;
+pub use tolerance::{YieldResult, monte_carlo_yield};
 
 /// E-series component selection + bill of materials (Filter Phase F2.1): ideal
 /// LC ladder values → nearest IEC 60063 standard parts + a grouped [`Bom`].
