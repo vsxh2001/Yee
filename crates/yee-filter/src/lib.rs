@@ -52,6 +52,16 @@ pub use dimension::{
     dimension_edge_coupled_layout, dimension_hairpin, dimension_hairpin_layout,
 };
 
+/// Closed-form lumped-element LC ladder synthesis (Filter Phase F2.0):
+/// prototype g-values → ideal series/shunt LC resonators for a band-pass
+/// filter.
+pub mod lumped;
+pub use lumped::{LcBranch, LcResonator, LumpedError, LumpedLadder, synthesize_lumped};
+// `ladder_s21` is `#[doc(hidden)] pub`: the realized-response ABCD helper, kept
+// out of the documented API surface but reachable by the `lumped_001` gate.
+#[doc(hidden)]
+pub use lumped::ladder_s21;
+
 pub use yee_synth::Approximation;
 use yee_synth::{Prototype, coupling_design, lowpass_to_bandpass, min_order, prototype};
 
