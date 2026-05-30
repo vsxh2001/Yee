@@ -1,14 +1,17 @@
 //! # yee-export
 //!
 //! Manufacturing-file emitters for the Yee filter-design studio (Filter Phase
-//! F1.4). This first brick is a **single-copper-layer RS-274X Gerber** emitter:
-//! it turns a [`yee_layout::Layout`]'s top-metal polygons into filled
-//! [Gerber][ucamco] regions (`G36*`/`G37*`).
+//! F1.4). Two RS-274X [Gerber][ucamco] emitters are provided:
+//!
+//! - [`layout_to_gerber`] — single-copper-layer: a [`yee_layout::Layout`]'s
+//!   top-metal polygons as filled regions (`G36*`/`G37*`) — F1.4.0.
+//! - [`layout_to_gerber_outline`] — board-outline (Edge.Cuts): a single
+//!   **stroked** rectangular contour around the layout `bbox`, expanded by a
+//!   margin — F1.4.1a.
 //!
 //! Pure text, no EM, no native dependency — **WASM-safe** so the studio can
-//! export client-side (ADR-0089). The walking skeleton is deliberately minimal:
-//! one copper layer, one aperture, no drill / board-outline / soldermask /
-//! multi-layer (those are F1.4.1+).
+//! export client-side (ADR-0089). Drill, soldermask, silkscreen, and
+//! multi-layer stack-ups are F1.4.1b+.
 //!
 //! ## Coordinate model
 //!
@@ -86,8 +89,20 @@ fn mm_to_fixed46(mm: f64) -> i64 {
 /// word, doing the metres → mm → 4.6 fixed-point conversion (see
 /// [`mm_to_fixed46`]).
 fn coord_word(p: &Point2) -> String {
-    let ix = mm_to_fixed46(p.x * 1.0e3);
-    let iy = mm_to_fixed46(p.y * 1.0e3);
+    coord_word_xy(p.x, p.y)
+}
+
+/// Format a raw `(x_m, y_m)` coordinate pair (metres) as a Gerber
+/// `X<int>Y<int>` word, doing the metres → mm → 4.6 fixed-point conversion
+/// (see [`mm_to_fixed46`]).
+///
+/// This is the `Point2`-free variant used by the board-outline emitter, whose
+/// corners are computed from `bbox ± margin` rather than read from existing
+/// vertices. [`coord_word`] delegates to it so both paths share one
+/// conversion.
+fn coord_word_xy(x_m: f64, y_m: f64) -> String {
+    let ix = mm_to_fixed46(x_m * 1.0e3);
+    let iy = mm_to_fixed46(y_m * 1.0e3);
     format!("X{ix}Y{iy}")
 }
 
@@ -147,6 +162,102 @@ pub fn layout_to_gerber(layout: &Layout, opts: &GerberOptions) -> String {
         }
         s.push_str("G37*\n");
     }
+
+    // --- Footer -------------------------------------------------------------
+    s.push_str("M02*\n");
+
+    s
+}
+
+/// Options controlling the board-outline (Edge.Cuts) Gerber emission.
+///
+/// The outline is a single rectangular contour around the layout bounding box
+/// expanded by [`margin_mm`](Self::margin_mm) on each side. The
+/// [`layer_name`](Self::layer_name) is written as a `G04` comment.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutlineOptions {
+    /// Human-readable outline-layer name, emitted as a `G04 <layer_name>*`
+    /// comment. Defaults to `"Edge.Cuts"` (KiCad board-profile convention).
+    pub layer_name: String,
+    /// Margin added on *each* side of the layout bounding box, in
+    /// millimetres. The emitted rectangle therefore spans `bbox` grown by this
+    /// amount in `±x` and `±y`. Defaults to `1.0` mm.
+    pub margin_mm: f64,
+}
+
+impl Default for OutlineOptions {
+    fn default() -> Self {
+        Self {
+            layer_name: "Edge.Cuts".into(),
+            margin_mm: 1.0,
+        }
+    }
+}
+
+/// Emit a board-outline (Edge.Cuts) **RS-274X Gerber** for a [`Layout`]: a
+/// single closed rectangular contour around the layout `bbox`, expanded by
+/// `opts.margin_mm` on each side, **stroked** with a thin aperture (it is a
+/// cut path / profile, *not* a region fill — there is no `G36*`/`G37*`).
+///
+/// Structure (see the module docs for the coordinate model):
+///
+/// - header `%FSLAX46Y46*%` then `%MOMM*%`, a `G04 <layer_name>*` comment, one
+///   thin circular aperture `%ADD10C,0.100*%` (0.1 mm stroke) and `D10*`;
+/// - the four rectangle corners derived from `layout.bbox` expanded by
+///   `margin_m = margin_mm * 1e-3` metres on each side, in CCW order starting
+///   from the lower-left:
+///   `(min.x−m, min.y−m)`, `(max.x+m, min.y−m)`, `(max.x+m, max.y+m)`,
+///   `(min.x−m, max.y+m)`;
+/// - a `D02*` pen-up move to corner 0, then `D01*` pen-down draws to corners
+///   1, 2, 3, and a final `D01*` draw back to corner 0 (explicit close);
+/// - footer `M02*`.
+///
+/// Coordinates are converted from metres to millimetre 4.6 fixed-point with
+/// the same conversion as [`layout_to_gerber`] (see [`mm_to_fixed46`]).
+///
+/// The returned `String` is a complete, standalone Gerber file.
+pub fn layout_to_gerber_outline(layout: &Layout, opts: &OutlineOptions) -> String {
+    let mut s = String::new();
+
+    // --- Header -------------------------------------------------------------
+    // Format: absolute (A), leading-zero omission (L), X/Y = 4 integer + 6
+    // decimal digits.
+    s.push_str("%FSLAX46Y46*%\n");
+    // Units = millimetres.
+    s.push_str("%MOMM*%\n");
+    // Layer/function note (informational comment).
+    s.push_str(&format!("G04 {}*\n", opts.layer_name));
+    // One thin circular aperture, 0.100 mm — this is a stroked cut path, so
+    // the aperture *width* is meaningful (it is the routing tool's trace).
+    s.push_str("%ADD10C,0.100*%\n");
+    s.push_str("D10*\n");
+
+    // --- Outline contour ----------------------------------------------------
+    // Rectangle corners = bbox expanded by `margin_m` on each side, CCW from
+    // the lower-left corner.
+    let m = opts.margin_mm * 1.0e-3;
+    let (min, max) = (layout.bbox.min, layout.bbox.max);
+    let corners = [
+        (min.x - m, min.y - m),
+        (max.x + m, min.y - m),
+        (max.x + m, max.y + m),
+        (min.x - m, max.y + m),
+    ];
+
+    // Move (pen up) to corner 0.
+    s.push_str(&format!(
+        "{}D02*\n",
+        coord_word_xy(corners[0].0, corners[0].1)
+    ));
+    // Draw (pen down) to corners 1, 2, 3.
+    for &(x, y) in &corners[1..] {
+        s.push_str(&format!("{}D01*\n", coord_word_xy(x, y)));
+    }
+    // Close the contour back to corner 0.
+    s.push_str(&format!(
+        "{}D01*\n",
+        coord_word_xy(corners[0].0, corners[0].1)
+    ));
 
     // --- Footer -------------------------------------------------------------
     s.push_str("M02*\n");
