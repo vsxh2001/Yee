@@ -121,6 +121,50 @@
 //! - Piket-May, Taflove, Baron (1994), "FDTD modeling of digital signal
 //!   propagation in 3-D circuits with passive and active loads",
 //!   *IEEE Trans. Microw. Theory Tech.* 42(8): 1514-1523.
+//!
+//! # Multi-cell APERTURE lumped port (Phase 2.fdtd.6.9, ADR-0125)
+//!
+//! The single-cell two-way port above references **one Yee cell** for both its
+//! terminal voltage (`V = E_z·dz`, a single edge) and its field back-action
+//! (`(dt/(ε₀·dA))·I` with the bare `dA = dx²`). ADR-0124's dx-sweep showed this
+//! makes a sharp L‖C resonance impossible: as the grid refines the inductor's
+//! two-way back-action collapses as **O(dx²)** while the capacitor freezes at a
+//! fixed per-cell short — the realized reactance is dx-dependent and the tank
+//! degenerates to a transparent line.
+//!
+//! The [`LumpedRlcPort::aperture`] constructor (Phase 2.fdtd.6.9) fixes this by
+//! referencing the field coupling to the **modal port face** of physical area
+//! `A = w·h` (trace width × substrate height), NOT one Yee cell:
+//!
+//! - **Modal branch voltage** — `V = ∫E_z·dz` over the full substrate height
+//!   (all `n_sub` `E_z` edges in a column), averaged over the `w`-direction
+//!   columns, instead of one `E_z·dz` edge:
+//!   ```text
+//!   V_T = (1 / N_col) · Σ_columns ( Σ_height E_z(i,j,k)·dz )
+//!   ```
+//! - **Aperture-area back-action** — one *aggregate* branch current `I` threads
+//!   the whole aperture as a sheet displacement current `J_z = I / A`; every
+//!   `E_z` cell in the aperture is corrected with the **physical** area `A`:
+//!   ```text
+//!   E_z^{n+1}(cell) = E_z^{n+1,*}(cell) − (dt/(ε₀·A)) · I        ∀ cell ∈ aperture
+//!   ```
+//!   Because `A = w·h` is a fixed physical area (not `dx²`) and `V_T` integrates
+//!   the full height (not one edge), the realized `Z_L` is **dx-independent** —
+//!   the `O(dx²)` inductor collapse and the dx-frozen capacitor short are both
+//!   removed (the root fix, ADR-0125 item 1).
+//! - **(y,z) aperture distribution** — the lumped value is the *aggregate*
+//!   `R`/`L`/`C` of the element (one branch over the whole face), not the
+//!   ad-hoc `C/N`, `N·L` per-cell tiling of ADR-0124. The aperture
+//!   normalization (modal `V_T`, sheet `J_z = I/A`) holds the aggregate `Z_L`
+//!   fixed independent of how many cells span the face.
+//!
+//! The two-way coupled solve is the same Piket-May / Taflove–Hagness
+//! semi-implicit scheme as the single-cell path, but with `dz → h`
+//! (full substrate height for the modal voltage) and `dA → A` (aperture area
+//! for the back-action). `K + β > 0` is preserved (unconditional stability),
+//! and the **pure-R limit reduces to the validated resistor exactly** per cell
+//! — see [`LumpedRlcPort::correct_e_aperture`]. The single-edge
+//! `series_rlc` / `pure_resistor` / `with_two_way` path is untouched.
 
 use std::f64::consts::{PI, TAU};
 
@@ -212,11 +256,46 @@ impl SourceWaveform {
     }
 }
 
+/// Modal port-face aperture for the multi-cell aperture lumped port
+/// (Phase 2.fdtd.6.9, ADR-0125).
+///
+/// Describes the `(y, z)` port face the lumped element bridges: the set of
+/// `E_z` cells spanning the aperture, the physical aperture area `A = w·h`
+/// (trace width × substrate height), and the substrate height `h` the modal
+/// branch voltage `V = ∫E_z·dz` integrates over. The element is a **single
+/// aggregate branch** (one `R`/`L`/`C`) across the whole face — see the
+/// [module-level docs](crate::lumped#multi-cell-aperture-lumped-port-phase-2fdtd69-adr-0125).
+#[derive(Debug, Clone)]
+pub struct ApertureSpec {
+    /// The `E_z` cells `(i, j, k)` spanning the `(y, z)` aperture face. All
+    /// share the same x-index `i` (the port plane); the `(j, k)` indices tile
+    /// the trace width (`y`) × substrate height (`z`) the mode occupies.
+    pub cells: Vec<(usize, usize, usize)>,
+    /// Number of `z`-columns (width-direction `y` positions). The modal voltage
+    /// averages the per-column height integral over these columns, so an
+    /// aperture wider in cells does not multiply the modal `V`.
+    pub n_columns: usize,
+    /// Physical aperture area `A = w·h` (m²), the modal cross-section the
+    /// aggregate branch current threads. The field back-action references this
+    /// **physical** area, NOT the per-cell `dx²` — the dx-stability fix.
+    pub area: f64,
+    /// Physical substrate height `h` (m) the modal branch voltage integrates
+    /// over (`V = ∫E_z·dz` over the full height). Used for the KVL terminal
+    /// voltage; the per-cell `E_z·dz` sum over a column equals `E_z·h` for a
+    /// uniform field.
+    pub height: f64,
+}
+
 /// Lumped R/L/C/series-RLC port at a single Yee cell, oriented along ±z.
 ///
 /// Implements Taflove & Hagness §15.10 series-RLC lumped element by adding a
 /// current-driven correction to `E_z` at the port cell each timestep. See the
 /// [module-level documentation](crate::lumped) for the numerical scheme.
+///
+/// For the **multi-cell aperture** variant (Phase 2.fdtd.6.9, ADR-0125) whose
+/// field coupling references the modal port face `A = w·h` rather than a single
+/// Yee cell — removing the `O(dx²)` reactance collapse — see
+/// [`LumpedRlcPort::aperture`] and [`LumpedRlcPort::correct_e_aperture`].
 ///
 /// # Reference impedance
 ///
@@ -272,15 +351,31 @@ pub struct LumpedRlcPort {
     /// ports where the field's back-action on the load is physical.
     two_way: bool,
 
+    /// Multi-cell aperture spec (Phase 2.fdtd.6.9, ADR-0125). When `Some`, the
+    /// port couples to the modal port face (`V = ∫E_z·dz` over the substrate
+    /// height, back-action referenced to the physical area `A = w·h`) instead
+    /// of the single `cell`; apply via [`LumpedRlcPort::correct_e_aperture`].
+    /// `None` (default) is the single-edge path. An aperture port is always
+    /// two-way coupled.
+    aperture: Option<ApertureSpec>,
+
     // ---- internal state ----
-    /// Cached `E_z^n` at the port cell, captured at the *end* of each
-    /// `correct_e` call so the next call has the pre-update value
-    /// available for the semi-implicit resistor scheme.
+    /// Cached `E_z^n` at the port cell (single-edge path) or the modal terminal
+    /// voltage `V_T^n` (aperture path), captured at the *end* of each correct
+    /// call so the next call has the pre-update value for the semi-implicit
+    /// scheme.
     e_z_prev: f64,
-    /// Inductor current `I_L` at the half-step (staggered with `E_z`).
+    /// Inductor current `I_L` at the half-step (staggered with `E_z`). For the
+    /// aperture port this is the aggregate branch current `I^{n+1/2}`.
     inductor_current: f64,
     /// Capacitor voltage `V_C` at the integer step.
     capacitor_voltage: f64,
+    /// Aperture path only: the step-centred modal terminal voltage
+    /// `V_T = (V_T* + V_T^n)/2` used in the last `correct_e_aperture` call.
+    /// Exposed via [`LumpedRlcPort::last_terminal_voltage`] so a bench can read
+    /// the port's OWN realized `(V, I)` and form the realized branch impedance
+    /// `Z = V/I` directly — without the fragile line de-embed.
+    last_terminal_voltage: f64,
 }
 
 impl LumpedRlcPort {
@@ -303,9 +398,11 @@ impl LumpedRlcPort {
             capacitance: f64::INFINITY,
             source_voltage: src,
             two_way: false,
+            aperture: None,
             e_z_prev: 0.0,
             inductor_current: 0.0,
             capacitor_voltage: 0.0,
+            last_terminal_voltage: 0.0,
         }
     }
 
@@ -343,9 +440,11 @@ impl LumpedRlcPort {
             capacitance: c,
             source_voltage: src,
             two_way: false,
+            aperture: None,
             e_z_prev: 0.0,
             inductor_current: 0.0,
             capacitor_voltage: 0.0,
+            last_terminal_voltage: 0.0,
         }
     }
 
@@ -375,6 +474,86 @@ impl LumpedRlcPort {
         self.two_way
     }
 
+    /// Construct a **multi-cell aperture** series-RLC port (Phase 2.fdtd.6.9,
+    /// ADR-0125): one aggregate `R`/`L`/`C` branch bridging the modal port face
+    /// described by `aperture` (the `(y, z)` cells, physical area `A = w·h`,
+    /// substrate height `h`).
+    ///
+    /// Unlike [`LumpedRlcPort::series_rlc`] (which references one Yee cell —
+    /// `V = E_z·dz`, back-action `(dt/(ε₀·dx²))·I`), this port references the
+    /// **modal port face**: the branch voltage is `V = ∫E_z·dz` over the full
+    /// substrate height averaged across the width columns, and the field
+    /// back-action injects a sheet current `J_z = I/A` referenced to the
+    /// **physical** aperture area `A`, NOT the single-cell `dx²`. This removes
+    /// the `O(dx²)` inductor collapse (and the dx-frozen capacitor short) that
+    /// makes a single-cell port's realized `Z_L` dx-dependent (ADR-0124).
+    ///
+    /// The port is always two-way coupled. Apply it with
+    /// [`LumpedRlcPort::correct_e_aperture`] after the standard `update_e`.
+    /// `R`/`L`/`C` are the **aggregate** element values across the whole face
+    /// (one branch), not per-cell — the aperture normalization holds the
+    /// aggregate `Z_L` fixed regardless of cell count.
+    ///
+    /// # Panics
+    ///
+    /// Panics under the same R/L/C validity rules as
+    /// [`LumpedRlcPort::series_rlc`], and additionally if the aperture has no
+    /// cells, no columns, or a non-finite / non-positive `area` or `height`.
+    pub fn aperture(aperture: ApertureSpec, r: f64, l: f64, c: f64, src: SourceWaveform) -> Self {
+        assert!(
+            (r > 0.0 && r.is_finite()) || r.is_infinite(),
+            "LumpedRlcPort::aperture: resistance must be positive (got {r}); use f64::INFINITY for open"
+        );
+        assert!(
+            l >= 0.0 && !l.is_nan(),
+            "LumpedRlcPort::aperture: inductance must be ≥ 0 (got {l})"
+        );
+        assert!(
+            (c > 0.0 && !c.is_nan()) || c.is_infinite(),
+            "LumpedRlcPort::aperture: capacitance must be positive (got {c}); use f64::INFINITY for short"
+        );
+        assert!(
+            !aperture.cells.is_empty(),
+            "LumpedRlcPort::aperture: aperture must span at least one cell"
+        );
+        assert!(
+            aperture.n_columns >= 1,
+            "LumpedRlcPort::aperture: aperture must have ≥ 1 column"
+        );
+        assert!(
+            aperture.area.is_finite() && aperture.area > 0.0,
+            "LumpedRlcPort::aperture: area must be finite and positive (got {})",
+            aperture.area
+        );
+        assert!(
+            aperture.height.is_finite() && aperture.height > 0.0,
+            "LumpedRlcPort::aperture: height must be finite and positive (got {})",
+            aperture.height
+        );
+        // The representative `cell` is the first aperture cell (used only as a
+        // fallback / for the single-edge `correct_e` if ever mis-called; the
+        // aperture path ignores it and iterates `aperture.cells`).
+        let cell = aperture.cells[0];
+        Self {
+            cell,
+            resistance: r,
+            inductance: l,
+            capacitance: c,
+            source_voltage: src,
+            two_way: true,
+            aperture: Some(aperture),
+            e_z_prev: 0.0,
+            inductor_current: 0.0,
+            capacitor_voltage: 0.0,
+            last_terminal_voltage: 0.0,
+        }
+    }
+
+    /// Whether this port is a multi-cell aperture port (Phase 2.fdtd.6.9).
+    pub fn is_aperture(&self) -> bool {
+        self.aperture.is_some()
+    }
+
     /// Apply the lumped-element correction to `E_z` at the port cell.
     ///
     /// Call this **after** [`crate::update::update_e`] (so the grid already
@@ -395,11 +574,29 @@ impl LumpedRlcPort {
         let e0 = self.e_z_prev;
         let v_src = self.source_voltage.value(n_step, dt);
 
-        let e1 = if self.inductance > 0.0 || self.capacitance.is_finite() {
+        let has_l = self.inductance > 0.0;
+        let has_c = self.capacitance.is_finite();
+        let e1 = if has_l || has_c {
             if self.two_way {
-                // Stable two-way semi-implicit series-RLC (Phase 2.fdtd.6.2):
-                // the lumped current couples back into E_z (S-parameter ports).
-                self.update_series_rlc_two_way(e1_star, e0, v_src, dz, area, dt)
+                // Two-way S-parameter ports (Phase 2.fdtd.6.4, ADR-0118): the
+                // canonical Taflove–Hagness *per-element* lumped updates. These
+                // couple to the field correctly per timestep so a shunt inductor
+                // presents `jωL` and a shunt capacitor presents `1/(jωC)` — not
+                // the instantaneous-`K` loading that ADR-0117 proved defective.
+                match (has_l, has_c) {
+                    // Pure capacitor (L = 0): effective-permittivity update.
+                    (false, true) => self.update_pure_capacitor_two_way(e1_star, e0, dz, area),
+                    // Pure inductor (C = ∞): accumulated branch current.
+                    (true, false) => {
+                        self.update_pure_inductor_two_way(e1_star, e0, v_src, dz, area, dt)
+                    }
+                    // Series R-L-C: combined accumulated-current + V_C update.
+                    (true, true) => {
+                        self.update_series_rlc_two_way(e1_star, e0, v_src, dz, area, dt)
+                    }
+                    // has_l || has_c guarantees at least one reactive term.
+                    (false, false) => unreachable!(),
+                }
             } else {
                 // Default one-way series-RLC (circuit→field; fdtd-206 ring-down).
                 self.update_series_rlc(e1_star, e0, v_src, dz, area, dt)
@@ -411,6 +608,147 @@ impl LumpedRlcPort {
 
         grid.ez[(i, j, k)] = e1;
         self.e_z_prev = e1;
+    }
+
+    /// Apply the **multi-cell aperture** lumped correction (Phase 2.fdtd.6.9,
+    /// ADR-0125). Call after the standard [`crate::update::update_e`].
+    ///
+    /// This is the dx-stable counterpart of [`LumpedRlcPort::correct_e`]: the
+    /// field coupling references the modal port face (physical area `A = w·h`,
+    /// substrate height `h`) instead of one Yee cell.
+    ///
+    /// # Update equations
+    ///
+    /// 1. **Modal terminal voltage** — average the per-column height path
+    ///    integral `Σ_height E_z^{n+1,*}·dz` over the `N_col` width columns:
+    ///    ```text
+    ///    V_T* = (1/N_col) · Σ_columns Σ_height E_z^{n+1,*}(i,j,k)·dz
+    ///    ```
+    ///    For a uniform modal field `V_T* ≈ E_z·h`. We use the post-update
+    ///    `E_z^{n+1,*}` (and the cached previous `V_T^n`) symmetrically with the
+    ///    single-edge scheme.
+    /// 2. **Aggregate branch current** — one branch current `I^{n+1/2}` for the
+    ///    whole face, solved by the same semi-implicit Piket-May / Taflove
+    ///    scheme as the single-edge two-way path, but with `dz → h`, `dA → A`:
+    ///    ```text
+    ///    K = R + L/dt + dt/(2C)            (branch impedance, Ω)
+    ///    β = dt·h / (2·ε₀·A)              (aperture FDTD half back-action, Ω)
+    ///    I = [ (V_T* + V_T^n)/2 − V_src − V_C^n + (L/dt)·I_old ] / (K + β)
+    ///    ```
+    ///    (Pure-R reduces to `K = R`, β with aperture `A`/`h` — the exact
+    ///    aperture resistor; pure-C/pure-L use the same `A`/`h` references.)
+    /// 3. **(y,z) aperture back-action** — the branch current threads the whole
+    ///    face as a sheet `J_z = I/A`; every aperture cell is corrected with the
+    ///    **physical** `A`:
+    ///    ```text
+    ///    E_z^{n+1}(cell) = E_z^{n+1,*}(cell) − (dt/(ε₀·A))·I    ∀ cell
+    ///    ```
+    ///
+    /// Because `A`, `h`, and `R`/`L`/`C` are all physical (dx-independent), the
+    /// realized `Z_L` no longer collapses as `O(dx²)` — the decisive fix
+    /// (ADR-0125 item 1). `K + β > 0` keeps it unconditionally stable.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the port was not built with [`LumpedRlcPort::aperture`].
+    pub fn correct_e_aperture(&mut self, grid: &mut YeeGrid, n_step: usize, dt: f64) {
+        let spec = self
+            .aperture
+            .as_ref()
+            .expect("correct_e_aperture called on a non-aperture port")
+            .clone();
+        let dz = grid.dz;
+        let h = spec.height;
+        let area = spec.area;
+        let n_col = spec.n_columns as f64;
+        let v_src = self.source_voltage.value(n_step, dt);
+
+        // (1) Modal terminal voltage from the post-update field: average the
+        // per-column height path integral Σ E_z·dz over the width columns.
+        let mut v_sum = 0.0;
+        for &(i, j, k) in &spec.cells {
+            v_sum += grid.ez[(i, j, k)] * dz;
+        }
+        let v_term_star = v_sum / n_col; // V_T* (modal, post-update)
+        let v_term_prev = self.e_z_prev; // cached modal V_T^n (see end)
+        // Step-centred modal terminal voltage logged for the realized-impedance
+        // probe (a bench reads V/I directly from the port — no line de-embed).
+        self.last_terminal_voltage = 0.5 * (v_term_star + v_term_prev);
+
+        // (2) Aggregate branch current, semi-implicit two-way solve with the
+        // aperture references (dz→h, dA→A). The pure-R limit reduces exactly to
+        // the validated semi-implicit resistor (in the aperture sense).
+        let i_branch = self.aperture_branch_current(v_term_star, v_term_prev, v_src, h, area, dt);
+
+        // (3) Distribute the sheet current J_z = I/A back onto every aperture
+        // cell with the PHYSICAL area A (not dx²) — the dx-stable back-action.
+        let back = (dt / (EPS0 * area)) * i_branch;
+        for &(i, j, k) in &spec.cells {
+            grid.ez[(i, j, k)] -= back;
+        }
+
+        // Cache the modal terminal voltage for the next step's V_T^n. We read
+        // it back AFTER the correction so the semi-implicit average uses the
+        // realized (corrected) modal voltage, consistent with the single-edge
+        // scheme caching the corrected `E_z`.
+        let mut v_sum_post = 0.0;
+        for &(i, j, k) in &spec.cells {
+            v_sum_post += grid.ez[(i, j, k)] * dz;
+        }
+        self.e_z_prev = v_sum_post / n_col;
+    }
+
+    /// Solve the aggregate aperture branch current `I^{n+1/2}` for one step.
+    ///
+    /// Mirrors the single-edge two-way semi-implicit scheme (Piket-May,
+    /// Taflove & Hagness §15.10) but with the modal terminal voltage `V_T`
+    /// (= `∫E_z·dz` over the substrate height) and the aperture back-action
+    /// impedance `β = dt·h/(2·ε₀·A)`. Carries the inductor current and
+    /// capacitor voltage as state. `R = ∞` (open) blocks the branch.
+    fn aperture_branch_current(
+        &mut self,
+        v_term_star: f64,
+        v_term_prev: f64,
+        v_src: f64,
+        h: f64,
+        area: f64,
+        dt: f64,
+    ) -> f64 {
+        let r = self.resistance;
+        let l = self.inductance;
+        let c = self.capacitance;
+
+        // Open resistor: no branch current.
+        if r.is_infinite() {
+            self.inductor_current = 0.0;
+            return 0.0;
+        }
+
+        // Branch operational impedance K = R + L/dt + dt/(2C).
+        let l_over_dt = if l > 0.0 { l / dt } else { 0.0 };
+        let c_term = if c.is_finite() && c > 0.0 {
+            dt / (2.0 * c)
+        } else {
+            0.0
+        };
+        let k_branch = r + l_over_dt + c_term;
+        // Aperture FDTD half back-action impedance β = dt·h/(2·ε₀·A).
+        let beta = dt * h / (2.0 * EPS0 * area);
+
+        let v_c = self.capacitor_voltage;
+        let i_old = self.inductor_current;
+        // Step-centred modal terminal voltage (V_T* + V_T^n)/2 — the same
+        // semi-implicit average the single-edge resistor uses, generalised to
+        // the modal voltage.
+        let v_term_mid = 0.5 * (v_term_star + v_term_prev);
+        // I = [ V_T_mid − V_src − V_C + (L/dt)·I_old ] / (K + β).
+        let i_branch = (v_term_mid - v_src - v_c + l_over_dt * i_old) / (k_branch + beta);
+
+        self.inductor_current = i_branch;
+        if c.is_finite() && c > 0.0 {
+            self.capacitor_voltage = v_c + (dt / c) * i_branch;
+        }
+        i_branch
     }
 
     /// Pure series-R update with optional series voltage source.
@@ -525,49 +863,124 @@ impl LumpedRlcPort {
         }
     }
 
-    /// Series-RLC update — stable, **two-way** semi-implicit scheme
-    /// (Phase 2.fdtd.6.2; Piket-May, Taflove & Baron 1994). Used only when the
-    /// port is built with [`LumpedRlcPort::with_two_way`].
+    /// Pure-capacitor two-way update — **canonical Taflove effective
+    /// permittivity** (Phase 2.fdtd.6.4, ADR-0118). Used when `two_way` and
+    /// `L = 0`, `C` finite.
     ///
-    /// Solves the branch current `I^{n+1/2}` and the `E_z^{n+1}` field update
-    /// **together** so the lumped current couples back into the field. The
-    /// scheme is unconditionally stable for any `R ≥ 0`, `L ≥ 0`, `C > 0`.
-    ///
-    /// # Derivation
-    ///
-    /// The standard Yee update has already produced `E_z^{n+1,*}` (`e1_star`).
-    /// The lumped current `I` adds to Ampère's law:
+    /// A lumped capacitor `C` bridging an `E_z` edge augments that cell's
+    /// natural free-space capacitance. The textbook result (Taflove & Hagness
+    /// §15.10; Piket-May, Taflove & Baron 1994) is a *local effective
+    /// permittivity*
     ///
     /// ```text
-    /// E_z^{n+1} = e1_star − (dt/(ε₀·dA))·I            (field, two-way)
+    /// ε_eff = ε₀ + C·dz/dA
     /// ```
     ///
-    /// The series-RLC KVL at the half-step `n+1/2`, with trapezoidal L and C
-    /// (`V_T = E_z·dz`, source `V_src`, positive current `+z`):
+    /// so the cell's Ampère update runs at `ε_eff` instead of `ε₀`. The
+    /// standard Yee step has already produced `E_z^{n+1,*}` at `ε₀`:
     ///
     /// ```text
-    /// (E_z^{n+1}+e0)·dz/2 = V_src + R·I + L·(I − I_old)/dt + V_C + (dt/2C)·I
+    /// E_z^{n+1,*} = E_z^n + (dt/ε₀)·(∇×H)_z
+    /// ⇒ (∇×H)_z = (ε₀/dt)·(E_z^{n+1,*} − E_z^n)
     /// ```
     ///
-    /// Substituting the field update and collecting `I`:
+    /// Re-running that same curl term at `ε_eff` gives the canonical capacitor
+    /// update purely in terms of the already-computed `E_z^{n+1,*}`:
     ///
     /// ```text
-    /// K  = R + L/dt + dt/(2C)         (branch operational impedance, Ω)
-    /// β  = dt·dz / (2·ε₀·dA)          (FDTD half back-action impedance, Ω)
-    /// I  = [ (e1_star+e0)·dz/2 − V_src − V_C + (L/dt)·I_old ] / (K + β)
+    /// E_z^{n+1} = E_z^n + (dt/ε_eff)·(∇×H)_z
+    ///           = E_z^n + (ε₀/ε_eff)·(E_z^{n+1,*} − E_z^n)
     /// ```
     ///
-    /// Then `E_z^{n+1} = e1_star − (dt/(ε₀·dA))·I` and
-    /// `V_C^{n+1} = V_C + (dt/C)·I`, and `I_old ← I`.
+    /// Because `ε_eff ≥ ε₀`, the update can only *raise* the cell capacitance,
+    /// so it is unconditionally stable (no CFL penalty). The element presents
+    /// `Z_C = 1/(jωC)` to the line: at high frequency the term `ε₀/ε_eff → 0`
+    /// freezes the field (near-short), at low frequency `→ 1` (near-open),
+    /// exactly the `1/(jωC)` reactance. An optional series ESR is ignored here
+    /// (the gate's reactive case drives `R → 0`); a lossy capacitor uses the
+    /// series-RLC arm.
+    fn update_pure_capacitor_two_way(&mut self, e1_star: f64, e0: f64, dz: f64, area: f64) -> f64 {
+        let c = self.capacitance;
+        // ε_eff = ε₀ + C·dz/dA. C is finite & > 0 by construction here.
+        let eps_eff = EPS0 + c * dz / area;
+        let ratio = EPS0 / eps_eff; // ε₀/ε_eff ∈ (0, 1]
+        // E_z^{n+1} = E_z^n + (ε₀/ε_eff)·(E_z^{n+1,*} − E_z^n).
+        e0 + ratio * (e1_star - e0)
+    }
+
+    /// Pure-inductor two-way update — **canonical Taflove accumulated branch
+    /// current** (Phase 2.fdtd.6.4, ADR-0118). Used when `two_way` and `L > 0`,
+    /// `C = ∞`.
     ///
-    /// `K + β > 0` for all admissible R/L/C, so the implicit solve is always
-    /// well-conditioned: the `β` term is the on-diagonal damping that makes
-    /// the coupled update **unconditionally stable**, removing the old
-    /// explicit pure-capacitor `≥ η₀/√3 ≈ 196 Ω` instability.
+    /// A lumped inductor `L` bridging an `E_z` edge carries an auxiliary branch
+    /// current that *accumulates* the terminal voltage `V = E_z·dz` (the
+    /// textbook lumped-L FDTD source, Taflove & Hagness §15.10):
     ///
-    /// Limits: `L=0,C=∞ ⇒ K=R` (semi-implicit resistor); `L=0 ⇒ K=R+dt/2C`
-    /// (pure C, stable for any ESR); `C=∞ ⇒ K=R+L/dt` (pure L, not inert);
-    /// `R=∞ ⇒ I=0` (open, no-op).
+    /// ```text
+    /// I_L^{n+1/2} = I_L^{n−1/2} + (dt·dz/L)·E_z^n           (Faraday: dI/dt = V/L)
+    /// E_z^{n+1}   = E_z^{n+1,*} − (dt/(ε₀·dA))·I_L^{n+1/2}  (Ampère: −J back-action)
+    /// ```
+    ///
+    /// The current is integrated **explicitly** from the *present* field `E_z^n`
+    /// (`e0`), so — unlike the defective instantaneous-`K` scheme (ADR-0117) —
+    /// the inductor is NOT loaded by the huge `L/dt` term in a single step; the
+    /// accumulated `I_L` builds over many steps and presents the physical
+    /// `Z_L = jωL` to the line. Stable: an inductor adds no CFL constraint.
+    /// An optional series ESR is ignored here (the gate drives `R → 0`); a
+    /// lossy inductor uses the series-RLC arm. `V_src` enters as a series EMF
+    /// (`V = E_z·dz − V_src`).
+    fn update_pure_inductor_two_way(
+        &mut self,
+        e1_star: f64,
+        e0: f64,
+        v_src: f64,
+        dz: f64,
+        area: f64,
+        dt: f64,
+    ) -> f64 {
+        let l = self.inductance;
+        // Accumulate the terminal voltage onto the branch current:
+        //   I_L^{n+1/2} = I_L^{n−1/2} + (dt·dz/L)·E_z^n − (dt/L)·V_src.
+        // (V across the inductor = E_z·dz − V_src for a series EMF.)
+        let v_term = e0 * dz - v_src;
+        self.inductor_current += (dt / l) * v_term;
+        // Ampère back-action: feed the branch current into E_z.
+        e1_star - (dt / (EPS0 * area)) * self.inductor_current
+    }
+
+    /// Series-RLC two-way update — **canonical Taflove combined lumped-RLC `E`
+    /// update** (Phase 2.fdtd.6.4, ADR-0118). Used when `two_way` and both
+    /// `L > 0` and `C` finite.
+    ///
+    /// One branch current `I` flows through `R`, `L`, `C` in series, driven by
+    /// the terminal voltage `V_T = E_z·dz` (minus any series EMF `V_src`). The
+    /// canonical discretisation accumulates the inductor current explicitly
+    /// (as in the pure-L arm) while carrying the capacitor voltage `V_C` as a
+    /// state and treating `R` semi-implicitly for stability. KVL at step `n`:
+    ///
+    /// ```text
+    /// L·dI/dt = V_T − R·I − V_C − V_src,     dV_C/dt = I/C
+    /// ```
+    ///
+    /// Discretising `L·dI/dt` with the leapfrog increment, `R·I` with the
+    /// step-centred average `(I^{n+1/2}+I^{n−1/2})/2`, and `V_C`, `V_T` at the
+    /// integer step `n`:
+    ///
+    /// ```text
+    /// (L/dt)(I^{n+1/2} − I^{n−1/2}) = E_z^n·dz − V_src − V_C^n
+    ///                                 − (R/2)(I^{n+1/2}+I^{n−1/2})
+    /// ⇒ I^{n+1/2} = [ (L/dt − R/2)·I^{n−1/2}
+    ///                 + E_z^n·dz − V_src − V_C^n ] / (L/dt + R/2)
+    /// ```
+    ///
+    /// then the Ampère back-action `E_z^{n+1} = E_z^{n+1,*} −
+    /// (dt/(ε₀·dA))·I^{n+1/2}` and the trapezoidal capacitor charge
+    /// `V_C^{n+1} = V_C^n + (dt/C)·I^{n+1/2}`. The branch presents
+    /// `R + jωL + 1/(jωC)` to the line. Reductions: `R→0` recovers the LC
+    /// resonator; `R=∞` blocks the branch (open, no-op). `R ≥ 0` keeps the
+    /// `L/dt + R/2` denominator strictly positive, so the solve is always
+    /// well-conditioned; the explicit-from-`E_z^n` coupling presents the
+    /// physical reactance rather than the instantaneous-`K` loading (ADR-0117).
     fn update_series_rlc_two_way(
         &mut self,
         e1_star: f64,
@@ -584,47 +997,28 @@ impl LumpedRlcPort {
         // Open resistor: no current can flow through the series branch.
         if r_branch.is_infinite() {
             self.inductor_current = 0.0;
-            // V_C holds its DC value (an open branch can't (dis)charge it);
-            // leave capacitor_voltage untouched.
+            // V_C holds its DC value (an open branch can't (dis)charge it).
             return e1_star;
         }
 
-        // Branch operational impedance K = R + L/dt + dt/(2C).
-        //
-        // Solving directly for the branch current `I = I^{n+1/2}` (not the
-        // step-average), the trapezoidal inductor `L·(I−I_old)/dt` contributes
-        // `L/dt` to the diagonal and `(L/dt)·I_old` to the RHS — discrete
-        // reactance `(2/dt)tan(ωdt/2)·L ≈ jωL`. (The one-way scheme uses
-        // `2L/dt` because it solves for the average current instead.)
         let l_over_dt = l / dt;
-        let c_term = if c.is_finite() && c > 0.0 {
-            dt / (2.0 * c)
-        } else {
-            // C = ∞ shorts the capacitor: no 1/(jωC) term.
-            0.0
-        };
-        let k_branch = r_branch + l_over_dt + c_term;
-
-        // FDTD half back-action impedance β = dt·dz / (2·ε₀·dA).
-        let beta = dt * dz / (2.0 * EPS0 * area);
-
+        // Semi-implicit resistor: R/2 on the diagonal, (L/dt − R/2) on I_old.
+        let r_half = 0.5 * r_branch;
         let v_c = self.capacitor_voltage;
         let i_old = self.inductor_current;
 
-        // Semi-implicit branch current I^{n+1/2}; the (e1_star+e0)·dz/2
-        // terminal-voltage term and the implicit β denominator are what make
-        // this TWO-WAY and stable (cf. the one-way fdtd-206 scheme).
-        let i_half =
-            ((e1_star + e0) * dz / 2.0 - v_src - v_c + l_over_dt * i_old) / (k_branch + beta);
+        // Branch current accumulated from the present terminal voltage E_z^n·dz
+        // (explicit field coupling → physical reactance, not instantaneous-K).
+        let v_term = e0 * dz - v_src - v_c;
+        let i_half = ((l_over_dt - r_half) * i_old + v_term) / (l_over_dt + r_half);
 
-        // Carry I_old = I^{n−1/2} ← I^{n+1/2} for the inductor's trapezoid.
         self.inductor_current = i_half;
         // Trapezoidal capacitor charge update.
         if c.is_finite() && c > 0.0 {
             self.capacitor_voltage = v_c + (dt / c) * i_half;
         }
 
-        // Two-way FDTD correction: feed the lumped current back into E_z.
+        // Ampère back-action: feed the branch current into E_z.
         e1_star - (dt / (EPS0 * area)) * i_half
     }
 
@@ -642,6 +1036,19 @@ impl LumpedRlcPort {
     /// Read access to the capacitor voltage state (V). Series-RLC only.
     pub fn capacitor_voltage(&self) -> f64 {
         self.capacitor_voltage
+    }
+
+    /// Aperture port only: the step-centred modal terminal voltage `V_T`
+    /// (volts) from the most recent [`LumpedRlcPort::correct_e_aperture`] call.
+    ///
+    /// Paired with [`LumpedRlcPort::inductor_current`] (the aggregate branch
+    /// current `I`), this lets a bench form the port's OWN realized branch
+    /// impedance `Z = V_T(ω)/I(ω)` directly — the physical `R + jωL + 1/(jωC)`
+    /// the discrete port presents, independent of the surrounding line `Z₀` and
+    /// the fragile shunt de-embed. Used by `tests/aperture_port_001.rs` for the
+    /// dx-stability check (ADR-0125).
+    pub fn last_terminal_voltage(&self) -> f64 {
+        self.last_terminal_voltage
     }
 }
 
@@ -693,5 +1100,148 @@ mod tests {
         );
         assert_eq!(port.inductor_current, 0.0);
         assert_eq!(port.capacitor_voltage, 0.0);
+    }
+
+    // ---- Aperture port (Phase 2.fdtd.6.9, ADR-0125) ----
+
+    fn one_cell_spec(cell: (usize, usize, usize), dx: f64) -> ApertureSpec {
+        // A degenerate "aperture" of one cell with A = dx² and h = dz = dx — so
+        // its references collapse onto the single-edge resistor's dA = dx²,
+        // dz = dx. Used to prove the exact resistor reduction.
+        ApertureSpec {
+            cells: vec![cell],
+            n_columns: 1,
+            area: dx * dx,
+            height: dx,
+        }
+    }
+
+    #[test]
+    fn aperture_constructor_validates() {
+        let spec = one_cell_spec((1, 1, 1), 1e-3);
+        // Empty aperture must panic.
+        let mut bad = spec.clone();
+        bad.cells.clear();
+        assert!(
+            std::panic::catch_unwind(|| {
+                LumpedRlcPort::aperture(bad, 50.0, 0.0, f64::INFINITY, SourceWaveform::None)
+            })
+            .is_err(),
+            "empty aperture should panic"
+        );
+        // Non-positive area must panic.
+        let mut bad = one_cell_spec((1, 1, 1), 1e-3);
+        bad.area = 0.0;
+        assert!(
+            std::panic::catch_unwind(|| {
+                LumpedRlcPort::aperture(bad, 50.0, 0.0, f64::INFINITY, SourceWaveform::None)
+            })
+            .is_err(),
+            "zero area should panic"
+        );
+        // A valid aperture port reports itself as aperture + two-way.
+        let p = LumpedRlcPort::aperture(spec, 50.0, 0.0, f64::INFINITY, SourceWaveform::None);
+        assert!(p.is_aperture());
+        assert!(p.is_two_way());
+    }
+
+    #[test]
+    fn aperture_pure_resistor_reduces_to_single_edge_exactly() {
+        // A one-cell aperture (A = dx², h = dz = dx) pure-R port must produce
+        // the SAME E_z update as the validated single-edge semi-implicit
+        // resistor, step for step — the resistor-exact reduction (ADR-0125
+        // item 4). Drive both with the same E1*/E0 history.
+        let dx = 1.0e-3;
+        let dt = 1.5e-12;
+        let r = 73.0;
+        let cell = (2, 2, 2);
+
+        let grid_dims = (5, 5, 5);
+        let mut grid_ap = YeeGrid::vacuum(grid_dims.0, grid_dims.1, grid_dims.2, dx);
+        let mut grid_se = YeeGrid::vacuum(grid_dims.0, grid_dims.1, grid_dims.2, dx);
+
+        let mut ap = LumpedRlcPort::aperture(
+            one_cell_spec(cell, dx),
+            r,
+            0.0,
+            f64::INFINITY,
+            SourceWaveform::None,
+        );
+        // Single-edge two-way resistor (K = R, the validated semi-implicit
+        // limit). Use the public single-edge path.
+        let mut se = LumpedRlcPort::series_rlc(cell, r, 0.0, f64::INFINITY, SourceWaveform::None)
+            .with_two_way();
+
+        // Feed an identical post-update E1* sequence into both and compare the
+        // corrected E_z.
+        let e1_star_seq = [1.0, 0.7, -0.4, 0.2, -0.9, 0.55, -0.1];
+        for (n, &e1s) in e1_star_seq.iter().enumerate() {
+            grid_ap.ez[cell] = e1s;
+            grid_se.ez[cell] = e1s;
+            ap.correct_e_aperture(&mut grid_ap, n, dt);
+            se.correct_e(&mut grid_se, n, dt);
+            let a = grid_ap.ez[cell];
+            let s = grid_se.ez[cell];
+            assert!(
+                (a - s).abs() <= 1e-12 * (a.abs().max(s.abs()).max(1.0)),
+                "step {n}: aperture pure-R {a} != single-edge two-way resistor {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn aperture_open_resistor_is_noop() {
+        let dx = 1.0e-3;
+        let dt = 1.5e-12;
+        let cell = (2, 2, 2);
+        let mut grid = YeeGrid::vacuum(5, 5, 5, dx);
+        let mut ap = LumpedRlcPort::aperture(
+            one_cell_spec(cell, dx),
+            f64::INFINITY, // open
+            1.0e-9,        // L present but blocked by open R
+            f64::INFINITY,
+            SourceWaveform::None,
+        );
+        grid.ez[cell] = 0.42;
+        ap.correct_e_aperture(&mut grid, 0, dt);
+        assert_eq!(grid.ez[cell], 0.42, "open aperture R must be a no-op");
+        assert_eq!(ap.inductor_current(), 0.0);
+    }
+
+    #[test]
+    fn aperture_reactive_stays_finite_over_many_steps() {
+        // Stability: a multi-cell aperture pure-inductor and pure-capacitor must
+        // not blow up (K + β > 0 keeps the implicit solve well-conditioned).
+        let dx = 1.0e-3;
+        let dt = 1.5e-12;
+        let port_i = 2;
+        let cells: Vec<(usize, usize, usize)> = (1..4)
+            .flat_map(|j| (0..3).map(move |k| (port_i, j, k)))
+            .collect();
+        let n_cols = 3;
+        let spec = ApertureSpec {
+            cells: cells.clone(),
+            n_columns: n_cols,
+            area: (3.0 * dx) * (3.0 * dx),
+            height: 3.0 * dx,
+        };
+        for (l, c) in [(2.0e-9, f64::INFINITY), (0.0, 5.0e-13)] {
+            let mut grid = YeeGrid::vacuum(5, 5, 5, dx);
+            let mut ap = LumpedRlcPort::aperture(spec.clone(), 1e-6, l, c, SourceWaveform::None);
+            for n in 0..2000 {
+                // Drive a bounded oscillating field at the aperture cells.
+                let drive = (n as f64 * 0.3).sin();
+                for &cc in &cells {
+                    grid.ez[cc] = drive;
+                }
+                ap.correct_e_aperture(&mut grid, n, dt);
+                for &cc in &cells {
+                    assert!(
+                        grid.ez[cc].is_finite(),
+                        "aperture reactive update went non-finite at step {n} (L={l}, C={c})"
+                    );
+                }
+            }
+        }
     }
 }

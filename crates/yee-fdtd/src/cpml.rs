@@ -35,9 +35,16 @@
 //! ∂E_z/∂t|cpml = (1/ε) · (1/κ_x · ∂H_y/∂x − 1/κ_y · ∂H_x/∂y + ψ_Ezx − ψ_Ezy)
 //! ```
 //!
-//! ## Walking-skeleton scope
+//! ## Scope
 //!
-//! - Symmetric `npml`-layer thickness on all six faces (default 10 cells).
+//! - Symmetric `npml`-layer thickness (default 10 cells) on the faces of
+//!   each **enabled** axis.
+//! - Per-axis face selection via [`CpmlParams::axes`] (`[x, y, z]`, default
+//!   `[true; 3]`). A disabled axis carries **no** CPML — its faces are left
+//!   for the caller to terminate (typically a PEC clamp). This is what a
+//!   matched-line / waveguide setup needs: CPML on the propagation axis, PEC
+//!   on the transverse walls. The all-true default is byte-identical to the
+//!   original all-six-faces behaviour.
 //! - Polynomial grading of order `m = 3` (R&G eq. 17 / Taflove §7.5).
 //! - Standard parameter set: `σ_max = -(m+1) · ln(R_0) / (2·η₀·npml·dx)`,
 //!   `κ_max = 1`, `α_max = 0.05`, reflection target `R_0 = 1e-6`.
@@ -72,6 +79,17 @@ pub struct CpmlParams {
     /// low-frequency / evanescent-wave absorption at the cost of more
     /// reflection of propagating waves.
     pub alpha_max: f64,
+    /// Per-axis CPML enable mask, indexed `[x, y, z]`.
+    ///
+    /// Default `[true; 3]` — the symmetric all-six-faces behaviour every
+    /// existing caller relies on. Setting an entry to `false` disables the
+    /// CPML coordinate-stretch on that axis: its two outer faces carry **no**
+    /// CPML and [`CpmlState::pml_depth`] returns `None` there, so the caller
+    /// is responsible for terminating that axis some other way (typically a
+    /// PEC clamp via [`crate::boundary::apply_pec`]). This is what a
+    /// matched-line / waveguide setup needs: CPML on the propagation axis,
+    /// PEC on the transverse walls. Use [`CpmlParams::with_axes`] to set it.
+    pub axes: [bool; 3],
 }
 
 impl Default for CpmlParams {
@@ -87,6 +105,7 @@ impl Default for CpmlParams {
             sigma_max: sigma_max_optimal(m, npml, dx),
             kappa_max: 1.0,
             alpha_max: 0.05,
+            axes: [true; 3],
         }
     }
 }
@@ -95,6 +114,9 @@ impl CpmlParams {
     /// Standard parameter set sized to the given grid.
     ///
     /// `σ_max = -(m+1) · ln(R_0) / (2·η₀·npml·dx)` with `R_0 = 1e-6`.
+    ///
+    /// The axis mask is all-true (symmetric all-six-faces CPML); use
+    /// [`Self::with_axes`] to restrict absorption to a subset of axes.
     pub fn for_grid(grid: &YeeGrid, npml: usize) -> Self {
         let m = 3i32;
         Self {
@@ -103,7 +125,22 @@ impl CpmlParams {
             sigma_max: sigma_max_optimal(m, npml, grid.dx),
             kappa_max: 1.0,
             alpha_max: 0.05,
+            axes: [true; 3],
         }
+    }
+
+    /// Set the per-axis CPML enable mask (`[x, y, z]`) and return `self`.
+    ///
+    /// A `false` entry disables the CPML stretch on that axis — its faces
+    /// carry no CPML (the caller terminates them otherwise, e.g. PEC). For
+    /// example `params.with_axes([true, false, false])` requests **x-only**
+    /// CPML: absorbing at `x = 0` / `x = nx`, nothing on the y / z faces.
+    /// The default produced by [`Self::for_grid`] / [`Default`] is
+    /// `[true; 3]`, so omitting this call preserves the all-faces behaviour.
+    #[must_use]
+    pub fn with_axes(mut self, axes: [bool; 3]) -> Self {
+        self.axes = axes;
+        self
     }
 }
 
@@ -160,6 +197,15 @@ pub struct CpmlState {
 
     /// PML thickness in cells (cached from [`CpmlParams::npml`]).
     npml: usize,
+
+    /// Per-axis CPML enable mask `[x, y, z]` (cached from
+    /// [`CpmlParams::axes`]). A `false` entry makes [`Self::pml_depth`]
+    /// return `None` for every cell on that axis, so the `update_e` /
+    /// `update_h` loops skip its PML contribution entirely — the faces of a
+    /// disabled axis carry no CPML stretch. Default (and the
+    /// [`CpmlParams::for_grid`] path) is `[true; 3]`, which is byte-identical
+    /// to the original all-six-faces behaviour.
+    axes: [bool; 3],
 }
 
 /// Sample σ, κ, α at depth `rho_over_d` ∈ (0, 1] using the standard
@@ -289,6 +335,7 @@ impl CpmlState {
             c_h,
             kappa_h,
             npml: params.npml,
+            axes: params.axes,
         }
     }
 
@@ -297,12 +344,23 @@ impl CpmlState {
         self.npml
     }
 
-    /// Layer-depth lookup: given an absolute grid index `i` on an axis of
-    /// length `n`, return the PML profile index in `0..npml` if the cell
-    /// is inside the low- or high-side PML, else `None`. Also returns the
-    /// "side" (`false` = low/origin side, `true` = high/far side).
+    /// Layer-depth lookup: given an absolute grid index `i` on the axis
+    /// `axis` (`0 = x`, `1 = y`, `2 = z`) of length `n`, return the PML
+    /// profile index in `0..npml` if the cell is inside the low- or
+    /// high-side PML, else `None`. Also returns the "side" (`false` =
+    /// low/origin side, `true` = high/far side).
+    ///
+    /// Returns `None` unconditionally when `axis` is disabled in the
+    /// per-axis mask ([`CpmlParams::axes`]): a disabled axis carries no
+    /// CPML, so its `update_e` / `update_h` contributions are skipped and
+    /// the caller terminates that axis otherwise (e.g. PEC). When the mask
+    /// is all-true (the default) this is identical to the original
+    /// all-six-faces lookup.
     #[inline]
-    fn pml_depth(&self, i: usize, n: usize) -> Option<(usize, bool)> {
+    fn pml_depth(&self, axis: usize, i: usize, n: usize) -> Option<(usize, bool)> {
+        if !self.axes[axis] {
+            return None;
+        }
         if i < self.npml {
             // Low-side PML: i=0 is the outermost cell, i=npml-1 is innermost.
             // Profile index is "depth from inner edge", so depth = npml-1-i.
@@ -361,9 +419,9 @@ impl CpmlState {
         // E_x update region: i ∈ [0, nx), j ∈ [1, ny), k ∈ [1, nz).
         for i in 0..nx {
             for j in 1..ny {
-                let dep_y = self.pml_depth(j, ny + 1);
+                let dep_y = self.pml_depth(1, j, ny + 1);
                 for k in 1..nz {
-                    let dep_z = self.pml_depth(k, nz + 1);
+                    let dep_z = self.pml_depth(2, k, nz + 1);
                     if dep_y.is_none() && dep_z.is_none() {
                         continue;
                     }
@@ -403,10 +461,10 @@ impl CpmlState {
         // ∂H_x/∂z term -> ψ_E_yz, ∂H_z/∂x term -> ψ_E_yx.
         // E_y update region: i ∈ [1, nx), j ∈ [0, ny), k ∈ [1, nz).
         for i in 1..nx {
-            let dep_x = self.pml_depth(i, nx + 1);
+            let dep_x = self.pml_depth(0, i, nx + 1);
             for j in 0..ny {
                 for k in 1..nz {
-                    let dep_z = self.pml_depth(k, nz + 1);
+                    let dep_z = self.pml_depth(2, k, nz + 1);
                     if dep_x.is_none() && dep_z.is_none() {
                         continue;
                     }
@@ -442,9 +500,9 @@ impl CpmlState {
         // ∂H_y/∂x term -> ψ_E_zx, ∂H_x/∂y term -> ψ_E_zy.
         // E_z update region: i ∈ [1, nx), j ∈ [1, ny), k ∈ [0, nz).
         for i in 1..nx {
-            let dep_x = self.pml_depth(i, nx + 1);
+            let dep_x = self.pml_depth(0, i, nx + 1);
             for j in 1..ny {
-                let dep_y = self.pml_depth(j, ny + 1);
+                let dep_y = self.pml_depth(1, j, ny + 1);
                 if dep_x.is_none() && dep_y.is_none() {
                     continue;
                 }
@@ -507,9 +565,9 @@ impl CpmlState {
         // Standard curl: +dey_dz − dez_dy.
         for i in 0..=nx {
             for j in 0..ny {
-                let dep_y = self.pml_depth(j, ny);
+                let dep_y = self.pml_depth(1, j, ny);
                 for k in 0..nz {
-                    let dep_z = self.pml_depth(k, nz);
+                    let dep_z = self.pml_depth(2, k, nz);
                     if dep_y.is_none() && dep_z.is_none() {
                         continue;
                     }
@@ -545,10 +603,10 @@ impl CpmlState {
         // half-cell-shifted H profile.
         // Standard curl: +dez_dx − dex_dz.
         for i in 0..nx {
-            let dep_x = self.pml_depth(i, nx);
+            let dep_x = self.pml_depth(0, i, nx);
             for j in 0..=ny {
                 for k in 0..nz {
-                    let dep_z = self.pml_depth(k, nz);
+                    let dep_z = self.pml_depth(2, k, nz);
                     if dep_x.is_none() && dep_z.is_none() {
                         continue;
                     }
@@ -584,9 +642,9 @@ impl CpmlState {
         // half-cell-shifted H profile.
         // Standard curl: +dex_dy − dey_dx.
         for i in 0..nx {
-            let dep_x = self.pml_depth(i, nx);
+            let dep_x = self.pml_depth(0, i, nx);
             for j in 0..ny {
-                let dep_y = self.pml_depth(j, ny);
+                let dep_y = self.pml_depth(1, j, ny);
                 if dep_x.is_none() && dep_y.is_none() {
                     continue;
                 }
@@ -705,11 +763,45 @@ mod tests {
         let grid = YeeGrid::vacuum(50, 50, 50, 1.0e-3);
         let state = CpmlState::new(&grid, CpmlParams::for_grid(&grid, 10));
         // n = 50: low PML covers i ∈ [0, 10), high PML covers i ∈ [40, 50).
-        assert_eq!(state.pml_depth(0, 50), Some((9, false))); // outermost on low side
-        assert_eq!(state.pml_depth(9, 50), Some((0, false))); // innermost on low side
-        assert_eq!(state.pml_depth(10, 50), None); // interior
-        assert_eq!(state.pml_depth(39, 50), None); // interior
-        assert_eq!(state.pml_depth(40, 50), Some((0, true))); // innermost on high side
-        assert_eq!(state.pml_depth(49, 50), Some((9, true))); // outermost on high side
+        // Default mask is all-true, so every axis behaves identically.
+        for axis in 0..3 {
+            assert_eq!(state.pml_depth(axis, 0, 50), Some((9, false))); // outermost, low side
+            assert_eq!(state.pml_depth(axis, 9, 50), Some((0, false))); // innermost, low side
+            assert_eq!(state.pml_depth(axis, 10, 50), None); // interior
+            assert_eq!(state.pml_depth(axis, 39, 50), None); // interior
+            assert_eq!(state.pml_depth(axis, 40, 50), Some((0, true))); // innermost, high side
+            assert_eq!(state.pml_depth(axis, 49, 50), Some((9, true))); // outermost, high side
+        }
+    }
+
+    #[test]
+    fn default_axis_mask_is_all_true() {
+        // The default / for_grid path must request all-six-faces CPML so
+        // every existing caller and gate is byte-identical.
+        assert_eq!(CpmlParams::default().axes, [true; 3]);
+        let grid = YeeGrid::vacuum(20, 20, 20, 1.0e-3);
+        assert_eq!(CpmlParams::for_grid(&grid, 10).axes, [true; 3]);
+    }
+
+    #[test]
+    fn with_axes_sets_mask_and_disables_pml_depth() {
+        // x-only mask: y and z axes must report no PML at any index, while x
+        // keeps the usual low/high-side lookup.
+        let grid = YeeGrid::vacuum(50, 50, 50, 1.0e-3);
+        let params = CpmlParams::for_grid(&grid, 10).with_axes([true, false, false]);
+        assert_eq!(params.axes, [true, false, false]);
+        let state = CpmlState::new(&grid, params);
+
+        // x (axis 0) still finds the PML on both sides.
+        assert_eq!(state.pml_depth(0, 0, 50), Some((9, false)));
+        assert_eq!(state.pml_depth(0, 49, 50), Some((9, true)));
+        assert_eq!(state.pml_depth(0, 25, 50), None); // interior
+
+        // y (axis 1) and z (axis 2) are disabled: None everywhere, even in
+        // the cells that would otherwise be inside the PML.
+        for &i in &[0usize, 5, 9, 25, 40, 49] {
+            assert_eq!(state.pml_depth(1, i, 50), None, "y axis must be disabled");
+            assert_eq!(state.pml_depth(2, i, 50), None, "z axis must be disabled");
+        }
     }
 }
