@@ -1021,6 +1021,15 @@ fn export_lumped(lumped: ReadOnlySignal<Option<LumpedDesigned>>) -> Element {
                     },
                 }
                 download_btn {
+                    label: "Gerber Edge.Cuts",
+                    make: move |_| {
+                        if let Some(d) = lumped.read().as_ref() {
+                            let g = yee_export::layout_to_gerber_outline(&d.board.layout, &Default::default());
+                            download_file("filter-lumped-Edge_Cuts.gbr", "application/vnd.gerber", &g);
+                        }
+                    },
+                }
+                download_btn {
                     label: "KiCad .kicad_pcb",
                     make: move |_| {
                         if let Some(d) = lumped.read().as_ref() {
@@ -1040,10 +1049,10 @@ fn export_lumped(lumped: ReadOnlySignal<Option<LumpedDesigned>>) -> Element {
                 }
             }
             div { class: "note honest",
-                "The BOM CSV is the grouped E-series selection (the Components stage); the Gerber + "
-                "KiCad come from the placed SMD `Layout` (the Layout stage) via the shipped "
-                "`yee-export` emitters. Footprint pad geometry + a parasitic-aware land library are "
-                "documented follow-ons (F2.2b)."
+                "The BOM CSV is the grouped E-series selection (the Components stage); the Gerber "
+                "(F.Cu + Edge.Cuts) + KiCad come from the placed SMD `Layout` (the Layout stage) via "
+                "the shipped `yee-export` emitters. Footprint pad geometry + a parasitic-aware land "
+                "library are documented follow-ons (F2.2b)."
             }
         }
     }
