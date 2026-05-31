@@ -17,7 +17,7 @@ use yee_filter::{
     recommend_technique,
 };
 
-use crate::engine::{BomView, Designed, LumpedDesigned, YieldView};
+use crate::engine::{BomView, Designed, LumpedDesigned, SteppedLowpassDesigned, YieldView};
 use crate::svg::{board_svg, lumped_board_svg, response_plot};
 
 /// The realization technique the downstream stages render for.
@@ -37,6 +37,12 @@ pub enum Topology {
     Hairpin,
     /// Lumped-element LC ladder (ADR-0120: synth → BOM → tolerance → board).
     LumpedLc,
+    /// Distributed **stepped-impedance low-pass** (ADR-0139, F1.2.3): alternating
+    /// high-Z / low-Z microstrip sections realizing a low-pass prototype. The
+    /// first **low-pass** flow — its Spec form labels f0 as the cutoff and hides
+    /// the fractional bandwidth, and Synthesis / Layout route to the stepped
+    /// renderers (the distributed five-stage rail, no Components / Tolerance).
+    SteppedImpedance,
 }
 
 /// The product stages (the left rail order). Two stages —
@@ -87,7 +93,11 @@ impl Stage {
     /// The rail order for the active topology.
     pub fn rail(topology: Topology) -> &'static [Stage] {
         match topology {
-            Topology::EdgeCoupled | Topology::Hairpin => &Stage::DISTRIBUTED,
+            // Stepped-impedance is distributed: the same five-stage rail (Spec /
+            // Technique / Synthesis / Layout / Export — no Components / Tolerance).
+            Topology::EdgeCoupled | Topology::Hairpin | Topology::SteppedImpedance => {
+                &Stage::DISTRIBUTED
+            }
             Topology::LumpedLc => &Stage::LUMPED,
         }
     }
@@ -445,15 +455,24 @@ pub fn layout_stage(designed: ReadOnlySignal<Designed>) -> Element {
 /// dimensioning, BOM, yield, board) re-derives on every edit. A live PASS/FAIL
 /// chip + realizability note close the loop without leaving the stage.
 ///
-/// `designed`/`lumped` are read-only views of the current re-derivation, used
-/// for the live verdict + the realizability hints.
+/// `designed`/`lumped`/`stepped` are read-only views of the current
+/// re-derivation, used for the live verdict + the realizability hints.
+///
+/// `topology` makes the form **low-pass-aware**: when the stepped-impedance
+/// (low-pass) flow is active, the centre frequency is labelled **Cutoff**, the
+/// fractional-bandwidth field is hidden (low-pass has no FBW), and the live
+/// verdict is graded against the low-pass spec mask. Every other topology keeps
+/// the band-pass form.
 pub fn spec_stage(
     mut spec: Signal<yee_filter::FilterSpec>,
+    topology: ReadOnlySignal<Topology>,
     designed: ReadOnlySignal<Designed>,
     lumped: ReadOnlySignal<Option<LumpedDesigned>>,
+    stepped: ReadOnlySignal<SteppedLowpassDesigned>,
 ) -> Element {
     let s = spec.read().clone();
     let d = designed.read();
+    let lowpass = topology() == Topology::SteppedImpedance;
     let chebyshev = matches!(s.approximation, yee_filter::Approximation::Chebyshev { .. });
     let ripple = match s.approximation {
         yee_filter::Approximation::Chebyshev { ripple_db } => ripple_db,
@@ -471,10 +490,29 @@ pub fn spec_stage(
     // Live realizability: the lumped flow may be unrealizable; the distributed
     // flow surfaces a dim_error. Show both honestly.
     let lumped_ok = lumped.read().is_some();
-    let dist_dim_err = d.dim_error.clone();
-    // Label the distributed-geometry note with the active technique so a hairpin
-    // error never reads as "Edge-coupled geometry note".
-    let dist_topo = d.topology_name();
+    // The active flow's geometry-error + verdict: low-pass reads from the stepped
+    // design, every band-pass flow from the distributed `Designed`.
+    let (active_dim_err, active_topo, verdict_pass, achieved_rl) = if lowpass {
+        let st = stepped.read();
+        (
+            st.dim_error.clone(),
+            "Stepped-impedance",
+            st.pass,
+            st.worst_return_loss_db,
+        )
+    } else {
+        (
+            d.dim_error.clone(),
+            d.topology_name(),
+            d.report.pass,
+            d.report.worst_return_loss_db,
+        )
+    };
+    let freq_label = if lowpass {
+        "Cutoff f_c (GHz)"
+    } else {
+        "Centre f0 (GHz)"
+    };
 
     rsx! {
         div { class: "canvas-head",
@@ -488,7 +526,7 @@ pub fn spec_stage(
                 div { class: "fields",
                     div { class: "field",
                         span { class: "name", "Response" }
-                        span { class: "val", "Bandpass" }
+                        span { class: "val", if lowpass { "Lowpass" } else { "Bandpass" } }
                     }
                     // approximation toggle
                     div { class: "field",
@@ -513,13 +551,17 @@ pub fn spec_stage(
                         }
                     }
                     {num_field(
-                        "Centre f0 (GHz)", s.f0_hz / 1e9, 0.001, 0.1, 100.0,
+                        freq_label, s.f0_hz / 1e9, 0.001, 0.1, 100.0,
                         move |v| spec.write().f0_hz = v * 1e9,
                     )}
-                    {num_field(
-                        "Fractional bandwidth (%)", s.fbw * 100.0, 0.1, 0.5, 80.0,
-                        move |v| spec.write().fbw = (v / 100.0).max(1e-4),
-                    )}
+                    // Fractional bandwidth is a band-pass-only concept; the
+                    // stepped-impedance low-pass flow hides it.
+                    if !lowpass {
+                        {num_field(
+                            "Fractional bandwidth (%)", s.fbw * 100.0, 0.1, 0.5, 80.0,
+                            move |v| spec.write().fbw = (v / 100.0).max(1e-4),
+                        )}
+                    }
                     {int_field(
                         "Order N", s.order.unwrap_or(5), 1, 11,
                         move |n| spec.write().order = Some(n),
@@ -534,7 +576,7 @@ pub fn spec_stage(
             div { class: "card", style: "flex:1",
                 h2 { class: "card-title",
                     "Spec mask"
-                    if d.report.pass {
+                    if verdict_pass {
                         span { class: "chip pass", style: "margin-left:auto", "PASS" }
                     } else {
                         span { class: "chip fail", style: "margin-left:auto", "FAIL" }
@@ -573,22 +615,33 @@ pub fn spec_stage(
                 // live realizability
                 div { class: "stats", style: "margin-top:12px",
                     div { class: "stat",
-                        div { class: "v", "{d.report.worst_return_loss_db:.2} dB" }
+                        div { class: "v", "{achieved_rl:.2} dB" }
                         div { class: "l", "achieved in-band RL" }
                     }
-                    div { class: "stat",
-                        div {
-                            class: "v",
-                            style: if lumped_ok { "color:#2dd4bf" } else { "color:#e35d6a" },
-                            if lumped_ok { "yes" } else { "no" }
+                    if !lowpass {
+                        div { class: "stat",
+                            div {
+                                class: "v",
+                                style: if lumped_ok { "color:#2dd4bf" } else { "color:#e35d6a" },
+                                if lumped_ok { "yes" } else { "no" }
+                            }
+                            div { class: "l", "lumped realizable" }
                         }
-                        div { class: "l", "lumped realizable" }
                     }
                 }
-                if let Some(err) = dist_dim_err {
+                if let Some(err) = active_dim_err {
                     div { class: "note honest",
-                        "{dist_topo} geometry note: " span { class: "mono", "{err}" }
-                        " — the Lumped LC technique may still realize this spec."
+                        "{active_topo} geometry note: " span { class: "mono", "{err}" }
+                        if lowpass {
+                            " — adjust the cutoff / order."
+                        } else {
+                            " — the Lumped LC technique may still realize this spec."
+                        }
+                    }
+                } else if lowpass {
+                    div { class: "note",
+                        "The stepped-impedance low-pass realizes this spec. Edits flow straight into "
+                        "synthesis — watch the PASS/FAIL chip and the downstream stages update live."
                     }
                 } else {
                     div { class: "note",
@@ -704,9 +757,9 @@ fn technique_status(t: RealizationTechnique) -> TechStatus {
         RealizationTechnique::Combline | RealizationTechnique::Interdigital => {
             TechStatus::Soon(Topology::EdgeCoupled)
         }
-        // A distributed lowpass has no band-pass-shaped live flow; the discrete
-        // lumped flow is the nearest realizable stand-in.
-        RealizationTechnique::SteppedImpedance => TechStatus::Soon(Topology::LumpedLc),
+        // The stepped-impedance low-pass flow is live (ADR-0139): it routes
+        // straight into the real F1.2.3 dimensioner + the low-pass response.
+        RealizationTechnique::SteppedImpedance => TechStatus::Live(Topology::SteppedImpedance),
     }
 }
 
@@ -726,6 +779,7 @@ fn topology_label(t: Topology) -> &'static str {
         Topology::EdgeCoupled => "Edge-coupled",
         Topology::Hairpin => "Hairpin",
         Topology::LumpedLc => "Lumped LC",
+        Topology::SteppedImpedance => "Stepped-impedance",
     }
 }
 
@@ -740,9 +794,37 @@ fn response_word(r: Response) -> &'static str {
     }
 }
 
-/// Route into a topology's flow: set the topology signal and land on Spec (so
-/// the user can review / refine the seeded spec before synthesizing).
-fn route_into(mut topology: Signal<Topology>, mut active: Signal<Stage>, t: Topology) {
+/// The response class a topology's synthesis flow builds: the stepped-impedance
+/// flow is **low-pass**; every other live flow is band-pass. Selecting a
+/// technique writes this into the shared spec so the Spec form + the engine
+/// re-derive in the right response domain.
+fn topology_response(t: Topology) -> Response {
+    match t {
+        Topology::SteppedImpedance => Response::Lowpass,
+        Topology::EdgeCoupled | Topology::Hairpin | Topology::LumpedLc => Response::Bandpass,
+    }
+}
+
+/// Switch the spec's response to match the selected topology's flow (low-pass
+/// for stepped-impedance, band-pass otherwise) so the Spec form + the engine
+/// re-derive in the right domain when a technique is picked.
+fn set_response_for(mut spec: Signal<FilterSpec>, t: Topology) {
+    let r = topology_response(t);
+    if spec.read().response != r {
+        spec.write().response = r;
+    }
+}
+
+/// Route into a topology's flow: set the topology signal, align the spec's
+/// response class to the flow, and land on Spec (so the user can review / refine
+/// the seeded spec before synthesizing).
+fn route_into(
+    mut topology: Signal<Topology>,
+    mut active: Signal<Stage>,
+    spec: Signal<FilterSpec>,
+    t: Topology,
+) {
+    set_response_for(spec, t);
     topology.set(t);
     active.set(Stage::Spec);
 }
@@ -953,46 +1035,60 @@ fn render_recommendation(
                     }
                 }
                 p { class: "rec-rationale", "{r.rationale}" }
-                // The studio's interactive synthesis flow is band-pass-only today
-                // (the Spec/Synthesis stages run the coupled-resonator band-pass
-                // engine). Only route a Bandpass spec into a live flow; for
-                // low-/high-/band-stop the recommendation above is correct guidance,
-                // but seeding it into the band-pass synthesizer would silently
-                // mis-synthesize — so we show an honest note instead of a route button.
+                // The studio has two live synthesis domains: the coupled-resonator
+                // band-pass flow (edge-coupled / hairpin / lumped) and the
+                // stepped-impedance LOW-PASS flow (ADR-0139). A Live technique
+                // routes when its flow builds the recommended response — band-pass
+                // for the resonator flows, low-pass for stepped-impedance.
+                // High-pass / band-stop have no live flow yet, so the
+                // recommendation is shown as honest guidance instead.
                 {
-                    if matches!(response, Response::Bandpass) {
-                        match status {
-                            TechStatus::Live(t) => rsx! {
-                                button {
-                                    class: "btn dl rec-use",
-                                    onclick: move |_| {
-                                        seed();
-                                        route_into(topology, active, t);
-                                    },
-                                    "Use this → seed the spec + open the {topology_label(t)} flow"
-                                }
-                            },
-                            TechStatus::Soon(t) => rsx! {
-                                div { class: "note honest",
-                                    "This technique is roadmapped (not yet buildable in the studio). "
-                                    "The nearest live realization is "
-                                    b { "{topology_label(t)}" } " — proceed with it:"
-                                }
-                                button {
-                                    class: "btn dl rec-use",
-                                    onclick: move |_| {
-                                        seed();
-                                        route_into(topology, active, t);
-                                    },
-                                    "Proceed with {topology_label(t)} (seed the spec + open the flow)"
-                                }
-                            },
+                    // Route only when SOME live flow builds the recommended
+                    // response: the primary itself (Live + matching response), or
+                    // a roadmapped (Soon) technique whose nearest-live stand-in
+                    // builds that response. Keyed on the stand-in's flow response,
+                    // not the recommendation's class, so it generalizes to the
+                    // low-pass flow (and any future response) without a band-pass
+                    // assumption — high-pass / band-stop, which have no live flow,
+                    // fall through to the honest note.
+                    let live_match = matches!(status, TechStatus::Live(t) if topology_response(t) == response);
+                    let soon_standin = matches!(status, TechStatus::Soon(t) if topology_response(t) == response);
+                    if live_match {
+                        let TechStatus::Live(t) = status else { unreachable!() };
+                        rsx! {
+                            button {
+                                class: "btn dl rec-use",
+                                onclick: move |_| {
+                                    seed();
+                                    route_into(topology, active, spec, t);
+                                },
+                                "Use this → seed the spec + open the {topology_label(t)} flow"
+                            }
+                        }
+                    } else if soon_standin {
+                        // The primary is roadmapped, but its nearest-live stand-in
+                        // builds the recommended response: offer it.
+                        let TechStatus::Soon(t) = status else { unreachable!() };
+                        rsx! {
+                            div { class: "note honest",
+                                "This technique is roadmapped (not yet buildable in the studio). "
+                                "The nearest live realization is "
+                                b { "{topology_label(t)}" } " — proceed with it:"
+                            }
+                            button {
+                                class: "btn dl rec-use",
+                                onclick: move |_| {
+                                    seed();
+                                    route_into(topology, active, spec, t);
+                                },
+                                "Proceed with {topology_label(t)} (seed the spec + open the flow)"
+                            }
                         }
                     } else {
                         rsx! {
                             div { class: "note honest",
                                 "The studio's interactive synthesis flow currently builds "
-                                b { "band-pass" } " filters; "
+                                b { "band-pass" } " and " b { "stepped-impedance low-pass" } " filters; "
                                 "{response_word(response)} synthesis is roadmapped. The recommendation "
                                 "above is the technique to target when that flow lands."
                             }
@@ -1073,9 +1169,9 @@ pub fn technique_stage(
         },
         TechCard {
             name: "Stepped-impedance",
-            desc: "hi/lo-Z stub sections",
-            glyph: r##"<svg viewBox="0 0 120 54"><g stroke="#6b7480" stroke-width="4" fill="none"><line x1="10" y1="30" x2="40" y2="30"/><rect x="40" y="20" width="16" height="20"/><line x1="56" y1="30" x2="72" y2="30"/><rect x="72" y="22" width="10" height="16"/><line x1="82" y1="30" x2="110" y2="30"/></g></svg>"##,
-            selects: None,
+            desc: "hi/lo-Z low-pass sections · F1.2.3",
+            glyph: r##"<svg viewBox="0 0 120 54"><g stroke="#e6b24d" stroke-width="4" fill="none"><line x1="10" y1="30" x2="40" y2="30"/><rect x="40" y="20" width="16" height="20"/><line x1="56" y1="30" x2="72" y2="30"/><rect x="72" y="22" width="10" height="16"/><line x1="82" y1="30" x2="110" y2="30"/></g></svg>"##,
+            selects: Some(Topology::SteppedImpedance),
         },
     ];
     let cur = topology();
@@ -1109,6 +1205,10 @@ pub fn technique_stage(
                                 if let Some(t) = target
                                     && topology() != t
                                 {
+                                    // Align the spec's response class to the flow
+                                    // (low-pass for stepped-impedance, band-pass
+                                    // otherwise) so the engine re-derives correctly.
+                                    set_response_for(spec, t);
                                     topology.set(t);
                                     // The new flow may not contain the current
                                     // stage — land on Synthesis.
@@ -1207,11 +1307,12 @@ pub fn export_stage(
     topology: ReadOnlySignal<Topology>,
     designed: ReadOnlySignal<Designed>,
     lumped: ReadOnlySignal<Option<LumpedDesigned>>,
+    stepped: ReadOnlySignal<SteppedLowpassDesigned>,
 ) -> Element {
-    if topology() == Topology::LumpedLc {
-        export_lumped(lumped)
-    } else {
-        export_distributed(designed)
+    match topology() {
+        Topology::LumpedLc => export_lumped(lumped),
+        Topology::SteppedImpedance => export_stepped(stepped),
+        Topology::EdgeCoupled | Topology::Hairpin => export_distributed(designed),
     }
 }
 
@@ -2001,6 +2102,466 @@ pub fn lumped_layout_stage(designed: ReadOnlySignal<Option<LumpedDesigned>>) -> 
                 "The same Layout feeds the shipped Gerber / KiCad exporters (Export stage). "
                 "Component values are keyed by ref-des from the BOM; routing / matched-meander "
                 "and a parasitic-aware land library are documented follow-ons (F2.2b)."
+            }
+        }
+    }
+}
+
+// ===========================================================================
+// REAL stage — stepped-impedance low-pass (App.2.2, ADR-0139)
+// ===========================================================================
+
+/// Honest placeholder when the stepped-impedance geometry is not realizable on
+/// FR-4 for the current spec (mirrors [`lumped_unrealizable`]).
+fn stepped_unrealizable(title: &str, msg: &str) -> Element {
+    let msg = msg.to_string();
+    rsx! {
+        div { class: "canvas-head",
+            h1 { "{title}" }
+            p { class: "sub", "Stepped-impedance low-pass realization of the current spec." }
+        }
+        div { class: "card",
+            h2 { class: "card-title",
+                "Geometry not realizable"
+                span { class: "chip fail", style: "margin-left:auto", "FR-4" }
+            }
+            div { class: "note honest",
+                "The current low-pass spec does not dimension onto an FR-4 microstrip "
+                "(a section width / length goes non-physical). Adjust the cutoff or order on "
+                "the Spec stage. Engine note: " span { class: "mono", "{msg}" }
+            }
+        }
+    }
+}
+
+/// Stepped-impedance low-pass **Synthesis** stage: the prototype g-values + the
+/// swept low-pass `|S21|`/`|S11|` vs the shaded low-pass mask + PASS/FAIL, plus
+/// the realized stepped-section table (impedance, electrical length βl, width,
+/// length per section). Mirrors [`lumped_synthesis_stage`]. All values are live
+/// engine output (the F1.2.3 dimensioner + the App.2.2 low-pass response).
+pub fn stepped_synthesis_stage(designed: ReadOnlySignal<SteppedLowpassDesigned>) -> Element {
+    let d = designed.read();
+    let plot = response_plot(&d.sweep, &d.mask_bands);
+    let n = d.order;
+    let fc_ghz = d.cutoff_hz() / 1e9;
+    let stopband_rows: Vec<(String, String, String, bool)> = d
+        .stopband
+        .iter()
+        .map(|&(f, achieved, required, met)| {
+            (
+                format!("{:.3} GHz", f / 1e9),
+                format!("{achieved:.1} dB"),
+                format!("{required:.1} dB"),
+                met,
+            )
+        })
+        .collect();
+
+    rsx! {
+        div { class: "canvas-head",
+            h1 { "Synthesis · Stepped-impedance low-pass" }
+            p { class: "sub", "The low-pass prototype mapped to alternating high-Z / low-Z microstrip sections (Pozar §8.6, shunt-capacitor low-Z first). The swept |S21| is the closed-form low-pass response at Ω = f / f_c. All values are live engine output." }
+        }
+
+        // ---- ideal low-pass response vs mask ------------------------------
+        div { class: "card", style: "margin-bottom:16px",
+            h2 { class: "card-title",
+                "Ideal low-pass response vs spec mask"
+                span { class: "k", "closed-form |S21| at Ω = f / f_c · f_c = {fc_ghz:.3} GHz" }
+                if d.pass {
+                    span { class: "chip pass", style: "margin-left:auto", "PASS" }
+                } else {
+                    span { class: "chip fail", style: "margin-left:auto", "FAIL" }
+                }
+            }
+            div { class: "plot", dangerous_inner_html: "{plot}" }
+            div { class: "legend",
+                span { span { class: "swatch", style: "background:#2dd4bf" } "|S21| (transmission)" }
+                span { span { class: "swatch", style: "background:#6b7480" } "|S11| (reflection)" }
+                span { span { class: "swatch", style: "background:#e35d6a" } "forbidden (mask)" }
+            }
+        }
+
+        div { class: "row",
+            // ---- stepped-section table -------------------------------------
+            div { class: "card", style: "flex:1.6",
+                h2 { class: "card-title",
+                    "Line sections"
+                    span { class: "k", "N={n} · low-Z first · source → load" }
+                }
+                table {
+                    thead {
+                        tr {
+                            th { "#" }
+                            th { "line" }
+                            th { "Z (Ω)" }
+                            th { "βl (°)" }
+                            th { "W (mm)" }
+                            th { "L (mm)" }
+                        }
+                    }
+                    tbody {
+                        for s in d.sections.iter() {
+                            tr { key: "sec{s.index}",
+                                td { class: "mono", "{s.index}" }
+                                td {
+                                    if s.high_z {
+                                        span { class: "pill-sel", "high-Z (series L)" }
+                                    } else {
+                                        span { class: "pill-sel", style: "background:#11302a;border-color:#1f5138;color:#2dd4bf", "low-Z (shunt C)" }
+                                    }
+                                }
+                                td { class: "mono", "{s.z_ohm:.1}" }
+                                td { class: "mono", "{s.betal_deg:.2}" }
+                                td { class: "mono", "{s.width_mm:.3}" }
+                                td { class: "mono", "{s.length_mm:.2}" }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ---- prototype + impedance pair --------------------------------
+            div { class: "card", style: "flex:1",
+                h2 { class: "card-title", "Prototype + impedances" }
+                div { class: "stats",
+                    div { class: "stat",
+                        div { class: "v", "{d.z_high():.0} Ω" }
+                        div { class: "l", "high-Z line" }
+                    }
+                    div { class: "stat",
+                        div { class: "v", "{d.z_low():.0} Ω" }
+                        div { class: "l", "low-Z line" }
+                    }
+                }
+                p { class: "lab", style: "margin-top:16px", "g-values" }
+                div { class: "gvals",
+                    for (i, g) in d.g_values.iter().enumerate() {
+                        div { key: "g{i}", class: "gval", b { "g{i} " } "{g:.4}" }
+                    }
+                }
+                div { class: "stats", style: "margin-top:16px",
+                    div { class: "stat",
+                        div { class: "v", "{d.worst_passband_ripple_db:.3} dB" }
+                        div { class: "l", "passband ripple" }
+                    }
+                    div { class: "stat",
+                        div { class: "v", "{d.worst_return_loss_db:.2} dB" }
+                        div { class: "l", "in-band return loss" }
+                    }
+                }
+            }
+        }
+
+        // ---- stopband verdict ---------------------------------------------
+        if !stopband_rows.is_empty() {
+            div { class: "card", style: "margin-top:16px",
+                h2 { class: "card-title", "Stopband rejection" }
+                table {
+                    thead {
+                        tr {
+                            th { "stopband point" }
+                            th { "achieved" }
+                            th { "required" }
+                            th { "" }
+                        }
+                    }
+                    tbody {
+                        for (i, (f, achieved, required, met)) in stopband_rows.iter().enumerate() {
+                            tr { key: "sb{i}",
+                                td { class: "mono", "{f}" }
+                                td { class: "mono", "{achieved}" }
+                                td { class: "mono", "{required}" }
+                                td {
+                                    if *met {
+                                        span { class: "ok-mark", "✓ met" }
+                                    } else {
+                                        span { style: "color:#e35d6a", "✗ under" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        div { class: "note honest",
+            "Honest note: this is the IDEAL closed-form low-pass prototype response and the "
+            "first-order stepped-impedance dimensions (Pozar §8.6). Junction discontinuities, "
+            "step reactances, and the full-wave realized response are EM-verify (later) — the "
+            "studio never hides the ideal-vs-realized gap."
+        }
+    }
+}
+
+/// Stepped-impedance low-pass **Layout** stage: the dimensioned in-line board
+/// top-view (the generic `Layout` SVG — reuses [`board_svg`]) + the material
+/// stackup + the per-section geometry table. Mirrors [`lumped_layout_stage`] /
+/// [`layout_stage`].
+pub fn stepped_layout_stage(designed: ReadOnlySignal<SteppedLowpassDesigned>) -> Element {
+    let d = designed.read();
+    let Some(layout) = d.layout.as_ref() else {
+        let msg = d
+            .dim_error
+            .clone()
+            .unwrap_or_else(|| "geometry not realizable on FR-4".into());
+        return stepped_unrealizable("Layout · Stepped-impedance board", &msg);
+    };
+    let board = board_svg(layout);
+    let sub = &layout.substrate;
+    let (bw, bh) = d.board_size_mm;
+
+    rsx! {
+        div { class: "canvas-head",
+            h1 { "Layout + Materials" }
+            p { class: "sub", "The stepped-impedance low-pass line — alternating high-Z / low-Z sections laid end to end with Z0 feeds — and the material stackup, all from the live F1.2.3 dimensional synthesis." }
+        }
+
+        div { class: "row",
+            // ---- board top view ---------------------------------------------
+            div { class: "card", style: "flex:1.6",
+                h2 { class: "card-title",
+                    "Board · top view"
+                    span { class: "k", "F.Cu · substrate · ports · {bw:.1} × {bh:.1} mm" }
+                }
+                div { class: "board-frame", dangerous_inner_html: "{board}" }
+                div { class: "legend-row",
+                    span { class: "sw-cu", "● copper" }
+                    span { class: "sw-sub", "● substrate" }
+                    span { style: "color:#2dd4bf", "◯ port" }
+                }
+            }
+
+            // ---- material stackup -------------------------------------------
+            div { class: "card", style: "flex:0 0 260px",
+                h2 { class: "card-title", "Material stackup" }
+                div { class: "stack-layer",
+                    span { class: "lbl", "F.Cu" }
+                    span { class: "swatch", style: "background:#e6b24d;height:8px", "{sub.metal_thickness_m*1e6:.0} µm" }
+                }
+                div { class: "stack-layer",
+                    span { class: "lbl", "substrate" }
+                    span { class: "swatch", style: "background:#3f9e72;height:42px", "FR-4 · εr {sub.eps_r:.1} · {sub.height_m*1e3:.2} mm" }
+                }
+                div { class: "stack-layer",
+                    span { class: "lbl", "GND" }
+                    span { class: "swatch", style: "background:#e6b24d;height:8px", "{sub.metal_thickness_m*1e6:.0} µm" }
+                }
+                div { style: "margin-top:14px",
+                    div { class: "editrow", span { "Substrate" } span { class: "pill-sel", "FR-4" } }
+                    div { class: "editrow", span { "εr" } span { class: "v", "{sub.eps_r:.2}" } }
+                    div { class: "editrow", span { "height h" } span { class: "v", "{sub.height_m*1e3:.2} mm" } }
+                    div { class: "editrow", span { "Cu thickness" } span { class: "v", "{sub.metal_thickness_m*1e6:.0} µm" } }
+                    div { class: "editrow", span { "high / low Z" } span { class: "v", "{d.z_high():.0} / {d.z_low():.0} Ω" } }
+                }
+            }
+        }
+
+        // ---- per-section geometry table -----------------------------------
+        div { class: "card", style: "margin-top:16px",
+            h2 { class: "card-title",
+                "Sections · geometry"
+                span { class: "k", "source → load · Z / βl / W / L per section" }
+            }
+            table {
+                thead {
+                    tr {
+                        th { "#" }
+                        th { "line" }
+                        th { "Z (Ω)" }
+                        th { "βl (°)" }
+                        th { "W (mm)" }
+                        th { "L (mm)" }
+                    }
+                }
+                tbody {
+                    for s in d.sections.iter() {
+                        tr { key: "lsec{s.index}",
+                            td { class: "mono", "{s.index}" }
+                            td {
+                                if s.high_z {
+                                    span { class: "pill-sel", "high-Z" }
+                                } else {
+                                    span { class: "pill-sel", style: "background:#11302a;border-color:#1f5138;color:#2dd4bf", "low-Z" }
+                                }
+                            }
+                            td { class: "mono", "{s.z_ohm:.1}" }
+                            td { class: "mono", "{s.betal_deg:.2}" }
+                            td { class: "mono", "{s.width_mm:.3}" }
+                            td { class: "mono", "{s.length_mm:.2}" }
+                        }
+                    }
+                }
+            }
+            p { class: "note honest",
+                "Section widths come from Hammerstad-Jensen synthesis at each impedance; the "
+                "lengths from βl and the guided wavelength at f_c. The same Layout feeds the "
+                "shipped Gerber / KiCad exporters (Export stage)."
+            }
+        }
+    }
+}
+
+/// Build the stepped-impedance low-pass parameter sheet: the spec, the prototype
+/// g-values, and the realized per-section geometry — all live engine values.
+fn stepped_param_sheet(d: &SteppedLowpassDesigned) -> String {
+    let mut s = String::new();
+    s.push_str("# Yee Filter Studio — stepped-impedance low-pass parameter sheet\n\n");
+    s.push_str("## Specification\n");
+    s.push_str("response          : Lowpass\n");
+    s.push_str(&format!(
+        "approximation     : {}\n",
+        approx_label(&d.spec.approximation)
+    ));
+    s.push_str(&format!("order N           : {}\n", d.order));
+    s.push_str(&format!(
+        "cutoff f_c        : {:.6} GHz\n",
+        d.cutoff_hz() / 1e9
+    ));
+    s.push_str(&format!("system Z0         : {:.1} ohm\n", d.spec.z0_ohm));
+    s.push_str(&format!(
+        "high / low Z      : {:.1} / {:.1} ohm\n",
+        d.z_high(),
+        d.z_low()
+    ));
+    s.push_str(&format!(
+        "verdict           : {} (worst RL {:.2} dB, worst ripple {:.3} dB)\n",
+        if d.pass { "PASS" } else { "FAIL" },
+        d.worst_return_loss_db,
+        d.worst_passband_ripple_db
+    ));
+    for (f, achieved, required, met) in &d.stopband {
+        s.push_str(&format!(
+            "  stopband        : {:.4} GHz -> {:.1} dB (need {:.1} dB) {}\n",
+            f / 1e9,
+            achieved,
+            required,
+            if *met { "MET" } else { "UNDER" }
+        ));
+    }
+    s.push_str("\n## Prototype g-values\n");
+    for (i, g) in d.g_values.iter().enumerate() {
+        s.push_str(&format!("g{i:<2} = {g:.6}\n"));
+    }
+    if !d.sections.is_empty() {
+        let (bw, bh) = d.board_size_mm;
+        s.push_str(&format!(
+            "\n## Realized sections (FR-4, board {bw:.2} x {bh:.2} mm, source -> load)\n"
+        ));
+        s.push_str("#   line    Z(ohm)  betal(deg)  W(mm)    L(mm)\n");
+        for sec in &d.sections {
+            s.push_str(&format!(
+                "{:<3} {:<7} {:<7.1} {:<11.2} {:<8.3} {:<.2}\n",
+                sec.index,
+                if sec.high_z { "high-Z" } else { "low-Z" },
+                sec.z_ohm,
+                sec.betal_deg,
+                sec.width_mm,
+                sec.length_mm
+            ));
+        }
+    } else if let Some(err) = &d.dim_error {
+        s.push_str(&format!(
+            "\n## Realized geometry\nNOT REALIZABLE on FR-4: {err}\n"
+        ));
+    }
+    s
+}
+
+/// Stepped-impedance low-pass **Export** panel: real Gerber / KiCad from the
+/// dimensioned `Layout` (the shipped generic `yee-export` emitters) + a
+/// parameter sheet. Mirrors [`export_distributed`].
+fn export_stepped(designed: ReadOnlySignal<SteppedLowpassDesigned>) -> Element {
+    let d = designed.read();
+    let (bw, bh) = d.board_size_mm;
+    let approx = approx_label(&d.spec.approximation);
+    let realizable = d.layout.is_some();
+
+    rsx! {
+        div { class: "canvas-head",
+            h1 { "Export" }
+            p { class: "sub", "The parameter sheet + manufacturable files, generated live from the dimensioned stepped-impedance low-pass layout — Gerber and KiCad are written client-side by the shipped `yee-export` emitters." }
+        }
+        div { class: "card",
+            h2 { class: "card-title",
+                "Design summary"
+                span { class: "k", "stepped-impedance low-pass microstrip" }
+            }
+            div { class: "fields",
+                div { class: "field", span { class: "name", "Topology" } span { class: "val", "Stepped-impedance · N={d.order}" } }
+                div { class: "field", span { class: "name", "Approximation" } span { class: "val", "{approx}" } }
+                div { class: "field", span { class: "name", "Cutoff f_c" } span { class: "val", "{d.cutoff_hz()/1e9:.3} GHz" } }
+                div { class: "field", span { class: "name", "System Z0" } span { class: "val", "{d.spec.z0_ohm:.0} Ω" } }
+                div { class: "field", span { class: "name", "High / low Z" } span { class: "val", "{d.z_high():.0} / {d.z_low():.0} Ω" } }
+                div { class: "field", span { class: "name", "Board" } span { class: "val", "{bw:.1} × {bh:.1} mm" } }
+                div { class: "field",
+                    span { class: "name", "Spec verdict" }
+                    if d.pass {
+                        span { class: "val", style: "color:#2dd4bf", "PASS" }
+                    } else {
+                        span { class: "val", style: "color:#e35d6a", "FAIL" }
+                    }
+                }
+            }
+            if realizable {
+                div { class: "export-row",
+                    download_btn {
+                        label: "Gerber F.Cu",
+                        make: move |_| {
+                            if let Some(layout) = designed.read().layout.as_ref() {
+                                let g = yee_export::layout_to_gerber(layout, &Default::default());
+                                download_file("lowpass-F_Cu.gbr", "application/vnd.gerber", &g);
+                            }
+                        },
+                    }
+                    download_btn {
+                        label: "Gerber Edge.Cuts",
+                        make: move |_| {
+                            if let Some(layout) = designed.read().layout.as_ref() {
+                                let g = yee_export::layout_to_gerber_outline(layout, &Default::default());
+                                download_file("lowpass-Edge_Cuts.gbr", "application/vnd.gerber", &g);
+                            }
+                        },
+                    }
+                    download_btn {
+                        label: "KiCad .kicad_pcb",
+                        make: move |_| {
+                            if let Some(layout) = designed.read().layout.as_ref() {
+                                let k = yee_export::layout_to_kicad_pcb(layout, &Default::default());
+                                download_file("lowpass.kicad_pcb", "application/octet-stream", &k);
+                            }
+                        },
+                    }
+                    download_btn {
+                        label: "Parameter sheet",
+                        make: move |_| {
+                            let sheet = stepped_param_sheet(&designed.read());
+                            download_file("lowpass-parameters.txt", "text/plain", &sheet);
+                        },
+                    }
+                }
+                div { class: "note honest",
+                    "Gerber + KiCad are written by the shipped `yee-export` emitters from the same "
+                    "`Layout` the board view draws — single copper layer + Edge.Cuts outline. "
+                    "Drill / soldermask / silkscreen and a Touchstone .s2p (post EM-verify) are "
+                    "documented follow-ons."
+                }
+            } else {
+                div { class: "note honest",
+                    "Geometry is not realizable on FR-4 for the current spec, so the board exporters "
+                    "are unavailable — adjust the cutoff / order on the Spec stage. The parameter "
+                    "sheet (synthesis-only) is still available:"
+                }
+                div { class: "export-row",
+                    download_btn {
+                        label: "Parameter sheet",
+                        make: move |_| {
+                            let sheet = stepped_param_sheet(&designed.read());
+                            download_file("lowpass-parameters.txt", "text/plain", &sheet);
+                        },
+                    }
+                }
             }
         }
     }

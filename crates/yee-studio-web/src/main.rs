@@ -40,8 +40,8 @@ mod svg;
 use dioxus::prelude::*;
 
 use engine::{
-    Designed, LumpedDesigned, demo_spec, design_demo, design_demo_from, design_lumped,
-    design_lumped_from,
+    Designed, LumpedDesigned, SteppedLowpassDesigned, demo_spec, design_demo, design_demo_from,
+    design_lumped, design_lumped_from, design_stepped, design_stepped_from,
 };
 use stages::{Stage, Topology};
 use yee_filter::FilterSpec;
@@ -80,11 +80,16 @@ fn App() -> Element {
     // swaps the board between the two distributed realizations.
     let mut designed = use_signal(design_demo);
     let mut lumped = use_signal(|| Some(design_lumped()));
+    // The stepped-impedance low-pass design (ADR-0139): re-derived on every spec
+    // edit, mirroring `lumped`. It always succeeds (the dimensioner degrades to
+    // a `dim_error` rather than failing), so it is a plain value, not an Option.
+    let mut stepped = use_signal(design_stepped);
     use_effect(move || {
         let s: FilterSpec = spec();
         let t: Topology = topology();
         designed.set(design_demo_from(s.clone(), t));
-        lumped.set(design_lumped_from(s).ok());
+        lumped.set(design_lumped_from(s.clone()).ok());
+        stepped.set(design_stepped_from(s));
     });
 
     let active = use_signal(|| Stage::Synthesis);
@@ -105,6 +110,7 @@ fn App() -> Element {
                         spec,
                         designed,
                         lumped,
+                        stepped,
                         series_e96,
                     }
                 }
@@ -173,8 +179,9 @@ fn Rail(active: Signal<Stage>, topology: ReadOnlySignal<Topology>) -> Element {
 }
 
 /// Dispatch the active stage to its renderer, routing Synthesis / Components /
-/// Tolerance / Layout to the lumped renderers when the lumped topology is
-/// selected.
+/// Tolerance / Layout to the lumped renderers for the lumped topology, and
+/// Synthesis / Layout to the stepped-impedance low-pass renderers for the
+/// `SteppedImpedance` topology (ADR-0139).
 #[component]
 fn StageCanvas(
     stage: Stage,
@@ -183,19 +190,23 @@ fn StageCanvas(
     spec: Signal<FilterSpec>,
     designed: ReadOnlySignal<Designed>,
     lumped: ReadOnlySignal<Option<LumpedDesigned>>,
+    stepped: ReadOnlySignal<SteppedLowpassDesigned>,
     series_e96: Signal<bool>,
 ) -> Element {
     let lumped_flow = topology() == Topology::LumpedLc;
+    let stepped_flow = topology() == Topology::SteppedImpedance;
     match stage {
-        Stage::Spec => stages::spec_stage(spec, designed, lumped),
+        Stage::Spec => stages::spec_stage(spec, topology.into(), designed, lumped, stepped),
         Stage::Technique => stages::technique_stage(topology, active, spec),
+        Stage::Synthesis if stepped_flow => stages::stepped_synthesis_stage(stepped),
         Stage::Synthesis if lumped_flow => stages::lumped_synthesis_stage(lumped),
         Stage::Synthesis => stages::synthesis_stage(designed),
         Stage::Components => stages::lumped_components_stage(lumped, series_e96),
         Stage::Tolerance => stages::lumped_tolerance_stage(lumped),
+        Stage::Layout if stepped_flow => stages::stepped_layout_stage(stepped),
         Stage::Layout if lumped_flow => stages::lumped_layout_stage(lumped),
         Stage::Layout => stages::layout_stage(designed),
         Stage::Verify => stages::verify_stage(),
-        Stage::Export => stages::export_stage(topology.into(), designed, lumped),
+        Stage::Export => stages::export_stage(topology.into(), designed, lumped, stepped),
     }
 }

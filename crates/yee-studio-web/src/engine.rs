@@ -11,9 +11,11 @@
 use yee_filter::{
     Approximation, Bom, BranchKind, CompKind, CouplingMatrix, ESeries, FilterProject, FilterSpec,
     Footprint, LcBranch, LumpedBoard, LumpedLadder, MaskReport, MaskVerdict, Response, SpecMask,
-    check_mask, dimension_edge_coupled, dimension_edge_coupled_layout, dimension_hairpin,
-    dimension_hairpin_layout, ideal_response, ladder_s21, lumped_board, mask_verdict,
-    monte_carlo_yield, select_components, synthesize, synthesize_lumped,
+    SteppedSection, check_mask, dimension_edge_coupled, dimension_edge_coupled_layout,
+    dimension_hairpin, dimension_hairpin_layout, dimension_stepped_impedance,
+    dimension_stepped_impedance_layout, ideal_response, ideal_response_lowpass, ladder_s21,
+    lumped_board, mask_verdict, monte_carlo_yield, select_components, synthesize,
+    synthesize_lumped,
 };
 use yee_layout::{BBox, CoupledMicrostrip, Layout, Substrate, coupled_microstrip, eps_eff};
 
@@ -160,9 +162,13 @@ impl Designed {
     pub fn topology_name(&self) -> &'static str {
         match self.topology {
             Topology::Hairpin => "hairpin (U-folded ½λ)",
-            // The lumped flow renders its own (lumped) Layout / Export; the
-            // distributed `Designed` it carries is dimensioned edge-coupled.
-            Topology::EdgeCoupled | Topology::LumpedLc => "edge-coupled ½λ",
+            // The lumped + stepped-impedance flows render their own Layout /
+            // Export (the band-pass `Designed` is never built for them — they use
+            // `LumpedDesigned` / `SteppedLowpassDesigned`); the carried distributed
+            // `Designed` is dimensioned edge-coupled.
+            Topology::EdgeCoupled | Topology::LumpedLc | Topology::SteppedImpedance => {
+                "edge-coupled ½λ"
+            }
         }
     }
 
@@ -172,7 +178,9 @@ impl Designed {
     pub fn length_label(&self) -> &'static str {
         match self.topology {
             Topology::Hairpin => "arm length (mm)",
-            Topology::EdgeCoupled | Topology::LumpedLc => "length (mm)",
+            Topology::EdgeCoupled | Topology::LumpedLc | Topology::SteppedImpedance => {
+                "length (mm)"
+            }
         }
     }
 }
@@ -323,7 +331,10 @@ fn derive_geometry(project: &FilterProject, topology: Topology) -> Geometry {
                     .unwrap_or_else(|| "hairpin geometry is not realizable on FR-4".into())),
             }
         }
-        Topology::EdgeCoupled | Topology::LumpedLc => {
+        // `SteppedImpedance` has its own low-pass `SteppedLowpassDesigned` flow
+        // and never builds a band-pass `Designed`; if it ever reached here it
+        // would harmlessly reuse the edge-coupled geometry.
+        Topology::EdgeCoupled | Topology::LumpedLc | Topology::SteppedImpedance => {
             match (
                 dimension_edge_coupled(project, &SUBSTRATE),
                 dimension_edge_coupled_layout(project, &SUBSTRATE),
@@ -760,6 +771,294 @@ fn footprint_name(fp: Footprint) -> &'static str {
     }
 }
 
+// ===========================================================================
+// Stepped-impedance low-pass adapter (App.2.2, ADR-0139)
+// ===========================================================================
+
+/// High-Z line impedance for the stepped-impedance dimensioner, ohms (the
+/// standard high/low pair used in Pozar §8.6 Example 8.6). A practical FR-4
+/// microstrip realizes roughly 20–120 Ω, so these are the impedances the
+/// alternating series-inductor (high-Z) / shunt-capacitor (low-Z) sections use.
+const STEPPED_Z_HIGH: f64 = 120.0;
+/// Low-Z line impedance for the stepped-impedance dimensioner, ohms.
+const STEPPED_Z_LOW: f64 = 20.0;
+/// The low-pass response sweep spans `[0, SWEEP_SPAN_MULT·f_c]` so the −3 dB
+/// cutoff and the stopband roll-off are both visible on the plot.
+const LP_SWEEP_SPAN_MULT: f64 = 3.0;
+
+/// One rendered transmission-line section of the stepped-impedance low-pass
+/// filter (Synthesis / Layout tables), pre-extracted for display.
+#[derive(Clone, Copy)]
+pub struct SteppedSectionRow {
+    /// Section index, 1-based (source → load).
+    pub index: usize,
+    /// `true` for a series-inductor **high-Z** line; `false` for a
+    /// shunt-capacitor **low-Z** line.
+    pub high_z: bool,
+    /// Characteristic impedance of the section, ohms.
+    pub z_ohm: f64,
+    /// Electrical length `βl`, degrees.
+    pub betal_deg: f64,
+    /// Physical microstrip width, mm.
+    pub width_mm: f64,
+    /// Physical section length, mm.
+    pub length_mm: f64,
+}
+
+/// Everything the two stepped-impedance low-pass stages render — all from the
+/// live engine (the F1.2.3 [`dimension_stepped_impedance`] dimensioner + the
+/// App.2.2 [`ideal_response_lowpass`] response). Mirrors [`LumpedDesigned`].
+pub struct SteppedLowpassDesigned {
+    /// The low-pass spec this was designed from (`Response::Lowpass`; `f0_hz`
+    /// reused as the cutoff `f_c`).
+    pub spec: FilterSpec,
+    /// The filter order `N`.
+    pub order: usize,
+    /// Prototype element values `[g0, g1, …, gN, g_{N+1}]`.
+    pub g_values: Vec<f64>,
+    /// Display-ready stepped-section rows (source → load, low-Z first).
+    pub sections: Vec<SteppedSectionRow>,
+    /// The swept low-pass `|S21|`/`|S11|` response (reuses [`SweepPoint`]).
+    pub sweep: Vec<SweepPoint>,
+    /// Forbidden low-pass mask regions for the response plot.
+    pub mask_bands: Vec<MaskBand>,
+    /// `true` iff the swept response satisfies the low-pass spec mask.
+    pub pass: bool,
+    /// Worst-case in-band insertion-loss ripple observed, dB.
+    pub worst_passband_ripple_db: f64,
+    /// Worst-case (smallest) in-band return loss observed, dB.
+    pub worst_return_loss_db: f64,
+    /// Per stopband point: `(freq_hz, achieved_rejection_db, required_db, met)`.
+    pub stopband: Vec<(f64, f64, f64, bool)>,
+    /// The dimensioned stepped-impedance board, or `None` when the sections are
+    /// not realizable on FR-4 (then [`dim_error`](Self::dim_error) is `Some`).
+    pub layout: Option<Layout>,
+    /// Board bounding box, mm (`(width, height)`); `(0, 0)` when not realizable.
+    pub board_size_mm: (f64, f64),
+    /// The dimensioning error string when the sections could not be realized on
+    /// FR-4, else `None`. The synthesis / response / verdict stay real.
+    pub dim_error: Option<String>,
+}
+
+impl SteppedLowpassDesigned {
+    /// The high-Z line impedance the dimensioner used, ohms.
+    pub fn z_high(&self) -> f64 {
+        STEPPED_Z_HIGH
+    }
+    /// The low-Z line impedance the dimensioner used, ohms.
+    pub fn z_low(&self) -> f64 {
+        STEPPED_Z_LOW
+    }
+    /// The cutoff frequency `f_c`, Hz (the low-pass spec reuses `f0_hz`).
+    pub fn cutoff_hz(&self) -> f64 {
+        self.spec.f0_hz
+    }
+}
+
+/// Run the full live stepped-impedance low-pass pipeline on the hard-coded demo
+/// spec, mapped to a low-pass cutoff.
+///
+/// Convenience wrapper around [`design_stepped_from`] for the initial boot state
+/// (the Spec stage edits a live spec that re-drives the pipeline). The band-pass
+/// [`demo_spec`] is reused with its response switched to [`Response::Lowpass`]
+/// (its `f0_hz` becomes the cutoff, its `fbw` is irrelevant to low-pass).
+pub fn design_stepped() -> SteppedLowpassDesigned {
+    design_stepped_from(stepped_demo_spec())
+}
+
+/// The demo spec adapted to a low-pass stepped-impedance design: the [`demo_spec`]
+/// with [`Response::Lowpass`] and a stopband well above the cutoff (so the mask
+/// has a meaningful rejection target for the low-pass roll-off).
+fn stepped_demo_spec() -> FilterSpec {
+    let mut spec = demo_spec();
+    spec.response = Response::Lowpass;
+    // f0 stays as the cutoff; place the stopband at ~2× cutoff with a target the
+    // order-5 roll-off comfortably meets.
+    spec.mask.stopband = vec![(2.0 * spec.f0_hz, 25.0)];
+    spec
+}
+
+/// Run the full live stepped-impedance low-pass pipeline on an arbitrary
+/// [`FilterSpec`] interpreted as a **low-pass** design (the `f0_hz` field is the
+/// cutoff `f_c`): synthesize the prototype g-values → dimension the alternating
+/// high-Z / low-Z microstrip sections ([`dimension_stepped_impedance`], Pozar
+/// §8.6) → sweep the low-pass `|S21|` ([`ideal_response_lowpass`]) → grade
+/// against a low-pass spec mask → assemble the in-line board layout. Every value
+/// is real engine output; nothing is faked.
+///
+/// The synthesis / response / verdict stay real even when the geometry is not
+/// realizable on FR-4 (an over-short / over-long section width-synthesis edge
+/// case): the geometry-derived fields degrade to empty + a `dim_error`, mirroring
+/// [`design_demo_from`].
+pub fn design_stepped_from(spec: FilterSpec) -> SteppedLowpassDesigned {
+    // Low-pass synthesis is the bare prototype g-values — there is no band-pass
+    // coupling matrix or fractional bandwidth, so go straight to
+    // `yee_synth::prototype` (the same g-values the dimensioner consumes) rather
+    // than the band-pass `synthesize`. The order is the explicit spec order
+    // (default 5 for the boot demo); a low-pass mask cannot be band-pass-mapped
+    // to estimate an order, so an explicit order is required here.
+    let order = spec.order.unwrap_or(5).max(1);
+    let prototype = yee_synth::prototype(spec.approximation, order);
+    let g_values = prototype.g.clone();
+    let f_c = spec.f0_hz;
+    let approx = spec.approximation;
+
+    // ---- physical dimensioning (FR-4, stepped-impedance) ------------------
+    let (sections, layout, board_size_mm, dim_error) = match (
+        dimension_stepped_impedance(
+            &prototype,
+            f_c,
+            spec.z0_ohm,
+            STEPPED_Z_HIGH,
+            STEPPED_Z_LOW,
+            &SUBSTRATE,
+        ),
+        dimension_stepped_impedance_layout(
+            &prototype,
+            f_c,
+            spec.z0_ohm,
+            STEPPED_Z_HIGH,
+            STEPPED_Z_LOW,
+            &SUBSTRATE,
+        ),
+    ) {
+        (Ok(dims), Ok(layout)) => {
+            let rows: Vec<SteppedSectionRow> = dims
+                .sections
+                .iter()
+                .enumerate()
+                .map(|(i, s): (usize, &SteppedSection)| SteppedSectionRow {
+                    index: i + 1,
+                    high_z: s.high_z,
+                    z_ohm: s.z_ohm,
+                    betal_deg: s.electrical_length_rad.to_degrees(),
+                    width_mm: s.width_m * 1e3,
+                    length_mm: s.length_m * 1e3,
+                })
+                .collect();
+            let bs = board_size_mm(&layout.bbox);
+            (rows, Some(layout), bs, None)
+        }
+        (dims_res, layout_res) => {
+            let msg = dims_res
+                .err()
+                .map(|e| e.to_string())
+                .or_else(|| layout_res.err().map(|e| e.to_string()))
+                .unwrap_or_else(|| "stepped-impedance geometry is not realizable on FR-4".into());
+            (Vec::new(), None, (0.0, 0.0), Some(msg))
+        }
+    };
+
+    // ---- swept low-pass response (Ω = f / f_c) ----------------------------
+    let freqs = lowpass_sweep_freqs(f_c);
+    let s21 = ideal_response_lowpass(approx, order, f_c, &freqs);
+    let sweep: Vec<SweepPoint> = freqs
+        .iter()
+        .zip(s21.iter())
+        .map(|(&f, z)| {
+            let s21_mag = z.norm().min(1.0);
+            let s11_sq = (1.0 - s21_mag * s21_mag).max(0.0);
+            SweepPoint {
+                f_hz: f,
+                s21_db: 20.0 * s21_mag.max(1e-12).log10(),
+                s11_db: 10.0 * s11_sq.max(1e-12).log10(),
+            }
+        })
+        .collect();
+
+    let mask_bands = lowpass_mask_bands(&spec);
+
+    // ---- low-pass spec-mask verdict ---------------------------------------
+    // In-band is [0, f_c]: grade the worst ripple + the worst return loss over
+    // that band, then check each stopband rejection point.
+    let mut min_il = f64::INFINITY;
+    let mut max_il = f64::NEG_INFINITY;
+    let mut worst_rl = f64::INFINITY;
+    let mut saw_passband = false;
+    for s in sweep.iter().filter(|s| s.f_hz > 0.0 && s.f_hz <= f_c) {
+        saw_passband = true;
+        let il = -s.s21_db; // insertion loss (positive = loss)
+        min_il = min_il.min(il);
+        max_il = max_il.max(il);
+        worst_rl = worst_rl.min(-s.s11_db);
+    }
+    let worst_passband_ripple_db = if saw_passband {
+        (max_il - min_il).max(0.0)
+    } else {
+        0.0
+    };
+    let worst_return_loss_db = if worst_rl.is_finite() { worst_rl } else { 0.0 };
+
+    let mut pass = saw_passband
+        && worst_passband_ripple_db <= spec.mask.passband_ripple_db + 1e-9
+        && worst_return_loss_db + 1e-9 >= spec.mask.return_loss_db;
+
+    let stopband: Vec<(f64, f64, f64, bool)> = spec
+        .mask
+        .stopband
+        .iter()
+        .map(|&(f_s, required_db)| {
+            let s21f = ideal_response_lowpass(approx, order, f_c, &[f_s]);
+            let s21_mag = s21f[0].norm();
+            let rejection_db = -20.0 * s21_mag.max(1e-12).log10();
+            let met = rejection_db + 1e-9 >= required_db;
+            if !met {
+                pass = false;
+            }
+            (f_s, rejection_db, required_db, met)
+        })
+        .collect();
+
+    SteppedLowpassDesigned {
+        spec,
+        order,
+        g_values,
+        sections,
+        sweep,
+        mask_bands,
+        pass,
+        worst_passband_ripple_db,
+        worst_return_loss_db,
+        stopband,
+        layout,
+        board_size_mm,
+        dim_error,
+    }
+}
+
+/// Linear low-pass sweep over `[0, LP_SWEEP_SPAN_MULT·f_c]` with `SWEEP_POINTS`
+/// samples (the first point is a small epsilon above 0 so the dB-floor is well
+/// defined and the cutoff/stopband roll-off are both on-screen).
+fn lowpass_sweep_freqs(f_c: f64) -> Vec<f64> {
+    let hi = (LP_SWEEP_SPAN_MULT * f_c).max(f_c * 1e-3);
+    let lo = f_c * 1e-3;
+    (0..SWEEP_POINTS)
+        .map(|i| lo + (hi - lo) * (i as f64) / ((SWEEP_POINTS - 1) as f64))
+        .collect()
+}
+
+/// Forbidden low-pass mask regions for the plot: a passband insertion-loss floor
+/// at `−passband_ripple_db` over `[0, f_c]`, plus a rejection ceiling at
+/// `−reject` over a ±2 % band at each stopband point above the cutoff.
+fn lowpass_mask_bands(spec: &FilterSpec) -> Vec<MaskBand> {
+    let f_c = spec.f0_hz;
+    let mut bands = vec![MaskBand {
+        f_lo_hz: f_c * 1e-3,
+        f_hi_hz: f_c,
+        is_floor: true,
+        limit_db: -spec.mask.passband_ripple_db,
+    }];
+    for &(f_s, reject_db) in &spec.mask.stopband {
+        bands.push(MaskBand {
+            f_lo_hz: f_s * 0.98,
+            f_hi_hz: f_s * 1.02,
+            is_floor: false,
+            limit_db: -reject_db,
+        });
+    }
+    bands
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -928,5 +1227,114 @@ mod tests {
             // If FR-4 happens to realize it, the layout must be present.
             assert!(d.layout.is_some());
         }
+    }
+
+    /// Nearest-sample `|S21|` in dB at the requested frequency from a sweep.
+    fn s21_db_at(sweep: &[SweepPoint], f_hz: f64) -> f64 {
+        sweep
+            .iter()
+            .min_by(|a, b| {
+                (a.f_hz - f_hz)
+                    .abs()
+                    .partial_cmp(&(b.f_hz - f_hz).abs())
+                    .unwrap()
+            })
+            .expect("non-empty sweep")
+            .s21_db
+    }
+
+    #[test]
+    fn stepped_card_routes_to_real_lowpass_engine() {
+        // The SteppedImpedance gallery card must drive the REAL F1.2.3
+        // `dimension_stepped_impedance` + the App.2.2 `ideal_response_lowpass`,
+        // not a stub or the band-pass stand-in. A Butterworth low-pass demo spec
+        // must:
+        //   (a) produce ≥ order real stepped sections, low-Z first, from the
+        //       real dimensioner (positive, finite, alternating widths); and
+        //   (b) sweep a low-pass |S21| that is ≈ −3 dB at the cutoff and rolls
+        //       off into the stopband — proving the response is genuinely
+        //       low-pass (a band-pass clone would peak at f_c, not be −3 dB).
+        let mut spec = stepped_demo_spec();
+        spec.approximation = Approximation::Butterworth; // clean −3 dB cutoff
+        spec.order = Some(5);
+        let d = design_stepped_from(spec);
+
+        // (a) Real stepped sections from the real dimensioner.
+        assert_eq!(d.order, 5, "order-5 low-pass prototype");
+        assert!(
+            d.dim_error.is_none(),
+            "demo low-pass spec dimensions on FR-4: {:?}",
+            d.dim_error
+        );
+        assert!(d.layout.is_some(), "stepped board is realized");
+        assert!(
+            d.sections.len() >= d.order,
+            "≥ order sections (got {} for order {})",
+            d.sections.len(),
+            d.order
+        );
+        assert_eq!(d.sections.len(), 5, "order-5 prototype → 5 line sections");
+        // Low-Z first: the standard low-pass prototype starts with a shunt
+        // capacitor (low-Z line), then alternates.
+        assert!(
+            !d.sections[0].high_z,
+            "section 1 is the low-Z (shunt-C) line"
+        );
+        for (i, s) in d.sections.iter().enumerate() {
+            assert_eq!(s.high_z, i % 2 == 1, "section {} alternation", i + 1);
+            assert!(s.z_ohm > 0.0 && s.width_mm > 0.0 && s.length_mm > 0.0);
+            // High-Z sections use Z_high (120 Ω), low-Z use Z_low (20 Ω).
+            let expect_z = if s.high_z { d.z_high() } else { d.z_low() };
+            assert!(
+                (s.z_ohm - expect_z).abs() < 1e-9,
+                "section impedance pairing"
+            );
+        }
+        // Non-vacuous: not all section lengths equal (a constant synthesizer
+        // would emit identical sections).
+        let first_len = d.sections[0].length_mm;
+        assert!(
+            d.sections
+                .iter()
+                .any(|s| (s.length_mm - first_len).abs() > 1e-6),
+            "section lengths must differ (real, not a constant stub)"
+        );
+        assert!(d.board_size_mm.0 > 0.0 && d.board_size_mm.1 > 0.0);
+
+        // (b) The swept response is a real low-pass: ≈ −3 dB at the cutoff and
+        // far down in the stopband — the band-pass `ideal_response` would NOT
+        // pass through a half-power cutoff at f0 (it peaks there).
+        assert_eq!(d.sweep.len(), SWEEP_POINTS);
+        let f_c = d.cutoff_hz();
+        let cutoff_db = s21_db_at(&d.sweep, f_c);
+        assert!(
+            (cutoff_db - (-3.0103)).abs() <= 0.3,
+            "Butterworth |S21(f_c)| = {cutoff_db:.3} dB, expected ≈ −3.01 dB (real low-pass)"
+        );
+        // DC passband is near 0 dB; the stopband (2 f_c) is well below −3 dB.
+        let dc_db = s21_db_at(&d.sweep, f_c * 1e-3);
+        assert!(
+            dc_db > -0.5,
+            "near-DC passband |S21| ≈ 0 dB (got {dc_db:.3})"
+        );
+        let stop_db = s21_db_at(&d.sweep, 2.0 * f_c);
+        assert!(
+            stop_db < cutoff_db - 10.0,
+            "stopband |S21|({stop_db:.2} dB) rolls off well past the cutoff"
+        );
+
+        // The low-pass spec carries the cutoff in f0_hz with Response::Lowpass.
+        assert_eq!(d.spec.response, Response::Lowpass);
+    }
+
+    #[test]
+    fn stepped_design_boots() {
+        // The boot-state convenience wrapper produces a real, realizable design.
+        let d = design_stepped();
+        assert_eq!(d.spec.response, Response::Lowpass);
+        assert!(d.order >= 1);
+        assert!(!d.sections.is_empty());
+        assert_eq!(d.sweep.len(), SWEEP_POINTS);
+        assert!(d.sweep.iter().all(|s| s.s21_db.is_finite()));
     }
 }
