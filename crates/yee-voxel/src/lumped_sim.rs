@@ -78,7 +78,7 @@
 //! drive/load resistors stay on the single-edge `pure_resistor` /
 //! [`LumpedRlcPort::correct_e`] path (a pure resistor reflects identically).
 //!
-//! # CW per-frequency S21 extraction (matched-CPML de-embed, F2.3-d/-f, ADR-0128/0131)
+//! # CW per-frequency S21 extraction (PEC-box 2-point standing-wave de-embed, F2.3-g, ADR-0132)
 //!
 //! The transmission is measured **one frequency at a time** with a CW
 //! steady-state drive — NOT a single broadband pulse. The earlier F2.3-c driver
@@ -88,68 +88,103 @@
 //! measures an *unsettled transient* on a short standing-wave line, so the
 //! high-Q (Q≈10) tanks never reach steady state and no band-pass forms.
 //!
-//! ## The matched-CPML termination (F2.3-f, ADR-0131)
+//! ## Why a PEC box + a 2-point standing-wave de-embed (F2.3-g, ADR-0132)
 //!
-//! F2.3-d's CW drive cured the transient, but the F2.3 short-board de-embed
-//! still did **not converge**: the passband read **over-unity** (`|S21| > 1`,
-//! unphysical for a passive filter) and the notch **collapsed** at finer `dx`
-//! (ADR-0129). The wall was the *measurement*: a single-edge `Z0`
-//! lumped-resistor "load" does not match the microstrip's guided quasi-TEM mode,
-//! so it reflected, leaving a standing wave whose DUT/thru ratio shifted with
-//! `dx`. F2.3-f replaces it with an **x-only CPML matched termination**
-//! ([`CpmlParams::with_axes`]`([true, false, false])`, transverse walls PEC —
-//! the `cpml_per_axis_001` configuration, ADR-0122): the output CPML absorbs the
-//! transmitted wave with no backward reflection, and the input CPML behind the
-//! source absorbs the source-side reflection, so the line is matched after one
-//! pass. The CW drive (single-frequency, not DC) sidesteps the
-//! CPML≠matched-at-DC dead end (ADR-0123). The signal line is also **lengthened**
-//! ([`LumpedSimConfig::lead_in_cells`]) so the source and the reference plane
-//! sit clear of the element + port discontinuities and the line runs into the
-//! CPML.
+//! F2.3-d's CW drive cured the transient, but **every** prior de-embed
+//! (short-board F2.3-c/-d, finer-grid F2.3-e, matched-CPML F2.3-f) gave a
+//! **monotone + over-unity** `|S21|` — never a band-pass. Two distinct failures
+//! compounded:
 //!
-//! So for each measured frequency `f`:
+//! 1. **Over-unity is a bad-de-embed signature.** All the prior measurements
+//!    took a *single* reference-plane voltage and never separated the forward
+//!    (incident / transmitted) wave from the backward (reflected) wave. On a
+//!    short, mismatched line the standing wave's peaks/nulls move with frequency,
+//!    so the single-point DUT/thru ratio reads `> 1` in places — unphysical for a
+//!    passive filter.
+//! 2. **CPML-into-substrate is unstable.** F2.3-f's x-only CPML termination hit
+//!    the *documented* instability ([`crate::run_line_eeff`] / ADR-0108): CPML on
+//!    a microstrip whose PEC ground + high-ε substrate run into the boundary is
+//!    late-time unstable, and it still read monotone + over-unity.
+//!
+//! F2.3-g fixes both. It mirrors the **stable** [`crate::run_line_eeff`] pattern:
+//! a **plain PEC box** ([`WalkingSkeletonSolver::new`] — no CPML; the
+//! `apply_cpml_*` calls fall back to a hard-PEC clamp), with the line lengthened
+//! so the elements clear the ends and a steady standing wave develops. Then it
+//! does a proper **2-point (here 3-point) standing-wave de-embed** to separate
+//! the forward and backward travelling waves.
+//!
+//! ### The standing-wave decomposition
+//!
+//! On a uniform section of the guided line the steady-state CW voltage phasor is
+//!
+//! ```text
+//! V(x) = a · e^{−jβx} + b · e^{+jβx}
+//! ```
+//!
+//! a forward (`+x`) travelling amplitude `a` plus a backward (`−x`) amplitude
+//! `b`. We single-bin-DFT the steady-state `E_z` (×`dz` → modal voltage) phasor
+//! at **three equally-spaced columns** `x₀, x₀+d, x₀+2d` in each port reference
+//! region. The standing wave obeys the exact recurrence
+//!
+//! ```text
+//! V₀ + V₂ = 2·cos(βd)·V₁   ⟹   cos(βd) = (V₀ + V₂) / (2·V₁)
+//! ```
+//!
+//! so `β` is read **directly from the data** (`β = acos(Re[(V₀+V₂)/(2V₁)]) / d`)
+//! — self-consistent with the actual FDTD grid's numerical dispersion, needing
+//! **no separate ε_eff calibration run**. (`Im[(V₀+V₂)/(2V₁)] → 0` as the fit is
+//! consistent; it is reported as a quality check.) With `β` known, the 2×2 system
+//! from `V₀` and `V₂` (local origin `x₀ = 0`) solves for the forward `a` and
+//! backward `b`:
+//!
+//! ```text
+//! V₀ = a + b
+//! V₂ = a·e^{−j2βd} + b·e^{+j2βd}
+//! ```
+//!
+//! ### S21 = forward-out / forward-in, thru-normalized
+//!
+//! For each measured frequency `f`:
 //!
 //! 1. A [`SourceWaveform::HannSine`] **soft `E_z` source sheet** across the
-//!    strip's `(y, z)` face at the source column launches a clean `+x` traveling
+//!    strip's `(y, z)` face at the input column launches a clean `+x` travelling
 //!    quasi-TEM wave, **Hann-ramped** over the first
 //!    [`LumpedSimConfig::cw_ramp_cycles`] cycles to suppress the turn-on
 //!    transient.
 //! 2. The solve runs [`LumpedSimConfig::cw_ramp_cycles`] +
 //!    [`LumpedSimConfig::cw_settle_cycles`] cycles so the highest-Q tank's
-//!    ring-up **and** the source→reference-plane transit settle into a
-//!    single-frequency steady state.
-//! 3. The transmitted-wave voltage `V_out = E_z · dz` at an output reference
-//!    plane (in the substrate under the strip, downstream of the last element
-//!    and clear of the output CPML) is single-bin-DFT'd at `f` over the final
-//!    [`LumpedSimConfig::cw_measure_cycles`] cycles (the **settled window only**,
-//!    not the whole record) → the steady-state amplitude `|V_out,ss(f)|`.
+//!    ring-up **and** the line transit settle into a single-frequency steady
+//!    state on the PEC line.
+//! 3. The 3-point standing-wave fit at the **input** reference region gives the
+//!    incident forward amplitude `a₁` (the backward part there is the input
+//!    reflection — separated out and discarded); the fit at the **output**
+//!    reference region (downstream of the last element) gives the transmitted
+//!    forward amplitude `b₂` (the `+x` part there).
 //!
-//! To divide out the (frequency-dependent, coarse-grid-dependent) feed + line +
-//! port coupling, the **same** board is run a second time with the filter
-//! elements removed (a bare through line); then
+//! The raw transmission is `(b₂/a₁)`. To divide out the (frequency-dependent,
+//! coarse-grid-dependent) feed + line + port coupling, the **same** board is run
+//! a second time with the filter elements removed (a bare through line); then
 //!
 //! ```text
-//! S21(f) = |V_out,dut,ss(f)| / |V_out,thru,ss(f)|
+//! S21(f) = (b₂/a₁)_dut / (b₂/a₁)_thru
 //! ```
 //!
 //! which is ≈ 1 (0 dB) in the passband and rolls off in the stopband — the
-//! transmission *relative to the matched thru*, exactly the quantity
-//! [`yee_filter::ladder_s21`] computes for the ideal circuit. With the matched
-//! CPML there is no backward reflection to corrupt the reference-plane reading,
-//! so the de-embed converges (a physical, `dx`-stable `|S21|`). Each frequency
-//! costs two full FDTD solves (DUT + thru), so the frequency set
-//! ([`LumpedSimConfig::cw_freqs_hz`]) is deliberately small — the gate-check
-//! points plus a handful for the sweep shape, NOT a fine sweep.
+//! transmission *relative to the thru*, exactly the quantity
+//! [`yee_filter::ladder_s21`] computes for the ideal circuit. Because the forward
+//! and backward waves are separated, the standing wave no longer corrupts the
+//! ratio (no over-unity), and the PEC box is unconditionally stable (no CPML
+//! divergence). Each frequency costs two full FDTD solves (DUT + thru), so the
+//! frequency set ([`LumpedSimConfig::cw_freqs_hz`]) is deliberately small — the
+//! gate-check points plus a handful for the sweep shape, NOT a fine sweep.
 
 use std::f64::consts::PI;
 
-use yee_fdtd::{
-    ApertureSpec, CpmlParams, LumpedRlcPort, SourceWaveform, WalkingSkeletonSolver, YeeGrid,
-};
+use yee_fdtd::{ApertureSpec, LumpedRlcPort, SourceWaveform, WalkingSkeletonSolver};
 use yee_filter::{BranchKind, Footprint, LcBranch, LumpedLadder, Placement, lumped_board};
 use yee_layout::{Point2, Polygon, Substrate};
 
-use crate::{MicrostripModel, VoxelOptions, voxelize_microstrip};
+use crate::{C0_M_S, MicrostripModel, VoxelOptions, voxelize_microstrip};
 
 /// Series ESR (Ω) used on every lumped element.
 ///
@@ -215,24 +250,25 @@ pub struct LumpedSimConfig {
     /// (the gate-check points + a handful for the sweep shape) because each
     /// frequency costs two full FDTD solves (DUT + thru) — NOT a fine sweep.
     pub cw_freqs_hz: Vec<f64>,
-    /// CPML thickness in cells for the **x-only matched termination** (F2.3-f,
-    /// ADR-0131). The microstrip line is terminated with an x-only CPML
-    /// ([`CpmlParams::with_axes`]`([true,false,false])`) at both x-ends —
-    /// absorbing the transmitted wave at the output and the source-side
-    /// reflection at the input — while the transverse (y, z) walls stay PEC
-    /// (the quasi-TEM guide mode is preserved). This replaces the F2.3
-    /// single-edge `Z0` lumped-resistor "load", which did not match the guided
-    /// mode and reflected, corrupting the short-board de-embed (the over-unity /
-    /// notch-collapse symptom, ADR-0129).
+    /// PEC end-wall **guard band** in cells (F2.3-g, ADR-0132). The line runs in
+    /// a plain PEC box (NO CPML — the stable [`crate::run_line_eeff`] pattern,
+    /// per ADR-0108: CPML on a microstrip whose PEC ground / high-ε substrate run
+    /// into the boundary is late-time unstable). `npml` cells of clear line are
+    /// kept between each `x`-end PEC wall and the nearest source / probe column,
+    /// so the launcher and the standing-wave reference regions sit on undisturbed
+    /// line rather than right against the reflecting wall. (The field name is
+    /// retained from the F2.3-f CPML driver to keep the public config API stable;
+    /// it now sizes a PEC guard band, not an absorber thickness.)
     pub npml: usize,
     /// Length (in cells) of the straight microstrip **lead-in** added to each
-    /// end of the synthesized board before voxelizing (F2.3-f, ADR-0131). The
+    /// end of the synthesized board before voxelizing (F2.3-g, ADR-0132). The
     /// board's signal trace is extended `lead_in_cells` cells past each port so
-    /// (a) the source and the output reference plane sit clear of the element
-    /// and port discontinuities, and (b) the line runs into the x-CPML region so
-    /// the guided wave is absorbed *while still guided* (a bare trace-end inside
-    /// air would reflect). The transmitted-wave reference plane is placed a few
-    /// cells short of the output CPML, downstream of the last element.
+    /// the source and the two standing-wave reference regions sit on a uniform
+    /// section of line, clear of the element + original-port discontinuities, and
+    /// the line is long enough past each port that a steady standing wave
+    /// develops on the PEC box. The input reference region sits just downstream
+    /// of the source; the output reference region just upstream of the far PEC
+    /// wall, downstream of the last element.
     pub lead_in_cells: usize,
 }
 
@@ -249,33 +285,95 @@ impl Default for LumpedSimConfig {
             footprint: Footprint::Smd0603,
             drive_v0: 1.0,
             cw_ramp_cycles: 12.0,
-            // With the matched x-CPML termination (F2.3-f, ADR-0131) there is no
-            // standing wave to settle — only the high-Q tank ring-up + the
-            // source→reference line transit. A settle probe (settle 40 vs 80 →
-            // |S21| stable to 0.07 dB at both gate points) shows steady state by
-            // ~40 cycles, so 60 is a comfortable margin (down from the 140 the
-            // standing-wave F2.3-d driver needed to keep deepening the notch).
-            cw_settle_cycles: 60.0,
+            // PEC box (F2.3-g, ADR-0132): the standing wave must fully establish
+            // — multiple end-to-end transits + the high-Q (Q≈10) tank ring-up
+            // settle into a single-frequency steady state before the phasors are
+            // read. 120 cycles is a generous margin on a ~few-λ_g PEC line while
+            // staying bounded (a single solve stays in the minutes, not hours).
+            cw_settle_cycles: 120.0,
             cw_measure_cycles: 16.0,
             cw_freqs_hz: vec![1.6e9, 1.8e9, 2.0e9, 2.2e9, 2.4e9, 2.6e9],
-            // 10-cell x-only CPML (matches the cpml_per_axis_001 gate's npml).
-            npml: 10,
-            // Straight-line lead-in past each port: must clear the input CPML
-            // (npml + a few-cell guard) so the source / reference plane sit on
-            // undisturbed line, and run the trace into the CPML so the guided
-            // wave is absorbed while still guided. 24 cells (~9.6 mm at 0.4 mm)
-            // is enough margin past npml=10 + guard=3 and keeps the run tractable.
-            lead_in_cells: 24,
+            // PEC end-wall guard band (NOT a CPML thickness — F2.3-g, ADR-0132):
+            // cells of clear line kept between each x-end PEC wall and the
+            // nearest source / probe column.
+            npml: 6,
+            // Straight-line lead-in past each port (F2.3-g, ADR-0132): long
+            // enough that the source + the two 3-point standing-wave reference
+            // regions (each spanning 2·d ≈ 2·λ_g/12 ≈ 36 cells past the npml=6
+            // guard) sit on a uniform section of line clear of the element /
+            // original-port discontinuities, with a steady standing wave. 52
+            // cells (~21 mm at 0.4 mm) fits npml(6)+guard(3)+2d(~36)+margin and
+            // keeps the run tractable (a single solve stays in the minutes).
+            lead_in_cells: 52,
         }
+    }
+}
+
+/// A minimal complex number `(re, im)` for the standing-wave de-embed math
+/// (F2.3-g, ADR-0132). `yee-voxel` carries no `num-complex` dependency, so —
+/// matching the by-hand phasor arithmetic already used in [`Bin`] and
+/// [`crate::run_line_eeff`] — the few complex operations the 3-point fit needs
+/// are implemented inline.
+#[derive(Clone, Copy, Debug)]
+struct Cplx {
+    re: f64,
+    im: f64,
+}
+
+impl Cplx {
+    const ZERO: Cplx = Cplx { re: 0.0, im: 0.0 };
+
+    fn new(re: f64, im: f64) -> Self {
+        Self { re, im }
+    }
+
+    /// `e^{jθ}` (unit phasor).
+    fn expj(theta: f64) -> Self {
+        Self {
+            re: theta.cos(),
+            im: theta.sin(),
+        }
+    }
+
+    fn add(self, o: Cplx) -> Cplx {
+        Cplx::new(self.re + o.re, self.im + o.im)
+    }
+
+    fn sub(self, o: Cplx) -> Cplx {
+        Cplx::new(self.re - o.re, self.im - o.im)
+    }
+
+    fn mul(self, o: Cplx) -> Cplx {
+        Cplx::new(
+            self.re * o.re - self.im * o.im,
+            self.re * o.im + self.im * o.re,
+        )
+    }
+
+    fn scale(self, s: f64) -> Cplx {
+        Cplx::new(self.re * s, self.im * s)
+    }
+
+    /// `self / o`.
+    fn div(self, o: Cplx) -> Cplx {
+        let d = o.re * o.re + o.im * o.im;
+        Cplx::new(
+            (self.re * o.re + self.im * o.im) / d,
+            (self.im * o.re - self.re * o.im) / d,
+        )
+    }
+
+    fn abs(self) -> f64 {
+        self.re.hypot(self.im)
     }
 }
 
 /// Single-bin DFT accumulator at one frequency: real/imag of `Σ x[n]·e^{-jωt}`.
 ///
-/// Used to measure the **steady-state** load-voltage amplitude over the final
+/// Used to measure the **steady-state** line-voltage phasor over the final
 /// settled cycles of a CW solve (the settled window only — NOT the whole
-/// record): `mag()` is the single-tone amplitude of `x[n]` at `ω` over the
-/// accumulated samples (F2.3-d, ADR-0128).
+/// record): [`Self::phasor`] is the complex single-tone amplitude of `x[n]` at
+/// `ω` over the accumulated samples (F2.3-d/-g, ADR-0128/0132).
 #[derive(Clone, Copy)]
 struct Bin {
     omega: f64,
@@ -296,8 +394,72 @@ impl Bin {
         self.re += x * phase.cos();
         self.im -= x * phase.sin();
     }
-    fn mag(&self) -> f64 {
-        (self.re * self.re + self.im * self.im).sqrt()
+    /// The accumulated complex phasor `Σ x[n]·e^{-jωt}` (un-normalized; only
+    /// phasor *ratios* are used downstream, so the common `1/N` cancels).
+    fn phasor(&self) -> Cplx {
+        Cplx::new(self.re, self.im)
+    }
+}
+
+/// The travelling-wave decomposition `V(x) = a·e^{−jβx} + b·e^{+jβx}` of a
+/// standing-wave region, fitted from 3 equally-spaced phasors (F2.3-g,
+/// ADR-0132).
+#[derive(Clone, Copy, Debug)]
+struct StandingWaveFit {
+    /// Forward (`+x`-travelling) complex amplitude `a` at the region origin.
+    fwd: Cplx,
+    /// Backward (`−x`-travelling) complex amplitude `b` at the region origin.
+    bwd: Cplx,
+    /// Extracted phase constant `β` (rad/m) — self-consistent with the FDTD
+    /// grid's numerical dispersion (read from the data, not a calibration).
+    beta: f64,
+    /// `|Im[(V₀+V₂)/(2V₁)]|` — the imaginary residual of the `cos(βd)`
+    /// recurrence; → 0 for a consistent fit (a quality diagnostic).
+    cos_imag_residual: f64,
+}
+
+/// Fit `V(x) = a·e^{−jβx} + b·e^{+jβx}` from three equally-spaced steady-state
+/// phasors `v0 = V(x₀)`, `v1 = V(x₀+d)`, `v2 = V(x₀+2d)` of spacing `d` metres
+/// (F2.3-g, ADR-0132). Returns the forward `a` / backward `b` amplitudes at the
+/// region origin `x₀`, the data-derived `β`, and the recurrence residual.
+///
+/// `β` comes from the exact 3-point recurrence `V₀ + V₂ = 2·cos(βd)·V₁`, so it
+/// is self-consistent with the FDTD grid (no separate ε_eff calibration). With
+/// `β` known, the 2×2 system from `V₀, V₂` (local origin `x₀ = 0`) gives `a, b`:
+/// `V₀ = a + b`, `V₂ = a·e^{−j2βd} + b·e^{+j2βd}`.
+fn fit_standing_wave(v0: Cplx, v1: Cplx, v2: Cplx, d: f64) -> StandingWaveFit {
+    // cos(βd) = (V₀ + V₂) / (2·V₁). The real part is the physical cosine; the
+    // imaginary part is a consistency residual (→ 0 for a clean standing wave).
+    let cos_bd = v0.add(v2).div(v1.scale(2.0));
+    let cos_imag_residual = cos_bd.im.abs();
+    // acos needs a real argument in [-1, 1]; clamp so grid noise that pushes the
+    // measured cosine slightly outside the unit interval does not produce a NaN.
+    let c = cos_bd.re.clamp(-1.0, 1.0);
+    let beta_d = c.acos();
+    // d > 0 always (caller passes a positive cell spacing); β in rad/m.
+    let beta = beta_d / d;
+
+    // Solve V₀ = a + b, V₂ = a·p + b·q with p = e^{−j2βd}, q = e^{+j2βd}.
+    // a = (V₀·q − V₂) / (q − p),  b = V₀ − a.
+    let p = Cplx::expj(-2.0 * beta_d);
+    let q = Cplx::expj(2.0 * beta_d);
+    let denom = q.sub(p);
+    let (fwd, bwd) = if denom.abs() > 1e-12 {
+        let a = v0.mul(q).sub(v2).div(denom);
+        let b = v0.sub(a);
+        (a, b)
+    } else {
+        // Degenerate (βd ≈ 0 or π → q ≈ p): cannot separate the two waves.
+        // Fall back to "all forward" so the caller still gets a finite number;
+        // flagged by the residual / β being at a band edge.
+        (v0, Cplx::ZERO)
+    };
+
+    StandingWaveFit {
+        fwd,
+        bwd,
+        beta,
+        cos_imag_residual,
     }
 }
 
@@ -350,16 +512,20 @@ fn line_band_at(model: &MicrostripModel, port_cell: (usize, usize, usize)) -> (u
 /// over the `(y, z)` port-face aperture (trace width × substrate height) at the
 /// element's x-column (series branch → one series-RLC aperture; shunt branch →
 /// pure-L ‖ pure-C apertures, see the [module docs](self)), then measures the
-/// transmission **one frequency at a time** with a CW steady-state drive into an
-/// **x-only CPML matched line** (F2.3-d/-f, ADR-0128/0131): a Hann-ramped CW soft
-/// `E_z` source sheet at the input launches a clean traveling wave, the line is
-/// terminated with an x-only CPML at both ends (the output absorbs the
-/// transmitted wave with no reflection, the input absorbs the source-side
-/// reflection), run until the high-Q tanks + line transit settle, with the
-/// transmitted-wave `E_z` at an output reference plane single-bin-DFT'd over the
-/// settled window only. A second, element-free *thru* solve per frequency
-/// normalizes the response, so the returned `|S21|` is the steady-state
-/// transmission relative to the matched thru (≈ 0 dB in-band, rolling off in the
+/// transmission **one frequency at a time** with a CW steady-state drive in a
+/// **plain PEC box** + a **3-point standing-wave de-embed** (F2.3-g, ADR-0132):
+/// a Hann-ramped CW soft `E_z` source sheet at the input launches a clean
+/// traveling wave on a PEC-bounded line (the stable [`crate::run_line_eeff`]
+/// pattern — no CPML), run until the high-Q tanks + the standing wave settle,
+/// then the steady-state `E_z` phasor is sampled at three equally-spaced columns
+/// in the **input** and **output** reference regions and fitted to
+/// `V(x) = a·e^{−jβx} + b·e^{+jβx}` ([`fit_standing_wave`]). This separates the
+/// forward (incident / transmitted) from the backward (reflected) travelling
+/// wave, so the raw transmission is the **complex ratio** `b₂/a₁` (transmitted
+/// forward over incident forward) — free of the standing-wave / over-unity
+/// artifact that corrupted the single-point de-embeds (ADR-0129/0131). A second,
+/// element-free *thru* solve normalizes it:
+/// `S21(f) = (b₂/a₁)_dut / (b₂/a₁)_thru` (≈ 0 dB in-band, rolling off in the
 /// stopband).
 ///
 /// Returns `(freq_hz, |S21|)` for each frequency in
@@ -392,8 +558,9 @@ pub fn simulate_lumped_board(
 
     // DUT: filter elements present. THRU: elements removed (bare line) for the
     // normalization. Both run the identical board geometry / grid / CW drive at
-    // each measured frequency. Each entry is the steady-state load-voltage
-    // amplitude `|V_ss(f)|` measured over the settled window (F2.3-d, ADR-0128).
+    // each measured frequency. Each entry is the **complex** raw transmission
+    // `b₂/a₁` (transmitted-forward over incident-forward) from the 3-point
+    // standing-wave de-embed (F2.3-g, ADR-0132).
     let dut = run_board_solve(ladder, substrate, cfg, freqs, true);
     let thru = run_board_solve(ladder, substrate, cfg, freqs, false);
 
@@ -401,12 +568,18 @@ pub fn simulate_lumped_board(
         .iter()
         .enumerate()
         .map(|(fi, &f)| {
-            let v_dut = dut[fi];
-            let v_thru = thru[fi];
-            // S21 = steady-state transmission relative to the matched thru. A
-            // vanishing thru maps to 0 transmission rather than a
-            // divide-by-zero blow-up.
-            let s21 = if v_thru > 0.0 { v_dut / v_thru } else { 0.0 };
+            let t_dut = dut[fi];
+            let t_thru = thru[fi];
+            // S21 = (b₂/a₁)_dut / (b₂/a₁)_thru — the transmission relative to the
+            // bare-line thru, with the forward/backward waves already separated
+            // so the standing wave cannot corrupt the ratio (no over-unity). A
+            // vanishing thru maps to 0 transmission rather than a divide-by-zero
+            // blow-up. We return the magnitude (the gate is a |S21| shape check).
+            let s21 = if t_thru.abs() > 0.0 {
+                t_dut.div(t_thru).abs()
+            } else {
+                0.0
+            };
             (f, s21)
         })
         .collect()
@@ -460,13 +633,12 @@ impl ElementRecipe {
 
 /// Extend the synthesized board's signal trace by `lead_m` metres of straight
 /// microstrip past **each** port, and move the ports to the new line ends
-/// (F2.3-f, ADR-0131).
+/// (F2.3-g, ADR-0132).
 ///
-/// The lead-in does two jobs for the matched-CPML de-embed: it sits the source
-/// and the output reference plane clear of the element + original port
-/// discontinuities, and it lets the line run all the way into the x-CPML region
-/// so the guided quasi-TEM wave is absorbed *while still guided* (a bare
-/// trace-end inside the air margin would reflect). The added segments are
+/// The lead-in gives the PEC-box standing-wave de-embed uniform line on each
+/// side: the source and the two 3-point reference regions sit clear of the
+/// element + original port discontinuities, and the line is long enough past
+/// each port that a steady standing wave develops. The added segments are
 /// full-width (`w_line`) copper rectangles at the signal-line `y`-band, read off
 /// the existing ports (centre `y_sig`, width `w_line`). The substrate / ground
 /// extent follows automatically from the widened bounding box.
@@ -500,35 +672,38 @@ fn lengthen_board(board: &mut yee_filter::LumpedBoard, lead_m: f64) {
 }
 
 /// CW per-frequency steady-state solve of the board (DUT if `place_elements`,
-/// else a bare thru line), returning the **steady-state transmitted-wave
-/// amplitude** `|V_out,ss(f)|` at each measured frequency (F2.3-f, ADR-0131).
+/// else a bare thru line), returning the **complex raw transmission** `b₂/a₁`
+/// (transmitted-forward over incident-forward) at each measured frequency from
+/// the 3-point standing-wave de-embed (F2.3-g, ADR-0132).
 ///
 /// The board's signal line is lengthened by [`LumpedSimConfig::lead_in_cells`]
 /// cells past each port ([`lengthen_board`]) and voxelized once. Then for every
-/// frequency `f` a fresh solver (cloned grid, zeroed fields) is driven with a
-/// Hann-ramped CW sinusoid at `f`, with the microstrip **x-only CPML terminated
-/// at both ends** ([`CpmlParams::with_axes`]`([true,false,false])`, transverse
-/// walls PEC). The output CPML absorbs the transmitted wave with no backward
-/// reflection, and the input CPML (behind the source) absorbs the source-side
-/// reflection — so the line is matched after one pass and the standing-wave
-/// artifact that corrupted the F2.3 short-board de-embed is gone (ADR-0129). The
-/// **transmitted-wave** `E_z` at an output reference plane (in the substrate
-/// under the strip, downstream of the last element and clear of the output
-/// CPML) is single-bin DFT'd over the settled measurement window → the
-/// steady-state amplitude `|V_out,ss(f)|`. The DUT/thru ratio then yields a
-/// physical, dx-stable `|S21|`. Factored out so the DUT and thru runs share
-/// identical geometry, grid, drive, and step body.
+/// frequency `f` a fresh solver (cloned grid, zeroed fields) runs in a **plain
+/// PEC box** ([`WalkingSkeletonSolver::new`] — no CPML; the stable
+/// [`crate::run_line_eeff`] pattern, ADR-0108), driven by a Hann-ramped CW soft
+/// `E_z` source sheet at the input. After the high-Q tanks + the standing wave
+/// settle, the steady-state `E_z` phasor is single-bin DFT'd at **three
+/// equally-spaced columns** in the input reference region and three in the
+/// output reference region (downstream of the last element). Each triple is
+/// fitted to `V(x) = a·e^{−jβx} + b·e^{+jβx}` ([`fit_standing_wave`]): the
+/// input fit's forward amplitude is the incident `a₁`; the output fit's forward
+/// amplitude is the transmitted `b₂`. The returned per-frequency value is the
+/// complex ratio `b₂/a₁`; [`simulate_lumped_board`] then thru-normalizes it.
+/// Factored out so the DUT and thru runs share identical geometry, grid, drive,
+/// and step body.
 fn run_board_solve(
     ladder: &LumpedLadder,
     substrate: &Substrate,
     cfg: &LumpedSimConfig,
     freqs: &[f64],
     place_elements: bool,
-) -> Vec<f64> {
+) -> Vec<Cplx> {
     // --- 1. Board (lengthened) + voxelize. ----------------------------------
     let mut board = lumped_board(ladder, substrate, cfg.footprint);
-    // Lengthen the line so the source / reference plane clear the element + port
-    // discontinuities and the line runs into the x-CPML (F2.3-f, ADR-0131).
+    // Lengthen the line so the source + the two 3-point standing-wave reference
+    // regions sit on uniform line clear of the element / original-port
+    // discontinuities, and a steady standing wave develops on the PEC box
+    // (F2.3-g, ADR-0132).
     let lead_m = cfg.lead_in_cells as f64 * cfg.dx_m;
     lengthen_board(&mut board, lead_m);
     let opts = VoxelOptions {
@@ -591,32 +766,55 @@ fn run_board_solve(
         v
     };
 
-    // --- 2. Source plane + output reference plane (F2.3-f, ADR-0131). -------
-    // The line is x-only-CPML terminated at both ends (the source-side CPML
-    // absorbs the input reflection, the output CPML absorbs the transmitted
-    // wave — see `cw_steady_state_amplitude`). Both planes are anchored to the
-    // CPML region, NOT the original port cells: with the lead-in the ports map
-    // into the CPML interior, so a `port_cells`-anchored source/probe would sit
-    // *inside* the absorber. The CPML inner edge is `npml` cells in; a small
-    // guard keeps both planes a couple cells clear of it.
+    // --- 2. Source column + two 3-point reference regions (F2.3-g, ADR-0132).
+    // PEC box (no CPML): the source sits a guard band in from the input PEC
+    // wall, and the standing-wave reference regions live on the uniform lead-in
+    // line on each side. `npml` is repurposed as the PEC end-wall guard band
+    // (see `LumpedSimConfig::npml`); a small extra `guard` keeps the source +
+    // the input reference region clear of the launch transient.
     let npml = cfg.npml;
-    let guard = 3usize; // cells of clear line between a plane and the CPML edge
+    let guard = 3usize; // extra clear cells past the wall-guard band
     // Strip centre row (the signal-line band midpoint) and the substrate probe
     // depth (the `E_z` node just below the trace, where the quasi-TEM vertical
     // field is strongest — matches `run_line_eeff`'s `k_probe`).
     let j_strip = (j_lo + j_hi) / 2;
     let k_probe = k_top.saturating_sub(1).max(1);
-    // Drive `E_z` just inside the input CPML; read the transmitted wave just
-    // before the output CPML.
+
+    // Probe spacing `d` (cells) for the 3-point standing-wave fit. It only needs
+    // to land `βd` in a well-conditioned range (≈ π/6 … π/2) — `β` itself is
+    // extracted from the data — so an *approximate* λ_g from a coarse FR-4 ε_eff
+    // guess is fine. λ_g_guess = c / (f̄·√ε_eff_guess) at the band-centre f̄;
+    // d ≈ λ_g_guess / 12.
+    let eps_eff_guess = 0.5 * (substrate.eps_r + 1.0); // ≈ 2.7 for FR-4 (ε_r 4.4)
+    let f_centre = {
+        let s: f64 = freqs.iter().copied().sum();
+        s / freqs.len() as f64
+    };
+    let lambda_g_guess = C0_M_S / (f_centre * eps_eff_guess.sqrt());
+    let probe_d = ((lambda_g_guess / 12.0 / dx).round() as usize).max(3);
+
+    // Input source column: a guard band in from the input PEC wall.
     let src_i = (npml + guard).min(nx.saturating_sub(1));
-    let ref_i = nx.saturating_sub(npml + guard + 1).max(src_i + 1);
+    // Input reference region: three columns `in0, in0+d, in0+2d`, a few cells
+    // downstream of the source (clear of the launch transient).
+    let in0 = (src_i + guard).min(nx.saturating_sub(1));
+    // Output reference region: three columns ending a guard band short of the
+    // far PEC wall (downstream of the last element), `out0, out0+d, out0+2d`.
+    let out_end = nx.saturating_sub(npml + guard + 1);
+    let out0 = out_end.saturating_sub(2 * probe_d);
+    let in_cols = [in0, in0 + probe_d, in0 + 2 * probe_d];
+    let out_cols = [out0, out0 + probe_d, out0 + 2 * probe_d];
     let drive_cell = (src_i, j_strip, k_top);
-    let ref_cell = (ref_i, j_strip, k_probe);
     assert!(
-        ref_i > src_i,
-        "run_board_solve: output reference plane collapsed into the source plane \
-         (src_i={src_i}, ref_i={ref_i}); lengthen the board (lead_in_cells) or \
-         shrink npml/guard"
+        out_cols[0] > in_cols[2],
+        "run_board_solve: input and output reference regions overlap \
+         (in_cols={in_cols:?}, out_cols={out_cols:?}, d={probe_d}); lengthen the \
+         board (lead_in_cells) or shrink npml/guard/d"
+    );
+    assert!(
+        out_cols[2] < nx,
+        "run_board_solve: output reference region runs past the grid \
+         (out_cols={out_cols:?}, nx={nx}); shrink d or npml/guard"
     );
 
     // --- 3. Per-branch lumped-element recipes (DUT only). -------------------
@@ -672,108 +870,84 @@ fn run_board_solve(
         }
     }
 
-    // --- 4. CW per-frequency steady-state loop (F2.3-d/-f, ADR-0128/0131). --
-    // For each measured frequency, drive a Hann-ramped CW sinusoid into the
-    // x-only-CPML-matched line, let the high-Q tanks + the line transit settle,
-    // then single-bin DFT the transmitted-wave `E_z` at the output reference
-    // plane over the settled measurement window ONLY → the steady-state
-    // amplitude `|V_out,ss(f)|`. (The line is CPML-matched now — there is no Z0
-    // lumped load, so `ladder.z0_ohm` is unused here.)
+    // --- 4. CW per-frequency PEC-box 2-point de-embed loop (F2.3-g, ADR-0132).
+    // For each measured frequency, drive a Hann-ramped CW sinusoid on the PEC
+    // line, let the high-Q tanks + the standing wave settle, then read the
+    // steady-state `E_z` phasor at the three input + three output reference
+    // columns, fit each triple to a forward/backward travelling-wave pair, and
+    // return the complex raw transmission `b₂/a₁` (transmitted-forward over
+    // incident-forward). (`ladder.z0_ohm` is unused — there is no lumped load.)
     freqs
         .iter()
         .map(|&f| {
-            cw_steady_state_amplitude(
+            cw_deembed_b2_over_a1(
                 model.grid.clone(),
                 cfg,
                 f,
                 drive_cell,
-                ref_cell,
+                in_cols,
+                out_cols,
+                j_strip,
+                k_probe,
                 (j_lo, j_hi),
                 k_top,
+                probe_d,
+                dx,
                 &recipes,
             )
         })
         .collect()
 }
 
-/// Zero the tangential `E` on the transverse (y, z) outer faces — a PEC clamp
-/// that leaves the x-faces alone so the x-only CPML owns them (F2.3-f,
-/// ADR-0131). Mirrors the `cpml_per_axis_001` gate's `clamp_transverse_pec`.
-///
-/// y = 0 / y = ny faces: tangential are `E_x`, `E_z`.
-/// z = 0 / z = nz faces: tangential are `E_x`, `E_y`.
-fn clamp_transverse_pec(grid: &mut YeeGrid) {
-    let nx = grid.nx;
-    let ny = grid.ny;
-    let nz = grid.nz;
-    // y = 0 / y = ny faces: clamp E_x and E_z.
-    for i in 0..nx {
-        for k in 0..=nz {
-            grid.ex[(i, 0, k)] = 0.0;
-            grid.ex[(i, ny, k)] = 0.0;
-        }
-    }
-    for i in 0..=nx {
-        for k in 0..nz {
-            grid.ez[(i, 0, k)] = 0.0;
-            grid.ez[(i, ny, k)] = 0.0;
-        }
-    }
-    // z = 0 / z = nz faces: clamp E_x and E_y.
-    for i in 0..nx {
-        for j in 0..=ny {
-            grid.ex[(i, j, 0)] = 0.0;
-            grid.ex[(i, j, nz)] = 0.0;
-        }
-    }
-    for i in 0..=nx {
-        for j in 0..ny {
-            grid.ey[(i, j, 0)] = 0.0;
-            grid.ey[(i, j, nz)] = 0.0;
-        }
-    }
-}
-
 /// Run one CW steady-state FDTD solve at frequency `f` on a fresh `grid` (zeroed
-/// fields) and return the steady-state **transmitted-wave** amplitude
-/// `|V_out,ss(f)|` at the output reference plane (F2.3-f, ADR-0131).
+/// fields) in a **plain PEC box** and return the complex raw transmission
+/// `b₂/a₁` from a 3-point standing-wave de-embed (F2.3-g, ADR-0132).
 ///
-/// The microstrip line is terminated with an **x-only CPML** at both ends
-/// ([`CpmlParams::with_axes`]`([true,false,false])`), with the transverse
-/// (y, z) outer faces clamped PEC each step — the matched-line configuration
-/// from the `cpml_per_axis_001` gate. The output CPML absorbs the transmitted
-/// wave with no backward reflection (the matched de-embed), and the input CPML
-/// behind the source absorbs the source-side reflection. A Hann-ramped CW
-/// **soft** `E_z` source sheet across the strip's `(y, z)` face at the source
-/// column launches a clean `+x` traveling quasi-TEM wave; after `cw_ramp_cycles
-/// + cw_settle_cycles` the fields reach a single-frequency steady state (the
-/// highest-Q tank ring-up + the source→reference transit). The transmitted
-/// `E_z` at `ref_cell` (in the substrate under the strip, downstream of the last
-/// element and clear of the output CPML) is single-bin DFT'd over the final
-/// `cw_measure_cycles` (the settled window) into the steady-state amplitude.
+/// The line runs in a hard-PEC box ([`WalkingSkeletonSolver::new`] — the
+/// `apply_cpml_*` calls fall back to a PEC clamp when no CPML is configured;
+/// this is the *stable* [`crate::run_line_eeff`] pattern, ADR-0108: CPML into a
+/// microstrip's PEC-ground / high-ε substrate is late-time unstable). A
+/// Hann-ramped CW **soft** `E_z` source sheet across the strip's `(y, z)` face
+/// at `drive_cell`'s column launches a `+x` travelling quasi-TEM wave; after
+/// `cw_ramp_cycles + cw_settle_cycles` the fields settle into a single-frequency
+/// steady standing wave (the highest-Q tank ring-up + the box transits).
 ///
-/// The per-step body mirrors `cpml_per_axis_001`: `update_h_only` → CPML H →
-/// soft CW source → `update_e_only` → CPML E → transverse-PEC clamp → the
-/// filter elements' multi-cell `correct_e_aperture` → advance the clock and
-/// record.
+/// Over the final `cw_measure_cycles` (the settled window) the steady-state
+/// `E_z·dz` voltage phasor is single-bin DFT'd at the three `in_cols` and three
+/// `out_cols` columns (substrate depth `k_probe`, strip centre `j_strip`). Each
+/// triple of spacing `probe_d·dx` is fitted to `V(x) = a·e^{−jβx} + b·e^{+jβx}`
+/// ([`fit_standing_wave`]): the input fit's forward amplitude is the incident
+/// `a₁`; the output fit's forward amplitude is the transmitted `b₂`. The forward
+/// and backward waves are thereby separated, so the returned complex ratio
+/// `b₂/a₁` is free of the standing-wave / over-unity artifact (ADR-0129/0131).
+///
+/// The per-step body mirrors [`crate::run_line_eeff`]: `update_h_only` →
+/// `apply_cpml_h` (= PEC clamp) → soft CW source → `update_e_only` →
+/// `apply_cpml_e` (= PEC clamp + interior mask) → the filter elements'
+/// multi-cell `correct_e_aperture` → advance the clock and record.
 #[allow(clippy::too_many_arguments)]
-fn cw_steady_state_amplitude(
-    grid: YeeGrid,
+fn cw_deembed_b2_over_a1(
+    grid: yee_fdtd::YeeGrid,
     cfg: &LumpedSimConfig,
     f: f64,
     drive_cell: (usize, usize, usize),
-    ref_cell: (usize, usize, usize),
+    in_cols: [usize; 3],
+    out_cols: [usize; 3],
+    j_strip: usize,
+    k_probe: usize,
     strip_band: (usize, usize),
     k_top: usize,
+    probe_d: usize,
+    dx: f64,
     recipes: &[ElementRecipe],
-) -> f64 {
+) -> Cplx {
     let dt = grid.dt;
+    let dz = grid.dz;
 
-    // x-only CPML: absorbing at x = 0 / x = nx, transverse (y, z) walls left to
-    // the per-step PEC clamp (the matched-line config — cpml_per_axis_001 /
-    // ADR-0122/0131).
-    let params = CpmlParams::for_grid(&grid, cfg.npml).with_axes([true, false, false]);
-    let mut solver = WalkingSkeletonSolver::with_cpml(grid, params);
+    // Plain PEC box (no CPML): the stable run_line_eeff configuration. The
+    // `apply_cpml_*` calls below fall back to a hard-PEC tangential-E clamp when
+    // no CPML state is configured (ADR-0108).
+    let mut solver = WalkingSkeletonSolver::new(grid);
 
     // Cycle counts → step counts at THIS frequency.
     let steps_per_cycle = (1.0 / (f * dt)).round().max(1.0) as usize;
@@ -787,26 +961,27 @@ fn cw_steady_state_amplitude(
     let n_steps = measure_start + measure_steps;
 
     // Hann-ramped CW sinusoid at `f`, injected as a SOFT `E_z` source over the
-    // strip's `(y, z)` face at the source column (the quasi-TEM launcher) — not
-    // a lumped Z0 resistor; the CPML provides the matched termination.
+    // strip's `(y, z)` face at the source column (the quasi-TEM launcher).
     let wave = SourceWaveform::HannSine {
         v0: cfg.drive_v0,
         frequency: f,
         ramp_steps,
     };
     let (j_lo, j_hi) = strip_band;
-    let (src_i, _sj, _sk) = drive_cell;
+    let src_i = drive_cell.0;
 
     // Fresh passive aperture ports for this solve.
     let mut elements: Vec<LumpedRlcPort> = recipes.iter().flat_map(ElementRecipe::build).collect();
 
-    // Single-bin DFT of the transmitted-wave reference-plane voltage,
-    // accumulated over the SETTLED window only → the steady-state amplitude.
-    let mut bin = Bin::new(2.0 * PI * f);
+    // One single-bin DFT accumulator per reference column (3 input + 3 output),
+    // accumulated over the SETTLED window only → the steady-state phasors.
+    let omega = 2.0 * PI * f;
+    let mut in_bins = [Bin::new(omega), Bin::new(omega), Bin::new(omega)];
+    let mut out_bins = [Bin::new(omega), Bin::new(omega), Bin::new(omega)];
 
     for n in 0..n_steps {
         solver.update_h_only();
-        solver.apply_cpml_h();
+        solver.apply_cpml_h(); // no CPML → PEC clamp
 
         // Soft CW source sheet across the strip face at the source column.
         let s = wave.value(n, dt);
@@ -820,9 +995,7 @@ fn cw_steady_state_amplitude(
         }
 
         solver.update_e_only();
-        solver.apply_cpml_e();
-        // Transverse PEC clamp (y/z faces only — the disabled CPML axes).
-        clamp_transverse_pec(solver.grid_mut());
+        solver.apply_cpml_e(); // no CPML → PEC clamp + interior PEC mask
 
         for el in elements.iter_mut() {
             el.correct_e_aperture(solver.grid_mut(), n, dt);
@@ -832,11 +1005,60 @@ fn cw_steady_state_amplitude(
 
         if n >= measure_start {
             let grid = solver.grid();
-            let v_out = grid.ez[ref_cell] * grid.dz;
             let t = n as f64 * dt;
-            bin.accumulate(v_out, t);
+            for (idx, &i) in in_cols.iter().enumerate() {
+                let v = grid.ez[(i, j_strip, k_probe)] * dz;
+                in_bins[idx].accumulate(v, t);
+            }
+            for (idx, &i) in out_cols.iter().enumerate() {
+                let v = grid.ez[(i, j_strip, k_probe)] * dz;
+                out_bins[idx].accumulate(v, t);
+            }
         }
     }
 
-    bin.mag()
+    // Fit each triple to V(x) = a·e^{−jβx} + b·e^{+jβx}. The probe columns are
+    // equally spaced by `probe_d` cells → physical spacing `d = probe_d·dx`.
+    let d = probe_d as f64 * dx;
+    let in_fit = fit_standing_wave(
+        in_bins[0].phasor(),
+        in_bins[1].phasor(),
+        in_bins[2].phasor(),
+        d,
+    );
+    let out_fit = fit_standing_wave(
+        out_bins[0].phasor(),
+        out_bins[1].phasor(),
+        out_bins[2].phasor(),
+        d,
+    );
+
+    // a₁ = incident forward (input region); b₂ = transmitted forward (output
+    // region). Raw transmission is the complex ratio b₂/a₁.
+    let a1 = in_fit.fwd;
+    let b2 = out_fit.fwd;
+    let t_raw = if a1.abs() > 0.0 {
+        b2.div(a1)
+    } else {
+        Cplx::ZERO
+    };
+
+    eprintln!(
+        "[F2.3-g DIAG] f={:.3} GHz | β_in={:.2} β_out={:.2} rad/m (d={:.2} mm) | \
+         in: |fwd a₁|={:.3e} |bwd(refl)|={:.3e} | out: |fwd b₂|={:.3e} |bwd(wall)|={:.3e} | \
+         |b₂/a₁|={:.4} | cos-resid in={:.2e} out={:.2e}",
+        f * 1e-9,
+        in_fit.beta,
+        out_fit.beta,
+        d * 1e3,
+        a1.abs(),
+        in_fit.bwd.abs(),
+        b2.abs(),
+        out_fit.bwd.abs(),
+        t_raw.abs(),
+        in_fit.cos_imag_residual,
+        out_fit.cos_imag_residual,
+    );
+
+    t_raw
 }
