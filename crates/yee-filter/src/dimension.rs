@@ -111,6 +111,13 @@ pub enum DimError {
     /// or the cut-off frequency / impedances (`f_c`, `Z₀`, `Z_high`, `Z_low`) are
     /// not strictly positive. Carries a human-readable description.
     NonPhysicalInput(&'static str),
+    /// A combline resonator electrical length `θ0` was not in the open interval
+    /// `(0, π/2)`. The combline loading capacitor is `C_L = cot(θ0)/(2π·f0·Z0)`,
+    /// which is only positive (physical) for `θ0 ∈ (0, π/2)`; at `θ0 = π/2` the
+    /// line is already self-resonant (`cot = 0` → `C_L = 0`) and beyond it
+    /// `cot < 0` would demand a non-physical negative capacitance. Carries the
+    /// offending `θ0` in radians.
+    InvalidTheta0(f64),
 }
 
 impl std::fmt::Display for DimError {
@@ -138,6 +145,11 @@ impl std::fmt::Display for DimError {
             DimError::NonPhysicalInput(why) => {
                 write!(f, "non-physical stepped-impedance input: {why}")
             }
+            DimError::InvalidTheta0(theta0) => write!(
+                f,
+                "combline resonator electrical length theta0 = {theta0:.6} rad must be in \
+                 (0, pi/2); cot(theta0) <= 0 outside it gives a non-physical loading cap"
+            ),
         }
     }
 }
@@ -718,5 +730,156 @@ pub fn dimension_stepped_impedance_layout(
         traces,
         ports: vec![in_port, out_port],
         bbox,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Combline (capacitively-loaded short-circuited coupled lines) — F1.2.5.
+// ---------------------------------------------------------------------------
+
+/// First-order physical dimensions of a **combline** microstrip band-pass
+/// filter, synthesized from a [`crate::CouplingMatrix`] (Filter Phase F1.2.5,
+/// Hong & Lancaster §5.2.5).
+///
+/// A combline resonator is a short-circuited microstrip line of characteristic
+/// impedance `Z0` and electrical length `θ0 < π/2` at `f0`, **capacitively
+/// loaded** by a shunt capacitor `C_L` at its open end; the shorter-than-λ/4
+/// line is brought to resonance at `f0` by that load. Adjacent resonators couple
+/// through the line-to-line edge gap (coupled even/odd modes) — *exactly* the
+/// edge-coupled / hairpin mechanism — so the coupling realization **reuses** the
+/// validated [`solve_gap`] bisection and the `target_k = FBW · m_{i,i+1}`
+/// derivation (see the [module docs](self)). The combline-**distinct** pieces
+/// are the short-circuited `θ0` resonator and its loading cap; this struct
+/// carries both alongside the shared `gaps_m` / `target_k`.
+///
+/// All lengths are in metres; `loading_cap_f` is in farads. `gaps_m` and
+/// `target_k` are both length `N − 1` (one per adjacent resonator pair) and
+/// index-aligned: `gaps_m[i]` is the edge gap that realizes `target_k[i]`.
+///
+/// This first-order engine reuses the proven `solve_gap` coupling realization
+/// (like hairpin) rather than the rigorous Getsinger/Cristal self-/mutual-
+/// capacitance coupled-bar synthesis (H&L eq 5.44); that, the discrete E-series
+/// selection of `C_L`, and the via/short-circuit 3-D modelling are out of scope
+/// for this increment (ADR-0144).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComblineDimensions {
+    /// Resonator / feed line width for the spec `Z0`, metres (Hammerstad-Jensen,
+    /// via [`yee_layout::microstrip_width`]).
+    pub line_width_m: f64,
+    /// Chosen resonator electrical length `θ0` at `f0`, radians (must be in
+    /// `(0, π/2)`; default design choice 45° = `π/4` = λ_g/8 for compactness).
+    pub theta0_rad: f64,
+    /// Physical resonator length `L = θ0 / β(f0)`, metres, with
+    /// `β(f0) = 2π·f0·√ε_eff/c` at the synthesized width.
+    pub resonator_length_m: f64,
+    /// Loading capacitance `C_L = cot(θ0)/(2π·f0·Z0)`, farads, placed at the
+    /// resonator's **open** end. The opposite end is **short-circuited** — a via
+    /// to the ground plane (the short-circuit / via 3-D model is out of scope;
+    /// here it is the ideal `Y → ∞` boundary the synthesis assumes).
+    pub loading_cap_f: f64,
+    /// Inter-resonator edge-coupling gaps, metres (length `N − 1`).
+    pub gaps_m: Vec<f64>,
+    /// The `FBW · m_{i,i+1}` coupling each gap was solved for (length `N − 1`).
+    pub target_k: Vec<f64>,
+}
+
+/// Synthesize the physical dimensions of a **combline** microstrip band-pass
+/// filter from a synthesized [`FilterProject`], a chosen resonator electrical
+/// length `θ0`, and a [`Substrate`] (Filter Phase F1.2.5, Hong & Lancaster
+/// §5.2.5).
+///
+/// Closed-form throughout and a direct mirror of [`dimension_hairpin`]; the
+/// combline-distinct pieces are the short-circuited `θ0` resonator and its
+/// loading cap:
+///
+/// - **Line width** — the spec-`Z0` Hammerstad-Jensen width
+///   ([`yee_layout::microstrip_width`]).
+/// - **Resonator length** — `L = θ0 / β(f0)` with `β(f0) = 2π·f0·√ε_eff/c`
+///   (`ε_eff` from [`yee_layout::eps_eff`] at the synthesized width). A combline
+///   resonator is a *short* (`θ0 < π/2`) short-circuited line, not the
+///   edge-coupled λ_g/2 strip nor the hairpin's λ_g/4 arm.
+/// - **Loading cap** — `C_L = cot(θ0)/(2π·f0·Z0)` (H&L eq 5.43): the shunt cap
+///   at the open end that resonates the short-circuited `θ0` line at `f0`. The
+///   short-circuited stub has input susceptance `B_stub = −(1/Z0)·cot(θ0·f/f0)`;
+///   adding the cap's `2π·f·C_L` and forcing the sum to zero at `f = f0` gives
+///   exactly this `C_L` (the `dim_combline_001` gate re-derives that resonance
+///   independently rather than inverting this formula).
+/// - **Inter-resonator gaps** — identical to edge-coupled / hairpin: for each
+///   adjacent pair `(i, i+1)`, `target_k[i] = FBW · m_{i,i+1}` is realized by
+///   bisecting the monotone coupled-line coupling coefficient with the shared
+///   [`solve_gap`] helper (no optimizer, no FDTD). See the [module docs](self)
+///   for the `target_k = FBW · m` cross-check.
+///
+/// # Errors
+///
+/// - [`DimError::InvalidTheta0`] if `θ0_rad` is not in the open interval
+///   `(0, π/2)` (outside it `cot(θ0) ≤ 0` → a non-physical loading cap).
+/// - [`DimError::UnsupportedTopology`] if the project is not
+///   [`Topology::CoupledResonator`] (the only synthesized topology today; the
+///   combline is a *realization* of that coupling network).
+/// - [`DimError::OrderTooSmall`] if the order `N < 2` (no inter-resonator
+///   coupling to realize).
+/// - [`DimError::GapNotBracketed`] if a `target_k` is unreachable for any gap in
+///   the `[5 µm, 5 mm]` bracket at the synthesized width (no silent clamping).
+pub fn dimension_combline(
+    project: &FilterProject,
+    theta0_rad: f64,
+    substrate: &Substrate,
+) -> Result<ComblineDimensions, DimError> {
+    // θ0 must be strictly inside (0, π/2): cot(θ0) ≤ 0 outside it yields a
+    // non-physical (zero / negative) loading capacitance.
+    if !(theta0_rad.is_finite() && theta0_rad > 0.0 && theta0_rad < std::f64::consts::FRAC_PI_2) {
+        return Err(DimError::InvalidTheta0(theta0_rad));
+    }
+
+    if project.topology != Topology::CoupledResonator {
+        return Err(DimError::UnsupportedTopology);
+    }
+
+    let n = project.coupling.m.len();
+    if n < 2 {
+        return Err(DimError::OrderTooSmall);
+    }
+
+    let eps_r = substrate.eps_r;
+    let h_m = substrate.height_m;
+    let f0 = project.spec.f0_hz;
+    let fbw = project.spec.fbw;
+    let z0 = project.spec.z0_ohm;
+
+    // 1. Line width from the Hammerstad-Jensen Z0 synthesis.
+    let line_width_m = microstrip_width(z0, eps_r, h_m);
+
+    // 2. Resonator length L = θ0 / β(f0), β(f0) = 2π·f0·√ε_eff/c. The combline
+    //    resonator is a short (θ0 < π/2) short-circuited line.
+    let e_eff = eps_eff(line_width_m, h_m, eps_r);
+    let beta0 = 2.0 * std::f64::consts::PI * f0 * e_eff.sqrt() / C;
+    let resonator_length_m = theta0_rad / beta0;
+
+    // 3. Loading cap C_L = cot(θ0)/(2π·f0·Z0) (H&L eq 5.43): the shunt cap at the
+    //    open end that resonates the short-circuited θ0 line at f0.
+    let cot_theta0 = theta0_rad.cos() / theta0_rad.sin();
+    let loading_cap_f = cot_theta0 / (2.0 * std::f64::consts::PI * f0 * z0);
+
+    // 4. Inter-resonator gaps: target_k[i] = FBW · m[i][i+1] (= yee-synth's
+    //    k_{i,i+1}; see module docs), solved by the SAME bisection as edge-coupled
+    //    / hairpin because adjacent combline resonators couple through the edge
+    //    gap between their lines (coupled even/odd modes).
+    let mut target_k = Vec::with_capacity(n - 1);
+    let mut gaps_m = Vec::with_capacity(n - 1);
+    for i in 0..n - 1 {
+        let k_i = fbw * project.coupling.m[i][i + 1];
+        let gap = solve_gap(i, k_i, line_width_m, h_m, eps_r)?;
+        target_k.push(k_i);
+        gaps_m.push(gap);
+    }
+
+    Ok(ComblineDimensions {
+        line_width_m,
+        theta0_rad,
+        resonator_length_m,
+        loading_cap_f,
+        gaps_m,
+        target_k,
     })
 }

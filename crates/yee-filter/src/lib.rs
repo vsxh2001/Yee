@@ -49,9 +49,10 @@ pub use extract::{CouplingExtraction, extract_coupling, extract_q_ringdown};
 /// low-pass prototype → stepped-impedance line sections.
 pub mod dimension;
 pub use dimension::{
-    DimError, EdgeCoupledDimensions, HairpinDimensions, SteppedImpedanceDimensions, SteppedSection,
-    dimension_edge_coupled, dimension_edge_coupled_layout, dimension_hairpin,
-    dimension_hairpin_layout, dimension_stepped_impedance, dimension_stepped_impedance_layout,
+    ComblineDimensions, DimError, EdgeCoupledDimensions, HairpinDimensions,
+    SteppedImpedanceDimensions, SteppedSection, dimension_combline, dimension_edge_coupled,
+    dimension_edge_coupled_layout, dimension_hairpin, dimension_hairpin_layout,
+    dimension_stepped_impedance, dimension_stepped_impedance_layout,
 };
 
 /// Closed-form lumped-element LC ladder synthesis (Filter Phase F2.0):
