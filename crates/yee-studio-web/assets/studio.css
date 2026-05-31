@@ -560,3 +560,23 @@ td { color: var(--text-2); }
 .rec-alt-head { display: flex; align-items: center; gap: var(--sp-2); }
 .rec-alt-name { color: var(--text); font-size: 13px; font-weight: 600; }
 .rec-alt-note { color: var(--muted-2); font-size: 12px; line-height: 1.45; margin: 4px 0 0; }
+
+/* compare-techniques table (App.2.5) */
+.compare-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: var(--sp-2); }
+.compare-table th {
+  text-align: left;
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-3);
+}
+.compare-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-2);
+  color: var(--text-2);
+}
+.compare-table .compare-rec td { background: var(--accent-bg); }
+.compare-table .compare-rec td:first-child { box-shadow: inset 2px 0 0 var(--accent); }

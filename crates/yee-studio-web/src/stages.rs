@@ -18,7 +18,8 @@ use yee_filter::{
 };
 
 use crate::engine::{
-    BomView, Designed, LumpedDesigned, SteppedLowpassDesigned, VerifyLevel, YieldView, verify_view,
+    BomView, Designed, LumpedDesigned, SteppedLowpassDesigned, TechniqueComparison, VerifyLevel,
+    YieldView, compare_techniques, verify_view,
 };
 use crate::svg::{board_svg, lumped_board_svg, response_plot};
 
@@ -1131,11 +1132,151 @@ fn render_recommendation(
     }
 }
 
+/// The live [`Topology`] a [`RealizationTechnique`] resolves to, regardless of
+/// whether it is live or roadmapped (both [`TechStatus`] arms carry one): used by
+/// the Compare panel to mark the recommended row and to route "Use this" into the
+/// right flow. Every technique `compare_techniques` emits a row for is itself
+/// live ([`TechStatus::Live`]); this also resolves a roadmapped *recommendation*
+/// to its nearest-live stand-in so the recommended row can still be marked.
+fn technique_topology(t: RealizationTechnique) -> Topology {
+    match technique_status(t) {
+        TechStatus::Live(topo) | TechStatus::Soon(topo) => topo,
+    }
+}
+
+/// The Compare panel (App.2.5, ADR-0142) on the Technique stage: for the current
+/// spec, a side-by-side table over every **live** technique that realizes the
+/// spec's response class (the pure [`compare_techniques`] helper). Each row shows
+/// the technique, its board size, a PASS / FAIL / "not realizable" chip, and the
+/// key graded metrics (worst ripple / return loss / stopband rejection) — all
+/// real engine output. The recommended technique (from [`recommend_technique`],
+/// resolved to its live [`Topology`]) is marked, and each realizable row offers a
+/// "Use this" that routes into that technique's flow ([`route_into`]). A single
+/// row (low-pass) still renders; an empty set (high-pass) shows an honest note.
+#[component]
+fn compare_panel(
+    topology: Signal<Topology>,
+    active: Signal<Stage>,
+    spec: Signal<FilterSpec>,
+) -> Element {
+    let cur_spec = spec();
+    let rows = compare_techniques(&cur_spec);
+    // The recommended technique, resolved to the live topology its flow routes
+    // into, so the matching Compare row can be marked.
+    let recommended_topo = technique_topology(recommend_technique(&cur_spec).primary);
+
+    rsx! {
+        div { class: "card compare", style: "margin-top:18px",
+            h2 { class: "card-title",
+                "Compare · all techniques for this spec"
+                span { class: "k", "side-by-side, real engine output" }
+            }
+            p { class: "guided-lead",
+                "Every live technique that realizes this response class, synthesized for the "
+                "current spec and graded side-by-side — board size, verdict, and key metrics. "
+                "The recommended technique is marked; use any realizable one to route into its flow."
+            }
+            if rows.is_empty() {
+                div { class: "note honest",
+                    "No live technique realizes a "
+                    b { "{response_word(cur_spec.response)}" }
+                    " response yet — that synthesis flow is roadmapped. The guided recommender "
+                    "above names the technique to target when it lands."
+                }
+            } else {
+                table { class: "compare-table",
+                    thead {
+                        tr {
+                            th { "Technique" }
+                            th { "Board (W×H mm)" }
+                            th { "Verdict" }
+                            th { "Worst ripple" }
+                            th { "Worst RL" }
+                            th { "Stopband rej." }
+                            th { "" }
+                        }
+                    }
+                    tbody {
+                        for row in rows.iter().copied() {
+                            {compare_row(row, recommended_topo, topology, active, spec)}
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One Compare-table row: the technique's metrics + a recommended marker + a
+/// "Use this" route-into action for realizable techniques.
+fn compare_row(
+    row: TechniqueComparison,
+    recommended_topo: Topology,
+    topology: Signal<Topology>,
+    active: Signal<Stage>,
+    spec: Signal<FilterSpec>,
+) -> Element {
+    let row_topo = technique_topology(row.technique);
+    let is_recommended = row_topo == recommended_topo;
+    let board_disp = if row.realizable {
+        format!("{:.1} × {:.1}", row.board_w_mm, row.board_h_mm)
+    } else {
+        "—".to_string()
+    };
+    let ripple_disp = if row.realizable {
+        format!("{:.3} dB", row.worst_passband_ripple_db)
+    } else {
+        "—".to_string()
+    };
+    let rl_disp = if row.realizable {
+        format!("{:.2} dB", row.worst_return_loss_db)
+    } else {
+        "—".to_string()
+    };
+    let rej_disp = match row.worst_stopband_rej_db {
+        Some(rej) => format!("{rej:.2} dB"),
+        None => "—".to_string(),
+    };
+    let row_cls = if is_recommended { "compare-rec" } else { "" };
+
+    rsx! {
+        tr { key: "{row.technique.name()}", class: "{row_cls}",
+            td {
+                span { class: "rec-alt-name", "{row.technique.name()}" }
+                if is_recommended {
+                    span { class: "chip pass", style: "margin-left:8px", "recommended" }
+                }
+            }
+            td { "{board_disp}" }
+            td {
+                match row.pass {
+                    Some(true) => rsx! { span { class: "chip pass", "PASS" } },
+                    Some(false) => rsx! { span { class: "chip fail", "FAIL" } },
+                    None => rsx! { span { class: "chip muted", "not realizable" } },
+                }
+            }
+            td { "{ripple_disp}" }
+            td { "{rl_disp}" }
+            td { "{rej_disp}" }
+            td {
+                if row.realizable {
+                    button {
+                        class: "btn dl",
+                        onclick: move |_| route_into(topology, active, spec, row_topo),
+                        "Use this"
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Technique stage: a **guided** recommender panel atop the **expert** topology
-/// gallery (the dual-UI entry, App.2.0). **Edge-coupled** and **Lumped LC** are
-/// live and selectable (clicking a live card routes the downstream stages via
-/// `topology`); the rest stay greyed "Soon". The currently selected topology is
-/// highlighted.
+/// gallery (the dual-UI entry, App.2.0), with a **Compare** panel (App.2.5) below
+/// that synthesizes every live technique for the current spec side-by-side.
+/// **Edge-coupled** and **Lumped LC** are live and selectable (clicking a live
+/// card routes the downstream stages via `topology`); the rest stay greyed
+/// "Soon". The currently selected topology is highlighted.
 pub fn technique_stage(
     mut topology: Signal<Topology>,
     mut active: Signal<Stage>,
@@ -1229,6 +1370,9 @@ pub fn technique_stage(
                 }
             }
         }
+
+        // ---- compare-techniques panel (App.2.5) ---------------------------
+        compare_panel { topology, active, spec }
     }
 }
 
