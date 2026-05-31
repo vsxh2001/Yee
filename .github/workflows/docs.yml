@@ -1,16 +1,36 @@
-# mdBook docs build + GitHub Pages deploy.
+# mdBook docs + Dioxus studio build + GitHub Pages deploy.
 #
-# Builds the `docs/` mdBook on every push to main and deploys it to GitHub
-# Pages.
+# Builds the `docs/` mdBook AND the `yee-studio-web` Dioxus web bundle on every
+# push to main, combines them into a single Pages artifact (docs at the site
+# root, the studio under `/studio/`), and deploys to GitHub Pages. The live
+# deploy runs here on every push to main (the same CI/CD model as the original
+# docs-only deploy) — it is not reproducible locally.
+#
+# Result:
+#   https://<owner>.github.io/Yee/           — the mdBook docs (root)
+#   https://<owner>.github.io/Yee/studio/    — the Dioxus filter studio (App.1.2c)
 #
 # Requirements:
 # 1. In the repository Settings → Pages, set the source to "GitHub Actions".
 # 2. The `docs/book.toml` mdBook configuration must exist (it does).
 #
+# This is the SINGLE workflow that owns the `pages` concurrency group and the
+# `github-pages` environment — do not add a second Pages-deploying workflow, or
+# the two would race the same environment. (App.1.2c, ADR-0135 folded the studio
+# build into this previously-docs-only workflow.)
+#
+# Base-path crux (ADR-0135): a GitHub *project* Pages site serves under
+# `https://<owner>.github.io/<repo>/`, so the studio lives at `/Yee/studio/`.
+# `crates/yee-studio-web/Dioxus.toml` sets `[web.app] base_path = "Yee/studio"`,
+# which dx 0.6.3 bakes into the built `index.html` (JS/wasm loader URLs) and into
+# the release wasm (`DIOXUS_ASSET_ROOT`, for the runtime `asset!` CSS path) so
+# every asset URL resolves under `/Yee/studio/` rather than a bare `/assets/…`
+# that would 404 and leave the live page blank.
+#
 # The deploy job uses the standard GitHub Pages deployment pattern with the
 # `pages` environment and `actions/deploy-pages@v4`.
 
-name: Docs
+name: Docs & Studio (Pages)
 
 on:
   push:
@@ -18,6 +38,7 @@ on:
       - main
     paths:
       - "docs/**"
+      - "crates/yee-studio-web/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch: {}
 
@@ -32,16 +53,17 @@ concurrency:
 
 jobs:
   build:
-    name: Build mdBook
+    name: Build mdBook + studio bundle
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
+      - name: Install Rust toolchain + wasm32 target
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.92"
+          targets: wasm32-unknown-unknown
 
       - name: Cache cargo build artifacts
         uses: Swatinem/rust-cache@v2
@@ -52,7 +74,24 @@ jobs:
       - name: Build mdBook
         run: mdbook build docs/
 
-      - name: Upload Pages artifact
+      # App.1.2c (ADR-0135): build the Dioxus studio web bundle the same way the
+      # ci.yml `wasm-build` job does (dx 0.6.3, release), then drop it under the
+      # combined Pages tree at `docs/book/studio/`. The base-path
+      # (`base_path = "Yee/studio"` in Dioxus.toml) makes the built index.html's
+      # JS/wasm URLs and the runtime CSS asset path resolve under `/Yee/studio/`.
+      - name: Install Dioxus CLI (dx 0.6.3)
+        run: cargo install dioxus-cli --version 0.6.3 --locked
+
+      - name: dx build (yee-studio-web web bundle, release)
+        working-directory: crates/yee-studio-web
+        run: dx build --platform web --release
+
+      - name: Combine studio into the Pages tree (docs/book/studio/)
+        run: |
+          mkdir -p docs/book/studio
+          cp -r target/dx/yee-studio-web/release/web/public/. docs/book/studio/
+
+      - name: Upload Pages artifact (docs + studio/)
         uses: actions/upload-pages-artifact@v3
         with:
           path: docs/book
