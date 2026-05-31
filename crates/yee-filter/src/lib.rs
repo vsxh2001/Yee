@@ -261,6 +261,48 @@ pub fn ideal_response(proj: &FilterProject, freqs_hz: &[f64]) -> Vec<Complex64> 
         .collect()
 }
 
+/// Evaluate the ideal forward transmission `S21` of a **low-pass** filter over
+/// `freqs_hz` (Filter Phase App.2.2, ADR-0139).
+///
+/// The low-pass analogue of [`ideal_response`]: it reuses the *same* closed-form
+/// magnitude response [`lowpass_s21_squared`] but evaluates it at the bare
+/// low-pass frequency variable `Ω = f / f_c` — there is **no** band-pass
+/// frequency transform (a low-pass filter is already expressed in the prototype
+/// `Ω` domain, scaled only by the cutoff `f_c`):
+///
+/// - Butterworth: `|S21|² = 1 / (1 + Ω^{2N})`.
+/// - Chebyshev: `|S21|² = 1 / (1 + ε²·T_N²(Ω))`, `ε = √(10^{L_Ar/10} − 1)`.
+///
+/// At `Ω = 1` (i.e. `f = f_c`) Butterworth gives the defining `−3.01 dB`
+/// half-power edge and Chebyshev the `−ripple_db` equi-ripple edge; past `f_c`
+/// the response rolls off toward the `−20·N·log10(f/f_c)` asymptote. Frequencies
+/// `f ≤ 0` map to a fully-rejected `0`. The returned values are the (real,
+/// zero-phase) magnitude of `S21`; the closed-form model is magnitude only.
+///
+/// Unlike [`ideal_response`] this takes the [`Approximation`] / `order` / cutoff
+/// directly rather than a [`FilterProject`], because a low-pass design has no
+/// band-pass coupling matrix — the magnitude response is fully determined by
+/// `(approx, order, f_c)`.
+pub fn ideal_response_lowpass(
+    approx: Approximation,
+    order: usize,
+    cutoff_hz: f64,
+    freqs_hz: &[f64],
+) -> Vec<Complex64> {
+    freqs_hz
+        .iter()
+        .map(|&f| {
+            let s21_sq = if f <= 0.0 {
+                0.0
+            } else {
+                let omega = f / cutoff_hz;
+                lowpass_s21_squared(approx, order, omega)
+            };
+            Complex64::new(s21_sq.sqrt(), 0.0)
+        })
+        .collect()
+}
+
 /// Closed-form lowpass `|S21|²(Ω)` for the given approximation and order.
 fn lowpass_s21_squared(approx: Approximation, n: usize, omega: f64) -> f64 {
     match approx {
