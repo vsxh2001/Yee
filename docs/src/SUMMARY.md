@@ -188,3 +188,4 @@
 - [ADR-0142: App.2.5 — compare techniques side-by-side](decisions/0142-app-2-5-compare-techniques.md)
 - [ADR-0143: App.2.6 — multi-technique response overlay](decisions/0143-app-2-6-response-overlay.md)
 - [ADR-0144: Filter F1.2.5 — combline dimensional synthesis](decisions/0144-f1-2-5-combline-synthesis.md)
+- [ADR-0145: Filter F1.2.6 — combline board layout](decisions/0145-f1-2-6-combline-layout.md)
