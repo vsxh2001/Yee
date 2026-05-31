@@ -888,3 +888,137 @@ pub fn dimension_combline(
         target_k,
     })
 }
+
+/// Compose a [`yee_layout::Layout`] for a **combline** band-pass filter (Filter
+/// Phase F1.2.6), placing the synthesized [`dimension_combline`] dimensions as an
+/// honest **comb**: `N` aligned, short-circuited resonator lines on a common
+/// ground spine, capacitively loaded at the open ends, with tapped input/output
+/// feeds.
+///
+/// This is the board-layout companion of [`dimension_combline`] — the
+/// prerequisite for lighting combline in the studio (which renders a `Layout`).
+/// It calls [`dimension_combline`] for the physics (no recompute) and composes
+/// the comb from [`yee_layout`] primitives directly (`Polygon::rect` / `PortRef`
+/// / `BBox::from_polygons` / `Layout`), the same approach
+/// [`dimension_stepped_impedance_layout`] used — there is no first-class
+/// `yee-layout::combline_bpf` generator (a later refactor; ADR-0145).
+///
+/// A combline is deliberately **not** drawn like [`edge_coupled_bpf`], which lays
+/// staggered *open* half-wave lines: combline resonators are aligned, all
+/// short-circuited at a common spine and capacitively loaded at the open ends.
+/// The geometry composed here is:
+///
+/// - **Resonator lines** — `N` (= `gaps_m.len() + 1`) parallel vertical
+///   rectangles, each `line_width_m` wide (x) × `resonator_length_m` long (y).
+///   The short-circuit end is at `y = 0`, the open end at
+///   `y = resonator_length_m`. Resonator `i`'s left edge sits at
+///   `x_i = Σ_{j<i}(line_width_m + gaps_m[j])`, so the centre-to-centre pitch is
+///   `line_width_m + gaps_m[i]` — the **real solved per-section gaps**, not a
+///   uniform placeholder.
+/// - **Ground spine** — a horizontal bar at the short-circuit end (`y` just ≤ 0,
+///   `line_width_m` tall) spanning all `N` lines' x-range: the comb spine
+///   (grounded via vias; vias are a fabrication annotation, not separate copper).
+/// - **Loading-cap pads** — a small `line_width_m`-square pad at each open end
+///   (`y = resonator_length_m`) where the SMD loading cap `C_L` mounts (the cap
+///   value lives in the dimensions / studio table, not the copper).
+/// - **Feeds + ports** — a tapped feed line to the first and last resonator
+///   (neutral defaults, mirroring hairpin / stepped-Z: feed width =
+///   `line_width_m`, feed length = one resonator length), each ending in a
+///   [`PortRef`] referenced to the spec `Z0`. Mapping the external Q to a tap
+///   position is deferred (as in [`dimension_hairpin_layout`]).
+///
+/// `bbox = BBox::from_polygons(&traces)`. No physics is recomputed and
+/// `yee-layout` is not edited.
+///
+/// # Errors
+///
+/// Propagates every [`DimError`] from [`dimension_combline`].
+pub fn dimension_combline_layout(
+    project: &FilterProject,
+    theta0_rad: f64,
+    substrate: &Substrate,
+) -> Result<Layout, DimError> {
+    let dims = dimension_combline(project, theta0_rad, substrate)?;
+
+    let n = dims.gaps_m.len() + 1; // N resonators, N−1 gaps.
+    let w = dims.line_width_m;
+    let l = dims.resonator_length_m;
+
+    // Left-edge x of each resonator: x_0 = 0, x_i = x_{i-1} + w + gaps_m[i-1].
+    // The centre-to-centre pitch is therefore `w + gaps_m[i-1]` — the solved
+    // per-section gap, not a uniform placeholder.
+    let mut resonator_x = Vec::with_capacity(n);
+    let mut x = 0.0_f64;
+    for i in 0..n {
+        resonator_x.push(x);
+        if i < dims.gaps_m.len() {
+            x += w + dims.gaps_m[i];
+        }
+    }
+    // Total x-extent spanned by the N resonator lines (left edge of #0 to right
+    // edge of #(N−1)).
+    let comb_right = resonator_x[n - 1] + w;
+
+    // traces: N resonator lines + 1 ground spine + N cap pads + 2 feeds.
+    let mut traces: Vec<Polygon> = Vec::with_capacity(2 * n + 3);
+
+    // N resonator lines: short-circuit end at y = 0, open end at y = l.
+    for &xi in &resonator_x {
+        traces.push(Polygon::rect(xi, 0.0, w, l));
+    }
+
+    // Ground spine: a w-tall horizontal bar just below the short-circuit ends
+    // (y ∈ [−w, 0]), spanning the full x-range of the resonators — the comb spine.
+    traces.push(Polygon::rect(0.0, -w, comb_right, w));
+
+    // Loading-cap pads: a w × w square at each open end (y ∈ [l, l + w]).
+    for &xi in &resonator_x {
+        traces.push(Polygon::rect(xi, l, w, w));
+    }
+
+    // Tapped input/output feeds + ports (neutral defaults, mirroring hairpin /
+    // stepped-Z): feed width = line_width_m, feed length = one resonator length.
+    // The input feed taps the first resonator's open-end edge and extends in −x;
+    // the output feed taps the last resonator's open-end edge and extends in +x.
+    let feed_width_m = w;
+    let feed_length_m = l;
+    // A tap point partway up the open-end edge (a neutral default; qe→tap
+    // dimensioning is deferred, as in dimension_hairpin_layout).
+    let tap_y = l / 3.0;
+
+    // Input feed: extends leftward (−x) from the first resonator's left edge.
+    let in_x0 = resonator_x[0] - feed_length_m;
+    traces.push(Polygon::rect(
+        in_x0,
+        tap_y - feed_width_m / 2.0,
+        feed_length_m,
+        feed_width_m,
+    ));
+    let in_port = PortRef {
+        at: Point2::new(in_x0, tap_y),
+        width_m: feed_width_m,
+        ref_impedance_ohm: project.spec.z0_ohm,
+    };
+
+    // Output feed: extends rightward (+x) from the last resonator's right edge.
+    let out_x0 = resonator_x[n - 1] + w;
+    traces.push(Polygon::rect(
+        out_x0,
+        tap_y - feed_width_m / 2.0,
+        feed_length_m,
+        feed_width_m,
+    ));
+    let out_port = PortRef {
+        at: Point2::new(out_x0 + feed_length_m, tap_y),
+        width_m: feed_width_m,
+        ref_impedance_ohm: project.spec.z0_ohm,
+    };
+
+    let bbox = BBox::from_polygons(&traces);
+    Ok(Layout {
+        substrate: *substrate,
+        traces,
+        ports: vec![in_port, out_port],
+        bbox,
+    })
+}
