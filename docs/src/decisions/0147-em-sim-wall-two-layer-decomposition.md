@@ -32,7 +32,12 @@ team's central, oracle-validated output:
 - **Layer 1 — cavity vs CW steady state (ADR-0133):** a high-Q microstrip filter must ring
   up (CW), but the only *stable* microstrip box is a PEC cavity whose own modes dominate
   (lossless thru reads ~1.3× over-unity at a box mode), and the cavity-killing absorber
-  (CPML) is unstable into the substrate. **SOLVED** by `prony`.
+  (CPML) was believed unstable into the substrate. **SOLVED two independent ways** — `prony`
+  (extract-in-post: matrix-pencil pole separation) **and** `cfspml` (absorb-in-sim: a
+  √εr-matched substrate CPML — the "CPML unstable into substrate" sub-claim is itself
+  *superseded*, the binding knob was σ_max medium-calibration, not an intrinsic instability).
+  `trl` proved de-embed *cannot* (the cavity is a non-cascadable parallel bypass), which is
+  why removal — not de-embedding — is the route.
 - **Layer 2 — the FDTD filter *realization* (ADR-0125):** even with the cavity removed,
   the embedded-resonator filter-DUT in FDTD does not reproduce the analytic filter — the
   **single-cell aperture port floors at a frequency-flat shunt capacitance** (ADR-0125;
@@ -87,13 +92,20 @@ team's central, oracle-validated output:
    driver (synthesized L,C run as a circuit ODE) reproduces `ladder_s21` **by construction**
    — a tautology; it is **not** counted as evidence (only the independent-realization
    `spike` bin is).
-3. **Substrate CFS-PML (`cfspml`) — PARTIAL PASS: a real building block, not a break.**
-   Built + verified a **stable √εr-matched substrate-CPML line termination**, −35.2 dB,
-   stable across dx = 0.4→0.1 mm — which supersedes "no stable substrate absorber exists"
-   *for a bare line*. FAIL as a wall-break (self-surfaced honestly): did not reproduce
-   ADR-0108's divergence (that is the *lumped-tank board*, not the bare line, untested), so
-   the stability metric is unproven-sensitive; and no |S21| / cavity-removal (a bare line
-   has no filter). Same Layer-2 blocker on the next step.
+3. **Substrate CFS-PML (`cfspml`) — PARTIAL PASS, UPGRADED: cavity-removal *demonstrated*
+   for a line.** Built + verified a **stable √εr-matched substrate-CPML termination**:
+   the library default σ_max is vacuum-η₀-calibrated (→ only −9.5 dB into εr=4.4); scaling
+   σ_max by **√εr (×2.1)** + a 24-cell layer → **−35.2 dB**, stable (energy env_ratio = 1.00)
+   across dx = 0.4→0.1 mm. **Decisively (oracle-validated):** a lossless straight-microstrip
+   THRU |S21| in the matched box reads **flat 1.37 dB ripple over 1.6–2.4 GHz vs 7.96 dB in
+   the PEC box** — ~6× flatter, **no over-unity, no box mode**; the oracle confirmed the
+   +0.7 dB low-freq lift is *dispersion* (monotone, not a peak at the 2.0 GHz mode), not
+   residual cavity. So a **stable + cavity-free + matched microstrip box EXISTS** — this
+   **contradicts ADR-0133's premise** (high-Q-CW ⊥ stable-cavity-free-box) for the *box
+   half*, and the fix is small (√εr-σ + ~24 PML cells). STANDING LIMIT: demonstrated for a
+   **bare line / single tank**, not the filter — the filter-in-matched-box |S21| was the
+   identified decisive next test but was **not run/validated this session** (lost to a
+   teammate-shutdown race), so no end-to-end break is *claimed* here.
 4. **In-FDTD TRL (`trl`) — FAIL as a break, but the BEST DIAGNOSTIC.** TRL algebra correct
    + non-circular (verified: `calibrate()` never sees `ladder_s21`); cavity over-unity
    reproduced (|S21|_thru = 1.14–1.29 at the box mode). FAIL end-to-end: a *known* lossless
@@ -109,17 +121,28 @@ team's central, oracle-validated output:
 
 ## Consequences / the path through
 
-**Near-term (the decisive Layer-2 experiment):** pair `prony`'s validated Layer-1
-matrix-pencil cavity-removal with **both** L2 fixes on the real 3-D
-`yee-voxel::simulate_lumped_board`, pulse-driven, graded vs the locked `ladder_s21`
-including the geometric-asymmetry gate: (i) **L2a** — g-scaled distributed coupled-line
-realization (method known, the 3-D analog of the validated `ladder` control); (ii) **L2b**
-— the **multi-cell aperture port** (the deferred, unproven, multi-increment F2.3 brick).
-**Critical (oracle):** running prony-on-3D with the *current single-cell* port produces no
-band-pass to extract (L2b → flat 0.04) and the wrong shape (L2a) — it would only re-confirm
-the gap. So this is **not** a clean single increment; L2b is the multi-week long pole. The
-one immediately bankable piece is `prony`'s Layer-1 matrix-pencil cavity-separation as a
-reusable tool, but it has nothing to separate on the real 3-D board until L2b lands.
+**The through-line (trl + cfspml together):** trl *proved* de-embed is topologically dead
+(the cavity is a non-cascadable parallel bypass) → the only viable cavity route is to
+**remove** the cavity, not de-embed it; and there are now **two demonstrated cavity-kills** —
+`cfspml` **absorb-in-sim** (matched √εr-σ box, THRU flat, oracle-validated) and `prony`
+**extract-in-post** (matrix-pencil, Q-insensitive). Both still need the Layer-2 filter
+realization to read the analytic curve end-to-end.
+
+**Cheapest decisive near-term test (newly enabled, ~1 FDTD run — recommended first):** drop
+`synthesize_lumped`'s exact L,C tanks (correct components → **sidesteps L2a** by
+construction) into `cfspml`'s matched √εr-σ box via `yee-voxel::simulate_lumped_board`, and
+read |S21| vs the locked `ladder_s21` *including the geometric-asymmetry gate* (1.6 GHz
+deeper than 2.4 GHz). This isolates the **last unknown**: does the production `LumpedRlcPort`
+realize the band-pass, or does it floor like trl's aperture-coupled DUT (**L2b**)? GO →
+end-to-end break on the lumped path; NO-GO → L2b confirmed as the sole remaining blocker
+even with a perfect box + perfect components. **Requires a skeptic validator** (the original
+`oracle`'s gate; the locked reference + grading tooling are preserved in
+`crates/yee-filter/examples/oracle_reference.rs` / `oracle_grade.rs`).
+
+**Larger fallback (if L2b floors):** the **multi-cell aperture port** (the deferred,
+unproven, multi-increment F2.3 brick) + a g-scaled *distributed* coupled-line realization
+(the 3-D analog of L2a) + a cavity-kill — graded vs the locked curve. Multi-week; L2b is
+the long pole.
 
 **Long-term (the blocker-free path):** the FEM driven-sweep (`femmor`'s scoping above) —
 the only direction with no unsolved physics; ~2–3 weeks + the solver-scaling decision
@@ -131,10 +154,15 @@ reusable advance (it defeats the cavity-Q→∞ regime that no CW de-embed survi
 productionizing as a reusable extraction tool in `yee-fdtd` independent of the Layer-2 fix.
 `cfspml`'s stable √εr substrate line-termination is a real component for that work.
 
-**This is now a multi-week, maintainer-funded decision, not an autonomous increment** —
-both viable full-break paths (multi-cell-port + prony-L1; or FEM) are multi-week. The studio
-Verify stage stays honestly circuit-level until one is funded. **No EM result was merged;
-nothing was faked; the oracle rejected every match-by-construction.**
+**Sequencing:** run the cheap matched-box + correct-L,C test *first* (≈1 FDTD run + a fresh
+validator) — it either yields an end-to-end break on the lumped path or pins L2b as the sole
+remaining blocker. Only if L2b floors does the **multi-week, maintainer-funded fork** open
+(multi-cell-port + distributed realization, or the FEM driven-sweep). The studio Verify
+stage stays honestly circuit-level until an EM path is validated. **No EM result was merged;
+nothing was faked; the oracle rejected every match-by-construction** (the ODE-ladder
+tautology, the wrong-test FEM number). The cfspml THRU cavity-removal upgrade recorded above
+*was* oracle-validated; the filter-in-box |S21| was **not** run/validated this session and
+is **not** claimed as a break.
 
 ---
 
