@@ -10,12 +10,12 @@
 
 use yee_filter::{
     Approximation, Bom, BranchKind, CompKind, CouplingMatrix, ESeries, FilterProject, FilterSpec,
-    Footprint, LcBranch, LumpedBoard, LumpedLadder, MaskReport, MaskVerdict, Response, SpecMask,
-    SteppedSection, check_mask, dimension_edge_coupled, dimension_edge_coupled_layout,
-    dimension_hairpin, dimension_hairpin_layout, dimension_stepped_impedance,
-    dimension_stepped_impedance_layout, ideal_response, ideal_response_lowpass, ladder_s21,
-    lumped_board, mask_verdict, monte_carlo_yield, select_components, synthesize,
-    synthesize_lumped,
+    Footprint, LcBranch, LumpedBoard, LumpedLadder, MaskReport, MaskVerdict, RealizationTechnique,
+    Response, SpecMask, SteppedSection, check_mask, dimension_edge_coupled,
+    dimension_edge_coupled_layout, dimension_hairpin, dimension_hairpin_layout,
+    dimension_stepped_impedance, dimension_stepped_impedance_layout, ideal_response,
+    ideal_response_lowpass, ladder_s21, lumped_board, mask_verdict, monte_carlo_yield,
+    select_components, synthesize, synthesize_lumped,
 };
 use yee_layout::{BBox, CoupledMicrostrip, Layout, Substrate, coupled_microstrip, eps_eff};
 
@@ -1256,6 +1256,163 @@ pub fn verify_view(
     }
 }
 
+// ===========================================================================
+// Compare-techniques view (App.2.5, ADR-0142)
+// ===========================================================================
+
+/// One comparable row in the Technique-stage compare view: a single realization
+/// technique synthesized for the current spec, with its board size, verdict, and
+/// key graded metrics pulled straight from that technique's design.
+///
+/// Every numeric field is **real engine output** (the same graded structs the
+/// App.2.4 [`verify_view`] reads); nothing is fabricated. When a design fails to
+/// dimension (an unrealizable lumped ladder, or a distributed layout that cannot
+/// be realized on FR-4), [`realizable`](Self::realizable) is `false`, `pass` is
+/// `None`, and the metric fields are zeroed (`worst_stopband_rej_db` is `None`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TechniqueComparison {
+    /// The realization technique this row was synthesized for.
+    pub technique: RealizationTechnique,
+    /// `false` when the design failed to dimension (no realizable board /
+    /// ladder). The synthesized response metrics may still be real, but the
+    /// physical realization did not produce a board.
+    pub realizable: bool,
+    /// Board bounding-box width, mm (`0.0` when not realizable).
+    pub board_w_mm: f64,
+    /// Board bounding-box height, mm (`0.0` when not realizable).
+    pub board_h_mm: f64,
+    /// Overall spec-mask verdict for this technique's design: `Some(true)` =
+    /// meets the mask, `Some(false)` = fails, `None` = not realizable.
+    pub pass: Option<bool>,
+    /// The filter order `N`.
+    pub order: usize,
+    /// Worst-case in-band passband insertion-loss ripple observed, dB.
+    pub worst_passband_ripple_db: f64,
+    /// Worst-case (smallest) in-band return loss observed, dB.
+    pub worst_return_loss_db: f64,
+    /// Worst-case (smallest) stopband rejection across the mask's stopband
+    /// points, dB. `None` when the mask has no stopband points (rendered as
+    /// "—", never a fabricated number).
+    pub worst_stopband_rej_db: Option<f64>,
+}
+
+/// Synthesize **every live technique that realizes `spec`'s response class** and
+/// collect a comparable metric row for each — board size, PASS/FAIL, order, and
+/// the worst passband ripple / return loss / stopband rejection — pulled directly
+/// from each design's existing graded struct (the same fields [`verify_view`]
+/// reads; real engine output).
+///
+/// Pure (reads no signals): it builds the relevant designs from `spec` and
+/// returns one [`TechniqueComparison`] per technique. Building the (light,
+/// synchronous) designs per call is intentional — the studio re-derives live.
+///
+/// Keyed on [`FilterSpec::response`]:
+/// - [`Response::Bandpass`] / [`Response::Bandstop`] → three rows:
+///   [`RealizationTechnique::EdgeCoupled`] and
+///   [`RealizationTechnique::Hairpin`] (via [`design_demo_from`]; metrics from
+///   [`Designed::report`], `realizable = layout.is_some()`), and
+///   [`RealizationTechnique::LumpedLc`] (via [`design_lumped_from`]; metrics from
+///   [`LumpedDesigned::verdict`] on `Ok`, `realizable = false` with zeroed
+///   metrics on `Err`).
+/// - [`Response::Lowpass`] → one row,
+///   [`RealizationTechnique::SteppedImpedance`] (via [`design_stepped_from`];
+///   metrics from the stepped low-pass fields).
+/// - [`Response::Highpass`] → `[]` (no live technique realizes this yet).
+pub fn compare_techniques(spec: &FilterSpec) -> Vec<TechniqueComparison> {
+    /// Minimum achieved rejection over a `(freq, achieved, required, met)`
+    /// stopband table (`None` when the mask has no stopband points).
+    fn min_achieved(stopband: &[(f64, f64, f64, bool)]) -> Option<f64> {
+        stopband
+            .iter()
+            .map(|&(_, achieved, _, _)| achieved)
+            .fold(None, |acc, a| Some(acc.map_or(a, |m: f64| m.min(a))))
+    }
+
+    /// A `TechniqueComparison` row from a distributed [`Designed`] (edge-coupled
+    /// or hairpin): metrics from the synthesized-response mask report, the board
+    /// from the dimensioned layout (`realizable = layout.is_some()`).
+    fn from_distributed(technique: RealizationTechnique, d: &Designed) -> TechniqueComparison {
+        let realizable = d.layout.is_some();
+        let (bw, bh) = d.board_size_mm;
+        TechniqueComparison {
+            technique,
+            realizable,
+            board_w_mm: bw,
+            board_h_mm: bh,
+            pass: Some(d.report.pass),
+            order: d.order(),
+            worst_passband_ripple_db: d.report.worst_passband_ripple_db,
+            worst_return_loss_db: d.report.worst_return_loss_db,
+            worst_stopband_rej_db: min_achieved(&d.report.stopband),
+        }
+    }
+
+    match spec.response {
+        Response::Bandpass | Response::Bandstop => {
+            let edge = design_demo_from(spec.clone(), Topology::EdgeCoupled);
+            let hairpin = design_demo_from(spec.clone(), Topology::Hairpin);
+            // The lumped flow has its own fallible ladder synthesis; an
+            // unrealizable ladder degrades to a not-realizable row (zeroed
+            // metrics, no verdict) rather than panicking.
+            let lumped_row = match design_lumped_from(spec.clone()) {
+                Ok(l) => {
+                    let (bw, bh) = l.board_size_mm;
+                    TechniqueComparison {
+                        technique: RealizationTechnique::LumpedLc,
+                        realizable: true,
+                        board_w_mm: bw,
+                        board_h_mm: bh,
+                        pass: Some(l.verdict.pass),
+                        order: l.order(),
+                        worst_passband_ripple_db: l.verdict.worst_passband_ripple_db,
+                        worst_return_loss_db: l.verdict.worst_return_loss_db,
+                        // `worst_stopband_rej_db` is `+∞` when the mask has no
+                        // stopband points — map that to `None`, never ∞.
+                        worst_stopband_rej_db: l
+                            .verdict
+                            .worst_stopband_rej_db
+                            .is_finite()
+                            .then_some(l.verdict.worst_stopband_rej_db),
+                    }
+                }
+                Err(_) => TechniqueComparison {
+                    technique: RealizationTechnique::LumpedLc,
+                    realizable: false,
+                    board_w_mm: 0.0,
+                    board_h_mm: 0.0,
+                    pass: None,
+                    order: 0,
+                    worst_passband_ripple_db: 0.0,
+                    worst_return_loss_db: 0.0,
+                    worst_stopband_rej_db: None,
+                },
+            };
+            vec![
+                from_distributed(RealizationTechnique::EdgeCoupled, &edge),
+                from_distributed(RealizationTechnique::Hairpin, &hairpin),
+                lumped_row,
+            ]
+        }
+        Response::Lowpass => {
+            let stepped = design_stepped_from(spec.clone());
+            let (bw, bh) = stepped.board_size_mm;
+            vec![TechniqueComparison {
+                technique: RealizationTechnique::SteppedImpedance,
+                realizable: stepped.layout.is_some(),
+                board_w_mm: bw,
+                board_h_mm: bh,
+                pass: Some(stepped.pass),
+                order: stepped.order,
+                worst_passband_ripple_db: stepped.worst_passband_ripple_db,
+                worst_return_loss_db: stepped.worst_return_loss_db,
+                worst_stopband_rej_db: min_achieved(&stepped.stopband),
+            }]
+        }
+        // No live technique realizes a high-pass response yet.
+        Response::Highpass => vec![],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1718,5 +1875,120 @@ mod tests {
         assert_eq!(lc_none.worst_passband_ripple_db, 0.0);
         assert_eq!(lc_none.worst_return_loss_db, 0.0);
         assert_eq!(lc_none.worst_stopband_rej_db, None);
+    }
+
+    #[test]
+    fn compare_techniques_surfaces_real_per_technique_metrics() {
+        // `compare_techniques` must synthesize EVERY live technique for the
+        // response class and surface each one's REAL graded metrics — pulled
+        // straight from that technique's freshly-built design, not a constant.
+        // A constant / empty `compare_techniques` fails every assertion below.
+
+        // ---- (a) band-pass demo spec → three techniques, real metrics -------
+        let rows = compare_techniques(&demo_spec());
+        assert_eq!(
+            rows.len(),
+            3,
+            "band-pass realizes edge-coupled + hairpin + lumped"
+        );
+        assert_eq!(rows[0].technique, RealizationTechnique::EdgeCoupled);
+        assert_eq!(rows[1].technique, RealizationTechnique::Hairpin);
+        assert_eq!(rows[2].technique, RealizationTechnique::LumpedLc);
+
+        // Each row's metrics equal that technique's freshly-built design's
+        // graded fields (equality, not constants).
+        let edge = design_demo_from(demo_spec(), Topology::EdgeCoupled);
+        let hairpin = design_demo_from(demo_spec(), Topology::Hairpin);
+        let lumped = design_lumped_from(demo_spec()).expect("demo ladder is realizable");
+
+        let ec = &rows[0];
+        assert_eq!(ec.realizable, edge.layout.is_some());
+        assert_eq!(ec.board_w_mm, edge.board_size_mm.0);
+        assert_eq!(ec.board_h_mm, edge.board_size_mm.1);
+        assert_eq!(ec.pass, Some(edge.report.pass));
+        assert_eq!(ec.order, edge.order());
+        assert_eq!(
+            ec.worst_passband_ripple_db,
+            edge.report.worst_passband_ripple_db
+        );
+        assert_eq!(ec.worst_return_loss_db, edge.report.worst_return_loss_db);
+        let ec_min = edge
+            .report
+            .stopband
+            .iter()
+            .map(|&(_, a, _, _)| a)
+            .fold(f64::INFINITY, f64::min);
+        assert!(!edge.report.stopband.is_empty(), "demo has a stopband pt");
+        assert_eq!(ec.worst_stopband_rej_db, Some(ec_min));
+
+        let hp = &rows[1];
+        assert_eq!(hp.realizable, hairpin.layout.is_some());
+        assert_eq!(hp.board_w_mm, hairpin.board_size_mm.0);
+        assert_eq!(hp.board_h_mm, hairpin.board_size_mm.1);
+        assert_eq!(hp.pass, Some(hairpin.report.pass));
+        assert_eq!(hp.order, hairpin.order());
+        assert_eq!(
+            hp.worst_passband_ripple_db,
+            hairpin.report.worst_passband_ripple_db
+        );
+        assert_eq!(hp.worst_return_loss_db, hairpin.report.worst_return_loss_db);
+
+        let lc = &rows[2];
+        assert!(lc.realizable, "demo ladder is realizable");
+        assert_eq!(lc.board_w_mm, lumped.board_size_mm.0);
+        assert_eq!(lc.board_h_mm, lumped.board_size_mm.1);
+        assert_eq!(lc.pass, Some(lumped.verdict.pass));
+        assert_eq!(lc.order, lumped.order());
+        assert_eq!(
+            lc.worst_passband_ripple_db,
+            lumped.verdict.worst_passband_ripple_db
+        );
+        assert_eq!(lc.worst_return_loss_db, lumped.verdict.worst_return_loss_db);
+        assert!(lumped.verdict.worst_stopband_rej_db.is_finite());
+        assert_eq!(
+            lc.worst_stopband_rej_db,
+            Some(lumped.verdict.worst_stopband_rej_db)
+        );
+
+        // The rows are NOT all identical: the three techniques realize the same
+        // prototype on physically different boards. In particular the set of
+        // board sizes is not a single value (hairpin folds smaller than the
+        // straight edge-coupled lines; lumped is an SMD board entirely).
+        let board_sizes = [
+            (ec.board_w_mm, ec.board_h_mm),
+            (hp.board_w_mm, hp.board_h_mm),
+            (lc.board_w_mm, lc.board_h_mm),
+        ];
+        assert!(
+            board_sizes.iter().any(|&b| b != board_sizes[0]),
+            "the techniques must differ physically — board sizes are not all \
+             identical (edge-coupled {:?} vs hairpin {:?} vs lumped {:?})",
+            board_sizes[0],
+            board_sizes[1],
+            board_sizes[2]
+        );
+
+        // ---- (b) low-pass spec → exactly the stepped-impedance row ----------
+        let lp = compare_techniques(&stepped_demo_spec());
+        assert_eq!(lp.len(), 1, "low-pass realizes exactly stepped-impedance");
+        assert_eq!(lp[0].technique, RealizationTechnique::SteppedImpedance);
+        let stepped = design_stepped_from(stepped_demo_spec());
+        assert_eq!(lp[0].pass, Some(stepped.pass));
+        assert_eq!(lp[0].order, stepped.order);
+        assert_eq!(
+            lp[0].worst_passband_ripple_db,
+            stepped.worst_passband_ripple_db
+        );
+        assert_eq!(lp[0].worst_return_loss_db, stepped.worst_return_loss_db);
+        assert_eq!(lp[0].board_w_mm, stepped.board_size_mm.0);
+        assert_eq!(lp[0].board_h_mm, stepped.board_size_mm.1);
+
+        // ---- (c) high-pass spec → no live technique -------------------------
+        let mut hpf = demo_spec();
+        hpf.response = Response::Highpass;
+        assert!(
+            compare_techniques(&hpf).is_empty(),
+            "no live technique realizes a high-pass response yet"
+        );
     }
 }
