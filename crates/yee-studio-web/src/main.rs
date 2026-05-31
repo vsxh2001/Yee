@@ -178,7 +178,7 @@ fn StageCanvas(
     let lumped_flow = topology() == Topology::LumpedLc;
     match stage {
         Stage::Spec => stages::spec_stage(spec, designed, lumped),
-        Stage::Technique => stages::technique_stage(topology, active),
+        Stage::Technique => stages::technique_stage(topology, active, spec),
         Stage::Synthesis if lumped_flow => stages::lumped_synthesis_stage(lumped),
         Stage::Synthesis => stages::synthesis_stage(designed),
         Stage::Components => stages::lumped_components_stage(lumped, series_e96),

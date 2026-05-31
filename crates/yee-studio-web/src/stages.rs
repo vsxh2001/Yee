@@ -12,6 +12,11 @@
 
 use dioxus::prelude::*;
 
+use yee_filter::{
+    Approximation, FilterSpec, RealizationTechnique, Response, SpecMask, TechniqueRecommendation,
+    recommend_technique,
+};
+
 use crate::engine::{BomView, Designed, LumpedDesigned, YieldView};
 use crate::svg::{board_svg, lumped_board_svg, response_plot};
 
@@ -669,11 +674,328 @@ struct TechCard {
     selects: Option<Topology>,
 }
 
-/// Technique stage: the topology gallery. **Edge-coupled** and **Lumped LC** are
+/// Whether a [`RealizationTechnique`] is realizable by the studio today
+/// ("live"), and — when not — the nearest live technique to fall back to.
+///
+/// This is the **UI-side** live/Soon knowledge (the `yee-filter` engine stays
+/// pure-domain). Edge-coupled and Lumped LC are the two live flows
+/// ([`Topology`]); the four distributed-resonator techniques are roadmap
+/// placeholders whose nearest live realization is the one whose flow can stand
+/// in (edge-coupled for the distributed resonators).
+fn technique_status(t: RealizationTechnique) -> TechStatus {
+    match t {
+        RealizationTechnique::EdgeCoupled => TechStatus::Live(Topology::EdgeCoupled),
+        RealizationTechnique::LumpedLc => TechStatus::Live(Topology::LumpedLc),
+        // Folded / coupled-resonator distributed techniques: the live
+        // edge-coupled flow is the nearest stand-in.
+        RealizationTechnique::Hairpin
+        | RealizationTechnique::Combline
+        | RealizationTechnique::Interdigital => TechStatus::Soon(Topology::EdgeCoupled),
+        // A distributed lowpass has no band-pass-shaped live flow; the discrete
+        // lumped flow is the nearest realizable stand-in.
+        RealizationTechnique::SteppedImpedance => TechStatus::Soon(Topology::LumpedLc),
+    }
+}
+
+/// The studio's live/Soon status for a recommended technique.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TechStatus {
+    /// Buildable today; routes straight into this [`Topology`]'s flow.
+    Live(Topology),
+    /// Roadmapped; the recommendation is shown honestly and this [`Topology`]
+    /// is offered as the nearest live stand-in.
+    Soon(Topology),
+}
+
+/// The short flow label for a [`Topology`] (used in the "nearest live" offer).
+fn topology_label(t: Topology) -> &'static str {
+    match t {
+        Topology::EdgeCoupled => "Edge-coupled",
+        Topology::LumpedLc => "Lumped LC",
+    }
+}
+
+/// Route into a topology's flow: set the topology signal and land on Spec (so
+/// the user can review / refine the seeded spec before synthesizing).
+fn route_into(mut topology: Signal<Topology>, mut active: Signal<Stage>, t: Topology) {
+    topology.set(t);
+    active.set(Stage::Spec);
+}
+
+/// Seed the editable [`FilterSpec`] from the guided form inputs, preserving the
+/// existing approximation / order / Z0 / mask shape (only the response,
+/// frequency, and fractional bandwidth come from the form). When the form has a
+/// stopband target it is written as the single mask stopband point.
+fn seed_spec_from_form(
+    mut spec: Signal<FilterSpec>,
+    response: Response,
+    f0_hz: f64,
+    fbw: f64,
+    stopband_ghz: Option<f64>,
+    stopband_rej_db: f64,
+) {
+    let mut w = spec.write();
+    w.response = response;
+    w.f0_hz = f0_hz;
+    w.fbw = fbw.max(1e-4);
+    if let Some(f_ghz) = stopband_ghz {
+        w.mask.stopband = vec![(f_ghz * 1e9, stopband_rej_db)];
+    }
+}
+
+/// The guided "recommend-a-technique" panel (App.2.0, ADR-0136) atop the expert
+/// gallery — the studio's dual-UI entry. A small form (response, centre/cutoff
+/// frequency, fractional bandwidth, optional stopband target) drives the pure
+/// [`recommend_technique`] engine; the result block highlights the primary
+/// technique, shows the rationale, and lists ranked alternatives. **Live**
+/// techniques (edge-coupled, lumped) get a "Use this" that seeds the spec and
+/// routes into the flow; **Soon** techniques are labelled honestly and offer the
+/// nearest live alternative to proceed with.
+#[component]
+fn guided_panel(
+    topology: Signal<Topology>,
+    active: Signal<Stage>,
+    spec: Signal<FilterSpec>,
+) -> Element {
+    // Form state (local to the panel; seeds the real spec only on "Use this").
+    // 0 = Lowpass, 1 = Highpass, 2 = Bandpass, 3 = Bandstop.
+    let mut response_idx = use_signal(|| 2usize);
+    let mut f0_ghz = use_signal(|| 2.4f64);
+    let mut fbw_pct = use_signal(|| 5.0f64);
+    let mut use_stopband = use_signal(|| false);
+    let mut stop_ghz = use_signal(|| 4.0f64);
+    let mut stop_rej_db = use_signal(|| 30.0f64);
+    // The latest recommendation (None until the user clicks Recommend).
+    let mut rec = use_signal(|| None::<TechniqueRecommendation>);
+
+    let response_of = |idx: usize| match idx {
+        0 => Response::Lowpass,
+        1 => Response::Highpass,
+        3 => Response::Bandstop,
+        _ => Response::Bandpass,
+    };
+    let cur_response = response_of(response_idx());
+    let is_band = matches!(cur_response, Response::Bandpass | Response::Bandstop);
+    // Lowpass/highpass call f0 the "cutoff"; band filters call it "centre".
+    let freq_label = if is_band {
+        "Centre f0 (GHz)"
+    } else {
+        "Cutoff (GHz)"
+    };
+
+    rsx! {
+        div { class: "card guided", style: "margin-bottom:18px",
+            h2 { class: "card-title",
+                "Guided · recommend a technique"
+                span { class: "k", "tell me the requirement → topology + rationale" }
+            }
+            p { class: "guided-lead",
+                "New to filter realization? Describe the requirement and the studio recommends a "
+                "technique with a plain-language rationale and ranked alternatives — then routes you "
+                "into the flow. (The expert gallery below stays available.)"
+            }
+
+            // ---- the requirement form ----------------------------------------
+            div { class: "fields guided-form",
+                div { class: "field",
+                    span { class: "name", "Response" }
+                    select {
+                        class: "spec-input",
+                        style: "width:160px;text-align:left",
+                        value: "{response_idx}",
+                        onchange: move |e| {
+                            if let Ok(v) = e.value().parse::<usize>() {
+                                response_idx.set(v);
+                            }
+                        },
+                        option { value: "2", "Bandpass" }
+                        option { value: "3", "Bandstop" }
+                        option { value: "0", "Lowpass" }
+                        option { value: "1", "Highpass" }
+                    }
+                }
+                {num_field(
+                    freq_label, f0_ghz(), 0.001, 0.001, 100.0,
+                    move |v| f0_ghz.set(v),
+                )}
+                if is_band {
+                    {num_field(
+                        "Fractional bandwidth (%)", fbw_pct(), 0.1, 0.01, 80.0,
+                        move |v| fbw_pct.set(v),
+                    )}
+                }
+                // optional stopband target
+                div { class: "field",
+                    span { class: "name", "Stopband target" }
+                    button {
+                        class: if use_stopband() { "seg-btn on" } else { "seg-btn" },
+                        style: "border:1px solid var(--border-3);border-radius:5px",
+                        onclick: move |_| {
+                            let n = !use_stopband();
+                            use_stopband.set(n);
+                        },
+                        if use_stopband() { "on" } else { "off (optional)" }
+                    }
+                }
+                if use_stopband() {
+                    {num_field(
+                        "Stopband f (GHz)", stop_ghz(), 0.001, 0.001, 100.0,
+                        move |v| stop_ghz.set(v),
+                    )}
+                    {num_field(
+                        "Stopband rejection (dB)", stop_rej_db(), 0.5, 5.0, 90.0,
+                        move |v| stop_rej_db.set(v),
+                    )}
+                }
+            }
+
+            div { class: "export-row",
+                button {
+                    class: "btn dl",
+                    onclick: move |_| {
+                        let s = FilterSpec {
+                            response: response_of(response_idx()),
+                            approximation: Approximation::Chebyshev { ripple_db: 0.5 },
+                            f0_hz: f0_ghz() * 1e9,
+                            fbw: (fbw_pct() / 100.0).max(1e-4),
+                            order: Some(5),
+                            z0_ohm: 50.0,
+                            mask: SpecMask {
+                                passband_ripple_db: 0.5,
+                                return_loss_db: 10.0,
+                                stopband: if use_stopband() {
+                                    vec![(stop_ghz() * 1e9, stop_rej_db())]
+                                } else {
+                                    vec![]
+                                },
+                            },
+                        };
+                        rec.set(Some(recommend_technique(&s)));
+                    },
+                    "✦ Recommend a technique"
+                }
+            }
+
+            // ---- the recommendation result -----------------------------------
+            if let Some(r) = rec() {
+                {render_recommendation(&r, topology, active, spec, cur_response, f0_ghz(), fbw_pct(),
+                    if use_stopband() { Some(stop_ghz()) } else { None }, stop_rej_db())}
+            }
+        }
+    }
+}
+
+/// Render a [`TechniqueRecommendation`]: the highlighted primary (with its
+/// live/Soon status + a route-into action), the rationale, and the ranked
+/// alternatives.
+#[allow(clippy::too_many_arguments)]
+fn render_recommendation(
+    r: &TechniqueRecommendation,
+    topology: Signal<Topology>,
+    active: Signal<Stage>,
+    spec: Signal<FilterSpec>,
+    response: Response,
+    f0_ghz: f64,
+    fbw_pct: f64,
+    stopband_ghz: Option<f64>,
+    stop_rej_db: f64,
+) -> Element {
+    let primary = r.primary;
+    let status = technique_status(primary);
+    let seed = move || {
+        seed_spec_from_form(
+            spec,
+            response,
+            f0_ghz * 1e9,
+            fbw_pct / 100.0,
+            stopband_ghz,
+            stop_rej_db,
+        );
+    };
+    // Alternatives, cloned for the move into rsx.
+    let alts: Vec<(RealizationTechnique, String)> = r.alternatives.clone();
+
+    rsx! {
+        div { class: "rec-result",
+            // ---- primary -------------------------------------------------
+            div { class: "rec-primary",
+                div { class: "rec-head",
+                    span { class: "rec-badge", "Recommended" }
+                    span { class: "rec-name", "{primary.name()}" }
+                    match status {
+                        TechStatus::Live(_) => rsx! { span { class: "chip pass", "live" } },
+                        TechStatus::Soon(_) => rsx! { span { class: "chip fail", "soon" } },
+                    }
+                }
+                p { class: "rec-rationale", "{r.rationale}" }
+                match status {
+                    TechStatus::Live(t) => rsx! {
+                        button {
+                            class: "btn dl rec-use",
+                            onclick: move |_| {
+                                seed();
+                                route_into(topology, active, t);
+                            },
+                            "Use this → seed the spec + open the {topology_label(t)} flow"
+                        }
+                    },
+                    TechStatus::Soon(t) => rsx! {
+                        div { class: "note honest",
+                            "This technique is roadmapped (not yet buildable in the studio). "
+                            "The nearest live realization is "
+                            b { "{topology_label(t)}" } " — proceed with it:"
+                        }
+                        button {
+                            class: "btn dl rec-use",
+                            onclick: move |_| {
+                                seed();
+                                route_into(topology, active, t);
+                            },
+                            "Proceed with {topology_label(t)} (seed the spec + open the flow)"
+                        }
+                    },
+                }
+            }
+
+            // ---- alternatives --------------------------------------------
+            if !alts.is_empty() {
+                div { class: "rec-alts",
+                    p { class: "lab", "Alternatives" }
+                    for (i, (alt, note)) in alts.into_iter().enumerate() {
+                        {
+                            let alt_status = technique_status(alt);
+                            let live = matches!(alt_status, TechStatus::Live(_));
+                            rsx! {
+                                div { key: "alt{i}", class: "rec-alt",
+                                    div { class: "rec-alt-head",
+                                        span { class: "rec-alt-name", "{alt.name()}" }
+                                        if live {
+                                            span { class: "chip pass", "live" }
+                                        } else {
+                                            span { class: "chip fail", "soon" }
+                                        }
+                                    }
+                                    p { class: "rec-alt-note", "{note}" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Technique stage: a **guided** recommender panel atop the **expert** topology
+/// gallery (the dual-UI entry, App.2.0). **Edge-coupled** and **Lumped LC** are
 /// live and selectable (clicking a live card routes the downstream stages via
 /// `topology`); the rest stay greyed "Soon". The currently selected topology is
 /// highlighted.
-pub fn technique_stage(mut topology: Signal<Topology>, mut active: Signal<Stage>) -> Element {
+pub fn technique_stage(
+    mut topology: Signal<Topology>,
+    mut active: Signal<Stage>,
+    spec: Signal<FilterSpec>,
+) -> Element {
     let cards: [TechCard; 6] = [
         TechCard {
             name: "Edge-coupled",
@@ -716,7 +1038,15 @@ pub fn technique_stage(mut topology: Signal<Topology>, mut active: Signal<Stage>
     rsx! {
         div { class: "canvas-head",
             h1 { "Technique" }
-            p { class: "sub", "Each topology realizes the same prototype in a different way. Edge-coupled (distributed) and Lumped LC (discrete parts + BOM + tolerance) are live — click to route the flow; the rest are roadmap placeholders." }
+            p { class: "sub", "Two ways in: the guided recommender (tell it the requirement, it picks a topology) or the expert gallery below. Each topology realizes the same prototype differently — Edge-coupled (distributed) and Lumped LC (discrete parts + BOM + tolerance) are live; the rest are roadmap placeholders." }
+        }
+
+        // ---- guided dual-UI entry (App.2.0) -------------------------------
+        guided_panel { topology, active, spec }
+
+        h2 { class: "card-title", style: "margin:18px 0 10px",
+            "Expert gallery"
+            span { class: "k", "pick a topology directly" }
         }
         div { class: "tgrid",
             for card in cards {

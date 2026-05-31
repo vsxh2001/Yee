@@ -494,3 +494,64 @@ td { color: var(--text-2); }
   color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent) inset;
 }
+
+/* ===========================================================================
+   Guided technique-recommender (App.2.0, ADR-0136)
+   =========================================================================== */
+.card.guided { border-color: var(--border-3); }
+.guided-lead {
+  color: var(--muted-2);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0 0 var(--sp-3);
+}
+.guided-form { margin-bottom: var(--sp-2); }
+
+.rec-result {
+  margin-top: var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.rec-primary {
+  background: var(--accent-bg);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-sm);
+  padding: var(--sp-3) var(--sp-4);
+}
+.rec-head { display: flex; align-items: center; gap: var(--sp-2); }
+.rec-badge {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 2px 9px;
+}
+.rec-name { font-size: 16px; font-weight: 700; color: var(--text); }
+.rec-rationale {
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.55;
+  margin: var(--sp-2) 0 var(--sp-3);
+}
+.rec-use { cursor: pointer; }
+
+.rec-alts { display: flex; flex-direction: column; gap: var(--sp-2); }
+.rec-alts .lab {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin: 0 0 var(--sp-1);
+}
+.rec-alt {
+  background: var(--panel-3);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-sm);
+  padding: var(--sp-2) var(--sp-3);
+}
+.rec-alt-head { display: flex; align-items: center; gap: var(--sp-2); }
+.rec-alt-name { color: var(--text); font-size: 13px; font-weight: 600; }
+.rec-alt-note { color: var(--muted-2); font-size: 12px; line-height: 1.45; margin: 4px 0 0; }
