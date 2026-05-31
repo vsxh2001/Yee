@@ -180,3 +180,4 @@
 - [ADR-0134: Filter Phase F2.3-i — re-scope the lumped EM-sim gate to a physically-achievable bar](decisions/0134-f2-3-i-rescope-emsim-gate.md)
 - [ADR-0135: App.1.2c — deploy the Dioxus studio live via GitHub Pages](decisions/0135-app-1-2c-studio-pages-hosting.md)
 - [ADR-0136: App.2.0 — guided technique-recommender (dual-UI entry)](decisions/0136-app-2-0-guided-technique-recommender.md)
+- [ADR-0137: Filter F1.2.3 — stepped-impedance low-pass filter synthesis + dimensions](decisions/0137-f1-2-3-stepped-impedance-lpf.md)
