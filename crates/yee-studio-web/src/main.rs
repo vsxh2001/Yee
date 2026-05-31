@@ -135,12 +135,14 @@ fn TopBar(
     lumped: ReadOnlySignal<Option<LumpedDesigned>>,
     stepped: ReadOnlySignal<SteppedLowpassDesigned>,
 ) -> Element {
-    let (summary, verdict) = topbar_view(
-        topology(),
-        &designed.read(),
-        lumped.read().as_ref(),
-        &stepped.read(),
-    );
+    // Bind each signal guard to a named local so the borrows passed to
+    // `topbar_view` live for the whole call (no reliance on argument-position
+    // temporary-lifetime extension; robust to later refactors).
+    let designed_ref = designed.read();
+    let lumped_ref = lumped.read();
+    let stepped_ref = stepped.read();
+    let (summary, verdict) =
+        topbar_view(topology(), &designed_ref, lumped_ref.as_ref(), &stepped_ref);
 
     rsx! {
         header { class: "topbar",
