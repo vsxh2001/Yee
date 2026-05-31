@@ -1,6 +1,12 @@
 # ADR-0132: Filter Phase F2.3-g — PEC-box 2-point standing-wave CW de-embed
 
-**Status:** Accepted
+**Status:** Investigated — the 2-point de-embed WORKED for its primary aim: the
+result is now **PHYSICAL (no over-unity)** — the first F2.3 measurement without the
+bad-de-embed signature. But the PEC-box **soft source barely launches forward
+power** (it reflects), so the S21 is **launch/probe-floor-limited** and shows a
+(likely-artifact) deep notch at the passband center, not a band-pass. Next: a
+cleaner forward-wave launch (F2.3-h, ADR-0133) to disambiguate. Branch `4bde9dd`
+(unmerged). See Outcome.
 **Date:** 2026-05-31
 **Related:** ADR-0131 (F2.3-f — matched-CPML failed: monotone + over-unity, hit the
 ADR-0108 CPML-into-substrate instability), ADR-0108 (`run_line_eeff` uses PEC +
@@ -68,8 +74,42 @@ clean de-embed shows a shallow band-pass); the studio Verify stage.
 
 ---
 
+## Outcome (2026-05-31) — PHYSICAL de-embed achieved; launch is the new limiter
+
+Implemented (branch `4bde9dd`): plain PEC box (no CPML — stable, `run_line_eeff`
+pattern), β extracted in-band via the 3-point recurrence `cos(βd)=(V₀+V₂)/(2V₁)`
+(no separate ε_eff run), forward/backward `a`/`b` from the 2-point system,
+`S21=(b₂/a₁)_dut/(b₂/a₁)_thru`. fmt/clippy clean. Run bounded (~24 min).
+
+|S21| sweep: 1.6→−30, 1.8→−30, **2.0→−43.7**, 2.2→−57, **2.4→−34**, 2.6→−25 dB.
+
+- **PHYSICAL: no over-unity anywhere** (max |S21|=0.055) — the 2-point
+  forward/backward separation removed the bad-de-embed signature (vs F2.3-f's 7.4×).
+  This is the primary success of F2.3-g.
+- **But NO band-pass — a deep notch at the passband center** (−43.7 dB @2.0 GHz).
+- **Caveat (the new limiter):** the PEC-box soft `E_z` source **reflects almost
+  entirely** (input = near-pure standing wave, |fwd|≈|bwd|), and the bare **thru
+  barely couples forward power to the output region** (β_out=0 at 1.6/1.8 GHz,
+  thru |b₂|~0.02–0.22 vs |a₁|~7–14). So S21 divides small, partly-degenerate
+  output readings → the "notch at f0" is **likely a launch/probe-floor artifact,
+  not a real inverted response.** `fdtd_lumped_001` RED (43.7 dB IL ≫ 6 dB bar),
+  **not weakened**.
+
+**Verdict:** the de-embed math is now sound (physical), but the **forward-wave
+launch** in an unmatched PEC box is too weak to trust the S21 — the floor, not the
+board, sets the result. So the "no band-pass" is **not yet a definitive board
+verdict**. Next (F2.3-h, ADR-0133): a **cleaner forward-wave launch** (a time-gated
+incident-wave reference, `run_line_eeff` style, and/or a directional/TF-SF source +
+a longer line) to raise the floor and **disambiguate**: a real topology inversion
+(shunt tanks shorting at f0 — a cheap placement fix), a floor artifact (→ a clean
+band-pass emerges), or a genuine board-integration wall. The 2-point de-embed
+(`4bde9dd`) stays as the foundation.
+
+---
+
 ## References
 - ADR-0131 (matched-CPML failed); ADR-0108 (`run_line_eeff` PEC + standing-wave, no
-  CPML); ADR-0125/0127 (port correct in isolation); ADR-0115 (the gate).
+  CPML); ADR-0125/0127 (port correct in isolation); ADR-0115 (the gate);
+  ADR-0014/0021/0026 (TF/SF source).
 - `docs/superpowers/specs/2026-05-31-f2-3-g-pec-2point-deembed-design.md`;
   `docs/superpowers/plans/2026-05-31-f2-3-g-pec-2point-deembed.md`.
