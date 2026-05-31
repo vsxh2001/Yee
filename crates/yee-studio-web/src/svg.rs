@@ -557,7 +557,9 @@ mod tests {
             "one |S21| polyline per non-empty curve (got {polylines})"
         );
         // Honest labels appear in the legend text.
-        assert!(svg.contains("Coupled-resonator (edge-coupled / hairpin / combline) — ideal"));
+        assert!(svg.contains(
+            "Coupled-resonator (edge-coupled / hairpin / combline / interdigital) — ideal"
+        ));
         assert!(svg.contains("Lumped LC — realized ladder"));
         // Each curve's distinct stroke colour is present.
         assert!(svg.contains(&format!("stroke=\"{}\"", palette[0])));
