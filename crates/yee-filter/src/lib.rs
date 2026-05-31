@@ -45,14 +45,16 @@ pub mod extract;
 pub use extract::{CouplingExtraction, extract_coupling, extract_q_ringdown};
 
 /// Closed-form dimensional synthesis (Filter Phases F1.2.0 / F1.2.2 / F1.2.3 /
-/// F1.2.5): coupling matrix → physical microstrip dimensions (edge-coupled,
-/// hairpin, combline) and low-pass prototype → stepped-impedance line sections.
+/// F1.2.5 / F1.2.7): coupling matrix → physical microstrip dimensions
+/// (edge-coupled, hairpin, combline, interdigital) and low-pass prototype →
+/// stepped-impedance line sections.
 pub mod dimension;
 pub use dimension::{
-    ComblineDimensions, DimError, EdgeCoupledDimensions, HairpinDimensions,
+    ComblineDimensions, DimError, EdgeCoupledDimensions, HairpinDimensions, InterdigitalDimensions,
     SteppedImpedanceDimensions, SteppedSection, dimension_combline, dimension_combline_layout,
     dimension_edge_coupled, dimension_edge_coupled_layout, dimension_hairpin,
-    dimension_hairpin_layout, dimension_stepped_impedance, dimension_stepped_impedance_layout,
+    dimension_hairpin_layout, dimension_interdigital, dimension_stepped_impedance,
+    dimension_stepped_impedance_layout,
 };
 
 /// Closed-form lumped-element LC ladder synthesis (Filter Phase F2.0):

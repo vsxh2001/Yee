@@ -1024,3 +1024,145 @@ pub fn dimension_combline_layout(
         bbox,
     })
 }
+
+// ---------------------------------------------------------------------------
+// Interdigital (short-circuited λg/4 coupled lines, no loading cap) — F1.2.7.
+// ---------------------------------------------------------------------------
+
+/// First-order physical dimensions of an **interdigital** microstrip band-pass
+/// filter, synthesized from a [`crate::CouplingMatrix`] (Filter Phase F1.2.7,
+/// Hong & Lancaster §5).
+///
+/// An interdigital resonator is a straight microstrip line of characteristic
+/// impedance `Z0` that is **short-circuited at one end** and a **full quarter
+/// guided wavelength (`λ_g/4`) long** — i.e. its electrical length at `f0` is
+/// fixed at `θ = π/2`. Adjacent resonators are grounded at *alternating* ends
+/// (the interdigital finger structure) and couple through the line-to-line edge
+/// gap (coupled even/odd modes) — *exactly* the edge-coupled / hairpin / combline
+/// mechanism — so the coupling realization **reuses** the validated [`solve_gap`]
+/// bisection and the `target_k = FBW · m_{i,i+1}` derivation (see the
+/// [module docs](self)).
+///
+/// The interdigital-**distinct** point is the resonator: it is the `θ = π/2`
+/// limit of the combline line, where the short-circuited stub's input
+/// susceptance `B(f0) = −(1/Z0)·cot(π/2) = 0` is **already zero** because the
+/// full `λ_g/4` line is self-resonant. Consequently there is **no loading
+/// capacitor** at all — the structural contrast with [`ComblineDimensions`],
+/// which shortens the line to `θ0 < π/2` and adds `C_L = cot(θ0)/(2π·f0·Z0)`
+/// precisely to make up the missing susceptance. This struct therefore carries
+/// **neither** a `loading_cap_f` **nor** a `theta0_rad` field (θ is fixed at
+/// π/2 by definition).
+///
+/// All lengths are in metres. `gaps_m` and `target_k` are both length `N − 1`
+/// (one per adjacent resonator pair) and index-aligned: `gaps_m[i]` is the edge
+/// gap between resonators `i` and `i + 1` that realizes `target_k[i]`.
+///
+/// This first-order engine reuses the proven `solve_gap` coupling realization
+/// (like hairpin / combline) rather than the rigorous alternating-ground
+/// even/odd-mode coupled-bar synthesis; that EM coupling refinement and the
+/// via/short-circuit 3-D modelling are out of scope for this increment
+/// (ADR-0148), exactly the scope boundary combline drew around its loading cap's
+/// effect on coupling.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InterdigitalDimensions {
+    /// Resonator / feed line width for the spec `Z0`, metres (Hammerstad-Jensen,
+    /// via [`yee_layout::microstrip_width`]).
+    pub line_width_m: f64,
+    /// Physical resonator length `L = λ_g/4 = (π/2)/β(f0)`, metres, with
+    /// `β(f0) = 2π·f0·√ε_eff/c` at the synthesized width. The line is
+    /// short-circuited at one end; the full quarter-wave length makes it
+    /// self-resonant at `f0` with **no** loading cap.
+    pub resonator_length_m: f64,
+    /// Inter-resonator edge-coupling gaps, metres (length `N − 1`).
+    pub gaps_m: Vec<f64>,
+    /// The `FBW · m_{i,i+1}` coupling each gap was solved for (length `N − 1`).
+    pub target_k: Vec<f64>,
+}
+
+/// Synthesize the physical dimensions of an **interdigital** microstrip
+/// band-pass filter from a synthesized [`FilterProject`] and a [`Substrate`]
+/// (Filter Phase F1.2.7, Hong & Lancaster §5).
+///
+/// Closed-form throughout and a direct mirror of [`dimension_hairpin`] /
+/// [`dimension_combline`]; the interdigital-distinct point is the resonator — a
+/// **short-circuited `λ_g/4` line, `θ = π/2` fixed, with no loading cap**. Unlike
+/// [`dimension_combline`] this takes **no** `θ0` parameter (θ is fixed at π/2 by
+/// definition):
+///
+/// - **Line width** — the spec-`Z0` Hammerstad-Jensen width
+///   ([`yee_layout::microstrip_width`]).
+/// - **Resonator length** — `resonator_length_m = λ_g/4 = (π/2)/β(f0)` with
+///   `β(f0) = 2π·f0·√ε_eff/c` (`ε_eff` from [`yee_layout::eps_eff`] at the
+///   synthesized width). This is the **factor-4** quarter-wave (like the
+///   hairpin's λ_g/4 *arm*) but a *straight* line (not folded into a U), with
+///   the far end short-circuited. Equivalently `c / (4·f0·√ε_eff)`.
+/// - **No loading cap** — the `θ = π/2` line is self-resonant at `f0`
+///   (`cot(π/2) = 0` → `B(f0) = 0`), so [`InterdigitalDimensions`] carries no
+///   loading-cap field. This is the `θ = π/2` limit of combline, which instead
+///   shortens the line and adds `C_L`; [`dimension_combline`] deliberately
+///   *errors* at `θ0 = π/2`, so this is a genuinely distinct function.
+/// - **Inter-resonator gaps** — identical to edge-coupled / hairpin / combline:
+///   for each adjacent pair `(i, i+1)`, `target_k[i] = FBW · m_{i,i+1}` is
+///   realized by bisecting the monotone coupled-line coupling coefficient with
+///   the shared [`solve_gap`] helper (no optimizer, no FDTD). See the
+///   [module docs](self) for the `target_k = FBW · m` cross-check.
+///
+/// # Errors
+///
+/// - [`DimError::UnsupportedTopology`] if the project is not
+///   [`Topology::CoupledResonator`] (the only synthesized topology today; the
+///   interdigital is a *realization* of that coupling network).
+/// - [`DimError::OrderTooSmall`] if the order `N < 2` (no inter-resonator
+///   coupling to realize).
+/// - [`DimError::GapNotBracketed`] if a `target_k` is unreachable for any gap in
+///   the `[5 µm, 5 mm]` bracket at the synthesized width (no silent clamping).
+pub fn dimension_interdigital(
+    project: &FilterProject,
+    substrate: &Substrate,
+) -> Result<InterdigitalDimensions, DimError> {
+    if project.topology != Topology::CoupledResonator {
+        return Err(DimError::UnsupportedTopology);
+    }
+
+    let n = project.coupling.m.len();
+    if n < 2 {
+        return Err(DimError::OrderTooSmall);
+    }
+
+    let eps_r = substrate.eps_r;
+    let h_m = substrate.height_m;
+    let f0 = project.spec.f0_hz;
+    let fbw = project.spec.fbw;
+    let z0 = project.spec.z0_ohm;
+
+    // 1. Line width from the Hammerstad-Jensen Z0 synthesis.
+    let line_width_m = microstrip_width(z0, eps_r, h_m);
+
+    // 2. Resonator length L = λ_g/4 = (π/2)/β(f0), β(f0) = 2π·f0·√ε_eff/c. The
+    //    interdigital resonator is a short-circuited *full* quarter-wave line
+    //    (θ = π/2 fixed) — self-resonant at f0, so no loading cap. (Factor-4 like
+    //    the hairpin arm, but a straight line.)
+    let e_eff = eps_eff(line_width_m, h_m, eps_r);
+    let beta0 = 2.0 * std::f64::consts::PI * f0 * e_eff.sqrt() / C;
+    let resonator_length_m = std::f64::consts::FRAC_PI_2 / beta0;
+
+    // 3. Inter-resonator gaps: target_k[i] = FBW · m[i][i+1] (= yee-synth's
+    //    k_{i,i+1}; see module docs), solved by the SAME bisection as edge-coupled
+    //    / hairpin / combline because adjacent interdigital resonators couple
+    //    through the edge gap between their lines (coupled even/odd modes).
+    let mut target_k = Vec::with_capacity(n - 1);
+    let mut gaps_m = Vec::with_capacity(n - 1);
+    for i in 0..n - 1 {
+        let k_i = fbw * project.coupling.m[i][i + 1];
+        let gap = solve_gap(i, k_i, line_width_m, h_m, eps_r)?;
+        target_k.push(k_i);
+        gaps_m.push(gap);
+    }
+
+    Ok(InterdigitalDimensions {
+        line_width_m,
+        resonator_length_m,
+        gaps_m,
+        target_k,
+    })
+}
