@@ -24,11 +24,17 @@ use crate::svg::{board_svg, lumped_board_svg, response_plot};
 ///
 /// Selecting [`Topology::LumpedLc`] on the Technique stage routes Synthesis /
 /// Components / Tolerance / Layout to the lumped-LC renderers and swaps the rail
-/// for the lumped flow; [`Topology::EdgeCoupled`] keeps the distributed flow.
+/// for the lumped flow; [`Topology::EdgeCoupled`] and [`Topology::Hairpin`] both
+/// keep the distributed flow (same six stages, same coupled-resonator synthesis)
+/// and differ only in the geometry derived for the Layout / Export stages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Topology {
     /// Distributed edge-coupled microstrip (the POC's original flow).
     EdgeCoupled,
+    /// Distributed hairpin (U-folded ½λ) microstrip (ADR-0138, F1.2.2). Shares
+    /// the edge-coupled coupled-resonator synthesis; only the realized geometry
+    /// differs (U-folded λ/4 arms vs straight λ/2 lines).
+    Hairpin,
     /// Lumped-element LC ladder (ADR-0120: synth → BOM → tolerance → board).
     LumpedLc,
 }
@@ -81,7 +87,7 @@ impl Stage {
     /// The rail order for the active topology.
     pub fn rail(topology: Topology) -> &'static [Stage] {
         match topology {
-            Topology::EdgeCoupled => &Stage::DISTRIBUTED,
+            Topology::EdgeCoupled | Topology::Hairpin => &Stage::DISTRIBUTED,
             Topology::LumpedLc => &Stage::LUMPED,
         }
     }
@@ -290,10 +296,11 @@ pub fn layout_stage(designed: ReadOnlySignal<Designed>) -> Element {
             .dim_error
             .clone()
             .unwrap_or_else(|| "geometry not realizable on FR-4".into());
+        let topo = d.topology_name();
         return rsx! {
             div { class: "canvas-head",
                 h1 { "Layout + Materials" }
-                p { class: "sub", "Dimensioned edge-coupled board — derived live from the synthesized coupling matrix." }
+                p { class: "sub", "Dimensioned {topo} board — derived live from the synthesized coupling matrix." }
             }
             div { class: "card",
                 h2 { class: "card-title",
@@ -301,7 +308,7 @@ pub fn layout_stage(designed: ReadOnlySignal<Designed>) -> Element {
                     span { class: "chip fail", style: "margin-left:auto", "FR-4" }
                 }
                 div { class: "note honest",
-                    "The current spec over-couples the edge-coupled resonators beyond what an "
+                    "The current spec over-couples the resonators beyond what an "
                     "FR-4 microstrip can physically realize (gaps would go non-positive). The "
                     "synthesized prototype + ideal response on the Synthesis stage stay valid — "
                     "raise the order, narrow the fractional bandwidth, or switch to the Lumped LC "
@@ -314,11 +321,13 @@ pub fn layout_stage(designed: ReadOnlySignal<Designed>) -> Element {
     let board = board_svg(layout);
     let sub = &layout.substrate;
     let (bw, bh) = d.board_size_mm;
+    let topo = d.topology_name();
+    let length_label = d.length_label();
 
     rsx! {
         div { class: "canvas-head",
             h1 { "Layout + Materials" }
-            p { class: "sub", "Dimensioned edge-coupled board, the material stackup that feeds the even/odd models, and the per-resonator geometry — all from the live dimensional synthesis." }
+            p { class: "sub", "Dimensioned {topo} board, the material stackup that feeds the even/odd models, and the per-resonator geometry — all from the live dimensional synthesis." }
         }
 
         div { class: "row",
@@ -369,14 +378,14 @@ pub fn layout_stage(designed: ReadOnlySignal<Designed>) -> Element {
         div { class: "card", style: "margin-top:16px",
             h2 { class: "card-title",
                 "Components · resonators"
-                span { class: "k", "edge-coupled ½λ · W / L / gap → Z0e/Z0o · εeff · realized k" }
+                span { class: "k", "{topo} · W / L / gap → Z0e/Z0o · εeff · realized k" }
             }
             table {
                 thead {
                     tr {
                         th { "id" }
                         th { "W (mm)" }
-                        th { "length (mm)" }
+                        th { "{length_label}" }
                         th { "gap→next (mm)" }
                         th { "Z0e / Z0o (Ω)" }
                         th { "εeff (e / o)" }
@@ -685,12 +694,13 @@ struct TechCard {
 fn technique_status(t: RealizationTechnique) -> TechStatus {
     match t {
         RealizationTechnique::EdgeCoupled => TechStatus::Live(Topology::EdgeCoupled),
+        RealizationTechnique::Hairpin => TechStatus::Live(Topology::Hairpin),
         RealizationTechnique::LumpedLc => TechStatus::Live(Topology::LumpedLc),
-        // Folded / coupled-resonator distributed techniques: the live
+        // Remaining coupled-resonator distributed techniques: the live
         // edge-coupled flow is the nearest stand-in.
-        RealizationTechnique::Hairpin
-        | RealizationTechnique::Combline
-        | RealizationTechnique::Interdigital => TechStatus::Soon(Topology::EdgeCoupled),
+        RealizationTechnique::Combline | RealizationTechnique::Interdigital => {
+            TechStatus::Soon(Topology::EdgeCoupled)
+        }
         // A distributed lowpass has no band-pass-shaped live flow; the discrete
         // lumped flow is the nearest realizable stand-in.
         RealizationTechnique::SteppedImpedance => TechStatus::Soon(Topology::LumpedLc),
@@ -711,6 +721,7 @@ enum TechStatus {
 fn topology_label(t: Topology) -> &'static str {
     match t {
         Topology::EdgeCoupled => "Edge-coupled",
+        Topology::Hairpin => "Hairpin",
         Topology::LumpedLc => "Lumped LC",
     }
 }
@@ -1042,8 +1053,8 @@ pub fn technique_stage(
         TechCard {
             name: "Hairpin",
             desc: "U-folded ½λ · compact · F1.2.2",
-            glyph: r##"<svg viewBox="0 0 120 54"><g stroke="#6b7480" stroke-width="4" fill="none"><path d="M14,44 L14,14 L30,14 L30,44"/><path d="M44,44 L44,14 L60,14 L60,44"/><path d="M74,44 L74,14 L90,14 L90,44"/></g></svg>"##,
-            selects: None,
+            glyph: r##"<svg viewBox="0 0 120 54"><g stroke="#2dd4bf" stroke-width="4" fill="none"><path d="M14,44 L14,14 L30,14 L30,44"/><path d="M44,44 L44,14 L60,14 L60,44"/><path d="M74,44 L74,14 L90,14 L90,44"/></g></svg>"##,
+            selects: Some(Topology::Hairpin),
         },
         TechCard {
             name: "Combline",
@@ -1208,19 +1219,20 @@ fn export_distributed(designed: ReadOnlySignal<Designed>) -> Element {
     let (bw, bh) = d.board_size_mm;
     let approx = approx_label(&d.spec.approximation);
     let realizable = d.layout.is_some();
+    let topo = d.topology_name();
 
     rsx! {
         div { class: "canvas-head",
             h1 { "Export" }
-            p { class: "sub", "The final parameter sheet + manufacturable files, generated live from the dimensioned edge-coupled layout — Gerber and KiCad are written client-side by the shipped `yee-export` emitters." }
+            p { class: "sub", "The final parameter sheet + manufacturable files, generated live from the dimensioned {topo} layout — Gerber and KiCad are written client-side by the shipped `yee-export` emitters." }
         }
         div { class: "card",
             h2 { class: "card-title",
                 "Design summary"
-                span { class: "k", "edge-coupled ½λ microstrip" }
+                span { class: "k", "{topo} microstrip" }
             }
             div { class: "fields",
-                div { class: "field", span { class: "name", "Topology" } span { class: "val", "edge-coupled ½λ · N={d.order()}" } }
+                div { class: "field", span { class: "name", "Topology" } span { class: "val", "{topo} · N={d.order()}" } }
                 div { class: "field", span { class: "name", "Approximation" } span { class: "val", "{approx}" } }
                 div { class: "field", span { class: "name", "f0 / FBW" } span { class: "val", "{d.spec.f0_hz/1e9:.3} GHz / {d.spec.fbw*100.0:.0}%" } }
                 div { class: "field", span { class: "name", "System Z0" } span { class: "val", "{d.spec.z0_ohm:.0} Ω" } }
@@ -1433,7 +1445,10 @@ fn approx_label(a: &yee_filter::Approximation) -> String {
 /// geometry — all live engine values.
 fn distributed_param_sheet(d: &Designed) -> String {
     let mut s = String::new();
-    s.push_str("# Yee Filter Studio — edge-coupled microstrip parameter sheet\n\n");
+    s.push_str(&format!(
+        "# Yee Filter Studio — {} microstrip parameter sheet\n\n",
+        d.topology_name()
+    ));
     s.push_str("## Specification\n");
     s.push_str("response          : Bandpass\n");
     s.push_str(&format!(

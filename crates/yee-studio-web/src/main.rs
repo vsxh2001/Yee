@@ -66,17 +66,27 @@ fn App() -> Element {
     // The editable design intent. Everything else derives from it.
     let spec = use_signal(demo_spec);
 
-    // Derived engine output, recomputed reactively on every spec edit. Seeded
-    // from the demo spec; the `use_effect` re-derives on every subsequent edit.
+    // The selected realization technique (drives the rail + the distributed
+    // geometry derivation). Declared before the re-derivation effect so the
+    // `designed` memo can depend on it: switching technique re-dimensions the
+    // board for the new topology.
+    let topology = use_signal(|| Topology::EdgeCoupled);
+
+    // Derived engine output, recomputed reactively on every spec OR topology
+    // edit. Seeded from the demo spec (edge-coupled); the `use_effect`
+    // re-derives on every subsequent edit. The hairpin and edge-coupled flows
+    // share synthesis / response / verdict and differ only in the dimensioned
+    // geometry, so re-running `design_demo_from` on a topology change is what
+    // swaps the board between the two distributed realizations.
     let mut designed = use_signal(design_demo);
     let mut lumped = use_signal(|| Some(design_lumped()));
     use_effect(move || {
         let s: FilterSpec = spec();
-        designed.set(design_demo_from(s.clone()));
+        let t: Topology = topology();
+        designed.set(design_demo_from(s.clone(), t));
         lumped.set(design_lumped_from(s).ok());
     });
 
-    let topology = use_signal(|| Topology::EdgeCoupled);
     let active = use_signal(|| Stage::Synthesis);
     // E24 (false) / E96 (true) toggle for the lumped Components + BOM stage.
     let series_e96 = use_signal(|| false);
