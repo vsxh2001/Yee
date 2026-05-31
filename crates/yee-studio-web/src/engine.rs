@@ -1332,11 +1332,27 @@ pub fn compare_techniques(spec: &FilterSpec) -> Vec<TechniqueComparison> {
     /// or hairpin): metrics from the synthesized-response mask report, the board
     /// from the dimensioned layout (`realizable = layout.is_some()`).
     fn from_distributed(technique: RealizationTechnique, d: &Designed) -> TechniqueComparison {
-        let realizable = d.layout.is_some();
+        // When the coupling cannot be dimensioned on FR-4 the row degrades per
+        // the struct contract: realizable=false, pass=None, zeroed board +
+        // metrics (the order stays — a synthesis property, not geometry).
+        // Mirrors the lumped `Err` arm.
+        if d.layout.is_none() {
+            return TechniqueComparison {
+                technique,
+                realizable: false,
+                board_w_mm: 0.0,
+                board_h_mm: 0.0,
+                pass: None,
+                order: d.order(),
+                worst_passband_ripple_db: 0.0,
+                worst_return_loss_db: 0.0,
+                worst_stopband_rej_db: None,
+            };
+        }
         let (bw, bh) = d.board_size_mm;
         TechniqueComparison {
             technique,
-            realizable,
+            realizable: true,
             board_w_mm: bw,
             board_h_mm: bh,
             pass: Some(d.report.pass),
@@ -1990,5 +2006,41 @@ mod tests {
             compare_techniques(&hpf).is_empty(),
             "no live technique realizes a high-pass response yet"
         );
+
+        // ---- (d) unrealizable distributed design → degraded row -------------
+        // A wide fractional bandwidth at a low order is unrealizable on FR-4
+        // (the coupling gaps cannot be bracketed), so the edge-coupled + hairpin
+        // rows must degrade per the struct contract: realizable=false, pass=None,
+        // zeroed board + metrics (the order stays — synthesis, not geometry).
+        let mut wide = demo_spec();
+        wide.order = Some(2);
+        wide.fbw = 0.6;
+        // Precondition: the distributed designs are genuinely unrealizable here.
+        assert!(
+            design_demo_from(wide.clone(), Topology::EdgeCoupled)
+                .layout
+                .is_none(),
+            "fixture must be an unrealizable distributed design"
+        );
+        let wide_rows = compare_techniques(&wide);
+        for t in [
+            RealizationTechnique::EdgeCoupled,
+            RealizationTechnique::Hairpin,
+        ] {
+            let row = wide_rows
+                .iter()
+                .find(|r| r.technique == t)
+                .expect("band-pass lists the distributed techniques");
+            assert!(!row.realizable, "{t:?} is unrealizable for this fixture");
+            assert_eq!(row.pass, None, "{t:?}: no verdict when unrealizable");
+            assert_eq!(row.board_w_mm, 0.0, "{t:?}: zeroed board width");
+            assert_eq!(row.board_h_mm, 0.0, "{t:?}: zeroed board height");
+            assert_eq!(
+                row.worst_passband_ripple_db, 0.0,
+                "{t:?}: zeroed ripple metric"
+            );
+            assert_eq!(row.worst_return_loss_db, 0.0, "{t:?}: zeroed RL metric");
+            assert_eq!(row.worst_stopband_rej_db, None, "{t:?}: no rejection");
+        }
     }
 }

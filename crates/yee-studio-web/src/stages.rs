@@ -1223,8 +1223,16 @@ fn compare_row(
     } else {
         "—".to_string()
     };
-    let ripple_disp = format!("{:.3} dB", row.worst_passband_ripple_db);
-    let rl_disp = format!("{:.2} dB", row.worst_return_loss_db);
+    let ripple_disp = if row.realizable {
+        format!("{:.3} dB", row.worst_passband_ripple_db)
+    } else {
+        "—".to_string()
+    };
+    let rl_disp = if row.realizable {
+        format!("{:.2} dB", row.worst_return_loss_db)
+    } else {
+        "—".to_string()
+    };
     let rej_disp = match row.worst_stopband_rej_db {
         Some(rej) => format!("{rej:.2} dB"),
         None => "—".to_string(),
