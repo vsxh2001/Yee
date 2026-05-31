@@ -81,14 +81,17 @@ impl Stage {
         Stage::Export,
     ];
 
-    /// The lumped-flow rail (ADR-0120): adds Components + Tolerance.
-    const LUMPED: [Stage; 7] = [
+    /// The lumped-flow rail (ADR-0120): adds Components + Tolerance. Verify
+    /// (ADR-0141) shows the realized LC ladder graded vs the mask — the lumped
+    /// flow's strongest verification story — so it belongs in this rail too.
+    const LUMPED: [Stage; 8] = [
         Stage::Spec,
         Stage::Technique,
         Stage::Synthesis,
         Stage::Components,
         Stage::Tolerance,
         Stage::Layout,
+        Stage::Verify,
         Stage::Export,
     ];
 
