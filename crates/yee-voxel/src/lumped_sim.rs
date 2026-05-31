@@ -142,24 +142,63 @@
 //! V₂ = a·e^{−j2βd} + b·e^{+j2βd}
 //! ```
 //!
-//! ### S21 = forward-out / forward-in, thru-normalized
+//! ## The clean forward-wave launch (F2.3-h, ADR-0133)
 //!
-//! For each measured frequency `f`:
+//! F2.3-g made the de-embed **physical** (no over-unity) but exposed a new
+//! limiter: a single-column **soft `E_z` source** in a PEC box launches
+//! *symmetrically* (equal `+x` and `−x` halves), so the `−x` half reflects off
+//! the input wall and the input region becomes a **near-pure standing wave**
+//! (`|fwd a₁| ≈ |bwd refl|`), while only a small, cavity-resonance-dependent
+//! fraction of forward power reaches the output region — the bare thru read
+//! `β_out = 0` at some gate freqs and `|b₂|` at the floor (`~0.02`). So the
+//! `S21 = (b₂/a₁)_dut/(b₂/a₁)_thru` ratio divided tiny, partly-degenerate output
+//! readings and the "notch at f0" was a likely floor artifact, not a real result.
 //!
-//! 1. A [`SourceWaveform::HannSine`] **soft `E_z` source sheet** across the
-//!    strip's `(y, z)` face at the input column launches a clean `+x` travelling
-//!    quasi-TEM wave, **Hann-ramped** over the first
+//! F2.3-h gives the launch two fixes so `a₁` and `b₂` become **trustworthy**
+//! (`β > 0` at all gate freqs, `b₂` well above the floor):
+//!
+//! 1. **Directional two-column phased source.** Instead of one soft-`E_z` column,
+//!    the launcher drives **two adjacent columns** `src_i` and `src_i + 1` with
+//!    the downstream column *retarded* by the one-cell wave-transit phase
+//!    `Δφ = β·dx` (β from the calibration pre-pass below). A pair of soft sources
+//!    one cell apart, the downstream one delayed by the inter-cell transit time,
+//!    **adds constructively in `+x` and destructively in `−x`** — a poor-man's
+//!    TF/SF / Huygens launcher (cf. ADR-0014/0021/0026). It injects
+//!    *predominantly forward*, so the input is no longer a near-pure standing wave
+//!    and real forward power reaches the output region (raising `|b₂|`, fixing
+//!    `β_out = 0`).
+//! 2. **Time-gated incident `a₁` reference (`run_line_eeff` pattern, ADR-0108).**
+//!    A separate, short **pulse** pre-pass (`calibrate_launch`) launches a
+//!    modulated-Gaussian from the same directional source and **time-gates** the
+//!    DFT to the forward passage at the input reference region, *before* the first
+//!    far-wall reflection returns. With no reflected wave in the window the 3-point
+//!    fit reads a **pure forward** incident amplitude `a₁_gated` (`β > 0`,
+//!    `|bwd| ≈ 0`) — a trustworthy launch reference and the numerical `β` used to
+//!    phase the directional source. Because `a₁_gated` is a property of the launch
+//!    + lead-in line only (identical for the DUT and thru runs), it cancels in the
+//!    thru-normalization, but it is kept explicit so the scheme is verifiable.
+//!
+//! ### S21 = forward-out / forward-in, thru-normalized (hybrid)
+//!
+//! For each measured frequency `f` (the **hybrid**: a time-gated incident `a₁`
+//! reference + a CW-settled `b₂`):
+//!
+//! 1. A **directional two-column phased `HannSine` soft `E_z` source sheet**
+//!    across the strip's `(y, z)` face at the input launches a predominantly `+x`
+//!    travelling quasi-TEM wave, **Hann-ramped** over the first
 //!    [`LumpedSimConfig::cw_ramp_cycles`] cycles to suppress the turn-on
 //!    transient.
-//! 2. The solve runs [`LumpedSimConfig::cw_ramp_cycles`] +
-//!    [`LumpedSimConfig::cw_settle_cycles`] cycles so the highest-Q tank's
+//! 2. The CW solve runs [`LumpedSimConfig::cw_ramp_cycles`] +
+//!    [`LumpedSimConfig::cw_settle_cycles`] cycles so the highest-Q (Q≈10) tank's
 //!    ring-up **and** the line transit settle into a single-frequency steady
-//!    state on the PEC line.
-//! 3. The 3-point standing-wave fit at the **input** reference region gives the
-//!    incident forward amplitude `a₁` (the backward part there is the input
-//!    reflection — separated out and discarded); the fit at the **output**
-//!    reference region (downstream of the last element) gives the transmitted
-//!    forward amplitude `b₂` (the `+x` part there).
+//!    state on the PEC line (the tanks **must** ring up to show the band-pass, so
+//!    the DUT response stays CW).
+//! 3. The 3-point standing-wave fit at the **output** reference region (downstream
+//!    of the last element, on the lengthened lead-in clear of the far wall) gives
+//!    the transmitted forward amplitude `b₂` (the `+x` part). The incident forward
+//!    amplitude `a₁` is the **time-gated** `a₁_gated` from `calibrate_launch` (the
+//!    trustworthy clean-launch reference) rather than the CW-input standing-wave
+//!    fit.
 //!
 //! The raw transmission is `(b₂/a₁)`. To divide out the (frequency-dependent,
 //! coarse-grid-dependent) feed + line + port coupling, the **same** board is run
@@ -173,10 +212,12 @@
 //! transmission *relative to the thru*, exactly the quantity
 //! [`yee_filter::ladder_s21`] computes for the ideal circuit. Because the forward
 //! and backward waves are separated, the standing wave no longer corrupts the
-//! ratio (no over-unity), and the PEC box is unconditionally stable (no CPML
-//! divergence). Each frequency costs two full FDTD solves (DUT + thru), so the
-//! frequency set ([`LumpedSimConfig::cw_freqs_hz`]) is deliberately small — the
-//! gate-check points plus a handful for the sweep shape, NOT a fine sweep.
+//! ratio (no over-unity); the directional launch + time-gated `a₁` keep both
+//! amplitudes well above the floor; and the PEC box is unconditionally stable (no
+//! CPML divergence). Each frequency costs two full FDTD solves (DUT + thru) plus a
+//! shared one-off calibration pulse, so the frequency set
+//! ([`LumpedSimConfig::cw_freqs_hz`]) is deliberately small — the gate-check
+//! points plus a handful for the sweep shape, NOT a fine sweep.
 
 use std::f64::consts::PI;
 
@@ -870,20 +911,48 @@ fn run_board_solve(
         }
     }
 
-    // --- 4. CW per-frequency PEC-box 2-point de-embed loop (F2.3-g, ADR-0132).
+    // --- 4. Clean-launch calibration pre-pass (F2.3-h, ADR-0133). -----------
+    // One short, time-gated Gaussian-pulse run on this geometry (no elements in
+    // the path that the gated forward incident wave reaches) measures, at each
+    // frequency, the numerical phase constant `β(f)` (to phase the directional
+    // source) and the trustworthy time-gated incident forward amplitude
+    // `a₁_gated(f)` — the `run_line_eeff` pattern (ADR-0108): the DFT window
+    // closes before the first far-wall reflection returns, so the input region
+    // sees a pure forward wave. The calibration is launch/line-only, so it is run
+    // once per board geometry (DUT and thru share the same lead-in line).
+    let cal = calibrate_launch(
+        model.grid.clone(),
+        cfg,
+        freqs,
+        drive_cell,
+        in_cols,
+        j_strip,
+        k_probe,
+        (j_lo, j_hi),
+        k_top,
+        probe_d,
+        dx,
+    );
+
+    // --- 5. CW per-frequency PEC-box de-embed loop (F2.3-g/-h, ADR-0132/0133).
     // For each measured frequency, drive a Hann-ramped CW sinusoid on the PEC
-    // line, let the high-Q tanks + the standing wave settle, then read the
-    // steady-state `E_z` phasor at the three input + three output reference
-    // columns, fit each triple to a forward/backward travelling-wave pair, and
-    // return the complex raw transmission `b₂/a₁` (transmitted-forward over
-    // incident-forward). (`ladder.z0_ohm` is unused — there is no lumped load.)
+    // line through the DIRECTIONAL two-column phased source (β from `cal`), let
+    // the high-Q tanks + the standing wave settle, then read the steady-state
+    // `E_z` phasor at the three output reference columns, fit them to a
+    // forward/backward travelling-wave pair for the transmitted forward `b₂`, and
+    // return the complex raw transmission `b₂/a₁_gated` (transmitted-forward over
+    // the trustworthy time-gated incident-forward). (`ladder.z0_ohm` is unused —
+    // there is no lumped load.)
     freqs
         .iter()
-        .map(|&f| {
+        .enumerate()
+        .map(|(fi, &f)| {
             cw_deembed_b2_over_a1(
                 model.grid.clone(),
                 cfg,
                 f,
+                cal[fi].beta,
+                cal[fi].a1_gated,
                 drive_cell,
                 in_cols,
                 out_cols,
@@ -899,30 +968,306 @@ fn run_board_solve(
         .collect()
 }
 
+/// Per-frequency clean-launch calibration (F2.3-h, ADR-0133): the numerical
+/// phase constant `β` (to phase the directional source) and the trustworthy
+/// time-gated incident forward amplitude `a₁_gated`.
+#[derive(Clone, Copy, Debug)]
+struct LaunchCal {
+    /// Numerical phase constant `β` (rad/m) at this frequency, read from the
+    /// time-gated forward incident wave (self-consistent with the FDTD grid's
+    /// numerical dispersion). Used to retard the directional source's downstream
+    /// column by `Δφ = β·dx`.
+    beta: f64,
+    /// Time-gated incident **forward** amplitude `a₁` at the input reference
+    /// region — a pure forward wave (the gate closes before the first far-wall
+    /// reflection returns), so it is a trustworthy launch reference.
+    a1_gated: Cplx,
+}
+
+/// Run one short, time-gated **Gaussian-pulse** solve per frequency on a fresh
+/// PEC-box `grid` and return, for each, the numerical `β` and the time-gated
+/// incident forward amplitude `a₁_gated` (F2.3-h, ADR-0133; the
+/// [`crate::run_line_eeff`] time-gated incident-wave pattern, ADR-0108).
+///
+/// The directional two-column phased source (see [`inject_directional_source`])
+/// launches a modulated-Gaussian forward pulse; the DFT at each frequency is
+/// **time-gated** to the forward passage at the input reference region, closing
+/// before the first far-wall reflection returns. With no reflected wave in the
+/// window, the 3-point fit at the input reference region reads a **pure forward**
+/// incident amplitude (`β > 0`, `|bwd| ≈ 0`). The same physical phasing as the CW
+/// directional source is used, but the gate's `β` is bootstrapped from the
+/// quasi-TEM ε_eff guess (the forward pulse is insensitive to the exact phasing —
+/// any residual backward leak is gated out anyway), then refined from the data.
+///
+/// Each pulse run is short (a few hundred steps — the forward transit, not the
+/// high-Q ring-up), so the calibration is cheap relative to the CW solves.
+#[allow(clippy::too_many_arguments)]
+fn calibrate_launch(
+    grid: yee_fdtd::YeeGrid,
+    cfg: &LumpedSimConfig,
+    freqs: &[f64],
+    drive_cell: (usize, usize, usize),
+    in_cols: [usize; 3],
+    j_strip: usize,
+    k_probe: usize,
+    strip_band: (usize, usize),
+    k_top: usize,
+    probe_d: usize,
+    dx: f64,
+) -> Vec<LaunchCal> {
+    let dt = grid.dt;
+    let dz = grid.dz;
+    let (nx, _ny, _nz) = grid.ez.dim();
+    let (j_lo, j_hi) = strip_band;
+    let src_i = drive_cell.0;
+
+    // ε_eff guess (quasi-TEM upper bound) → an initial β/v_p for the directional
+    // source phasing and for sizing the time gate. The forward pulse is robust to
+    // imperfect phasing (any backward leak is gated out), and the *measured* β is
+    // returned for the CW source; this guess only bootstraps the gate length.
+    // Use the highest swept frequency's λ_g as the conservative (shortest)
+    // wavelength for the gate-length transit estimate.
+    let eps_eff_guess = 4.4_f64; // FR-4 ε_r — upper bound on quasi-TEM ε_eff (β large → safe gate)
+    let v_p_guess = C0_M_S / eps_eff_guess.sqrt();
+
+    freqs
+        .iter()
+        .map(|&f| {
+            // β guess for THIS frequency (rad/m): the source phasing target.
+            let beta_guess = 2.0 * PI * f / v_p_guess;
+
+            // Modulated-Gaussian pulse centred at `f`, ~80 % fractional bandwidth
+            // (matches `run_line_eeff`): a clean forward launch whose tail is
+            // negligible at t = 0.
+            let bw = 0.8 * f;
+            let t0_steps = ((3.5 * (2.0_f64 * std::f64::consts::LN_2).sqrt()
+                / (std::f64::consts::PI * bw))
+                / dt)
+                .ceil() as usize;
+            let wave = SourceWaveform::GaussianPulse {
+                v0: cfg.drive_v0,
+                f0: f,
+                bw,
+                t0_steps,
+            };
+
+            // Time gate: stop ~10 % before the first far-wall reflection returns
+            // to the downstream input-reference column. Reflection path =
+            // source → far wall (≈ (nx − src_i)·dx) → back to in_cols[2]
+            // (≈ (nx − in_cols[2])·dx), at v_p_guess. Run a little past the gate so
+            // the forward pulse is fully integrated.
+            let refl_dist = ((nx - src_i) as f64 + (nx - in_cols[2]) as f64) * dx;
+            let t_refl = refl_dist / v_p_guess;
+            let gate = (0.9 * t_refl / dt) as usize;
+            // Ensure the pulse has time to reach the probes (t0 + a transit).
+            let n_steps = gate + 200;
+
+            let mut solver = WalkingSkeletonSolver::new(grid.clone());
+            let omega = 2.0 * PI * f;
+            let mut in_bins = [Bin::new(omega), Bin::new(omega), Bin::new(omega)];
+
+            for n in 0..n_steps {
+                solver.update_h_only();
+                solver.apply_cpml_h(); // no CPML → PEC clamp
+
+                inject_directional_source(
+                    solver.grid_mut(),
+                    &wave,
+                    n,
+                    dt,
+                    src_i,
+                    j_lo,
+                    j_hi,
+                    k_top,
+                    beta_guess,
+                    dx,
+                    f,
+                );
+
+                solver.update_e_only();
+                solver.apply_cpml_e();
+                solver.advance_clock();
+
+                if n < gate {
+                    let g = solver.grid();
+                    let t = n as f64 * dt;
+                    for (idx, &i) in in_cols.iter().enumerate() {
+                        let v = g.ez[(i, j_strip, k_probe)] * dz;
+                        in_bins[idx].accumulate(v, t);
+                    }
+                }
+            }
+
+            let d = probe_d as f64 * dx;
+            let fit = fit_standing_wave(
+                in_bins[0].phasor(),
+                in_bins[1].phasor(),
+                in_bins[2].phasor(),
+                d,
+            );
+
+            eprintln!(
+                "[F2.3-h CAL] f={:.3} GHz | gate={gate} steps | β={:.2} rad/m \
+                 (guess {:.2}) | |a₁_gated(fwd)|={:.3e} |bwd|={:.3e} (ratio {:.3}) | \
+                 cos-resid={:.2e}",
+                f * 1e-9,
+                fit.beta,
+                beta_guess,
+                fit.fwd.abs(),
+                fit.bwd.abs(),
+                if fit.fwd.abs() > 0.0 {
+                    fit.bwd.abs() / fit.fwd.abs()
+                } else {
+                    f64::INFINITY
+                },
+                fit.cos_imag_residual,
+            );
+
+            LaunchCal {
+                beta: fit.beta,
+                a1_gated: fit.fwd,
+            }
+        })
+        .collect()
+}
+
+/// Inject the **directional two-column phased soft `E_z` source** (F2.3-h,
+/// ADR-0133) into the strip's `(y, z)` face at the input.
+///
+/// Two soft `E_z` source sheets one cell apart in `x` (`src_i` and `src_i + 1`),
+/// the downstream one **retarded** by the one-cell wave-transit phase
+/// `Δφ = β·dx` (= `ω·dx/v_p`), add constructively in `+x` and destructively in
+/// `−x` — a poor-man's Huygens / TF-SF launcher (ADR-0014/0021/0026) that injects
+/// predominantly forward, so the PEC-box input is no longer a near-pure standing
+/// wave and real forward power reaches the output region. The retardation is a
+/// time shift of the same waveform: `s₂(t) = s(t − Δφ/ω)` for a CW tone; for the
+/// pulse the same time shift retards the envelope and carrier together. `f` is
+/// the carrier frequency (for the CW-tone time-shift); a non-positive `β` (the
+/// degenerate calibration fallback) collapses to a single-column launch.
+#[allow(clippy::too_many_arguments)]
+fn inject_directional_source(
+    grid: &mut yee_fdtd::YeeGrid,
+    wave: &SourceWaveform,
+    n: usize,
+    dt: f64,
+    src_i: usize,
+    j_lo: usize,
+    j_hi: usize,
+    k_top: usize,
+    beta: f64,
+    dx: f64,
+    f: f64,
+) {
+    let (nx, _ny, _nz) = grid.ez.dim();
+    // Upstream column: the bare waveform.
+    let s0 = wave.value(n, dt);
+    for j in j_lo..j_hi {
+        for k in 0..k_top {
+            grid.ez[(src_i, j, k)] += s0;
+        }
+    }
+    // Downstream column (src_i + 1): retard by the one-cell transit phase
+    // Δφ = β·dx, i.e. a time delay Δt = Δφ/ω = β·dx/(2πf). A non-positive β
+    // (degenerate fit) → single-column launch (no second column).
+    let i2 = src_i + 1;
+    if beta > 0.0 && i2 < nx && f > 0.0 {
+        let dt_shift = beta * dx / (2.0 * PI * f);
+        let n_shift = dt_shift / dt; // in (fractional) steps
+        // Evaluate the same waveform at the retarded continuous time t − Δt by
+        // using a fractional step index (SourceWaveform::value samples a
+        // continuous t = n·dt). For n below the shift the retarded source is zero
+        // (causal: the second sheet has not "seen" the wave yet).
+        let n_eff = n as f64 - n_shift;
+        let s1 = if n_eff >= 0.0 {
+            wave_value_frac(wave, n_eff, dt)
+        } else {
+            0.0
+        };
+        for j in j_lo..j_hi {
+            for k in 0..k_top {
+                grid.ez[(i2, j, k)] += s1;
+            }
+        }
+    }
+}
+
+/// Evaluate a [`SourceWaveform`] at a **fractional** step index `n_frac` (the
+/// continuous time `t = n_frac·dt`), for the directional source's sub-step
+/// retardation (F2.3-h, ADR-0133).
+///
+/// [`SourceWaveform::value`] takes an integer step; the directional launcher
+/// needs the same waveform at `t − Δt` where `Δt = β·dx/ω` is generally not an
+/// integer number of steps. Both `HannSine` and `GaussianPulse` are closed-form
+/// in continuous `t`, so a fractional `n_frac` simply samples that closed form
+/// (the ramp / envelope use `n_frac` in place of the integer step).
+fn wave_value_frac(wave: &SourceWaveform, n_frac: f64, dt: f64) -> f64 {
+    let t = n_frac * dt;
+    match *wave {
+        SourceWaveform::None => 0.0,
+        SourceWaveform::HannSine {
+            v0,
+            frequency,
+            ramp_steps,
+        } => {
+            let ramp = if ramp_steps == 0 || n_frac >= ramp_steps as f64 {
+                1.0
+            } else {
+                0.5 * (1.0 - (PI * n_frac / ramp_steps as f64).cos())
+            };
+            v0 * ramp * (2.0 * PI * frequency * t).sin()
+        }
+        SourceWaveform::GaussianPulse {
+            v0,
+            f0,
+            bw,
+            t0_steps,
+        } => {
+            let t0 = t0_steps as f64 * dt;
+            let tau = if bw > 0.0 {
+                (2.0 * std::f64::consts::LN_2).sqrt() / (PI * bw)
+            } else {
+                f64::INFINITY
+            };
+            let env = if tau.is_infinite() {
+                1.0
+            } else {
+                let arg = (t - t0) / tau;
+                (-arg * arg).exp()
+            };
+            v0 * env * (2.0 * PI * f0 * (t - t0)).sin()
+        }
+    }
+}
+
 /// Run one CW steady-state FDTD solve at frequency `f` on a fresh `grid` (zeroed
 /// fields) in a **plain PEC box** and return the complex raw transmission
-/// `b₂/a₁` from a 3-point standing-wave de-embed (F2.3-g, ADR-0132).
+/// `b₂/a₁` (F2.3-g/-h, ADR-0132/0133).
 ///
 /// The line runs in a hard-PEC box ([`WalkingSkeletonSolver::new`] — the
 /// `apply_cpml_*` calls fall back to a PEC clamp when no CPML is configured;
 /// this is the *stable* [`crate::run_line_eeff`] pattern, ADR-0108: CPML into a
 /// microstrip's PEC-ground / high-ε substrate is late-time unstable). A
-/// Hann-ramped CW **soft** `E_z` source sheet across the strip's `(y, z)` face
-/// at `drive_cell`'s column launches a `+x` travelling quasi-TEM wave; after
+/// Hann-ramped CW **soft** `E_z` source sheet, launched through the
+/// **directional two-column phased** launcher ([`inject_directional_source`],
+/// `β` from the calibration pre-pass) at `drive_cell`'s column, sends a
+/// predominantly `+x` travelling quasi-TEM wave; after
 /// `cw_ramp_cycles + cw_settle_cycles` the fields settle into a single-frequency
 /// steady standing wave (the highest-Q tank ring-up + the box transits).
 ///
 /// Over the final `cw_measure_cycles` (the settled window) the steady-state
-/// `E_z·dz` voltage phasor is single-bin DFT'd at the three `in_cols` and three
-/// `out_cols` columns (substrate depth `k_probe`, strip centre `j_strip`). Each
-/// triple of spacing `probe_d·dx` is fitted to `V(x) = a·e^{−jβx} + b·e^{+jβx}`
-/// ([`fit_standing_wave`]): the input fit's forward amplitude is the incident
-/// `a₁`; the output fit's forward amplitude is the transmitted `b₂`. The forward
-/// and backward waves are thereby separated, so the returned complex ratio
-/// `b₂/a₁` is free of the standing-wave / over-unity artifact (ADR-0129/0131).
+/// `E_z·dz` voltage phasor is single-bin DFT'd at the three `in_cols` (a
+/// diagnostic) and three `out_cols` columns (substrate depth `k_probe`, strip
+/// centre `j_strip`). The output triple of spacing `probe_d·dx` is fitted to
+/// `V(x) = a·e^{−jβx} + b·e^{+jβx}` ([`fit_standing_wave`]) → the transmitted
+/// forward amplitude `b₂`. The incident forward `a₁` is the **time-gated**
+/// `a1_gated` from the calibration pre-pass (F2.3-h, ADR-0133) — a trustworthy
+/// pure-forward launch reference, NOT the CW input fit (which the input-wall
+/// reflection contaminates). The returned complex ratio `b₂/a₁_gated` is the
+/// transmitted-forward over incident-forward, free of the standing-wave /
+/// over-unity artifact (ADR-0129/0131) and well above the floor (ADR-0132).
 ///
 /// The per-step body mirrors [`crate::run_line_eeff`]: `update_h_only` →
-/// `apply_cpml_h` (= PEC clamp) → soft CW source → `update_e_only` →
+/// `apply_cpml_h` (= PEC clamp) → directional soft CW source → `update_e_only` →
 /// `apply_cpml_e` (= PEC clamp + interior mask) → the filter elements'
 /// multi-cell `correct_e_aperture` → advance the clock and record.
 #[allow(clippy::too_many_arguments)]
@@ -930,6 +1275,8 @@ fn cw_deembed_b2_over_a1(
     grid: yee_fdtd::YeeGrid,
     cfg: &LumpedSimConfig,
     f: f64,
+    beta: f64,
+    a1_gated: Cplx,
     drive_cell: (usize, usize, usize),
     in_cols: [usize; 3],
     out_cols: [usize; 3],
@@ -983,16 +1330,24 @@ fn cw_deembed_b2_over_a1(
         solver.update_h_only();
         solver.apply_cpml_h(); // no CPML → PEC clamp
 
-        // Soft CW source sheet across the strip face at the source column.
-        let s = wave.value(n, dt);
-        {
-            let grid = solver.grid_mut();
-            for j in j_lo..j_hi {
-                for k in 0..k_top {
-                    grid.ez[(src_i, j, k)] += s;
-                }
-            }
-        }
+        // Directional two-column phased soft `E_z` source sheet across the strip
+        // face at the input (F2.3-h, ADR-0133): the downstream column is retarded
+        // by the one-cell transit phase `Δφ = β·dx` so the launch adds forward and
+        // cancels backward — predominantly forward injection (no near-pure input
+        // standing wave). `β` from the time-gated calibration pre-pass.
+        inject_directional_source(
+            solver.grid_mut(),
+            &wave,
+            n,
+            dt,
+            src_i,
+            j_lo,
+            j_hi,
+            k_top,
+            beta,
+            dx,
+            f,
+        );
 
         solver.update_e_only();
         solver.apply_cpml_e(); // no CPML → PEC clamp + interior PEC mask
@@ -1033,9 +1388,17 @@ fn cw_deembed_b2_over_a1(
         d,
     );
 
-    // a₁ = incident forward (input region); b₂ = transmitted forward (output
-    // region). Raw transmission is the complex ratio b₂/a₁.
-    let a1 = in_fit.fwd;
+    // Incident forward `a₁`: the TRUSTWORTHY time-gated reference from the
+    // calibration pre-pass (F2.3-h, ADR-0133), NOT the CW input standing-wave fit
+    // (which the input-wall reflection contaminates). `a₁_gated` is a launch/line
+    // property — identical for the DUT and thru runs — so it cancels in the
+    // thru-normalization, but referencing `b₂` to it makes the raw transmission a
+    // clean transmitted-forward-over-incident-forward ratio at a well-resolved
+    // amplitude. The CW input fit (`in_fit`) is kept only as a diagnostic
+    // (β_in / the residual reflection) to confirm the directional launch worked.
+    let a1 = a1_gated;
+    // b₂ = transmitted forward (output region, CW-settled so the high-Q tanks
+    // have rung up). Raw transmission is the complex ratio b₂/a₁.
     let b2 = out_fit.fwd;
     let t_raw = if a1.abs() > 0.0 {
         b2.div(a1)
@@ -1044,15 +1407,22 @@ fn cw_deembed_b2_over_a1(
     };
 
     eprintln!(
-        "[F2.3-g DIAG] f={:.3} GHz | β_in={:.2} β_out={:.2} rad/m (d={:.2} mm) | \
-         in: |fwd a₁|={:.3e} |bwd(refl)|={:.3e} | out: |fwd b₂|={:.3e} |bwd(wall)|={:.3e} | \
-         |b₂/a₁|={:.4} | cos-resid in={:.2e} out={:.2e}",
+        "[F2.3-h DIAG] f={:.3} GHz | β_in(cw)={:.2} β_out={:.2} rad/m (d={:.2} mm) | \
+         in(cw): |fwd|={:.3e} |bwd(refl)|={:.3e} (refl/fwd {:.2}) | a₁_gated={:.3e} | \
+         out: |fwd b₂|={:.3e} |bwd(wall)|={:.3e} | |b₂/a₁|={:.4} | \
+         cos-resid in={:.2e} out={:.2e}",
         f * 1e-9,
         in_fit.beta,
         out_fit.beta,
         d * 1e3,
-        a1.abs(),
+        in_fit.fwd.abs(),
         in_fit.bwd.abs(),
+        if in_fit.fwd.abs() > 0.0 {
+            in_fit.bwd.abs() / in_fit.fwd.abs()
+        } else {
+            f64::INFINITY
+        },
+        a1.abs(),
         b2.abs(),
         out_fit.bwd.abs(),
         t_raw.abs(),
