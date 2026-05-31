@@ -1043,11 +1043,17 @@ fn render_recommendation(
                 // High-pass / band-stop have no live flow yet, so the
                 // recommendation is shown as honest guidance instead.
                 {
-                    // Whether the recommended Live technique's flow matches the
-                    // recommended response (so routing is physically correct).
-                    let routable_live = matches!(status, TechStatus::Live(t) if topology_response(t) == response);
-                    let bandpass_soon = matches!(response, Response::Bandpass);
-                    if routable_live {
+                    // Route only when SOME live flow builds the recommended
+                    // response: the primary itself (Live + matching response), or
+                    // a roadmapped (Soon) technique whose nearest-live stand-in
+                    // builds that response. Keyed on the stand-in's flow response,
+                    // not the recommendation's class, so it generalizes to the
+                    // low-pass flow (and any future response) without a band-pass
+                    // assumption — high-pass / band-stop, which have no live flow,
+                    // fall through to the honest note.
+                    let live_match = matches!(status, TechStatus::Live(t) if topology_response(t) == response);
+                    let soon_standin = matches!(status, TechStatus::Soon(t) if topology_response(t) == response);
+                    if live_match {
                         let TechStatus::Live(t) = status else { unreachable!() };
                         rsx! {
                             button {
@@ -1059,9 +1065,9 @@ fn render_recommendation(
                                 "Use this → seed the spec + open the {topology_label(t)} flow"
                             }
                         }
-                    } else if bandpass_soon {
-                        // A band-pass recommendation whose primary is roadmapped:
-                        // offer the nearest live band-pass stand-in.
+                    } else if soon_standin {
+                        // The primary is roadmapped, but its nearest-live stand-in
+                        // builds the recommended response: offer it.
                         let TechStatus::Soon(t) = status else { unreachable!() };
                         rsx! {
                             div { class: "note honest",
