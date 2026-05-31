@@ -191,3 +191,4 @@
 - [ADR-0145: Filter F1.2.6 — combline board layout](decisions/0145-f1-2-6-combline-layout.md)
 - [ADR-0146: App.2.7 — light the Combline technique in the studio](decisions/0146-app-2-7-studio-combline.md)
 - [ADR-0147: Full-board EM-sim wall — two-layer decomposition + the path through](decisions/0147-em-sim-wall-two-layer-decomposition.md)
+- [ADR-0148: Filter F1.2.7 — interdigital dimensional synthesis](decisions/0148-f1-2-7-interdigital-synthesis.md)
