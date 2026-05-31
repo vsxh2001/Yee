@@ -1166,3 +1166,175 @@ pub fn dimension_interdigital(
         target_k,
     })
 }
+
+/// Compose a [`yee_layout::Layout`] for an **interdigital** band-pass filter
+/// (Filter Phase F1.2.8, Hong & Lancaster §5), placing the synthesized
+/// [`dimension_interdigital`] dimensions as an honest interdigital **comb**: `N`
+/// aligned, short-circuited `λ_g/4` resonator lines grounded at **alternating**
+/// ends between **two** ground rails, with tapped input/output feeds.
+///
+/// This is the board-layout companion of [`dimension_interdigital`] — the
+/// prerequisite for lighting interdigital in the studio (which renders a
+/// `Layout`). It calls [`dimension_interdigital`] for the physics (no recompute)
+/// and composes the comb from [`yee_layout`] primitives directly (`Polygon::rect`
+/// / `PortRef` / `BBox::from_polygons` / `Layout`), exactly as
+/// [`dimension_combline_layout`] does — there is no first-class
+/// `yee-layout::interdigital_bpf` generator (ADR-0149). Unlike
+/// [`dimension_combline_layout`] it takes **no** `θ0` parameter (interdigital is
+/// `θ = π/2` fixed by definition).
+///
+/// An interdigital comb is the same aligned coupled-line comb at the solved
+/// per-section gaps as combline, but differs in three concrete, drawable ways
+/// (combline → interdigital):
+///
+/// 1. **Alternating-end grounding (the "finger" structure).** Combline shorts
+///    *all* resonators at one common ground spine (`y = 0`). Interdigital shorts
+///    adjacent resonators at **alternating** ends, so there are **two** ground
+///    rails (bottom + top): the **bottom rail** (`y ∈ [−w, 0]`) grounds the
+///    **even**-index resonators and the **top rail** (`y ∈ [l + g_open,
+///    l + g_open + w]`) grounds the **odd**-index resonators. Each resonator's
+///    open end is gapped `g_open` from the opposite rail; **no** resonator
+///    touches both rails (an accidental short would make a cavity).
+/// 2. **No loading-cap pads.** Combline draws a `w × w` cap pad at each open end
+///    (the SMD `C_L` mounts there). The interdigital `λ_g/4` line is
+///    self-resonant and needs **no** cap, so there are **no pads** — the trace
+///    count is `N + 2 + 2` (N lines + 2 rails + 2 feeds), not combline's
+///    `2N + 3`.
+/// 3. **Full `λ_g/4` lines** — `resonator_length_m` from the engine (the
+///    `θ = π/2` quarter-wave; combline's were the shortened `θ0 < π/2` line).
+///
+/// The geometry composed here is:
+///
+/// - **N resonator lines** — `N` (= `gaps_m.len() + 1`) parallel vertical
+///   rectangles, each `line_width_m` wide (x) × `resonator_length_m` long (y),
+///   **alternately offset** in `y` so the grounded end touches its rail and the
+///   open end is gapped `g_open` from the opposite rail:
+///   - **even `i`** (grounded bottom): `Polygon::rect(x_i, 0, w, l)` — shares the
+///     `y = 0` edge with the bottom rail; open top at `y = l`, gapped `g_open`
+///     below the top rail.
+///   - **odd `i`** (grounded top): `Polygon::rect(x_i, g_open, w, l)` — top at
+///     `y = l + g_open` shares the top rail's edge; open bottom at `y = g_open`,
+///     gapped `g_open` above the bottom rail.
+///
+///   Resonator `i`'s left edge sits at `x_i = Σ_{j<i}(line_width_m + gaps_m[j])`,
+///   so the centre-to-centre pitch is `line_width_m + gaps_m[i]` — the **real
+///   solved per-section gaps**, not a uniform placeholder.
+/// - **Bottom ground rail** — `Polygon::rect(0, −w, comb_right, w)`
+///   (`y ∈ [−w, 0]`), spanning the comb x-range; grounds the even resonators
+///   (vias are a fabrication annotation, not separate copper, as in combline).
+/// - **Top ground rail** — `Polygon::rect(0, l + g_open, comb_right, w)`
+///   (`y ∈ [l + g_open, l + g_open + w]`); grounds the odd resonators.
+/// - **Feeds + ports** — a tapped feed line to the first (`i = 0`, grounded
+///   bottom) and last (`i = N−1`) resonators (neutral defaults, mirroring
+///   combline / hairpin: feed width = `line_width_m`, feed length = one resonator
+///   length), tapped up the resonator from its grounded end at a neutral
+///   `tap_y`, each ending in a [`PortRef`] referenced to the spec `Z0`. Mapping
+///   the external Q to a tap position is deferred (F1.2.1, as in
+///   [`dimension_hairpin_layout`]).
+///
+/// The open-end coupling gap `g_open = line_width_m` is a neutral fixed default
+/// (like the hairpin fold spacing); mapping it to a precise end-coupling is an EM
+/// follow-on, not first-order (ADR-0149).
+///
+/// `bbox = BBox::from_polygons(&traces)`. No physics is recomputed and
+/// `yee-layout` is not edited.
+///
+/// # Errors
+///
+/// Propagates every [`DimError`] from [`dimension_interdigital`].
+pub fn dimension_interdigital_layout(
+    project: &FilterProject,
+    substrate: &Substrate,
+) -> Result<Layout, DimError> {
+    let dims = dimension_interdigital(project, substrate)?;
+
+    let n = dims.gaps_m.len() + 1; // N resonators, N−1 gaps.
+    let w = dims.line_width_m;
+    let l = dims.resonator_length_m;
+    // Open-end coupling gap = a neutral fixed default (the hairpin fold spacing
+    // analog); the precise end-coupling is an EM follow-on (ADR-0149).
+    let g_open = w;
+
+    // Left-edge x of each resonator: x_0 = 0, x_i = x_{i-1} + w + gaps_m[i-1].
+    // The centre-to-centre pitch is therefore `w + gaps_m[i-1]` — the solved
+    // per-section gap, not a uniform placeholder (identical to combline).
+    let mut resonator_x = Vec::with_capacity(n);
+    let mut x = 0.0_f64;
+    for i in 0..n {
+        resonator_x.push(x);
+        if i < dims.gaps_m.len() {
+            x += w + dims.gaps_m[i];
+        }
+    }
+    // Total x-extent spanned by the N resonator lines (left edge of #0 to right
+    // edge of #(N−1)).
+    let comb_right = resonator_x[n - 1] + w;
+
+    // traces: N resonator lines + 2 ground rails + 2 feeds (NO cap pads).
+    let mut traces: Vec<Polygon> = Vec::with_capacity(n + 4);
+
+    // N resonator lines, alternately offset (the interdigital finger structure):
+    //   even i grounded at the bottom rail → y0 = 0 (open top at y = l),
+    //   odd  i grounded at the top    rail → y0 = g_open (top at y = l + g_open).
+    // Each line is the full λ_g/4 length l; no line touches both rails.
+    for (i, &xi) in resonator_x.iter().enumerate() {
+        let y0 = if i % 2 == 0 { 0.0 } else { g_open };
+        traces.push(Polygon::rect(xi, y0, w, l));
+    }
+
+    // Bottom ground rail: a w-tall horizontal bar just below the bottom-grounded
+    // ends (y ∈ [−w, 0]), spanning the full x-range — grounds the even resonators.
+    traces.push(Polygon::rect(0.0, -w, comb_right, w));
+
+    // Top ground rail: a w-tall horizontal bar just above the top-grounded ends
+    // (y ∈ [l + g_open, l + g_open + w]), spanning the full x-range — grounds the
+    // odd resonators. There is NO cap pad anywhere (the λ_g/4 line self-resonates).
+    traces.push(Polygon::rect(0.0, l + g_open, comb_right, w));
+
+    // Tapped input/output feeds + ports (neutral defaults, mirroring combline /
+    // hairpin): feed width = line_width_m, feed length = one resonator length. The
+    // tap is up the resonator from its grounded end at tap_y (a neutral tap
+    // height; qe→tap dimensioning is deferred, F1.2.1). The first (i = 0) and last
+    // (i = N−1) resonators are both grounded at the bottom rail when N is odd; tap
+    // up from y = 0 in both cases (a neutral default — the interdigital tap is up
+    // the line from the short, not at an open / cap end).
+    let feed_width_m = w;
+    let feed_length_m = l;
+    let tap_y = l / 3.0;
+
+    // Input feed: extends leftward (−x) from the first resonator's left edge.
+    let in_x0 = resonator_x[0] - feed_length_m;
+    traces.push(Polygon::rect(
+        in_x0,
+        tap_y - feed_width_m / 2.0,
+        feed_length_m,
+        feed_width_m,
+    ));
+    let in_port = PortRef {
+        at: Point2::new(in_x0, tap_y),
+        width_m: feed_width_m,
+        ref_impedance_ohm: project.spec.z0_ohm,
+    };
+
+    // Output feed: extends rightward (+x) from the last resonator's right edge.
+    let out_x0 = resonator_x[n - 1] + w;
+    traces.push(Polygon::rect(
+        out_x0,
+        tap_y - feed_width_m / 2.0,
+        feed_length_m,
+        feed_width_m,
+    ));
+    let out_port = PortRef {
+        at: Point2::new(out_x0 + feed_length_m, tap_y),
+        width_m: feed_width_m,
+        ref_impedance_ohm: project.spec.z0_ohm,
+    };
+
+    let bbox = BBox::from_polygons(&traces);
+    Ok(Layout {
+        substrate: *substrate,
+        traces,
+        ports: vec![in_port, out_port],
+        bbox,
+    })
+}
