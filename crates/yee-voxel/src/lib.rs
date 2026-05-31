@@ -70,6 +70,12 @@ use ndarray::Array3;
 use yee_fdtd::{LumpedRlcPort, SourceWaveform, WalkingSkeletonSolver, YeeGrid};
 use yee_layout::{Layout, Point2, Polygon};
 
+/// Lumped-LC FDTD EM simulation of a synthesized filter board (Filter Phase
+/// F2.3, ADR-0115): place each ladder L/C as a [`yee_fdtd::LumpedRlcPort`] on
+/// the voxelized board, drive/sense two ports, and extract `|S21|(f)`.
+pub mod lumped_sim;
+pub use lumped_sim::{LumpedSimConfig, SERIES_ESR_OHM, simulate_lumped_board};
+
 /// Voxelization parameters for [`voxelize_microstrip`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VoxelOptions {
