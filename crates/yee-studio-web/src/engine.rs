@@ -1059,6 +1059,82 @@ fn lowpass_mask_bands(spec: &FilterSpec) -> Vec<MaskBand> {
     bands
 }
 
+// ===========================================================================
+// TopBar view (App.2.3, ADR-0140)
+// ===========================================================================
+
+/// The human-readable approximation label for the TopBar summary, e.g.
+/// `"Chebyshev 0.5 dB"` / `"Butterworth"`.
+fn approximation_label(approx: Approximation) -> String {
+    match approx {
+        Approximation::Chebyshev { ripple_db } => format!("Chebyshev {ripple_db:.1} dB"),
+        Approximation::Butterworth => "Butterworth".to_string(),
+    }
+}
+
+/// The TopBar summary line + PASS/FAIL verdict for the **active flow**.
+///
+/// Pure and host-testable: it reads no signals, taking the three flow values by
+/// reference, and is dispatched on the active [`Topology`] so the top bar
+/// reflects the filter the user is actually designing (the §10 honest-UI
+/// principle) rather than the always-band-pass `designed` signal. Returns the
+/// summary string and the verdict; a `None` verdict means the active flow's
+/// design is **not realizable** (e.g. an unrealizable lumped ladder), which the
+/// `TopBar` component renders as a muted "geometry not realizable" chip.
+///
+/// Branches:
+/// - [`Topology::EdgeCoupled`] / [`Topology::Hairpin`] → the band-pass summary
+///   (`· {approx} · N={order} · {f0} GHz · {fbw}%`) + `Some(designed.report.pass)`.
+/// - [`Topology::LumpedLc`] → the **same** band-pass summary (the lumped flow
+///   shares the band-pass spec, read from `designed.spec`) + the lumped ladder
+///   verdict `lumped.map(|l| l.verdict.pass)` (`None` → not realizable).
+/// - [`Topology::SteppedImpedance`] → the **low-pass** summary
+///   (`· {approx} · N={order} · cutoff {f_c} GHz`, no fractional bandwidth) +
+///   `Some(stepped.pass)`.
+pub fn topbar_view(
+    topology: Topology,
+    designed: &Designed,
+    lumped: Option<&LumpedDesigned>,
+    stepped: &SteppedLowpassDesigned,
+) -> (String, Option<bool>) {
+    match topology {
+        Topology::EdgeCoupled | Topology::Hairpin => {
+            let spec = &designed.spec;
+            let summary = format!(
+                "· {} · N={} · {:.2} GHz · {:.0}%",
+                approximation_label(spec.approximation),
+                designed.order(),
+                spec.f0_hz / 1e9,
+                spec.fbw * 100.0
+            );
+            (summary, Some(designed.report.pass))
+        }
+        Topology::LumpedLc => {
+            // The lumped flow shares the band-pass spec; the summary mirrors the
+            // band-pass branch, but the verdict is the lumped ladder's own (and
+            // `None` when the ladder is not realizable).
+            let spec = &designed.spec;
+            let summary = format!(
+                "· {} · N={} · {:.2} GHz · {:.0}%",
+                approximation_label(spec.approximation),
+                designed.order(),
+                spec.f0_hz / 1e9,
+                spec.fbw * 100.0
+            );
+            (summary, lumped.map(|l| l.verdict.pass))
+        }
+        Topology::SteppedImpedance => {
+            let summary = format!(
+                "· {} · N={} · cutoff {:.2} GHz",
+                approximation_label(stepped.spec.approximation),
+                stepped.order,
+                stepped.cutoff_hz() / 1e9
+            );
+            (summary, Some(stepped.pass))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1336,5 +1412,73 @@ mod tests {
         assert!(!d.sections.is_empty());
         assert_eq!(d.sweep.len(), SWEEP_POINTS);
         assert!(d.sweep.iter().all(|s| s.s21_db.is_finite()));
+    }
+
+    #[test]
+    fn topbar_view_is_topology_aware() {
+        // The TopBar view must reflect the ACTIVE flow, not always the band-pass
+        // `designed` (the App.2.3 honesty fix). Build all three flows from the
+        // real engine and assert each branch's summary shape + verdict source —
+        // a band-pass-only / constant `topbar_view` fails every assertion below.
+        let designed = design_demo();
+        let lumped = design_lumped();
+        let stepped = design_stepped();
+
+        // (a) Stepped-impedance is a LOW-PASS flow: a cutoff, no fractional
+        // bandwidth `%`, and the low-pass verdict.
+        let (sp_summary, sp_verdict) = topbar_view(
+            Topology::SteppedImpedance,
+            &designed,
+            Some(&lumped),
+            &stepped,
+        );
+        assert!(
+            sp_summary.contains("cutoff"),
+            "stepped summary shows a cutoff (got {sp_summary:?})"
+        );
+        assert!(
+            !sp_summary.contains('%'),
+            "stepped (low-pass) summary has no fractional bandwidth % (got {sp_summary:?})"
+        );
+        assert_eq!(
+            sp_verdict,
+            Some(stepped.pass),
+            "stepped verdict is the low-pass verdict"
+        );
+
+        // (b) Edge-coupled is a BAND-PASS flow: a fractional bandwidth `%`, no
+        // "cutoff", and the distributed verdict.
+        let (ec_summary, ec_verdict) =
+            topbar_view(Topology::EdgeCoupled, &designed, Some(&lumped), &stepped);
+        assert!(
+            ec_summary.contains('%'),
+            "edge-coupled (band-pass) summary shows fractional bandwidth % (got {ec_summary:?})"
+        );
+        assert!(
+            !ec_summary.contains("cutoff"),
+            "band-pass summary has no cutoff (got {ec_summary:?})"
+        );
+        assert_eq!(
+            ec_verdict,
+            Some(designed.report.pass),
+            "edge-coupled verdict is the distributed verdict"
+        );
+
+        // (c) Lumped shares the band-pass summary but reports its OWN ladder
+        // verdict — from `lumped`, not `designed`.
+        let (lc_summary, lc_verdict) =
+            topbar_view(Topology::LumpedLc, &designed, Some(&lumped), &stepped);
+        assert!(
+            lc_summary.contains('%'),
+            "lumped shares the band-pass summary (got {lc_summary:?})"
+        );
+        assert_eq!(
+            lc_verdict,
+            Some(&lumped).map(|l| l.verdict.pass),
+            "lumped verdict comes from the lumped ladder"
+        );
+        // An unrealizable lumped ladder (None) → no verdict (not realizable).
+        let (_, lc_none) = topbar_view(Topology::LumpedLc, &designed, None, &stepped);
+        assert_eq!(lc_none, None, "no lumped design → not-realizable verdict");
     }
 }

@@ -41,7 +41,7 @@ use dioxus::prelude::*;
 
 use engine::{
     Designed, LumpedDesigned, SteppedLowpassDesigned, demo_spec, design_demo, design_demo_from,
-    design_lumped, design_lumped_from, design_stepped, design_stepped_from,
+    design_lumped, design_lumped_from, design_stepped, design_stepped_from, topbar_view,
 };
 use stages::{Stage, Topology};
 use yee_filter::FilterSpec;
@@ -99,7 +99,7 @@ fn App() -> Element {
     rsx! {
         document::Stylesheet { href: STUDIO_CSS }
         div { class: "app",
-            TopBar { designed }
+            TopBar { topology, designed, lumped, stepped }
             div { class: "body",
                 Rail { active, topology }
                 main { class: "canvas",
@@ -119,24 +119,28 @@ fn App() -> Element {
     }
 }
 
-/// Top bar: app brand + the spec summary chip + the live PASS/FAIL verdict chip.
+/// Top bar: app brand + the **active flow's** spec summary chip + its live
+/// PASS/FAIL verdict chip (App.2.3, ADR-0140).
+///
+/// The summary + verdict are computed by the pure [`topbar_view`] helper, which
+/// dispatches on the active [`Topology`]: band-pass (edge-coupled / hairpin) →
+/// the distributed verdict; lumped → the lumped ladder verdict; stepped-impedance
+/// → the low-pass cutoff + verdict. When the active flow's design is not
+/// realizable (`None` verdict — e.g. an unrealizable lumped ladder) a muted
+/// "geometry not realizable" chip is shown instead of PASS/FAIL.
 #[component]
-fn TopBar(designed: ReadOnlySignal<Designed>) -> Element {
-    let d = designed.read();
-    let spec = &d.spec;
-    let approx = match spec.approximation {
-        yee_filter::Approximation::Chebyshev { ripple_db } => {
-            format!("Chebyshev {ripple_db:.1} dB")
-        }
-        yee_filter::Approximation::Butterworth => "Butterworth".to_string(),
-    };
-    let summary = format!(
-        "· {approx} · N={} · {:.2} GHz · {:.0}%",
-        d.order(),
-        spec.f0_hz / 1e9,
-        spec.fbw * 100.0
+fn TopBar(
+    topology: ReadOnlySignal<Topology>,
+    designed: ReadOnlySignal<Designed>,
+    lumped: ReadOnlySignal<Option<LumpedDesigned>>,
+    stepped: ReadOnlySignal<SteppedLowpassDesigned>,
+) -> Element {
+    let (summary, verdict) = topbar_view(
+        topology(),
+        &designed.read(),
+        lumped.read().as_ref(),
+        &stepped.read(),
     );
-    let pass = d.report.pass;
 
     rsx! {
         header { class: "topbar",
@@ -144,10 +148,16 @@ fn TopBar(designed: ReadOnlySignal<Designed>) -> Element {
             span { class: "brand", "Yee Filter Studio" }
             span { class: "spec-chip", "{summary}" }
             span { class: "spacer" }
-            if pass {
-                span { class: "chip pass", span { class: "dot-sm" } "SPEC MET" }
-            } else {
-                span { class: "chip fail", span { class: "dot-sm" } "SPEC FAIL" }
+            match verdict {
+                Some(true) => rsx! {
+                    span { class: "chip pass", span { class: "dot-sm" } "SPEC MET" }
+                },
+                Some(false) => rsx! {
+                    span { class: "chip fail", span { class: "dot-sm" } "SPEC FAIL" }
+                },
+                None => rsx! {
+                    span { class: "chip muted", span { class: "dot-sm" } "geometry not realizable" }
+                },
             }
         }
     }
