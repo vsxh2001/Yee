@@ -185,3 +185,4 @@
 - [ADR-0139: App.2.2 — low-pass stepped-impedance flow in the studio](decisions/0139-app-2-2-studio-lowpass-stepped.md)
 - [ADR-0140: App.2.3 — TopBar shows the active flow's verdict](decisions/0140-app-2-3-topbar-active-flow-verdict.md)
 - [ADR-0141: App.2.4 — honest Verify stage](decisions/0141-app-2-4-honest-verify-stage.md)
+- [ADR-0142: App.2.5 — compare techniques side-by-side](decisions/0142-app-2-5-compare-techniques.md)
