@@ -27,9 +27,10 @@
 //! **Spec** and **Export** are real: Spec is a live editable form driving
 //! synthesis; Export emits a parameter sheet, a BOM CSV (lumped), and Gerber /
 //! KiCad files from the real layout via the shipped `yee-export` emitters,
-//! downloaded client-side. **Verify (EM)** stays an honest "Soon" placeholder
-//! (it rides on the Track A FDTD-in-loop work). The remaining distributed
-//! topologies (Hairpin, Combline, …) are honestly labelled "Soon".
+//! downloaded client-side. **Verify** shows the active flow's real circuit-level
+//! mask metrics (App.2.4 / ADR-0141), honest that full-wave EM of the physical
+//! board is a separate native step. The remaining distributed topologies
+//! (Combline, …) are honestly labelled "Soon".
 //!
 //! [Dioxus]: https://dioxuslabs.com/
 
@@ -218,7 +219,7 @@ fn StageCanvas(
         Stage::Layout if stepped_flow => stages::stepped_layout_stage(stepped),
         Stage::Layout if lumped_flow => stages::lumped_layout_stage(lumped),
         Stage::Layout => stages::layout_stage(designed),
-        Stage::Verify => stages::verify_stage(),
+        Stage::Verify => stages::verify_stage(topology.into(), designed, lumped, stepped),
         Stage::Export => stages::export_stage(topology.into(), designed, lumped, stepped),
     }
 }

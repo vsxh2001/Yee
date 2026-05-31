@@ -1135,6 +1135,127 @@ pub fn topbar_view(
     }
 }
 
+// ===========================================================================
+// Verify view (App.2.4, ADR-0141)
+// ===========================================================================
+
+/// What level of verification the [`VerifyView`] metrics represent.
+///
+/// The studio grades at the **circuit / synthesis** level; full-wave EM
+/// verification of the physical board is a separate native step (the deferred
+/// ADR-0133 research frontier), not run in the browser. This enum names which
+/// of the two circuit-level checks produced the metrics so the Verify stage can
+/// state it honestly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifyLevel {
+    /// The **realized** LC ladder graded vs the mask (the lumped flow — a genuine
+    /// circuit-level check on the synthesized `ladder_s21` response).
+    RealizedLadder,
+    /// The **synthesized ideal** / coupled-resonator response graded vs the mask
+    /// (the distributed band-pass + stepped low-pass flows). The physical board's
+    /// full-wave EM response is a native step, not computed here.
+    SynthesizedIdeal,
+}
+
+/// The active flow's real verification metrics for the Verify stage.
+///
+/// Every field is a value the engine already computes for the active flow's
+/// graded response (`MaskReport` / `MaskVerdict` / the stepped low-pass fields);
+/// nothing here is fabricated. The Verify stage renders these directly.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VerifyView {
+    /// Which circuit-level check produced these metrics (realized ladder vs
+    /// synthesized ideal response).
+    pub level: VerifyLevel,
+    /// Overall verdict: `Some(true)` = the active flow meets its mask,
+    /// `Some(false)` = it fails, `None` = the active flow's design is **not
+    /// realizable** (e.g. an unrealizable lumped ladder), so no verdict exists.
+    pub pass: Option<bool>,
+    /// Worst-case in-band passband insertion-loss ripple observed, dB.
+    pub worst_passband_ripple_db: f64,
+    /// Worst-case (smallest) in-band return loss observed, dB.
+    pub worst_return_loss_db: f64,
+    /// Worst-case (smallest) stopband rejection across the mask's stopband
+    /// points, dB. `None` when the mask has no stopband points (nothing to
+    /// report — rendered as "—", not a fabricated number).
+    pub worst_stopband_rej_db: Option<f64>,
+}
+
+/// The verification metrics + level for the **active flow**.
+///
+/// Pure and host-testable: it reads no signals, taking the three flow values by
+/// reference, and dispatches on the active [`Topology`] so the Verify stage
+/// surfaces the filter the user is actually designing (the §10 honest-UI
+/// principle). Every metric is pulled from the flow's already-computed graded
+/// response — no fabricated placeholders.
+///
+/// Branches:
+/// - [`Topology::LumpedLc`] → [`VerifyLevel::RealizedLadder`] from
+///   `lumped.verdict` (a genuine realized-ladder check). When `lumped` is `None`
+///   (the ladder is not realizable) the metrics are `0.0` / `None` rejection and
+///   `pass` is `None`. The `verdict.worst_stopband_rej_db` is `+∞` when the mask
+///   has no stopband points; that maps to `None`.
+/// - [`Topology::SteppedImpedance`] → [`VerifyLevel::SynthesizedIdeal`] from the
+///   stepped low-pass fields; stopband rejection is the minimum achieved over
+///   `stepped.stopband` (`None` when empty).
+/// - [`Topology::EdgeCoupled`] / [`Topology::Hairpin`] →
+///   [`VerifyLevel::SynthesizedIdeal`] from `designed.report`; stopband rejection
+///   is the minimum achieved over `report.stopband` (`None` when empty).
+pub fn verify_view(
+    topology: Topology,
+    designed: &Designed,
+    lumped: Option<&LumpedDesigned>,
+    stepped: &SteppedLowpassDesigned,
+) -> VerifyView {
+    /// Minimum achieved rejection over a `(freq, achieved, required, met)`
+    /// stopband table (`None` when the mask has no stopband points).
+    fn min_achieved(stopband: &[(f64, f64, f64, bool)]) -> Option<f64> {
+        stopband
+            .iter()
+            .map(|&(_, achieved, _, _)| achieved)
+            .fold(None, |acc, a| Some(acc.map_or(a, |m: f64| m.min(a))))
+    }
+
+    match topology {
+        Topology::LumpedLc => match lumped {
+            Some(l) => VerifyView {
+                level: VerifyLevel::RealizedLadder,
+                pass: Some(l.verdict.pass),
+                worst_passband_ripple_db: l.verdict.worst_passband_ripple_db,
+                worst_return_loss_db: l.verdict.worst_return_loss_db,
+                // `worst_stopband_rej_db` is `+∞` when the mask has no stopband
+                // points — report that as "no stopband point" (`None`), not ∞.
+                worst_stopband_rej_db: l
+                    .verdict
+                    .worst_stopband_rej_db
+                    .is_finite()
+                    .then_some(l.verdict.worst_stopband_rej_db),
+            },
+            None => VerifyView {
+                level: VerifyLevel::RealizedLadder,
+                pass: None,
+                worst_passband_ripple_db: 0.0,
+                worst_return_loss_db: 0.0,
+                worst_stopband_rej_db: None,
+            },
+        },
+        Topology::SteppedImpedance => VerifyView {
+            level: VerifyLevel::SynthesizedIdeal,
+            pass: Some(stepped.pass),
+            worst_passband_ripple_db: stepped.worst_passband_ripple_db,
+            worst_return_loss_db: stepped.worst_return_loss_db,
+            worst_stopband_rej_db: min_achieved(&stepped.stopband),
+        },
+        Topology::EdgeCoupled | Topology::Hairpin => VerifyView {
+            level: VerifyLevel::SynthesizedIdeal,
+            pass: Some(designed.report.pass),
+            worst_passband_ripple_db: designed.report.worst_passband_ripple_db,
+            worst_return_loss_db: designed.report.worst_return_loss_db,
+            worst_stopband_rej_db: min_achieved(&designed.report.stopband),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1480,5 +1601,122 @@ mod tests {
         // An unrealizable lumped ladder (None) → no verdict (not realizable).
         let (_, lc_none) = topbar_view(Topology::LumpedLc, &designed, None, &stepped);
         assert_eq!(lc_none, None, "no lumped design → not-realizable verdict");
+    }
+
+    #[test]
+    fn verify_view_surfaces_real_per_flow_metrics() {
+        // The Verify view must surface the ACTIVE flow's REAL graded metrics —
+        // pulled straight from each flow's source struct, not a constant or "—"
+        // (the App.2.4 honesty fix). Build all three flows from the real engine
+        // and assert each branch's level + metrics equal the source fields. A
+        // fake / constant `verify_view` fails every assertion below.
+        let designed = design_demo();
+        let lumped = design_lumped();
+        let stepped = design_stepped();
+
+        // (a) Lumped → the REALIZED-ladder level, metrics == `lumped.verdict`.
+        let lc = verify_view(Topology::LumpedLc, &designed, Some(&lumped), &stepped);
+        assert_eq!(
+            lc.level,
+            VerifyLevel::RealizedLadder,
+            "lumped grades the realized LC ladder"
+        );
+        assert_eq!(lc.pass, Some(lumped.verdict.pass), "lumped verdict pass");
+        assert_eq!(
+            lc.worst_passband_ripple_db, lumped.verdict.worst_passband_ripple_db,
+            "lumped ripple is the verdict's"
+        );
+        assert_eq!(
+            lc.worst_return_loss_db, lumped.verdict.worst_return_loss_db,
+            "lumped return loss is the verdict's"
+        );
+        // The demo spec has a stopband point, so the rejection is finite + present
+        // and equals the verdict's worst rejection.
+        assert!(lumped.verdict.worst_stopband_rej_db.is_finite());
+        assert_eq!(
+            lc.worst_stopband_rej_db,
+            Some(lumped.verdict.worst_stopband_rej_db),
+            "lumped stopband rejection is the verdict's"
+        );
+
+        // (b) Stepped-impedance → the SYNTHESIZED-ideal level, metrics == stepped.
+        let sp = verify_view(
+            Topology::SteppedImpedance,
+            &designed,
+            Some(&lumped),
+            &stepped,
+        );
+        assert_eq!(
+            sp.level,
+            VerifyLevel::SynthesizedIdeal,
+            "stepped grades the synthesized ideal response"
+        );
+        assert_eq!(sp.pass, Some(stepped.pass), "stepped verdict pass");
+        assert_eq!(
+            sp.worst_passband_ripple_db, stepped.worst_passband_ripple_db,
+            "stepped ripple"
+        );
+        assert_eq!(
+            sp.worst_return_loss_db, stepped.worst_return_loss_db,
+            "stepped return loss"
+        );
+        // Stopband rejection is the minimum achieved over the stepped stopband.
+        let sp_min = stepped
+            .stopband
+            .iter()
+            .map(|&(_, a, _, _)| a)
+            .fold(f64::INFINITY, f64::min);
+        assert!(stepped.stopband.is_empty() == sp.worst_stopband_rej_db.is_none());
+        if !stepped.stopband.is_empty() {
+            assert_eq!(
+                sp.worst_stopband_rej_db,
+                Some(sp_min),
+                "stepped rejection is the min achieved over its stopband"
+            );
+        }
+
+        // (c) Edge-coupled → the SYNTHESIZED-ideal level, metrics == report.
+        let ec = verify_view(Topology::EdgeCoupled, &designed, Some(&lumped), &stepped);
+        assert_eq!(ec.level, VerifyLevel::SynthesizedIdeal);
+        assert_eq!(ec.pass, Some(designed.report.pass), "edge-coupled verdict");
+        assert_eq!(
+            ec.worst_passband_ripple_db, designed.report.worst_passband_ripple_db,
+            "edge-coupled ripple is the report's"
+        );
+        assert_eq!(
+            ec.worst_return_loss_db, designed.report.worst_return_loss_db,
+            "edge-coupled return loss is the report's"
+        );
+        let ec_min = designed
+            .report
+            .stopband
+            .iter()
+            .map(|&(_, a, _, _)| a)
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            !designed.report.stopband.is_empty(),
+            "demo has a stopband pt"
+        );
+        assert_eq!(
+            ec.worst_stopband_rej_db,
+            Some(ec_min),
+            "edge-coupled rejection is the min achieved over the report stopband"
+        );
+
+        // The LEVEL differs lumped-vs-distributed (a constant `verify_view`
+        // would tag both the same).
+        assert_ne!(
+            lc.level, ec.level,
+            "lumped (realized) and distributed (synthesized) levels differ"
+        );
+
+        // An unrealizable lumped ladder (None) → no verdict (not realizable),
+        // zeroed metrics, no rejection — never a fabricated number.
+        let lc_none = verify_view(Topology::LumpedLc, &designed, None, &stepped);
+        assert_eq!(lc_none.level, VerifyLevel::RealizedLadder);
+        assert_eq!(lc_none.pass, None, "no lumped design → not realizable");
+        assert_eq!(lc_none.worst_passband_ripple_db, 0.0);
+        assert_eq!(lc_none.worst_return_loss_db, 0.0);
+        assert_eq!(lc_none.worst_stopband_rej_db, None);
     }
 }

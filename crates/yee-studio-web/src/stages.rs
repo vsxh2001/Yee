@@ -5,10 +5,10 @@
 //! gallery — Edge-coupled + Lumped LC live, the rest honest "Soon"),
 //! [`synthesis_stage`] / [`layout_stage`] (distributed), the lumped quartet
 //! ([`lumped_synthesis_stage`], [`lumped_components_stage`],
-//! [`lumped_tolerance_stage`], [`lumped_layout_stage`]), and [`export_stage`]
-//! (a real parameter sheet + Gerber/KiCad/BOM downloads). Only
-//! [`verify_stage`] is an honest "Soon" placeholder (it rides on the Track A
-//! FDTD-in-loop work).
+//! [`lumped_tolerance_stage`], [`lumped_layout_stage`]), [`export_stage`]
+//! (a real parameter sheet + Gerber/KiCad/BOM downloads), and [`verify_stage`]
+//! (the active flow's real circuit-level mask metrics — App.2.4 / ADR-0141 —
+//! honest that full-wave EM of the board is a separate native step).
 
 use dioxus::prelude::*;
 
@@ -17,7 +17,9 @@ use yee_filter::{
     recommend_technique,
 };
 
-use crate::engine::{BomView, Designed, LumpedDesigned, SteppedLowpassDesigned, YieldView};
+use crate::engine::{
+    BomView, Designed, LumpedDesigned, SteppedLowpassDesigned, VerifyLevel, YieldView, verify_view,
+};
 use crate::svg::{board_svg, lumped_board_svg, response_plot};
 
 /// The realization technique the downstream stages render for.
@@ -62,7 +64,7 @@ pub enum Stage {
     Tolerance,
     /// Layout + Materials: board top-view, stackup / footprints, tables.
     Layout,
-    /// Verify (EM): FDTD realized response (later).
+    /// Verify: the active flow's real circuit-level mask metrics (App.2.4).
     Verify,
     /// Export: Gerber / KiCad / Touchstone / STEP + parameter sheet.
     Export,
@@ -1227,27 +1229,75 @@ pub fn technique_stage(
     }
 }
 
-/// Verify (EM) stage stub: the ideal-vs-realized story, marked "later".
-pub fn verify_stage() -> Element {
+/// Verify stage (App.2.4, ADR-0141): the active flow's **real** circuit-level
+/// verification metrics + an honest statement of what level was verified.
+///
+/// Mirrors the App.2.3 TopBar pattern — the pure [`verify_view`] helper pulls
+/// the active [`Topology`]'s already-computed graded metrics (`MaskReport` /
+/// `MaskVerdict` / the stepped low-pass fields). The three stat cards (worst
+/// passband ripple, worst in-band return loss, worst stopband rejection) show
+/// real values; a metric reads "—" only when it is genuinely absent (no
+/// stopband point in the mask). A PASS / FAIL / "not realizable" chip and a
+/// level label state whether the realized LC ladder or the synthesized ideal
+/// response was graded. The honest note frames full-wave EM of the physical
+/// board as a separate native step (the deferred ADR-0133 frontier), not run in
+/// the browser — no fabricated EM numbers.
+pub fn verify_stage(
+    topology: ReadOnlySignal<Topology>,
+    designed: ReadOnlySignal<Designed>,
+    lumped: ReadOnlySignal<Option<LumpedDesigned>>,
+    stepped: ReadOnlySignal<SteppedLowpassDesigned>,
+) -> Element {
+    // Bind each signal guard to a named local so the borrows passed to
+    // `verify_view` live for the whole call (the App.2.3 TopBar idiom).
+    let designed_ref = designed.read();
+    let lumped_ref = lumped.read();
+    let stepped_ref = stepped.read();
+    let view = verify_view(topology(), &designed_ref, lumped_ref.as_ref(), &stepped_ref);
+
+    let level_label = match view.level {
+        VerifyLevel::RealizedLadder => "Realized LC ladder, graded vs the mask",
+        VerifyLevel::SynthesizedIdeal => "Synthesized ideal response vs the mask",
+    };
+    let ripple_disp = format!("{:.3} dB", view.worst_passband_ripple_db);
+    let rl_disp = format!("{:.2} dB", view.worst_return_loss_db);
+    let rej_disp = match view.worst_stopband_rej_db {
+        Some(rej) => format!("{rej:.2} dB"),
+        None => "—".to_string(),
+    };
+
     rsx! {
         div { class: "canvas-head",
-            h1 { "Verify (EM)" }
-            p { class: "sub", "Built-in full-wave FDTD verification — the differentiator the calculators leave out." }
+            h1 { "Verify" }
+            p { class: "sub", "The active design graded against its spec mask — the real metrics the engine already computes, with an honest statement of what level was verified." }
         }
         div { class: "card",
             h2 { class: "card-title",
-                "FDTD realized response"
-                span { class: "chip fail", style: "margin-left:auto;background:#1b2027;border-color:#2a313b;color:#8b95a1", "Soon · FDTD in-loop" }
+                "{level_label}"
+                match view.pass {
+                    Some(true) => rsx! {
+                        span { class: "chip pass", style: "margin-left:auto", "PASS" }
+                    },
+                    Some(false) => rsx! {
+                        span { class: "chip fail", style: "margin-left:auto", "FAIL" }
+                    },
+                    None => rsx! {
+                        span { class: "chip muted", style: "margin-left:auto", "not realizable" }
+                    },
+                }
             }
             div { class: "grid-3",
-                div { class: "stat", div { class: "v", "—" } div { class: "l", "insertion loss @ f0" } }
-                div { class: "stat", div { class: "v", "—" } div { class: "l", "in-band return loss" } }
-                div { class: "stat", div { class: "v", "—" } div { class: "l", "rejection @ 2.4 GHz" } }
+                div { class: "stat", div { class: "v", "{ripple_disp}" } div { class: "l", "worst passband ripple" } }
+                div { class: "stat", div { class: "v", "{rl_disp}" } div { class: "l", "worst in-band return loss" } }
+                div { class: "stat", div { class: "v", "{rej_disp}" } div { class: "l", "worst stopband rejection" } }
             }
             div { class: "note honest",
-                "This stage will overlay the as-built FDTD response on the ideal prototype + "
-                "mask, closing the ideal-vs-realized gap, then tune / auto-optimize. It rides "
-                "on the F1.1b / F1.2.1 FDTD-in-loop work (App.D.5)."
+                "These are circuit / synthesis-level metrics: the lumped flow grades its "
+                "realized LC ladder, the distributed and low-pass flows grade the synthesized "
+                "ideal response. Full-wave EM verification of the physical board (metal "
+                "thickness, loss, dispersion, coupling) is a separate native step — the "
+                "deferred research frontier — and is not run in the browser. The studio never "
+                "hides the ideal-vs-realized gap."
             }
         }
     }
