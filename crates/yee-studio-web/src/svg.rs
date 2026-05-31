@@ -182,6 +182,11 @@ pub fn response_overlay(curves: &[(&str, &[SweepPoint], &str)], bands: &[MaskBan
             _ => None,
         });
     let (f_lo, f_hi) = span.unwrap_or((0.0, 1.0));
+    // Guard a degenerate single-point span (f_lo == f_hi): the production path
+    // always has the full sweep grid, but a 1-point fixture would divide by zero
+    // in `fx` → NaN SVG coordinates. Widen to a unit span (the point plots at the
+    // left edge, harmlessly) rather than emit malformed markup.
+    let f_hi = if f_hi > f_lo { f_hi } else { f_lo + 1.0 };
     let y_min = -80.0_f64;
     let y_max = 5.0_f64;
 
