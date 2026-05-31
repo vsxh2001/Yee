@@ -12,6 +12,10 @@ use crate::engine::{MaskBand, SweepPoint};
 
 // Design-system colours (kept in sync with assets/studio.css).
 const ACCENT: &str = "#2dd4bf";
+/// Distinct stroke colours for the multi-curve [`response_overlay`] (one per
+/// curve, cycled): the [`ACCENT`] teal, a warm copper, and a violet — all
+/// readable on the dark plot background.
+pub(crate) const OVERLAY_PALETTE: [&str; 3] = [ACCENT, "#e6b24d", "#a78bfa"];
 const COPPER: &str = "#e6b24d";
 const COPPER_EDGE: &str = "#b87814";
 const SUBSTRATE: &str = "#0a2218";
@@ -141,6 +145,165 @@ pub fn response_plot(sweep: &[SweepPoint], bands: &[MaskBand]) -> String {
     s.push_str(&format!(
         "<rect x=\"{ml:.1}\" y=\"{mt:.1}\" width=\"{pw:.1}\" height=\"{ph:.1}\" fill=\"none\" stroke=\"{GRID}\" stroke-width=\"1\"/>\n"
     ));
+
+    s.push_str("</svg>\n");
+    s
+}
+
+/// Render several labelled `|S21|` responses overlaid on one chart vs the spec
+/// mask — the App.2.6 Compare-panel multi-technique overlay.
+///
+/// Mirrors [`response_plot`]'s viewBox / axis / dB-scaling / shaded mask-band
+/// code, then draws one `<polyline>` of `|S21|(f)` per curve in its given stroke
+/// colour, plus a small legend (a colour swatch + label per curve). Each curve
+/// is `(label, sweep, color)`; a curve with an empty `sweep` (an unrealizable
+/// realization) draws no polyline but still appears in the legend (tagged "not
+/// realizable") so the chart stays honest.
+///
+/// The X axis (frequency) is spanned from the first non-empty curve; all curves
+/// share the same `sweep_freqs` grid, so this is the common span.
+pub fn response_overlay(curves: &[(&str, &[SweepPoint], &str)], bands: &[MaskBand]) -> String {
+    // viewBox geometry (identical to `response_plot`).
+    let w = 720.0;
+    let h = 320.0;
+    let ml = 52.0; // left margin (y labels)
+    let mr = 16.0;
+    let mt = 14.0;
+    let mb = 36.0; // bottom margin (x labels)
+    let pw = w - ml - mr;
+    let ph = h - mt - mb;
+
+    // Frequency span from the first curve that has samples (all curves share the
+    // same sweep grid).
+    let span = curves
+        .iter()
+        .find_map(|(_, sw, _)| match (sw.first(), sw.last()) {
+            (Some(a), Some(b)) => Some((a.f_hz, b.f_hz)),
+            _ => None,
+        });
+    let (f_lo, f_hi) = span.unwrap_or((0.0, 1.0));
+    let y_min = -80.0_f64;
+    let y_max = 5.0_f64;
+
+    let fx = |f: f64| ml + (f - f_lo) / (f_hi - f_lo) * pw;
+    let fy = |db: f64| {
+        let c = db.clamp(y_min, y_max);
+        mt + (y_max - c) / (y_max - y_min) * ph
+    };
+
+    let mut s = String::new();
+    s.push_str(&format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {w} {h}\" preserveAspectRatio=\"xMidYMid meet\" role=\"img\" aria-label=\"multi-technique S21 response overlay versus spec mask\">\n"
+    ));
+
+    // ---- gridlines + y axis labels (every 20 dB) --------------------------
+    let mut db = 0.0;
+    while db >= y_min {
+        let y = fy(db);
+        s.push_str(&format!(
+            "<line x1=\"{ml:.1}\" y1=\"{y:.1}\" x2=\"{:.1}\" y2=\"{y:.1}\" stroke=\"{GRID}\" stroke-width=\"1\"/>\n",
+            ml + pw
+        ));
+        s.push_str(&format!(
+            "<text x=\"{:.1}\" y=\"{:.1}\" fill=\"{MUTED}\" font-size=\"10\" font-family=\"monospace\" text-anchor=\"end\">{db:.0}</text>\n",
+            ml - 6.0,
+            y + 3.5
+        ));
+        db -= 20.0;
+    }
+
+    // ---- x axis labels (GHz) ----------------------------------------------
+    let n_ticks = 6;
+    for i in 0..=n_ticks {
+        let f = f_lo + (f_hi - f_lo) * (i as f64) / (n_ticks as f64);
+        let x = fx(f);
+        s.push_str(&format!(
+            "<line x1=\"{x:.1}\" y1=\"{mt:.1}\" x2=\"{x:.1}\" y2=\"{:.1}\" stroke=\"{GRID}\" stroke-width=\"1\"/>\n",
+            mt + ph
+        ));
+        s.push_str(&format!(
+            "<text x=\"{x:.1}\" y=\"{:.1}\" fill=\"{MUTED}\" font-size=\"10\" font-family=\"monospace\" text-anchor=\"middle\">{:.2}</text>\n",
+            mt + ph + 16.0,
+            f / 1e9
+        ));
+    }
+    // axis titles
+    s.push_str(&format!(
+        "<text x=\"{:.1}\" y=\"{:.1}\" fill=\"{MUTED}\" font-size=\"10\" text-anchor=\"middle\">frequency (GHz)</text>\n",
+        ml + pw / 2.0,
+        h - 4.0
+    ));
+    s.push_str(&format!(
+        "<text x=\"12\" y=\"{:.1}\" fill=\"{MUTED}\" font-size=\"10\" text-anchor=\"middle\" transform=\"rotate(-90 12 {:.1})\">magnitude (dB)</text>\n",
+        mt + ph / 2.0,
+        mt + ph / 2.0
+    ));
+
+    // ---- mask forbidden regions (shaded) ----------------------------------
+    for b in bands {
+        let x0 = fx(b.f_lo_hz.max(f_lo));
+        let x1 = fx(b.f_hi_hz.min(f_hi));
+        if x1 <= x0 {
+            continue;
+        }
+        let (y0, yh, fill) = if b.is_floor {
+            // Passband floor: forbidden BELOW limit (toward y_min).
+            let yt = fy(b.limit_db);
+            (yt, (mt + ph) - yt, FAIL)
+        } else {
+            // Stopband ceiling: forbidden ABOVE limit (toward 0 dB / top).
+            let yb = fy(b.limit_db);
+            (mt, yb - mt, FAIL)
+        };
+        if yh > 0.0 {
+            s.push_str(&format!(
+                "<rect x=\"{x0:.1}\" y=\"{y0:.1}\" width=\"{:.1}\" height=\"{yh:.1}\" fill=\"{fill}\" fill-opacity=\"0.12\" stroke=\"{fill}\" stroke-opacity=\"0.35\" stroke-dasharray=\"3 3\"/>\n",
+                x1 - x0
+            ));
+        }
+    }
+
+    // ---- one |S21| polyline per (non-empty) curve -------------------------
+    for (_, sweep, color) in curves {
+        if sweep.is_empty() {
+            continue;
+        }
+        let points = sweep
+            .iter()
+            .map(|p| format!("{:.2},{:.2}", fx(p.f_hz), fy(p.s21_db)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        s.push_str(&format!(
+            "<polyline points=\"{points}\" fill=\"none\" stroke=\"{color}\" stroke-width=\"2\"/>\n"
+        ));
+    }
+
+    // plot frame
+    s.push_str(&format!(
+        "<rect x=\"{ml:.1}\" y=\"{mt:.1}\" width=\"{pw:.1}\" height=\"{ph:.1}\" fill=\"none\" stroke=\"{GRID}\" stroke-width=\"1\"/>\n"
+    ));
+
+    // ---- legend (colour swatch + label per curve) -------------------------
+    let mut ly = mt + 6.0;
+    for (label, sweep, color) in curves {
+        let suffix = if sweep.is_empty() {
+            " (not realizable)"
+        } else {
+            ""
+        };
+        // Swatch line.
+        s.push_str(&format!(
+            "<line x1=\"{:.1}\" y1=\"{ly:.1}\" x2=\"{:.1}\" y2=\"{ly:.1}\" stroke=\"{color}\" stroke-width=\"3\"/>\n",
+            ml + 10.0,
+            ml + 28.0
+        ));
+        s.push_str(&format!(
+            "<text x=\"{:.1}\" y=\"{:.1}\" fill=\"{TEXT}\" font-size=\"11\" font-family=\"monospace\">{label}{suffix}</text>\n",
+            ml + 34.0,
+            ly + 3.5
+        ));
+        ly += 16.0;
+    }
 
     s.push_str("</svg>\n");
     s
@@ -334,4 +497,95 @@ pub fn lumped_board_svg(board: &LumpedBoard) -> String {
 
     s.push_str("</svg>\n");
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::{MaskBand, SweepPoint, overlay_curves, overlay_mask_bands};
+    use yee_filter::{Approximation, FilterSpec, Response, SpecMask};
+
+    /// The committed band-pass demo spec (mirrors `engine::demo_spec`), kept
+    /// local so this test does not depend on a private engine helper.
+    fn demo_spec() -> FilterSpec {
+        FilterSpec {
+            response: Response::Bandpass,
+            approximation: Approximation::Chebyshev { ripple_db: 0.5 },
+            f0_hz: 2.0e9,
+            fbw: 0.10,
+            order: Some(5),
+            z0_ohm: 50.0,
+            mask: SpecMask {
+                passband_ripple_db: 0.5,
+                return_loss_db: 9.0,
+                stopband: vec![(2.4e9, 40.0)],
+            },
+        }
+    }
+
+    #[test]
+    fn response_overlay_emits_one_polyline_per_curve_plus_legend() {
+        // The band-pass overlay must render one |S21| polyline per non-empty
+        // curve (the coupled-resonator ideal + the lumped realized ladder = 2)
+        // and a legend swatch line per curve — the App.2.6 DoD §2.
+        let spec = demo_spec();
+        let curves = overlay_curves(&spec);
+        assert_eq!(curves.len(), 2, "band-pass overlays two distinct curves");
+        let palette = OVERLAY_PALETTE;
+        let tuples: Vec<(&str, &[SweepPoint], &str)> = curves
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                (
+                    c.label.as_str(),
+                    c.sweep.as_slice(),
+                    palette[i % palette.len()],
+                )
+            })
+            .collect();
+        let svg = response_overlay(&tuples, &overlay_mask_bands(&spec));
+
+        // One polyline per curve (both demo curves are realizable / non-empty).
+        let polylines = svg.matches("<polyline").count();
+        assert_eq!(
+            polylines, 2,
+            "one |S21| polyline per non-empty curve (got {polylines})"
+        );
+        // Honest labels appear in the legend text.
+        assert!(svg.contains("Coupled-resonator (edge-coupled / hairpin) — ideal"));
+        assert!(svg.contains("Lumped LC — realized ladder"));
+        // Each curve's distinct stroke colour is present.
+        assert!(svg.contains(&format!("stroke=\"{}\"", palette[0])));
+        assert!(svg.contains(&format!("stroke=\"{}\"", palette[1])));
+        // Well-formed SVG.
+        assert!(svg.trim_start().starts_with("<svg"));
+        assert!(svg.trim_end().ends_with("</svg>"));
+    }
+
+    #[test]
+    fn response_overlay_skips_polyline_for_empty_curve_but_keeps_legend() {
+        // An unrealizable curve (empty sweep) draws no polyline but is still
+        // named in the legend with a "not realizable" tag — the chart stays
+        // honest about a missing realization.
+        let real: Vec<SweepPoint> = (0..3)
+            .map(|i| SweepPoint {
+                f_hz: 1.0e9 + i as f64 * 1.0e8,
+                s21_db: -(i as f64),
+                s11_db: -10.0,
+            })
+            .collect();
+        let bands: Vec<MaskBand> = Vec::new();
+        let tuples: Vec<(&str, &[SweepPoint], &str)> = vec![
+            ("Real curve", real.as_slice(), OVERLAY_PALETTE[0]),
+            ("Missing curve", &[], OVERLAY_PALETTE[1]),
+        ];
+        let svg = response_overlay(&tuples, &bands);
+        assert_eq!(
+            svg.matches("<polyline").count(),
+            1,
+            "only the non-empty curve draws a polyline"
+        );
+        assert!(svg.contains("Real curve"));
+        assert!(svg.contains("Missing curve (not realizable)"));
+    }
 }

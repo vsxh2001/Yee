@@ -1429,6 +1429,105 @@ pub fn compare_techniques(spec: &FilterSpec) -> Vec<TechniqueComparison> {
     }
 }
 
+// ===========================================================================
+// Response-overlay curves (App.2.6, ADR-0143)
+// ===========================================================================
+
+/// One labelled response curve for the Compare-panel overlay.
+///
+/// Each curve is a real swept response on the shared `sweep_freqs` grid (the
+/// same [`SweepPoint`]s the per-flow Synthesis stages plot); nothing is faked.
+/// When a realization fails to synthesize (an unrealizable lumped ladder),
+/// [`realizable`](Self::realizable) is `false` and [`sweep`](Self::sweep) is
+/// empty — the overlay draws no polyline for it but still names it in the
+/// legend.
+#[derive(Clone)]
+pub struct OverlayCurve {
+    /// Honest curve label, e.g.
+    /// `"Coupled-resonator (edge-coupled / hairpin) — ideal"`.
+    pub label: String,
+    /// The swept response (empty when not realizable).
+    pub sweep: Vec<SweepPoint>,
+    /// `false` when the realization could not be synthesized (empty sweep).
+    pub realizable: bool,
+}
+
+/// The **distinct** swept `|S21|` responses to overlay for `spec`, on the shared
+/// `sweep_freqs` grid — labelled truthfully (the §Honesty-constraint).
+///
+/// Pure (reads no signals): it builds the relevant designs from `spec` and
+/// returns one [`OverlayCurve`] per genuinely-distinct response. Edge-coupled
+/// and hairpin share the **same** coupled-resonator synthesis (identical
+/// coupling matrix → identical ideal `|S21|`); they differ only physically
+/// (board layout/size — already in the compare table), so they are a **single**
+/// shared ideal curve, never two relabelled copies.
+///
+/// Keyed on [`FilterSpec::response`]:
+/// - [`Response::Bandpass`] / [`Response::Bandstop`] → two curves: the
+///   coupled-resonator ideal (the [`Designed::sweep`] from
+///   [`design_demo_from`], labelled as edge-coupled / hairpin; always
+///   realizable — it is the synthesized response) and the lumped realized
+///   ladder (the [`LumpedDesigned::sweep`] = `ladder_s21` from
+///   [`design_lumped_from`]; on `Err` an empty/not-realizable curve so the
+///   legend stays honest).
+/// - [`Response::Lowpass`] → one curve: the stepped-impedance ideal
+///   (the [`SteppedLowpassDesigned::sweep`] from [`design_stepped_from`]).
+/// - [`Response::Highpass`] → `[]` (no live technique realizes this yet).
+pub fn overlay_curves(spec: &FilterSpec) -> Vec<OverlayCurve> {
+    match spec.response {
+        Response::Bandpass | Response::Bandstop => {
+            // The coupled-resonator ideal is topology-independent (edge-coupled
+            // and hairpin synthesize the *same* response), so a single curve
+            // labelled as both — never two relabelled copies.
+            let coupled = design_demo_from(spec.clone(), Topology::EdgeCoupled);
+            let coupled_curve = OverlayCurve {
+                label: "Coupled-resonator (edge-coupled / hairpin) — ideal".to_string(),
+                sweep: coupled.sweep,
+                realizable: true,
+            };
+            // The lumped realized ladder is a genuinely distinct response
+            // (`ladder_s21`); an unrealizable ladder degrades to an empty,
+            // not-realizable curve (no polyline, but still named in the legend).
+            let lumped_curve = match design_lumped_from(spec.clone()) {
+                Ok(l) => OverlayCurve {
+                    label: "Lumped LC — realized ladder".to_string(),
+                    sweep: l.sweep,
+                    realizable: true,
+                },
+                Err(_) => OverlayCurve {
+                    label: "Lumped LC — realized ladder".to_string(),
+                    sweep: Vec::new(),
+                    realizable: false,
+                },
+            };
+            vec![coupled_curve, lumped_curve]
+        }
+        Response::Lowpass => {
+            let stepped = design_stepped_from(spec.clone());
+            vec![OverlayCurve {
+                label: "Stepped-impedance — ideal".to_string(),
+                sweep: stepped.sweep,
+                realizable: true,
+            }]
+        }
+        // No live technique realizes a high-pass response yet.
+        Response::Highpass => vec![],
+    }
+}
+
+/// The forbidden spec-mask regions for the Compare-panel overlay, matching the
+/// spec's response class so the shaded mask lines up with the overlaid
+/// responses: the band-pass [`mask_bands`] for band-pass/band-stop, the low-pass
+/// [`lowpass_mask_bands`] for low-pass, and none for high-pass (which has no
+/// live overlay). Mirrors how each per-flow Synthesis stage chooses its bands.
+pub fn overlay_mask_bands(spec: &FilterSpec) -> Vec<MaskBand> {
+    match spec.response {
+        Response::Bandpass | Response::Bandstop => mask_bands(spec),
+        Response::Lowpass => lowpass_mask_bands(spec),
+        Response::Highpass => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2042,5 +2141,102 @@ mod tests {
             assert_eq!(row.worst_return_loss_db, 0.0, "{t:?}: zeroed RL metric");
             assert_eq!(row.worst_stopband_rej_db, None, "{t:?}: no rejection");
         }
+    }
+
+    #[test]
+    fn overlay_curves_are_real_and_distinct() {
+        // `overlay_curves` must return the genuinely-distinct swept responses
+        // for the spec — real engine sweeps on the shared grid, NOT a constant
+        // or two relabelled copies of one curve. A constant / empty
+        // `overlay_curves` fails every assertion below.
+
+        // ---- (a) band-pass demo → coupled-resonator ideal + lumped realized -
+        let curves = overlay_curves(&demo_spec());
+        assert_eq!(
+            curves.len(),
+            2,
+            "band-pass overlays the coupled-resonator ideal + the lumped realized ladder"
+        );
+        let coupled = &curves[0];
+        let lumped = &curves[1];
+        assert!(coupled.realizable, "the synthesized ideal is realizable");
+        assert!(lumped.realizable, "the demo ladder is realizable");
+        // Honest labels: the distributed pair is ONE shared ideal curve naming
+        // both edge-coupled + hairpin; the lumped is a distinct realized curve.
+        assert!(
+            coupled.label.contains("edge-coupled") && coupled.label.contains("hairpin"),
+            "coupled-resonator curve names both edge-coupled + hairpin (got {:?})",
+            coupled.label
+        );
+        assert!(
+            lumped.label.contains("Lumped"),
+            "lumped curve is labelled lumped (got {:?})",
+            lumped.label
+        );
+
+        // Each curve's sweep is the corresponding design's REAL sweep (equality,
+        // not a synthetic copy).
+        let coupled_design = design_demo_from(demo_spec(), Topology::EdgeCoupled);
+        let lumped_design = design_lumped_from(demo_spec()).expect("demo ladder is realizable");
+        let s21s = |sw: &[SweepPoint]| sw.iter().map(|p| p.s21_db).collect::<Vec<_>>();
+        let fhzs = |sw: &[SweepPoint]| sw.iter().map(|p| p.f_hz).collect::<Vec<_>>();
+        assert_eq!(
+            s21s(&coupled.sweep),
+            s21s(&coupled_design.sweep),
+            "coupled curve == the distributed design's sweep"
+        );
+        assert_eq!(
+            s21s(&lumped.sweep),
+            s21s(&lumped_design.sweep),
+            "lumped curve == the lumped design's sweep"
+        );
+
+        // Both sweeps are on the SAME frequency grid (same length + matching f).
+        assert_eq!(
+            coupled.sweep.len(),
+            lumped.sweep.len(),
+            "both curves are on the same grid length"
+        );
+        assert_eq!(coupled.sweep.len(), SWEEP_POINTS);
+        assert_eq!(
+            fhzs(&coupled.sweep),
+            fhzs(&lumped.sweep),
+            "both curves share the sweep frequency grid"
+        );
+
+        // The two responses genuinely DIFFER (the whole point of the overlay):
+        // the lumped realized |S21| ≠ the coupled-resonator ideal at ≥1 point.
+        assert!(
+            coupled
+                .sweep
+                .iter()
+                .zip(lumped.sweep.iter())
+                .any(|(c, l)| (c.s21_db - l.s21_db).abs() > 1e-6),
+            "lumped realized |S21| differs from the coupled-resonator ideal somewhere"
+        );
+
+        // ---- (b) low-pass → exactly the stepped-impedance ideal -------------
+        let lp = overlay_curves(&stepped_demo_spec());
+        assert_eq!(lp.len(), 1, "low-pass overlays exactly the stepped ideal");
+        assert!(lp[0].realizable);
+        assert!(
+            lp[0].label.to_lowercase().contains("stepped"),
+            "low-pass curve is the stepped-impedance ideal (got {:?})",
+            lp[0].label
+        );
+        let stepped_design = design_stepped_from(stepped_demo_spec());
+        assert_eq!(
+            s21s(&lp[0].sweep),
+            s21s(&stepped_design.sweep),
+            "stepped curve == the stepped design's sweep"
+        );
+
+        // ---- (c) high-pass → no live technique ------------------------------
+        let mut hpf = demo_spec();
+        hpf.response = Response::Highpass;
+        assert!(
+            overlay_curves(&hpf).is_empty(),
+            "no live technique realizes a high-pass response yet"
+        );
     }
 }

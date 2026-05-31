@@ -19,9 +19,9 @@ use yee_filter::{
 
 use crate::engine::{
     BomView, Designed, LumpedDesigned, SteppedLowpassDesigned, TechniqueComparison, VerifyLevel,
-    YieldView, compare_techniques, verify_view,
+    YieldView, compare_techniques, overlay_curves, overlay_mask_bands, verify_view,
 };
-use crate::svg::{board_svg, lumped_board_svg, response_plot};
+use crate::svg::{OVERLAY_PALETTE, board_svg, lumped_board_svg, response_overlay, response_plot};
 
 /// The realization technique the downstream stages render for.
 ///
@@ -1165,6 +1165,28 @@ fn compare_panel(
     // into, so the matching Compare row can be marked.
     let recommended_topo = technique_topology(recommend_technique(&cur_spec).primary);
 
+    // ---- multi-technique response overlay (App.2.6, ADR-0143) -------------
+    // The genuinely-distinct swept |S21| responses for this spec (the
+    // distributed techniques share one ideal curve; the lumped realized ladder
+    // is a second), overlaid vs the spec mask. High-pass → no curves → no chart
+    // (the empty-rows note above already covers the "no live technique" case).
+    let overlay = overlay_curves(&cur_spec);
+    let overlay_bands = overlay_mask_bands(&cur_spec);
+    let overlay_svg = (!overlay.is_empty()).then(|| {
+        let tuples: Vec<(&str, &[crate::engine::SweepPoint], &str)> = overlay
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                (
+                    c.label.as_str(),
+                    c.sweep.as_slice(),
+                    OVERLAY_PALETTE[i % OVERLAY_PALETTE.len()],
+                )
+            })
+            .collect();
+        response_overlay(&tuples, &overlay_bands)
+    });
+
     rsx! {
         div { class: "card compare", style: "margin-top:18px",
             h2 { class: "card-title",
@@ -1199,6 +1221,47 @@ fn compare_panel(
                     tbody {
                         for row in rows.iter().copied() {
                             {compare_row(row, recommended_topo, topology, active, spec)}
+                        }
+                    }
+                }
+            }
+
+            // ---- response overlay (App.2.6, ADR-0143) -------------------
+            // The distinct swept |S21| responses for this spec, overlaid vs
+            // the mask: the coupled-resonator ideal (shared by edge-coupled +
+            // hairpin) and the lumped realized ladder for band-pass; the
+            // stepped ideal for low-pass. High-pass has no live curve, so the
+            // chart is omitted (the empty-rows note above already explains it).
+            if let Some(svg) = overlay_svg {
+                div { style: "margin-top:16px",
+                    h2 { class: "card-title",
+                        "Response overlay vs spec mask"
+                        span { class: "k", "|S21| per technique · real engine sweeps" }
+                    }
+                    p { class: "guided-lead",
+                        "The genuinely-distinct responses for this spec. Edge-coupled and "
+                        "hairpin share the same coupled-resonator synthesis — one ideal curve "
+                        "(they differ only physically, in the board sizes above). The lumped "
+                        "realized ladder is a separate curve. All vs the spec mask."
+                    }
+                    div { class: "plot", dangerous_inner_html: "{svg}" }
+                    div { class: "legend",
+                        for (i, curve) in overlay.iter().enumerate() {
+                            span { key: "{curve.label}",
+                                span {
+                                    class: "swatch",
+                                    style: "background:{OVERLAY_PALETTE[i % OVERLAY_PALETTE.len()]}",
+                                }
+                                if curve.realizable {
+                                    "{curve.label}"
+                                } else {
+                                    "{curve.label} (not realizable)"
+                                }
+                            }
+                        }
+                        span {
+                            span { class: "swatch", style: "background:#e35d6a" }
+                            "forbidden (mask)"
                         }
                     }
                 }
