@@ -53,6 +53,13 @@ pub enum Topology {
     /// verdict); only the realized geometry — short θ0 lines + loading caps — and
     /// the board differ. Routes through the distributed rail (same six stages).
     Combline,
+    /// Distributed **interdigital** (ADR-0150, F1.2.7 / F1.2.8): full `λg/4`
+    /// resonators short-circuited at **alternating** ends (no loading cap). Shares
+    /// the edge-coupled coupled-resonator **band-pass** synthesis (same coupling
+    /// matrix / response / verdict); only the realized geometry — full λg/4 lines
+    /// with alternating shorts, no SMD cap — and the board differ. Routes through
+    /// the distributed rail (same six stages).
+    Interdigital,
 }
 
 /// The product stages (the left rail order). Two stages —
@@ -112,7 +119,8 @@ impl Stage {
             Topology::EdgeCoupled
             | Topology::Hairpin
             | Topology::SteppedImpedance
-            | Topology::Combline => &Stage::DISTRIBUTED,
+            | Topology::Combline
+            | Topology::Interdigital => &Stage::DISTRIBUTED,
             Topology::LumpedLc => &Stage::LUMPED,
         }
     }
@@ -783,9 +791,9 @@ fn technique_status(t: RealizationTechnique) -> TechStatus {
         // Combline is live (ADR-0146): it routes through the real
         // `dimension_combline` / `dimension_combline_layout` engine.
         RealizationTechnique::Combline => TechStatus::Live(Topology::Combline),
-        // Interdigital is the last roadmapped coupled-resonator technique: the
-        // live edge-coupled flow is the nearest stand-in.
-        RealizationTechnique::Interdigital => TechStatus::Soon(Topology::EdgeCoupled),
+        // Interdigital is live (ADR-0150): it routes through the real
+        // `dimension_interdigital` / `dimension_interdigital_layout` engine.
+        RealizationTechnique::Interdigital => TechStatus::Live(Topology::Interdigital),
         // The stepped-impedance low-pass flow is live (ADR-0139): it routes
         // straight into the real F1.2.3 dimensioner + the low-pass response.
         RealizationTechnique::SteppedImpedance => TechStatus::Live(Topology::SteppedImpedance),
@@ -799,6 +807,14 @@ enum TechStatus {
     Live(Topology),
     /// Roadmapped; the recommendation is shown honestly and this [`Topology`]
     /// is offered as the nearest live stand-in.
+    ///
+    /// With App.2.8 (ADR-0150) lighting interdigital, the coupled-resonator
+    /// gallery is **complete** and no technique is currently `Soon` — but the
+    /// honest roadmap-recommendation rendering (the "soon" chip + nearest-live
+    /// stand-in offer, [`technique_status`] consumers) is retained for the next
+    /// roadmapped response class (e.g. high-pass). The variant is matched in
+    /// several render branches but momentarily unconstructed; keep it.
+    #[allow(dead_code)]
     Soon(Topology),
 }
 
@@ -810,6 +826,7 @@ fn topology_label(t: Topology) -> &'static str {
         Topology::LumpedLc => "Lumped LC",
         Topology::SteppedImpedance => "Stepped-impedance",
         Topology::Combline => "Combline",
+        Topology::Interdigital => "Interdigital",
     }
 }
 
@@ -831,9 +848,11 @@ fn response_word(r: Response) -> &'static str {
 fn topology_response(t: Topology) -> Response {
     match t {
         Topology::SteppedImpedance => Response::Lowpass,
-        Topology::EdgeCoupled | Topology::Hairpin | Topology::LumpedLc | Topology::Combline => {
-            Response::Bandpass
-        }
+        Topology::EdgeCoupled
+        | Topology::Hairpin
+        | Topology::LumpedLc
+        | Topology::Combline
+        | Topology::Interdigital => Response::Bandpass,
     }
 }
 
@@ -1398,9 +1417,9 @@ pub fn technique_stage(
         },
         TechCard {
             name: "Interdigital",
-            desc: "interleaved grounded fingers",
-            glyph: r##"<svg viewBox="0 0 120 54"><g stroke="#6b7480" stroke-width="4" fill="none"><path d="M16,44 L16,12"/><path d="M34,10 L34,42"/><path d="M52,44 L52,12"/><path d="M70,10 L70,42"/><path d="M88,44 L88,12"/></g></svg>"##,
-            selects: None,
+            desc: "λ/4 lines · alternating shorts · F1.2.7–F1.2.8",
+            glyph: r##"<svg viewBox="0 0 120 54"><g stroke="#2dd4bf" stroke-width="4" fill="none"><path d="M16,44 L16,12"/><path d="M34,10 L34,42"/><path d="M52,44 L52,12"/><path d="M70,10 L70,42"/><path d="M88,44 L88,12"/></g></svg>"##,
+            selects: Some(Topology::Interdigital),
         },
         TechCard {
             name: "Stepped-impedance",
@@ -1598,9 +1617,10 @@ pub fn export_stage(
     match topology() {
         Topology::LumpedLc => export_lumped(lumped),
         Topology::SteppedImpedance => export_stepped(stepped),
-        // Combline is distributed: it exports Gerber/KiCad from the same real
-        // `Layout` the board view draws, via the shared distributed export.
-        Topology::EdgeCoupled | Topology::Hairpin | Topology::Combline => {
+        // Combline and interdigital are distributed: they export Gerber/KiCad from
+        // the same real `Layout` the board view draws, via the shared distributed
+        // export.
+        Topology::EdgeCoupled | Topology::Hairpin | Topology::Combline | Topology::Interdigital => {
             export_distributed(designed)
         }
     }
