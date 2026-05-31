@@ -162,15 +162,22 @@ fn dim_interdigital_001_quarter_wave_resonance() {
     let z0 = spec.z0_ohm;
     let f0 = spec.f0_hz;
     let proj = synthesize(&spec);
-    let _dims = dimension_interdigital(&proj, &substrate())
+    let sub = substrate();
+    let dims = dimension_interdigital(&proj, &sub)
         .expect("N=5 coupled-resonator interdigital fixture should dimension without error");
 
-    // INDEPENDENT UNLOADED short-circuited-stub susceptance at θ = π/2:
-    //   B(f) = −(1/Z0)·cot((π/2)·f/f0)            (β(f)·L = (π/2)·(f/f0)).
-    // There is NO cap term (interdigital is the θ = π/2 limit of combline:
-    // cot(π/2) = 0 ⇒ B(f0) = 0 already). A wrong length / dispersion / sign moves
-    // the root off f0 or breaks the bracket sign-change.
-    let theta = FRAC_PI_2;
+    // INDEPENDENT UNLOADED short-circuited-stub susceptance:
+    //   B(f) = −(1/Z0)·cot(θ·f/f0)               (β(f)·L = θ·(f/f0)).
+    // θ is RECOVERED FROM THE ENGINE's resonator length — θ = β(f0)·L — so this
+    // gate consumes engine output: a wrong length drives θ off π/2 and moves the
+    // root off f0 (or breaks the bracket sign-change), rather than relying on a
+    // hardcoded π/2. For a correct engine L = (π/2)/β(f0) ⇒ θ = π/2, and there is
+    // NO cap term (interdigital is the θ = π/2 limit of combline: cot(π/2) = 0 ⇒
+    // B(f0) = 0 already). Gate 3 separately pins L to the closed form; this ties
+    // resonance to that same length via the stub admittance.
+    let e_eff = yee_layout::eps_eff(dims.line_width_m, sub.height_m, sub.eps_r);
+    let beta0 = 2.0 * PI * f0 * e_eff.sqrt() / 299_792_458.0_f64;
+    let theta = beta0 * dims.resonator_length_m;
     let b_of = |f: f64| {
         let arg = theta * f / f0;
         let cot = arg.cos() / arg.sin();
