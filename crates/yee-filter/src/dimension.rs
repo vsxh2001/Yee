@@ -45,8 +45,9 @@
 use serde::{Deserialize, Serialize};
 
 use yee_layout::{
-    EdgeCoupledParams, EdgeCoupledSection, HairpinParams, Layout, Substrate, coupled_microstrip,
-    coupling_coefficient, edge_coupled_bpf, eps_eff, hairpin_bpf, microstrip_width,
+    BBox, EdgeCoupledParams, EdgeCoupledSection, HairpinParams, Layout, Point2, Polygon, PortRef,
+    Substrate, coupled_microstrip, coupling_coefficient, edge_coupled_bpf, eps_eff, hairpin_bpf,
+    microstrip_width,
 };
 
 use crate::{FilterProject, Topology};
@@ -106,6 +107,10 @@ pub enum DimError {
         /// Largest realizable coupling (at the minimum bracket gap).
         k_max: f64,
     },
+    /// A stepped-impedance input was non-physical: the prototype order is `0`,
+    /// or the cut-off frequency / impedances (`f_c`, `Z₀`, `Z_high`, `Z_low`) are
+    /// not strictly positive. Carries a human-readable description.
+    NonPhysicalInput(&'static str),
 }
 
 impl std::fmt::Display for DimError {
@@ -130,6 +135,9 @@ impl std::fmt::Display for DimError {
                  [{GAP_MIN_M:.1e}, {GAP_MAX_M:.1e}] m; achievable coupling range is \
                  [{k_min:.6}, {k_max:.6}]"
             ),
+            DimError::NonPhysicalInput(why) => {
+                write!(f, "non-physical stepped-impedance input: {why}")
+            }
         }
     }
 }
@@ -489,4 +497,226 @@ pub fn dimension_hairpin_layout(
     };
 
     Ok(hairpin_bpf(&params))
+}
+
+// ---------------------------------------------------------------------------
+// Stepped-impedance low-pass (alternating high-Z / low-Z lines) — F1.2.3.
+// ---------------------------------------------------------------------------
+
+/// One transmission-line section of a stepped-impedance low-pass filter.
+///
+/// Each low-pass-prototype reactive element `g_k` (k = 1..N) becomes one short
+/// microstrip section, alternating shunt-capacitor (low-Z) / series-inductor
+/// (high-Z) **starting with a shunt capacitor (low-Z)**. All lengths in metres.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SteppedSection {
+    /// `true` for a series-inductor **high-Z** line (realizes an inductor);
+    /// `false` for a shunt-capacitor **low-Z** line (realizes a capacitor).
+    pub high_z: bool,
+    /// The section's characteristic impedance, ohms — `Z_high` when
+    /// [`high_z`](Self::high_z) is `true`, else `Z_low`.
+    pub z_ohm: f64,
+    /// Electrical length `βl` of the section, radians (Pozar §8.6:
+    /// `g_k·Z_low/Z₀` for a low-Z line, `g_k·Z₀/Z_high` for a high-Z line).
+    pub electrical_length_rad: f64,
+    /// Physical microstrip width for `z_ohm` (Hammerstad-Jensen), metres.
+    pub width_m: f64,
+    /// Physical section length `l = (βl / 2π)·λ_g` at the section width, metres.
+    pub length_m: f64,
+}
+
+/// First-order physical dimensions of a stepped-impedance low-pass microstrip
+/// filter, synthesized from a low-pass [`yee_synth::Prototype`].
+///
+/// The `sections` are in physical order, **source → load**, one per reactive
+/// prototype element `g_k` (k = 1..N), alternating low-Z / high-Z starting with
+/// a low-Z (shunt-capacitor) line. Mirrors [`EdgeCoupledDimensions`] /
+/// [`HairpinDimensions`] in shape.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SteppedImpedanceDimensions {
+    /// The line sections in order, source → load (length `N`).
+    pub sections: Vec<SteppedSection>,
+    /// Substrate relative permittivity `ε_r` (carried for the layout step).
+    pub eps_r: f64,
+    /// Substrate height `h`, metres (carried for the layout step).
+    pub h_m: f64,
+}
+
+/// Synthesize the alternating line sections of a **stepped-impedance low-pass
+/// filter** from a low-pass prototype and the line-impedance choices, on a
+/// [`Substrate`] (Filter Phase F1.2.3, Pozar §8.6).
+///
+/// Closed-form throughout, mirroring [`dimension_edge_coupled`]. For each
+/// reactive prototype element `g_k` (k = 1..N), one short microstrip line
+/// section is produced, alternating shunt-capacitor (low-Z) / series-inductor
+/// (high-Z) **starting with a shunt capacitor (low-Z)** — the standard low-pass
+/// prototype begins with a shunt element, so `sections[0].high_z == false`:
+///
+/// - **Shunt capacitor → low-Z line** (`z_low`): electrical length
+///   `βl = g_k · Z_low / Z₀`.
+/// - **Series inductor → high-Z line** (`z_high`): electrical length
+///   `βl = g_k · Z₀ / Z_high`.
+///
+/// (Derivation: a high-Z line of electrical length `βl` looks inductive with
+/// `L = (Z_high/ω)·βl`; matching the prototype inductance `L = g_k·Z₀/ω_c` at
+/// `ω = ω_c` gives `βl = g_k·Z₀/Z_high`. Dually for the capacitive low-Z line.)
+///
+/// Physical dimensions per section: the width is the Hammerstad-Jensen
+/// synthesis width for that section's impedance ([`yee_layout::microstrip_width`]);
+/// the guided wavelength is `λ_g = c / (f_c · √ε_eff)` with `ε_eff` from
+/// [`yee_layout::eps_eff`] at that section's width; the physical length is
+/// `l = (βl / 2π) · λ_g`.
+///
+/// # Errors
+///
+/// Returns [`DimError::NonPhysicalInput`] if the prototype order is `0` or if
+/// `f_c_hz`, `z0`, `z_high`, or `z_low` is not strictly positive.
+pub fn dimension_stepped_impedance(
+    proto: &yee_synth::Prototype,
+    f_c_hz: f64,
+    z0: f64,
+    z_high: f64,
+    z_low: f64,
+    sub: &Substrate,
+) -> Result<SteppedImpedanceDimensions, DimError> {
+    let n = proto.order();
+    if n == 0 {
+        return Err(DimError::NonPhysicalInput("prototype order N must be >= 1"));
+    }
+    if f_c_hz <= 0.0 {
+        return Err(DimError::NonPhysicalInput("f_c must be > 0"));
+    }
+    if z0 <= 0.0 || z_high <= 0.0 || z_low <= 0.0 {
+        return Err(DimError::NonPhysicalInput(
+            "Z0, Z_high and Z_low must all be > 0",
+        ));
+    }
+
+    let eps_r = sub.eps_r;
+    let h_m = sub.height_m;
+    // `proto.g` is `[g0, g1, …, gN, g_{N+1}]`; `g[1..=N]` are the reactive
+    // elements. Iterate those by `enumerate()` so the 1-based prototype index
+    // `k = idx + 1` drives the low-Z-first alternation.
+    let reactive = &proto.g[1..=n];
+
+    let mut sections = Vec::with_capacity(n);
+    for (idx, &g_k) in reactive.iter().enumerate() {
+        let k = idx + 1; // 1-based prototype element index.
+        // Section 1 (k = 1) is the shunt capacitor → low-Z; alternate from there.
+        let high_z = k % 2 == 0;
+
+        // Pozar §8.6 electrical length βl (radians).
+        let (z_ohm, electrical_length_rad) = if high_z {
+            // Series inductor → high-Z line: βl = g_k·Z₀/Z_high.
+            (z_high, g_k * z0 / z_high)
+        } else {
+            // Shunt capacitor → low-Z line: βl = g_k·Z_low/Z₀.
+            (z_low, g_k * z_low / z0)
+        };
+
+        // Physical width for this section's impedance (Hammerstad-Jensen).
+        let width_m = microstrip_width(z_ohm, eps_r, h_m);
+        // Guided wavelength at the section width: λ_g = c / (f_c·√ε_eff).
+        let e_eff = eps_eff(width_m, h_m, eps_r);
+        let lambda_g = C / (f_c_hz * e_eff.sqrt());
+        // Physical length: l = (βl / 2π)·λ_g.
+        let length_m = electrical_length_rad / (2.0 * std::f64::consts::PI) * lambda_g;
+
+        sections.push(SteppedSection {
+            high_z,
+            z_ohm,
+            electrical_length_rad,
+            width_m,
+            length_m,
+        });
+    }
+
+    Ok(SteppedImpedanceDimensions {
+        sections,
+        eps_r,
+        h_m,
+    })
+}
+
+/// Convenience: assemble a [`yee_layout::Layout`] placing the synthesized
+/// stepped-impedance sections **in-line** along `x`, source → load.
+///
+/// Each section is a width-`width_m` × length-`length_m` rectangle laid end to
+/// end along `x`, centred on the `y = 0` axis (so the abrupt width steps are
+/// symmetric about the line centre, as in a real stepped-impedance line). A
+/// `feed_length` feed stub of the `Z₀` synthesis width attaches at each end,
+/// with a `Z₀`-referenced [`yee_layout::PortRef`] at the two outer feed ends.
+///
+/// There is no dedicated in-line generator in `yee-layout` (the existing
+/// `edge_coupled_bpf` / `hairpin_bpf` generators lay strips offset in `y` with a
+/// single uniform width), so this composes the [`yee_layout`] primitives
+/// directly rather than inventing a new generator. The feed length is one `Z₀`
+/// guided quarter-wave at `f_c` (a neutral default); port → feed de-embedding is
+/// out of scope for this increment.
+///
+/// # Errors
+///
+/// Propagates every [`DimError`] from [`dimension_stepped_impedance`].
+pub fn dimension_stepped_impedance_layout(
+    proto: &yee_synth::Prototype,
+    f_c_hz: f64,
+    z0: f64,
+    z_high: f64,
+    z_low: f64,
+    sub: &Substrate,
+) -> Result<Layout, DimError> {
+    let dims = dimension_stepped_impedance(proto, f_c_hz, z0, z_high, z_low, sub)?;
+
+    // Z0 feed line: synthesis width, a quarter guided wavelength long (neutral).
+    let feed_width_m = microstrip_width(z0, sub.eps_r, sub.height_m);
+    let feed_e_eff = eps_eff(feed_width_m, sub.height_m, sub.eps_r);
+    let feed_length_m = C / (4.0 * f_c_hz * feed_e_eff.sqrt());
+
+    let mut traces: Vec<Polygon> = Vec::with_capacity(dims.sections.len() + 2);
+
+    // Input feed: extends leftward (−x) from the line start at x = 0.
+    traces.push(Polygon::rect(
+        -feed_length_m,
+        -feed_width_m / 2.0,
+        feed_length_m,
+        feed_width_m,
+    ));
+    let in_port = PortRef {
+        at: Point2::new(-feed_length_m, 0.0),
+        width_m: feed_width_m,
+        ref_impedance_ohm: z0,
+    };
+
+    // Lay the sections in-line along +x, each centred on y = 0.
+    let mut x = 0.0_f64;
+    for sec in &dims.sections {
+        traces.push(Polygon::rect(
+            x,
+            -sec.width_m / 2.0,
+            sec.length_m,
+            sec.width_m,
+        ));
+        x += sec.length_m;
+    }
+
+    // Output feed: extends rightward (+x) from the line end at x.
+    traces.push(Polygon::rect(
+        x,
+        -feed_width_m / 2.0,
+        feed_length_m,
+        feed_width_m,
+    ));
+    let out_port = PortRef {
+        at: Point2::new(x + feed_length_m, 0.0),
+        width_m: feed_width_m,
+        ref_impedance_ohm: z0,
+    };
+
+    let bbox = BBox::from_polygons(&traces);
+    Ok(Layout {
+        substrate: *sub,
+        traces,
+        ports: vec![in_port, out_port],
+        bbox,
+    })
 }
