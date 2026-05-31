@@ -130,8 +130,9 @@ pub struct Designed {
     pub mask_bands: Vec<MaskBand>,
     /// The real spec-mask verdict.
     pub report: MaskReport,
-    /// The dimensioned edge-coupled board layout, or `None` when the coupling
-    /// is not realizable on FR-4 (see [`dim_error`](Designed::dim_error)).
+    /// The dimensioned board layout for the active distributed [`topology`]
+    /// (edge-coupled or hairpin), or `None` when the coupling is not realizable
+    /// on FR-4 (see [`dim_error`](Designed::dim_error)).
     pub layout: Option<Layout>,
     /// Per-resonator realized geometry + electricals (empty when geometry is
     /// not realizable).
@@ -141,9 +142,9 @@ pub struct Designed {
     pub line_eps_eff: f64,
     /// Board bounding box, mm (`(width, height)`); `(0, 0)` when not realizable.
     pub board_size_mm: (f64, f64),
-    /// The edge-coupled dimensioning error string when the coupling could not
-    /// be realized on FR-4, else `None`. The synthesis / response / verdict
-    /// stay real even when this is `Some`.
+    /// The distributed dimensioning error string (for the active [`topology`])
+    /// when the coupling could not be realized on FR-4, else `None`. The
+    /// synthesis / response / verdict stay real even when this is `Some`.
     pub dim_error: Option<String>,
 }
 

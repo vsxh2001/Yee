@@ -472,6 +472,9 @@ pub fn spec_stage(
     // flow surfaces a dim_error. Show both honestly.
     let lumped_ok = lumped.read().is_some();
     let dist_dim_err = d.dim_error.clone();
+    // Label the distributed-geometry note with the active technique so a hairpin
+    // error never reads as "Edge-coupled geometry note".
+    let dist_topo = d.topology_name();
 
     rsx! {
         div { class: "canvas-head",
@@ -584,7 +587,7 @@ pub fn spec_stage(
                 }
                 if let Some(err) = dist_dim_err {
                     div { class: "note honest",
-                        "Edge-coupled geometry note: " span { class: "mono", "{err}" }
+                        "{dist_topo} geometry note: " span { class: "mono", "{err}" }
                         " — the Lumped LC technique may still realize this spec."
                     }
                 } else {
