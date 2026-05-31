@@ -80,6 +80,12 @@ pub use parts::{Bom, BomLine, CompKind, ESeries, select_components};
 pub mod board;
 pub use board::{BranchKind, Footprint, LumpedBoard, PadSpec, Placement, lumped_board};
 
+/// Guided technique-recommender (App.2.0, ADR-0136): a deterministic decision
+/// tree mapping a [`FilterSpec`] to a recommended physical realization
+/// technique with a plain-language rationale + ranked alternatives.
+pub mod recommend;
+pub use recommend::{RealizationTechnique, TechniqueRecommendation, recommend_technique};
+
 pub use yee_synth::Approximation;
 use yee_synth::{Prototype, coupling_design, lowpass_to_bandpass, min_order, prototype};
 
