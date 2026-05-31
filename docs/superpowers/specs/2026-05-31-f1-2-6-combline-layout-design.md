@@ -52,10 +52,11 @@ build the layout for the demo combline (order-5 band-pass, θ0=45°) and assert:
    tight tolerance.
 2. The resonators are laid out with the **solved per-section gaps**: consecutive
    resonator-line x-positions differ by `line_width_m + gaps_m[i]` (centre-to-centre),
-   monotonically increasing — proving the layout consumes the real solved gaps, not a
-   uniform placeholder. (If a uniform representative gap is used for a single-gap
-   generator, document it like hairpin's `dimension_hairpin_layout` and assert against
-   the mean — but prefer per-section here since we compose primitives directly.)
+   asserted against `dimension_combline`'s own `gaps_m` — proving the layout consumes the
+   real solved gaps, not a uniform placeholder. NB the pitches are **symmetric** about
+   the centre (not monotone): the demo Chebyshev coupling is symmetric
+   (M₁₂=M₄₅, M₂₃=M₃₄ → gaps `[g0, g1, g1, g0]`), so the gate asserts mirror symmetry +
+   not-all-equal (a uniform placeholder fails).
 3. Exactly 2 `ports` (in/out feeds), ref impedance = spec `z0`; `bbox` width + height
    positive and finite; all trace rects have positive extent.
 4. `cargo test -p yee-filter` green; `cargo clippy -p yee-filter --all-targets -- -D
