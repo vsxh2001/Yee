@@ -2,7 +2,8 @@
 //!
 //! Almost every stage is **real** (driven by the live [`crate::engine`]):
 //! [`spec_stage`] (a live editable form), [`technique_stage`] (the topology
-//! gallery — Edge-coupled + Lumped LC live, the rest honest "Soon"),
+//! gallery — all six realizations live: edge-coupled, hairpin, combline,
+//! interdigital, lumped-LC, and stepped-impedance),
 //! [`synthesis_stage`] / [`layout_stage`] (distributed), the lumped quartet
 //! ([`lumped_synthesis_stage`], [`lumped_components_stage`],
 //! [`lumped_tolerance_stage`], [`lumped_layout_stage`]), [`export_stage`]
@@ -762,8 +763,11 @@ fn set_stopband(spec: &mut Signal<yee_filter::FilterSpec>, f_hz: Option<f64>, re
     w.mask.stopband = vec![(f_hz.unwrap_or(cur_f), rej_db.unwrap_or(cur_r))];
 }
 
-/// One Technique gallery card's static descriptor (the topology it selects, or
-/// `None` for the greyed roadmap placeholders).
+/// One Technique gallery card's static descriptor (the topology it selects).
+///
+/// The gallery is complete — every current card is live and selects a
+/// [`Topology`] — so the `selects: None` (greyed "Soon") path is unused today;
+/// it is retained for the next roadmapped technique.
 struct TechCard {
     /// Display name.
     name: &'static str,
@@ -771,7 +775,9 @@ struct TechCard {
     desc: &'static str,
     /// Inline `<svg>` glyph body.
     glyph: &'static str,
-    /// The topology this card selects when live (`None` → greyed "Soon").
+    /// The topology this card selects when live. `None` would grey the card as
+    /// "Soon"; every current card is live, so `None` is reserved for the next
+    /// roadmapped technique.
     selects: Option<Topology>,
 }
 
@@ -779,10 +785,10 @@ struct TechCard {
 /// ("live"), and — when not — the nearest live technique to fall back to.
 ///
 /// This is the **UI-side** live/Soon knowledge (the `yee-filter` engine stays
-/// pure-domain). Edge-coupled and Lumped LC are the two live flows
-/// ([`Topology`]); the four distributed-resonator techniques are roadmap
-/// placeholders whose nearest live realization is the one whose flow can stand
-/// in (edge-coupled for the distributed resonators).
+/// pure-domain). All six realizations are live ([`Topology`]): edge-coupled,
+/// hairpin, combline, interdigital, lumped-LC, and stepped-impedance. The
+/// `Soon` arm + nearest-live stand-in logic is retained for the next
+/// roadmapped technique but is currently unexercised.
 fn technique_status(t: RealizationTechnique) -> TechStatus {
     match t {
         RealizationTechnique::EdgeCoupled => TechStatus::Live(Topology::EdgeCoupled),
@@ -905,10 +911,10 @@ fn seed_spec_from_form(
 /// gallery — the studio's dual-UI entry. A small form (response, centre/cutoff
 /// frequency, fractional bandwidth, optional stopband target) drives the pure
 /// [`recommend_technique`] engine; the result block highlights the primary
-/// technique, shows the rationale, and lists ranked alternatives. **Live**
-/// techniques (edge-coupled, lumped) get a "Use this" that seeds the spec and
-/// routes into the flow; **Soon** techniques are labelled honestly and offer the
-/// nearest live alternative to proceed with.
+/// technique, shows the rationale, and lists ranked alternatives. Every current
+/// technique is **Live** and gets a "Use this" that seeds the spec and routes
+/// into the flow; the **Soon** path (labelled honestly, offering the nearest
+/// live alternative) is retained for the next roadmapped technique.
 #[component]
 fn guided_panel(
     topology: Signal<Topology>,
@@ -1087,8 +1093,8 @@ fn render_recommendation(
                 }
                 p { class: "rec-rationale", "{r.rationale}" }
                 // The studio has two live synthesis domains: the coupled-resonator
-                // band-pass flow (edge-coupled / hairpin / lumped) and the
-                // stepped-impedance LOW-PASS flow (ADR-0139). A Live technique
+                // band-pass flow (edge-coupled / hairpin / combline / interdigital
+                // / lumped) and the stepped-impedance LOW-PASS flow (ADR-0139). A Live technique
                 // routes when its flow builds the recommended response — band-pass
                 // for the resonator flows, low-pass for stepped-impedance.
                 // High-pass / band-stop have no live flow yet, so the
@@ -1382,9 +1388,11 @@ fn compare_row(
 /// Technique stage: a **guided** recommender panel atop the **expert** topology
 /// gallery (the dual-UI entry, App.2.0), with a **Compare** panel (App.2.5) below
 /// that synthesizes every live technique for the current spec side-by-side.
-/// **Edge-coupled** and **Lumped LC** are live and selectable (clicking a live
-/// card routes the downstream stages via `topology`); the rest stay greyed
-/// "Soon". The currently selected topology is highlighted.
+/// All six techniques are live and selectable (clicking a live card routes the
+/// downstream stages via `topology`): edge-coupled, hairpin, combline,
+/// interdigital, lumped-LC, and stepped-impedance. The greyed "Soon" rendering
+/// is retained for the next roadmapped technique. The currently selected
+/// topology is highlighted.
 pub fn technique_stage(
     mut topology: Signal<Topology>,
     mut active: Signal<Stage>,
@@ -1432,7 +1440,7 @@ pub fn technique_stage(
     rsx! {
         div { class: "canvas-head",
             h1 { "Technique" }
-            p { class: "sub", "Two ways in: the guided recommender (tell it the requirement, it picks a topology) or the expert gallery below. Each topology realizes the same prototype differently — Edge-coupled (distributed) and Lumped LC (discrete parts + BOM + tolerance) are live; the rest are roadmap placeholders." }
+            p { class: "sub", "Two ways in: the guided recommender (tell it the requirement, it picks a topology) or the expert gallery below. Each topology realizes the same prototype differently. All six realizations are live: edge-coupled, hairpin, combline, and interdigital (distributed band-pass), lumped-LC (discrete parts + BOM + tolerance), and stepped-impedance (low-pass). Pick via the guided recommender or the expert gallery." }
         }
 
         // ---- guided dual-UI entry (App.2.0) -------------------------------
