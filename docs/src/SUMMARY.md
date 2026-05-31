@@ -184,3 +184,4 @@
 - [ADR-0138: App.2.1 — light the Hairpin technique in the studio](decisions/0138-app-2-1-studio-hairpin.md)
 - [ADR-0139: App.2.2 — low-pass stepped-impedance flow in the studio](decisions/0139-app-2-2-studio-lowpass-stepped.md)
 - [ADR-0140: App.2.3 — TopBar shows the active flow's verdict](decisions/0140-app-2-3-topbar-active-flow-verdict.md)
+- [ADR-0141: App.2.4 — honest Verify stage](decisions/0141-app-2-4-honest-verify-stage.md)
