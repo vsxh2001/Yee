@@ -1,25 +1,29 @@
 //! Closed-form microstrip dimensional synthesis (Filter Phases F1.2.0 / F1.2.2 /
-//! F1.2.3 / F1.2.5).
+//! F1.2.3 / F1.2.5 / F1.2.7 / F1.2.8).
 //!
 //! Turns an abstract synthesized [`crate::CouplingMatrix`] (or low-pass
-//! prototype) into **physical microstrip dimensions** for three coupled-resonator
+//! prototype) into **physical microstrip dimensions** for four coupled-resonator
 //! band-pass topologies — the edge-coupled half-wave filter
 //! ([`dimension_edge_coupled`], F1.2.0), the U-folded **hairpin** filter
-//! ([`dimension_hairpin`], F1.2.2), and the capacitively-loaded **combline**
-//! filter ([`dimension_combline`], F1.2.5) — plus the **stepped-impedance**
+//! ([`dimension_hairpin`], F1.2.2), the capacitively-loaded **combline**
+//! filter ([`dimension_combline`], F1.2.5), and the **interdigital** filter
+//! ([`dimension_interdigital`], F1.2.7; board [`dimension_interdigital_layout`],
+//! F1.2.8) — plus the **stepped-impedance**
 //! low-pass ([`dimension_stepped_impedance`], F1.2.3), by inverting the
 //! already-validated `yee-layout` closed-form models. Pure `f64`, WASM-safe, NO
 //! FDTD, NO surrogate — this is the *initial* dimensioning that seeds the later
 //! EM-in-the-loop refinement (F1.2.1).
 //!
-//! The three coupled-resonator band-pass topologies share the **same
+//! The four coupled-resonator band-pass topologies share the **same
 //! inter-resonator coupling mechanism**: adjacent resonators couple through the
 //! edge gap between their lines — the edge-coupled gap→`k` inversion. They
 //! therefore reuse the identical [`solve_gap`] bisection and the
 //! `target_k = FBW · m_{i,i+1}` derivation below; only the resonator geometry
 //! differs — a straight λ/2 strip (edge-coupled), a folded half-wave = two ≈λ/4
-//! arms (hairpin, see [`dimension_hairpin`]), or a short-circuited θ0 < π/2 line
-//! capacitively loaded to resonance (combline, see [`dimension_combline`]).
+//! arms (hairpin, see [`dimension_hairpin`]), a short-circuited θ0 < π/2 line
+//! capacitively loaded to resonance (combline, see [`dimension_combline`]), or a
+//! full λ/4 line short-circuited at *alternating* ends with no cap (interdigital,
+//! the θ = π/2 limit of combline, see [`dimension_interdigital`]).
 //!
 //! # Method (Hong & Lancaster ch. 8 / Pozar §8.7)
 //!
