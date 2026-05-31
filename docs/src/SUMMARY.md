@@ -187,3 +187,4 @@
 - [ADR-0141: App.2.4 — honest Verify stage](decisions/0141-app-2-4-honest-verify-stage.md)
 - [ADR-0142: App.2.5 — compare techniques side-by-side](decisions/0142-app-2-5-compare-techniques.md)
 - [ADR-0143: App.2.6 — multi-technique response overlay](decisions/0143-app-2-6-response-overlay.md)
+- [ADR-0144: Filter F1.2.5 — combline dimensional synthesis](decisions/0144-f1-2-5-combline-synthesis.md)
