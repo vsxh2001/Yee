@@ -7,16 +7,12 @@ license      = { workspace = true }
 repository   = { workspace = true }
 description  = "Yee Filter Studio — egui-free StudioState logic layer (eframe view retired; App.D.2, ADR-0130)."
 
-[[bin]]
-name = "yee-studio"
-path = "src/main.rs"
-
 # The eframe/egui desktop+web view was retired in App.D.2 (ADR-0130): the
-# pure-Rust Dioxus `yee-studio-web` is now THE studio. This crate keeps only the
-# egui-free, WASM-safe `StudioState` logic layer (spec → synthesis → response →
-# mask verdict → dimensioning), so the headless pipeline + its tests survive and
-# remain reusable. There is no longer a windowing feature; the `[[bin]]` is a
-# no-GUI stub that points users at the Dioxus studio.
+# pure-Rust Dioxus `yee-studio-web` is now THE studio. This crate is a pure
+# library that keeps only the egui-free, WASM-safe `StudioState` logic layer
+# (spec → synthesis → response → mask verdict → dimensioning), so the headless
+# pipeline + its tests survive and remain reusable. The former no-GUI `[[bin]]`
+# stub was retired alongside the eframe view (ADR-0130 P2).
 
 [dependencies]
 yee-synth  = { workspace = true }
