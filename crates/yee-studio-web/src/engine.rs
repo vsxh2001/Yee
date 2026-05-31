@@ -115,7 +115,7 @@ pub struct ResonatorRow {
 /// Everything the POC's two real stages render — all from the live engine.
 pub struct Designed {
     /// The distributed realization the geometry was dimensioned for
-    /// (edge-coupled vs hairpin). Drives the topology-aware Layout / Export
+    /// (edge-coupled, hairpin, or combline). Drives the topology-aware Layout / Export
     /// labels; the synthesis / response / verdict fields are independent of it.
     pub topology: Topology,
     /// The hard-coded demo spec.
@@ -133,7 +133,7 @@ pub struct Designed {
     /// The real spec-mask verdict.
     pub report: MaskReport,
     /// The dimensioned board layout for the active distributed [`topology`]
-    /// (edge-coupled or hairpin), or `None` when the coupling is not realizable
+    /// (edge-coupled, hairpin, or combline), or `None` when the coupling is not realizable
     /// on FR-4 (see [`dim_error`](Designed::dim_error)).
     pub layout: Option<Layout>,
     /// Per-resonator realized geometry + electricals (empty when geometry is
@@ -210,8 +210,8 @@ pub fn design_demo() -> Designed {
 /// the per-resonator even/odd electricals from the solved gaps. Every value is
 /// real engine output.
 ///
-/// The synthesis / response / mask verdict are **topology-independent** (a
-/// hairpin and an edge-coupled filter realize the *same* coupled-resonator
+/// The synthesis / response / mask verdict are **topology-independent**
+/// (edge-coupled, hairpin, and combline all realize the *same* coupled-resonator
 /// band-pass prototype); only the geometry-derived fields differ. `topology`
 /// selects the dimensioner: [`Topology::EdgeCoupled`] →
 /// [`dimension_edge_coupled`], [`Topology::Hairpin`] → [`dimension_hairpin`].
@@ -1353,10 +1353,10 @@ pub struct TechniqueComparison {
 /// synchronous) designs per call is intentional — the studio re-derives live.
 ///
 /// Keyed on [`FilterSpec::response`]:
-/// - [`Response::Bandpass`] / [`Response::Bandstop`] → three rows:
-///   [`RealizationTechnique::EdgeCoupled`] and
-///   [`RealizationTechnique::Hairpin`] (via [`design_demo_from`]; metrics from
-///   [`Designed::report`], `realizable = layout.is_some()`), and
+/// - [`Response::Bandpass`] / [`Response::Bandstop`] → four rows:
+///   [`RealizationTechnique::EdgeCoupled`], [`RealizationTechnique::Hairpin`],
+///   and [`RealizationTechnique::Combline`] (via [`design_demo_from`]; metrics
+///   from [`Designed::report`], `realizable = layout.is_some()`), and
 ///   [`RealizationTechnique::LumpedLc`] (via [`design_lumped_from`]; metrics from
 ///   [`LumpedDesigned::verdict`] on `Ok`, `realizable = false` with zeroed
 ///   metrics on `Err`).
@@ -1513,7 +1513,8 @@ pub struct OverlayCurve {
 /// Keyed on [`FilterSpec::response`]:
 /// - [`Response::Bandpass`] / [`Response::Bandstop`] → two curves: the
 ///   coupled-resonator ideal (the [`Designed::sweep`] from
-///   [`design_demo_from`], labelled as edge-coupled / hairpin; always
+///   [`design_demo_from`], labelled as edge-coupled / hairpin / combline — they
+///   share the same coupling matrix → identical ideal `|S21|`; always
 ///   realizable — it is the synthesized response) and the lumped realized
 ///   ladder (the [`LumpedDesigned::sweep`] = `ladder_s21` from
 ///   [`design_lumped_from`]; on `Err` an empty/not-realizable curve so the
@@ -1524,12 +1525,12 @@ pub struct OverlayCurve {
 pub fn overlay_curves(spec: &FilterSpec) -> Vec<OverlayCurve> {
     match spec.response {
         Response::Bandpass | Response::Bandstop => {
-            // The coupled-resonator ideal is topology-independent (edge-coupled
-            // and hairpin synthesize the *same* response), so a single curve
-            // labelled as both — never two relabelled copies.
+            // The coupled-resonator ideal is topology-independent (edge-coupled,
+            // hairpin, and combline synthesize the *same* response), so a single
+            // curve labelled as all three — never relabelled copies.
             let coupled = design_demo_from(spec.clone(), Topology::EdgeCoupled);
             let coupled_curve = OverlayCurve {
-                label: "Coupled-resonator (edge-coupled / hairpin) — ideal".to_string(),
+                label: "Coupled-resonator (edge-coupled / hairpin / combline) — ideal".to_string(),
                 sweep: coupled.sweep,
                 realizable: true,
             };
@@ -2320,10 +2321,13 @@ mod tests {
         let lumped = &curves[1];
         assert!(coupled.realizable, "the synthesized ideal is realizable");
         assert!(lumped.realizable, "the demo ladder is realizable");
-        // Honest labels: the distributed pair is ONE shared ideal curve naming
-        // both edge-coupled + hairpin; the lumped is a distinct realized curve.
+        // Honest labels: the distributed techniques are ONE shared ideal curve
+        // naming edge-coupled + hairpin + combline (they share the coupled-
+        // resonator synthesis); the lumped is a distinct realized curve.
         assert!(
-            coupled.label.contains("edge-coupled") && coupled.label.contains("hairpin"),
+            coupled.label.contains("edge-coupled")
+                && coupled.label.contains("hairpin")
+                && coupled.label.contains("combline"),
             "coupled-resonator curve names both edge-coupled + hairpin (got {:?})",
             coupled.label
         );
