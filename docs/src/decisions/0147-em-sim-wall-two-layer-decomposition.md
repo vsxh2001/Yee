@@ -54,11 +54,15 @@ team's central, oracle-validated output:
     L,C through the same machinery reproduces the analytic curve *including* the asymmetry
     (analytic 5.51 dB low-side-deeper @1.6 vs 2.4 GHz; ladder 5.9 dB, within 0.4 dB). The
     3-D analog = proper distributed coupled-line synthesis.
-  - **L2b — aperture-port co-location:** clustered single-cell aperture ports degenerate to
-    one lumped short → flat 0.04, *no* band-pass at all (ADR-0125, "fundamental to the
+  - **L2b — aperture-port co-location:** clustered single-x-column aperture ports degenerate
+    to a frequency-flat block → no band-pass at all (ADR-0125, "fundamental to the
     single-cell formulation"). The genuinely hard one — needs the **multi-cell aperture
     port** (the deferred F2.3 brick, ADR-0124/0125 "genuinely required", sketched but never
-    built; unproven, multi-increment).
+    built). **NOW EXPERIMENTALLY CONFIRMED** (see "Decisive experiment" below): with the
+    cavity removed (cfspml's matched box) *and* the correct L,C, the filter still floors to a
+    flat ~−35 dB shelf (0.5 dB contrast vs ~40 dB) — skeptic-validated, non-circular. So the
+    multi-cell port is no longer "unproven-necessary" but **proven-necessary** for the lumped
+    path; it remains a multi-increment build.
 
   The two are independent; a 3-D break must close **both**. Neither is the ADR-0064 wall.
 
@@ -103,9 +107,9 @@ team's central, oracle-validated output:
    residual cavity. So a **stable + cavity-free + matched microstrip box EXISTS** — this
    **contradicts ADR-0133's premise** (high-Q-CW ⊥ stable-cavity-free-box) for the *box
    half*, and the fix is small (√εr-σ + ~24 PML cells). STANDING LIMIT: demonstrated for a
-   **bare line / single tank**, not the filter — the filter-in-matched-box |S21| was the
-   identified decisive next test but was **not run/validated this session** (lost to a
-   teammate-shutdown race), so no end-to-end break is *claimed* here.
+   **bare line**, not the filter — and the filter-in-matched-box test was subsequently
+   **run + skeptic-validated** (see "Decisive experiment" below): it **floored at L2b**, so
+   cavity-removal alone does **not** yield the filter on the single-cell-port lumped path.
 4. **In-FDTD TRL (`trl`) — FAIL as a break, but the BEST DIAGNOSTIC.** TRL algebra correct
    + non-circular (verified: `calibrate()` never sees `ladder_s21`); cavity over-unity
    reproduced (|S21|_thru = 1.14–1.29 at the box mode). FAIL end-to-end: a *known* lossless
@@ -128,21 +132,31 @@ team's central, oracle-validated output:
 **extract-in-post** (matrix-pencil, Q-insensitive). Both still need the Layer-2 filter
 realization to read the analytic curve end-to-end.
 
-**Cheapest decisive near-term test (newly enabled, ~1 FDTD run — recommended first):** drop
-`synthesize_lumped`'s exact L,C tanks (correct components → **sidesteps L2a** by
-construction) into `cfspml`'s matched √εr-σ box via `yee-voxel::simulate_lumped_board`, and
-read |S21| vs the locked `ladder_s21` *including the geometric-asymmetry gate* (1.6 GHz
-deeper than 2.4 GHz). This isolates the **last unknown**: does the production `LumpedRlcPort`
-realize the band-pass, or does it floor like trl's aperture-coupled DUT (**L2b**)? GO →
-end-to-end break on the lumped path; NO-GO → L2b confirmed as the sole remaining blocker
-even with a perfect box + perfect components. **Requires a skeptic validator** (the original
-`oracle`'s gate; the locked reference + grading tooling are preserved in
-`crates/yee-filter/examples/oracle_reference.rs` / `oracle_grade.rs`).
+**Decisive experiment — RUN + skeptic-validated (the headline result):** the cheapest test
+the through-line enabled was run — drop `synthesize_lumped`'s exact L,C tanks (correct
+components → **sidesteps L2a** by construction) as `LumpedRlcPort::aperture` ports (placement
+byte-identical to `simulate_lumped_board`'s `ElementRecipe`) into `cfspml`'s matched √εr-σ box
+and read |S21| via two forward field probes (non-circular: |S21| is an FDTD field-probe DFT
+ratio, the ladder enters only via `correct_e_aperture`), graded vs the locked `ladder_s21`
+(`crates/yee-voxel/examples/filter_in_matched_box.rs`, spike, not merged). **Result: the
+filter FLOORS.** THRU is flat (1.74 dB ripple, no over-unity — the matched box is sound), but
+the filter |S21| is a **flat ~−35 dB shelf**, in-band-vs-stopband contrast **0.5 dB** vs the
+~40 dB of the analytic band-pass (`oracle_grade`: in-band error ~34–36 dB ≫ 2 dB tol). A
+**fresh skeptic validator** attacked it on six fronts and could not break it: the *raw*
+(pre-normalization) |DUT| is a flat shelf **deepest at band-center** — there is no resonance
+for the normalization to divide out, so it is genuinely not a band-pass; placement is 3
+*distinct* columns with the correct (y,z) aperture face; reproduced bit-for-bit. **This is
+the L2b signature directly measured:** the single-x-column aperture port loads hard but can
+only shunt line-to-ground regardless of nominal Series/Shunt branch, so it cannot synthesize
+selectivity. **Conclusion: with the cavity removed AND the correct L,C, the lumped path still
+does not realize the filter — L2b is the wall, and the multi-cell aperture port is REQUIRED**
+(not merely "deferred/unproven" as stated above — now experimentally confirmed). This matches
+ADR-0125 and trl's independent flat-0.04.
 
-**Larger fallback (if L2b floors):** the **multi-cell aperture port** (the deferred,
-unproven, multi-increment F2.3 brick) + a g-scaled *distributed* coupled-line realization
-(the 3-D analog of L2a) + a cavity-kill — graded vs the locked curve. Multi-week; L2b is
-the long pole.
+**What remains (maintainer-funded, multi-week):** the **multi-cell aperture port** (the
+deferred F2.3 brick) — now the *proven-necessary* next brick for the lumped path — paired
+with a cavity-kill (cfspml's matched box, demonstrated) + the correct L,C (the rest is in
+place). OR the FEM driven-sweep path. Both multi-week.
 
 **Long-term (the blocker-free path):** the FEM driven-sweep (`femmor`'s scoping above) —
 the only direction with no unsolved physics; ~2–3 weeks + the solver-scaling decision
@@ -154,15 +168,17 @@ reusable advance (it defeats the cavity-Q→∞ regime that no CW de-embed survi
 productionizing as a reusable extraction tool in `yee-fdtd` independent of the Layer-2 fix.
 `cfspml`'s stable √εr substrate line-termination is a real component for that work.
 
-**Sequencing:** run the cheap matched-box + correct-L,C test *first* (≈1 FDTD run + a fresh
-validator) — it either yields an end-to-end break on the lumped path or pins L2b as the sole
-remaining blocker. Only if L2b floors does the **multi-week, maintainer-funded fork** open
-(multi-cell-port + distributed realization, or the FEM driven-sweep). The studio Verify
-stage stays honestly circuit-level until an EM path is validated. **No EM result was merged;
-nothing was faked; the oracle rejected every match-by-construction** (the ODE-ladder
-tautology, the wrong-test FEM number). The cfspml THRU cavity-removal upgrade recorded above
-*was* oracle-validated; the filter-in-box |S21| was **not** run/validated this session and
-is **not** claimed as a break.
+**Sequencing — settled:** the cheap matched-box + correct-L,C test has now been run and
+skeptic-validated (above), and it **floored at L2b**. So the lumped path's remaining work is
+unambiguous: the **multi-week, maintainer-funded fork** (the proven-necessary multi-cell
+aperture port + a cavity-kill, OR the FEM driven-sweep). There is no cheaper precursor left.
+The studio Verify stage stays honestly circuit-level until an EM path is validated. **No EM
+result was merged;
+nothing was faked; the oracle / fresh skeptic-validator rejected every match-by-construction**
+(the ODE-ladder tautology, the wrong-test FEM number) and attacked the filter-in-box NO-GO on
+six fronts without breaking it. The cfspml THRU cavity-removal upgrade *and* the
+filter-in-box L2b floor were both validated; **no end-to-end break was found** — the lumped
+path is blocked at L2b, and the path forward is the proven-necessary multi-cell port (or FEM).
 
 ---
 
@@ -172,3 +188,8 @@ is **not** claimed as a break.
 - `crates/yee-voxel/src/lumped_sim.rs` (`simulate_lumped_board`); `crates/yee-fdtd`
   (CPML); `crates/yee-fem` (driven sweep + wave ports); `crates/yee-filter`
   (`ladder_s21`). ADR-0133/0134/0124/0125/0108/0064/0070.
+- Decisive experiment (spike, not merged): `crates/yee-voxel/examples/filter_in_matched_box.rs`
+  (branch `feature/emwall-filter-matched-box`, commit `192b3ee`) — runner + fresh-validator
+  reproduction; cfspml's matched box `crates/yee-voxel/examples/cfs_pml_substrate_spike.rs`
+  (branch `worktree-oracle-validation`); locked-reference grading
+  `crates/yee-filter/examples/{oracle_reference.rs,oracle_grade.rs}`.
