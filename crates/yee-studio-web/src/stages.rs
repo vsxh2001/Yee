@@ -715,6 +715,17 @@ fn topology_label(t: Topology) -> &'static str {
     }
 }
 
+/// Plain-language word for a [`Response`] class (used in the honest note when
+/// the recommendation is for a response the live synthesis flow cannot yet build).
+fn response_word(r: Response) -> &'static str {
+    match r {
+        Response::Lowpass => "low-pass",
+        Response::Highpass => "high-pass",
+        Response::Bandpass => "band-pass",
+        Response::Bandstop => "band-stop",
+    }
+}
+
 /// Route into a topology's flow: set the topology signal and land on Spec (so
 /// the user can review / refine the seeded spec before synthesizing).
 fn route_into(mut topology: Signal<Topology>, mut active: Signal<Stage>, t: Topology) {
@@ -928,32 +939,51 @@ fn render_recommendation(
                     }
                 }
                 p { class: "rec-rationale", "{r.rationale}" }
-                match status {
-                    TechStatus::Live(t) => rsx! {
-                        button {
-                            class: "btn dl rec-use",
-                            onclick: move |_| {
-                                seed();
-                                route_into(topology, active, t);
+                // The studio's interactive synthesis flow is band-pass-only today
+                // (the Spec/Synthesis stages run the coupled-resonator band-pass
+                // engine). Only route a Bandpass spec into a live flow; for
+                // low-/high-/band-stop the recommendation above is correct guidance,
+                // but seeding it into the band-pass synthesizer would silently
+                // mis-synthesize — so we show an honest note instead of a route button.
+                {
+                    if matches!(response, Response::Bandpass) {
+                        match status {
+                            TechStatus::Live(t) => rsx! {
+                                button {
+                                    class: "btn dl rec-use",
+                                    onclick: move |_| {
+                                        seed();
+                                        route_into(topology, active, t);
+                                    },
+                                    "Use this → seed the spec + open the {topology_label(t)} flow"
+                                }
                             },
-                            "Use this → seed the spec + open the {topology_label(t)} flow"
-                        }
-                    },
-                    TechStatus::Soon(t) => rsx! {
-                        div { class: "note honest",
-                            "This technique is roadmapped (not yet buildable in the studio). "
-                            "The nearest live realization is "
-                            b { "{topology_label(t)}" } " — proceed with it:"
-                        }
-                        button {
-                            class: "btn dl rec-use",
-                            onclick: move |_| {
-                                seed();
-                                route_into(topology, active, t);
+                            TechStatus::Soon(t) => rsx! {
+                                div { class: "note honest",
+                                    "This technique is roadmapped (not yet buildable in the studio). "
+                                    "The nearest live realization is "
+                                    b { "{topology_label(t)}" } " — proceed with it:"
+                                }
+                                button {
+                                    class: "btn dl rec-use",
+                                    onclick: move |_| {
+                                        seed();
+                                        route_into(topology, active, t);
+                                    },
+                                    "Proceed with {topology_label(t)} (seed the spec + open the flow)"
+                                }
                             },
-                            "Proceed with {topology_label(t)} (seed the spec + open the flow)"
                         }
-                    },
+                    } else {
+                        rsx! {
+                            div { class: "note honest",
+                                "The studio's interactive synthesis flow currently builds "
+                                b { "band-pass" } " filters; "
+                                "{response_word(response)} synthesis is roadmapped. The recommendation "
+                                "above is the technique to target when that flow lands."
+                            }
+                        }
+                    }
                 }
             }
 
