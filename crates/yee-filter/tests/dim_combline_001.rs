@@ -14,14 +14,18 @@
 //!    full g → Qe/M chain; a constant or wrong synthesis fails by ≫ tol. We do
 //!    NOT hardcode the synthesizer's own output as expected — we compare it to the
 //!    book.
-//! 2. **Combline-distinct resonance consistency (first-principles, NOT the cap
-//!    tautology).** From a `dimension_combline` result (θ0 = 45° = π/4) build the
-//!    loaded short-circuited-stub input susceptance *independently*,
-//!    `B(f) = −(1/Z0)·cot(θ0·f/f0) + 2π·f·C_L`, root-find `B(f) = 0` over a band
-//!    around f0, and assert the root equals f0 within ±1%. This re-derives
-//!    resonance from the admittance (catching a wrong cap / length / sign) — it
-//!    does **not** assert `C_L == cot(θ0)/(2π·f0·Z0)` back (which would be
-//!    tautological — the engine's own emit formula).
+//! 2. **Combline resonator structural / sign consistency.** From a
+//!    `dimension_combline` result (θ0 = 45° = π/4) build the loaded
+//!    short-circuited-stub susceptance `B(f) = −(1/Z0)·cot(θ0·f/f0) + 2π·f·C_L`
+//!    and root-find `B(f) = 0`, asserting the root equals f0 within ±1%. NB: the
+//!    engine sets `C_L = cot(θ0)/(2π·f0·Z0)` precisely so that `B(f0) = 0`, so the
+//!    root *at f0* is structurally expected — this is **not** an independent
+//!    re-derivation of resonance (the non-tautological validation is gate 1, the
+//!    H&L published Qe/M). What this check *does* catch is a sign error, a grossly
+//!    wrong cap/length formula, or a broken `θ0·f/f0` dispersion (any of which
+//!    move the root off f0 or break the bracket sign-change), plus it confirms the
+//!    susceptance is monotone with a single crossing. We deliberately do NOT
+//!    assert `C_L == cot(θ0)/(2π·f0·Z0)` back (the engine's own emit formula).
 //! 3. The coupling gaps are solved/bracketed (no clamping), `θ0 ≥ π/2` → a
 //!    `DimError`, and all physical dims + the loading cap are positive and finite.
 

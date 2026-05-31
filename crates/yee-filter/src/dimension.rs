@@ -1,20 +1,25 @@
-//! Closed-form microstrip dimensional synthesis (Filter Phases F1.2.0 / F1.2.2).
+//! Closed-form microstrip dimensional synthesis (Filter Phases F1.2.0 / F1.2.2 /
+//! F1.2.3 / F1.2.5).
 //!
-//! Turns an abstract synthesized [`crate::CouplingMatrix`] into **physical
-//! microstrip dimensions** for two band-pass topologies — the edge-coupled
-//! half-wave filter ([`dimension_edge_coupled`], F1.2.0) and the U-folded
-//! **hairpin** filter ([`dimension_hairpin`], F1.2.2) — by inverting the
+//! Turns an abstract synthesized [`crate::CouplingMatrix`] (or low-pass
+//! prototype) into **physical microstrip dimensions** for three coupled-resonator
+//! band-pass topologies — the edge-coupled half-wave filter
+//! ([`dimension_edge_coupled`], F1.2.0), the U-folded **hairpin** filter
+//! ([`dimension_hairpin`], F1.2.2), and the capacitively-loaded **combline**
+//! filter ([`dimension_combline`], F1.2.5) — plus the **stepped-impedance**
+//! low-pass ([`dimension_stepped_impedance`], F1.2.3), by inverting the
 //! already-validated `yee-layout` closed-form models. Pure `f64`, WASM-safe, NO
 //! FDTD, NO surrogate — this is the *initial* dimensioning that seeds the later
 //! EM-in-the-loop refinement (F1.2.1).
 //!
-//! Both topologies share the **same inter-resonator coupling mechanism**: a
-//! hairpin is a half-wave line folded into a U, and adjacent hairpins couple
-//! through the edge gap between their adjacent arms — exactly the edge-coupled
-//! gap→`k` inversion. The two paths therefore reuse the identical
-//! [`solve_gap`] bisection and the `target_k = FBW · m_{i,i+1}` derivation
-//! below; only the resonator geometry differs (a folded half-wave = two ≈λ/4
-//! arms vs a single λ/2 straight strip — see [`dimension_hairpin`]).
+//! The three coupled-resonator band-pass topologies share the **same
+//! inter-resonator coupling mechanism**: adjacent resonators couple through the
+//! edge gap between their lines — the edge-coupled gap→`k` inversion. They
+//! therefore reuse the identical [`solve_gap`] bisection and the
+//! `target_k = FBW · m_{i,i+1}` derivation below; only the resonator geometry
+//! differs — a straight λ/2 strip (edge-coupled), a folded half-wave = two ≈λ/4
+//! arms (hairpin, see [`dimension_hairpin`]), or a short-circuited θ0 < π/2 line
+//! capacitively loaded to resonance (combline, see [`dimension_combline`]).
 //!
 //! # Method (Hong & Lancaster ch. 8 / Pozar §8.7)
 //!

@@ -44,9 +44,9 @@ use serde::{Deserialize, Serialize};
 pub mod extract;
 pub use extract::{CouplingExtraction, extract_coupling, extract_q_ringdown};
 
-/// Closed-form dimensional synthesis (Filter Phases F1.2.0 / F1.2.2 / F1.2.3):
-/// coupling matrix → physical microstrip dimensions (edge-coupled, hairpin) and
-/// low-pass prototype → stepped-impedance line sections.
+/// Closed-form dimensional synthesis (Filter Phases F1.2.0 / F1.2.2 / F1.2.3 /
+/// F1.2.5): coupling matrix → physical microstrip dimensions (edge-coupled,
+/// hairpin, combline) and low-pass prototype → stepped-impedance line sections.
 pub mod dimension;
 pub use dimension::{
     ComblineDimensions, DimError, EdgeCoupledDimensions, HairpinDimensions,
