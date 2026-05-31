@@ -11,11 +11,13 @@
 use yee_filter::{
     Approximation, Bom, BranchKind, CompKind, CouplingMatrix, ESeries, FilterProject, FilterSpec,
     Footprint, LcBranch, LumpedBoard, LumpedLadder, MaskReport, MaskVerdict, Response, SpecMask,
-    check_mask, dimension_edge_coupled, dimension_edge_coupled_layout, ideal_response, ladder_s21,
-    lumped_board, mask_verdict, monte_carlo_yield, select_components, synthesize,
-    synthesize_lumped,
+    check_mask, dimension_edge_coupled, dimension_edge_coupled_layout, dimension_hairpin,
+    dimension_hairpin_layout, ideal_response, ladder_s21, lumped_board, mask_verdict,
+    monte_carlo_yield, select_components, synthesize, synthesize_lumped,
 };
 use yee_layout::{BBox, CoupledMicrostrip, Layout, Substrate, coupled_microstrip, eps_eff};
+
+use crate::stages::Topology;
 
 /// Number of points in the response sweep (matches the CLI's `SWEEP_POINTS`).
 const SWEEP_POINTS: usize = 401;
@@ -89,7 +91,8 @@ pub struct ResonatorRow {
     pub id: usize,
     /// Strip width, mm.
     pub width_mm: f64,
-    /// Resonator length (`λ_g/2`), mm.
+    /// Resonator length, mm. For edge-coupled this is the straight half-wave
+    /// (`λ_g/2`); for hairpin it is the single U-folded arm length (`≈ λ_g/4`).
     pub length_mm: f64,
     /// Edge-coupling gap to the next resonator, mm (`None` for the last).
     pub gap_to_next_mm: Option<f64>,
@@ -109,6 +112,10 @@ pub struct ResonatorRow {
 
 /// Everything the POC's two real stages render — all from the live engine.
 pub struct Designed {
+    /// The distributed realization the geometry was dimensioned for
+    /// (edge-coupled vs hairpin). Drives the topology-aware Layout / Export
+    /// labels; the synthesis / response / verdict fields are independent of it.
+    pub topology: Topology,
     /// The hard-coded demo spec.
     pub spec: FilterSpec,
     /// The synthesized project (prototype, coupling matrix, topology).
@@ -123,8 +130,9 @@ pub struct Designed {
     pub mask_bands: Vec<MaskBand>,
     /// The real spec-mask verdict.
     pub report: MaskReport,
-    /// The dimensioned edge-coupled board layout, or `None` when the coupling
-    /// is not realizable on FR-4 (see [`dim_error`](Designed::dim_error)).
+    /// The dimensioned board layout for the active distributed [`topology`]
+    /// (edge-coupled or hairpin), or `None` when the coupling is not realizable
+    /// on FR-4 (see [`dim_error`](Designed::dim_error)).
     pub layout: Option<Layout>,
     /// Per-resonator realized geometry + electricals (empty when geometry is
     /// not realizable).
@@ -134,9 +142,9 @@ pub struct Designed {
     pub line_eps_eff: f64,
     /// Board bounding box, mm (`(width, height)`); `(0, 0)` when not realizable.
     pub board_size_mm: (f64, f64),
-    /// The edge-coupled dimensioning error string when the coupling could not
-    /// be realized on FR-4, else `None`. The synthesis / response / verdict
-    /// stay real even when this is `Some`.
+    /// The distributed dimensioning error string (for the active [`topology`])
+    /// when the coupling could not be realized on FR-4, else `None`. The
+    /// synthesis / response / verdict stay real even when this is `Some`.
     pub dim_error: Option<String>,
 }
 
@@ -145,30 +153,63 @@ impl Designed {
     pub fn order(&self) -> usize {
         self.project.prototype.order()
     }
+
+    /// Human-readable name of the realized distributed topology
+    /// (e.g. `"edge-coupled ½λ"` / `"hairpin (U-folded ½λ)"`), for the Layout /
+    /// Export headings.
+    pub fn topology_name(&self) -> &'static str {
+        match self.topology {
+            Topology::Hairpin => "hairpin (U-folded ½λ)",
+            // The lumped flow renders its own (lumped) Layout / Export; the
+            // distributed `Designed` it carries is dimensioned edge-coupled.
+            Topology::EdgeCoupled | Topology::LumpedLc => "edge-coupled ½λ",
+        }
+    }
+
+    /// The resonator-table length-column label for the realized topology: the
+    /// edge-coupled straight `λ_g/2` resonator vs the hairpin U-folded `λ_g/4`
+    /// arm.
+    pub fn length_label(&self) -> &'static str {
+        match self.topology {
+            Topology::Hairpin => "arm length (mm)",
+            Topology::EdgeCoupled | Topology::LumpedLc => "length (mm)",
+        }
+    }
 }
 
-/// Run the full live engine pipeline on the hard-coded demo spec.
+/// Run the full live engine pipeline on the hard-coded demo spec, realized as an
+/// edge-coupled board.
 ///
 /// Convenience wrapper around [`design_demo_from`] for the initial boot state
 /// (the Spec stage edits a live spec that re-drives [`design_demo_from`]).
 pub fn design_demo() -> Designed {
-    design_demo_from(demo_spec())
+    design_demo_from(demo_spec(), Topology::EdgeCoupled)
 }
 
-/// Run the full live engine pipeline on an arbitrary [`yee_filter::FilterSpec`].
+/// Run the full live engine pipeline on an arbitrary [`yee_filter::FilterSpec`],
+/// realized for the given distributed [`Topology`].
 ///
 /// Mirrors `yee_cli::filter::run_synth`: synthesize → sweep the ideal response
-/// → grade against the spec mask → dimension the edge-coupled board → derive
+/// → grade against the spec mask → dimension the board for `topology` → derive
 /// the per-resonator even/odd electricals from the solved gaps. Every value is
 /// real engine output.
 ///
-/// The edge-coupled dimensioning can fail when the requested coupling is not
+/// The synthesis / response / mask verdict are **topology-independent** (a
+/// hairpin and an edge-coupled filter realize the *same* coupled-resonator
+/// band-pass prototype); only the geometry-derived fields differ. `topology`
+/// selects the dimensioner: [`Topology::EdgeCoupled`] →
+/// [`dimension_edge_coupled`], [`Topology::Hairpin`] → [`dimension_hairpin`].
+/// [`Topology::LumpedLc`] has no distributed board, so it falls back to the
+/// edge-coupled geometry (the lumped flow uses [`design_lumped_from`] for its
+/// own board).
+///
+/// The distributed dimensioning can fail when the requested coupling is not
 /// realizable on FR-4 (e.g. an over-wide bandwidth at a low order); in that
 /// case the geometry-derived fields fall back to empty (no resonator rows, a
 /// zero board size) while the synthesized prototype / coupling / response /
 /// mask verdict remain real. The Spec form surfaces that as a "geometry not
 /// realizable" note rather than panicking the whole app.
-pub fn design_demo_from(spec: FilterSpec) -> Designed {
+pub fn design_demo_from(spec: FilterSpec, topology: Topology) -> Designed {
     let project = synthesize(&spec);
     let g_values = project.prototype.g.clone();
     let coupling = project.coupling.clone();
@@ -193,14 +234,15 @@ pub fn design_demo_from(spec: FilterSpec) -> Designed {
     let mask_bands = mask_bands(&spec);
     let report = check_mask(&project, &freqs);
 
-    // ---- physical dimensioning (FR-4 substrate, edge-coupled) -------------
+    // ---- physical dimensioning (FR-4 substrate, per topology) -------------
     // Fallible: an unrealizable coupling (e.g. a wide FBW at a low order from
     // the Spec form) returns a `DimError`. We keep the synthesized prototype /
     // response / verdict real and degrade only the geometry-derived fields,
     // surfacing the error through `dim_error` instead of panicking the app.
-    let geom = derive_geometry(&project);
+    let geom = derive_geometry(&project, topology);
 
     Designed {
+        topology,
         spec,
         project,
         g_values,
@@ -227,16 +269,89 @@ struct Geometry {
     dim_error: Option<String>,
 }
 
-/// Dimension the synthesized project onto FR-4, returning the geometry fields
-/// or — when the coupling is not realizable — an empty geometry carrying the
-/// error string.
-fn derive_geometry(project: &FilterProject) -> Geometry {
-    let dims_res = dimension_edge_coupled(project, &SUBSTRATE);
-    let layout_res = dimension_edge_coupled_layout(project, &SUBSTRATE);
+/// The topology-specific output of a distributed dimensioner, normalized so the
+/// shared per-resonator electrical table + layout packaging in
+/// [`derive_geometry`] can treat edge-coupled and hairpin uniformly. (Both
+/// invert the same coupled-microstrip model; only the line width / resonator
+/// length / assembled [`Layout`] differ.)
+struct SolvedDistributed {
+    /// Strip / arm width for the spec `Z0`, metres.
+    line_width_m: f64,
+    /// Per-resonator length, metres: edge-coupled straight `λ_g/2`, or the
+    /// hairpin U-folded arm `≈ λ_g/4`.
+    resonator_length_m: f64,
+    /// Inter-resonator edge-coupling gaps, metres (length `N − 1`).
+    gaps_m: Vec<f64>,
+    /// The `FBW · m_{i,i+1}` coupling each gap was solved for (length `N − 1`).
+    target_k: Vec<f64>,
+    /// The assembled board layout.
+    layout: Layout,
+}
 
-    match (dims_res, layout_res) {
-        (Ok(dims), Ok(layout)) => {
-            let w_m = dims.line_width_m;
+/// Dimension the synthesized project onto FR-4 for the given [`Topology`],
+/// returning the geometry fields or — when the coupling is not realizable — an
+/// empty geometry carrying the error string.
+///
+/// Both distributed topologies invert the **same** validated coupled-microstrip
+/// model from the same coupling matrix; they differ only in the realized
+/// resonator geometry (line width, resonator length, the assembled board
+/// [`Layout`]). The per-resonator even/odd electrical table is therefore shared
+/// — it is recovered from the solved inter-resonator gaps at the common line
+/// width — and only the line width / resonator length / `Layout` vary.
+fn derive_geometry(project: &FilterProject, topology: Topology) -> Geometry {
+    // Solve the topology-specific dimensions: the line width, the per-resonator
+    // length, the inter-resonator gaps + target couplings, and the assembled
+    // board `Layout`. `LumpedLc` has no distributed board; it reuses the
+    // edge-coupled geometry (its own board comes from `design_lumped_from`).
+    let solved: Result<SolvedDistributed, String> = match topology {
+        Topology::Hairpin => {
+            match (
+                dimension_hairpin(project, &SUBSTRATE),
+                dimension_hairpin_layout(project, &SUBSTRATE),
+            ) {
+                (Ok(dims), Ok(layout)) => Ok(SolvedDistributed {
+                    line_width_m: dims.line_width_m,
+                    resonator_length_m: dims.arm_length_m,
+                    gaps_m: dims.gaps_m,
+                    target_k: dims.target_k,
+                    layout,
+                }),
+                (dims_res, layout_res) => Err(dims_res
+                    .err()
+                    .map(|e| e.to_string())
+                    .or_else(|| layout_res.err().map(|e| e.to_string()))
+                    .unwrap_or_else(|| "hairpin geometry is not realizable on FR-4".into())),
+            }
+        }
+        Topology::EdgeCoupled | Topology::LumpedLc => {
+            match (
+                dimension_edge_coupled(project, &SUBSTRATE),
+                dimension_edge_coupled_layout(project, &SUBSTRATE),
+            ) {
+                (Ok(dims), Ok(layout)) => Ok(SolvedDistributed {
+                    line_width_m: dims.line_width_m,
+                    resonator_length_m: dims.resonator_length_m,
+                    gaps_m: dims.gaps_m,
+                    target_k: dims.target_k,
+                    layout,
+                }),
+                (dims_res, layout_res) => Err(dims_res
+                    .err()
+                    .map(|e| e.to_string())
+                    .or_else(|| layout_res.err().map(|e| e.to_string()))
+                    .unwrap_or_else(|| "edge-coupled geometry is not realizable on FR-4".into())),
+            }
+        }
+    };
+
+    match solved {
+        Ok(SolvedDistributed {
+            line_width_m: w_m,
+            resonator_length_m: length_m,
+            gaps_m,
+            target_k,
+            layout,
+        }) => {
             let line_eps_eff = eps_eff(w_m, SUBSTRATE.height_m, SUBSTRATE.eps_r);
 
             let n = project.coupling.m.len();
@@ -244,7 +359,7 @@ fn derive_geometry(project: &FilterProject) -> Geometry {
                 .map(|i| {
                     // Gaps + couplings exist for i in 0..n-1 (gap i is to i+1).
                     let (gap, z0e, z0o, eff_e, eff_o, rk, tk) = if i < n - 1 {
-                        let s = dims.gaps_m[i];
+                        let s = gaps_m[i];
                         let cm: CoupledMicrostrip =
                             coupled_microstrip(w_m, s, SUBSTRATE.height_m, SUBSTRATE.eps_r);
                         let realized_k = (cm.z0e_ohm - cm.z0o_ohm) / (cm.z0e_ohm + cm.z0o_ohm);
@@ -255,7 +370,7 @@ fn derive_geometry(project: &FilterProject) -> Geometry {
                             Some(cm.eps_eff_e),
                             Some(cm.eps_eff_o),
                             Some(realized_k),
-                            Some(dims.target_k[i]),
+                            Some(target_k[i]),
                         )
                     } else {
                         (None, None, None, None, None, None, None)
@@ -263,7 +378,7 @@ fn derive_geometry(project: &FilterProject) -> Geometry {
                     ResonatorRow {
                         id: i + 1,
                         width_mm: w_m * 1e3,
-                        length_mm: dims.resonator_length_m * 1e3,
+                        length_mm: length_m * 1e3,
                         gap_to_next_mm: gap,
                         z0e_ohm: z0e,
                         z0o_ohm: z0o,
@@ -284,21 +399,13 @@ fn derive_geometry(project: &FilterProject) -> Geometry {
                 dim_error: None,
             }
         }
-        (dims_res, layout_res) => {
-            // Prefer the dimensioning error, else the layout error.
-            let msg = dims_res
-                .err()
-                .map(|e| e.to_string())
-                .or_else(|| layout_res.err().map(|e| e.to_string()))
-                .unwrap_or_else(|| "edge-coupled geometry is not realizable on FR-4".into());
-            Geometry {
-                layout: None,
-                resonators: Vec::new(),
-                line_eps_eff: 0.0,
-                board_size_mm: (0.0, 0.0),
-                dim_error: Some(msg),
-            }
-        }
+        Err(msg) => Geometry {
+            layout: None,
+            resonators: Vec::new(),
+            line_eps_eff: 0.0,
+            board_size_mm: (0.0, 0.0),
+            dim_error: Some(msg),
+        },
     }
 }
 
@@ -710,6 +817,79 @@ mod tests {
         assert!(d.board_size_mm.0 > 0.0 && d.board_size_mm.1 > 0.0);
     }
 
+    /// Flatten a layout's copper geometry into a comparable signature: the
+    /// board bounding box plus every trace vertex. Two distributed realizations
+    /// of the same coupling network produce *different* signatures iff the
+    /// boards differ physically.
+    fn layout_signature(layout: &Layout) -> (Vec<f64>, Vec<(f64, f64)>) {
+        let bbox = vec![
+            layout.bbox.min.x,
+            layout.bbox.min.y,
+            layout.bbox.max.x,
+            layout.bbox.max.y,
+        ];
+        let mut verts: Vec<(f64, f64)> = layout
+            .traces
+            .iter()
+            .flat_map(|t| t.verts.iter().map(|p| (p.x, p.y)))
+            .collect();
+        verts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        (bbox, verts)
+    }
+
+    #[test]
+    fn hairpin_card_routes_to_real_dimensioner() {
+        // The Hairpin gallery card must drive the REAL `dimension_hairpin`
+        // engine, not a stub or an edge-coupled clone. The demo spec must
+        // dimension as a hairpin (Some(layout)), and that hairpin layout must
+        // DIFFER from the edge-coupled layout for the same spec — otherwise the
+        // card would be silently routing to the edge-coupled stand-in.
+        let spec = demo_spec();
+        let hairpin = design_demo_from(spec.clone(), Topology::Hairpin);
+        let edge = design_demo_from(spec, Topology::EdgeCoupled);
+
+        // Hairpin dimensions onto FR-4.
+        assert!(
+            hairpin.layout.is_some(),
+            "demo spec dimensions as a hairpin board"
+        );
+        assert!(hairpin.dim_error.is_none(), "no hairpin dimensioning error");
+        assert_eq!(hairpin.topology, Topology::Hairpin);
+        assert_eq!(hairpin.resonators.len(), 5, "order-5 hairpin → 5 arms");
+        assert!(hairpin.board_size_mm.0 > 0.0 && hairpin.board_size_mm.1 > 0.0);
+
+        // The shared coupled-resonator synthesis is topology-INDEPENDENT: same
+        // coupling matrix, same g-values, same swept response, same verdict.
+        assert_eq!(
+            hairpin.coupling.m, edge.coupling.m,
+            "shared coupling matrix"
+        );
+        assert_eq!(hairpin.report.pass, edge.report.pass, "shared verdict");
+
+        // ...but the realized boards DIFFER (the card routes to the real
+        // hairpin dimensioner). A folded λ/4-arm hairpin is geometrically
+        // distinct from a straight λ/2 edge-coupled board.
+        let (h_layout, e_layout) = (
+            hairpin.layout.as_ref().unwrap(),
+            edge.layout.as_ref().unwrap(),
+        );
+        assert_ne!(
+            layout_signature(h_layout),
+            layout_signature(e_layout),
+            "hairpin layout must differ from the edge-coupled layout (real, not a clone)"
+        );
+
+        // The hairpin arm length is the U-folded ≈λ_g/4, roughly half the
+        // edge-coupled straight λ_g/2 resonator length — a concrete witness
+        // that the hairpin dimensioner (not the edge-coupled one) produced it.
+        let h_len = hairpin.resonators[0].length_mm;
+        let e_len = edge.resonators[0].length_mm;
+        assert!(
+            h_len < e_len * 0.7,
+            "hairpin arm length ({h_len:.2} mm) ≈ λ/4 is well under the edge-coupled λ/2 ({e_len:.2} mm)"
+        );
+    }
+
     #[test]
     fn design_from_edited_spec_drives_synthesis() {
         // Editing the order from the Spec form re-drives synthesis: an order-3
@@ -717,7 +897,7 @@ mod tests {
         // from the demo's order-5.
         let mut spec = demo_spec();
         spec.order = Some(3);
-        let d = design_demo_from(spec.clone());
+        let d = design_demo_from(spec.clone(), Topology::EdgeCoupled);
         assert_eq!(d.order(), 3, "edited order flows through synthesize");
         assert_eq!(d.coupling.m.len(), 3);
 
@@ -735,7 +915,7 @@ mod tests {
         let mut spec = demo_spec();
         spec.order = Some(2);
         spec.fbw = 0.6;
-        let d = design_demo_from(spec);
+        let d = design_demo_from(spec, Topology::EdgeCoupled);
         // Synthesis is still real.
         assert_eq!(d.order(), 2);
         assert_eq!(d.sweep.len(), SWEEP_POINTS);
