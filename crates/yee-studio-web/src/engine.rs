@@ -11,11 +11,11 @@
 use yee_filter::{
     Approximation, Bom, BranchKind, CompKind, CouplingMatrix, ESeries, FilterProject, FilterSpec,
     Footprint, LcBranch, LumpedBoard, LumpedLadder, MaskReport, MaskVerdict, RealizationTechnique,
-    Response, SpecMask, SteppedSection, check_mask, dimension_edge_coupled,
-    dimension_edge_coupled_layout, dimension_hairpin, dimension_hairpin_layout,
-    dimension_stepped_impedance, dimension_stepped_impedance_layout, ideal_response,
-    ideal_response_lowpass, ladder_s21, lumped_board, mask_verdict, monte_carlo_yield,
-    select_components, synthesize, synthesize_lumped,
+    Response, SpecMask, SteppedSection, check_mask, dimension_combline, dimension_combline_layout,
+    dimension_edge_coupled, dimension_edge_coupled_layout, dimension_hairpin,
+    dimension_hairpin_layout, dimension_stepped_impedance, dimension_stepped_impedance_layout,
+    ideal_response, ideal_response_lowpass, ladder_s21, lumped_board, mask_verdict,
+    monte_carlo_yield, select_components, synthesize, synthesize_lumped,
 };
 use yee_layout::{BBox, CoupledMicrostrip, Layout, Substrate, coupled_microstrip, eps_eff};
 
@@ -115,7 +115,7 @@ pub struct ResonatorRow {
 /// Everything the POC's two real stages render — all from the live engine.
 pub struct Designed {
     /// The distributed realization the geometry was dimensioned for
-    /// (edge-coupled vs hairpin). Drives the topology-aware Layout / Export
+    /// (edge-coupled, hairpin, or combline). Drives the topology-aware Layout / Export
     /// labels; the synthesis / response / verdict fields are independent of it.
     pub topology: Topology,
     /// The hard-coded demo spec.
@@ -133,7 +133,7 @@ pub struct Designed {
     /// The real spec-mask verdict.
     pub report: MaskReport,
     /// The dimensioned board layout for the active distributed [`topology`]
-    /// (edge-coupled or hairpin), or `None` when the coupling is not realizable
+    /// (edge-coupled, hairpin, or combline), or `None` when the coupling is not realizable
     /// on FR-4 (see [`dim_error`](Designed::dim_error)).
     pub layout: Option<Layout>,
     /// Per-resonator realized geometry + electricals (empty when geometry is
@@ -148,6 +148,12 @@ pub struct Designed {
     /// when the coupling could not be realized on FR-4, else `None`. The
     /// synthesis / response / verdict stay real even when this is `Some`.
     pub dim_error: Option<String>,
+    /// The combline loading capacitance `C_L = cot(θ0)/(2π·f0·Z0)`, farads — the
+    /// combline-distinct quantity. A single value (uniform θ0 / Z0 → the same
+    /// `C_L` at every resonator's open end). `Some` only for
+    /// [`Topology::Combline`] with a realizable geometry; `None` for every other
+    /// topology and when the combline geometry is not realizable.
+    pub combline_loading_cap_f: Option<f64>,
 }
 
 impl Designed {
@@ -162,6 +168,7 @@ impl Designed {
     pub fn topology_name(&self) -> &'static str {
         match self.topology {
             Topology::Hairpin => "hairpin (U-folded ½λ)",
+            Topology::Combline => "combline (capacitively-loaded)",
             // The lumped + stepped-impedance flows render their own Layout /
             // Export (the band-pass `Designed` is never built for them — they use
             // `LumpedDesigned` / `SteppedLowpassDesigned`); the carried distributed
@@ -178,6 +185,7 @@ impl Designed {
     pub fn length_label(&self) -> &'static str {
         match self.topology {
             Topology::Hairpin => "arm length (mm)",
+            Topology::Combline => "resonator length (mm)",
             Topology::EdgeCoupled | Topology::LumpedLc | Topology::SteppedImpedance => {
                 "length (mm)"
             }
@@ -202,8 +210,8 @@ pub fn design_demo() -> Designed {
 /// the per-resonator even/odd electricals from the solved gaps. Every value is
 /// real engine output.
 ///
-/// The synthesis / response / mask verdict are **topology-independent** (a
-/// hairpin and an edge-coupled filter realize the *same* coupled-resonator
+/// The synthesis / response / mask verdict are **topology-independent**
+/// (edge-coupled, hairpin, and combline all realize the *same* coupled-resonator
 /// band-pass prototype); only the geometry-derived fields differ. `topology`
 /// selects the dimensioner: [`Topology::EdgeCoupled`] →
 /// [`dimension_edge_coupled`], [`Topology::Hairpin`] → [`dimension_hairpin`].
@@ -263,6 +271,7 @@ pub fn design_demo_from(spec: FilterSpec, topology: Topology) -> Designed {
         line_eps_eff: geom.line_eps_eff,
         board_size_mm: geom.board_size_mm,
         dim_error: geom.dim_error,
+        combline_loading_cap_f: geom.combline_loading_cap_f,
     }
 }
 
@@ -275,6 +284,9 @@ struct Geometry {
     line_eps_eff: f64,
     board_size_mm: (f64, f64),
     dim_error: Option<String>,
+    /// The combline loading cap `C_L`, farads — `Some` only for a realizable
+    /// [`Topology::Combline`] geometry, `None` otherwise.
+    combline_loading_cap_f: Option<f64>,
 }
 
 /// The topology-specific output of a distributed dimensioner, normalized so the
@@ -294,6 +306,9 @@ struct SolvedDistributed {
     target_k: Vec<f64>,
     /// The assembled board layout.
     layout: Layout,
+    /// The combline loading cap `C_L`, farads — `Some` only for the combline
+    /// dimensioner, `None` for edge-coupled / hairpin (which have no loading cap).
+    loading_cap_f: Option<f64>,
 }
 
 /// Dimension the synthesized project onto FR-4 for the given [`Topology`],
@@ -323,12 +338,39 @@ fn derive_geometry(project: &FilterProject, topology: Topology) -> Geometry {
                     gaps_m: dims.gaps_m,
                     target_k: dims.target_k,
                     layout,
+                    loading_cap_f: None,
                 }),
                 (dims_res, layout_res) => Err(dims_res
                     .err()
                     .map(|e| e.to_string())
                     .or_else(|| layout_res.err().map(|e| e.to_string()))
                     .unwrap_or_else(|| "hairpin geometry is not realizable on FR-4".into())),
+            }
+        }
+        // Combline: capacitively-loaded short-circuited θ0 resonators with a
+        // loading cap C_L at each open end. θ0 = π/4 = λg/8 is the compact
+        // default (ADR-0146). Same coupled-microstrip gap inversion as
+        // edge-coupled / hairpin; the distinct quantities are the short θ0
+        // resonator length and the surfaced loading cap.
+        Topology::Combline => {
+            let theta0 = std::f64::consts::FRAC_PI_4;
+            match (
+                dimension_combline(project, theta0, &SUBSTRATE),
+                dimension_combline_layout(project, theta0, &SUBSTRATE),
+            ) {
+                (Ok(dims), Ok(layout)) => Ok(SolvedDistributed {
+                    line_width_m: dims.line_width_m,
+                    resonator_length_m: dims.resonator_length_m,
+                    gaps_m: dims.gaps_m,
+                    target_k: dims.target_k,
+                    layout,
+                    loading_cap_f: Some(dims.loading_cap_f),
+                }),
+                (dims_res, layout_res) => Err(dims_res
+                    .err()
+                    .map(|e| e.to_string())
+                    .or_else(|| layout_res.err().map(|e| e.to_string()))
+                    .unwrap_or_else(|| "combline geometry is not realizable on FR-4".into())),
             }
         }
         // `SteppedImpedance` has its own low-pass `SteppedLowpassDesigned` flow
@@ -345,6 +387,7 @@ fn derive_geometry(project: &FilterProject, topology: Topology) -> Geometry {
                     gaps_m: dims.gaps_m,
                     target_k: dims.target_k,
                     layout,
+                    loading_cap_f: None,
                 }),
                 (dims_res, layout_res) => Err(dims_res
                     .err()
@@ -362,6 +405,7 @@ fn derive_geometry(project: &FilterProject, topology: Topology) -> Geometry {
             gaps_m,
             target_k,
             layout,
+            loading_cap_f,
         }) => {
             let line_eps_eff = eps_eff(w_m, SUBSTRATE.height_m, SUBSTRATE.eps_r);
 
@@ -408,6 +452,7 @@ fn derive_geometry(project: &FilterProject, topology: Topology) -> Geometry {
                 line_eps_eff,
                 board_size_mm,
                 dim_error: None,
+                combline_loading_cap_f: loading_cap_f,
             }
         }
         Err(msg) => Geometry {
@@ -416,6 +461,7 @@ fn derive_geometry(project: &FilterProject, topology: Topology) -> Geometry {
             line_eps_eff: 0.0,
             board_size_mm: (0.0, 0.0),
             dim_error: Some(msg),
+            combline_loading_cap_f: None,
         },
     }
 }
@@ -1098,7 +1144,7 @@ pub fn topbar_view(
     stepped: &SteppedLowpassDesigned,
 ) -> (String, Option<bool>) {
     match topology {
-        Topology::EdgeCoupled | Topology::Hairpin => {
+        Topology::EdgeCoupled | Topology::Hairpin | Topology::Combline => {
             let spec = &designed.spec;
             let summary = format!(
                 "· {} · N={} · {:.2} GHz · {:.0}%",
@@ -1246,7 +1292,7 @@ pub fn verify_view(
             worst_return_loss_db: stepped.worst_return_loss_db,
             worst_stopband_rej_db: min_achieved(&stepped.stopband),
         },
-        Topology::EdgeCoupled | Topology::Hairpin => VerifyView {
+        Topology::EdgeCoupled | Topology::Hairpin | Topology::Combline => VerifyView {
             level: VerifyLevel::SynthesizedIdeal,
             pass: Some(designed.report.pass),
             worst_passband_ripple_db: designed.report.worst_passband_ripple_db,
@@ -1307,10 +1353,10 @@ pub struct TechniqueComparison {
 /// synchronous) designs per call is intentional — the studio re-derives live.
 ///
 /// Keyed on [`FilterSpec::response`]:
-/// - [`Response::Bandpass`] / [`Response::Bandstop`] → three rows:
-///   [`RealizationTechnique::EdgeCoupled`] and
-///   [`RealizationTechnique::Hairpin`] (via [`design_demo_from`]; metrics from
-///   [`Designed::report`], `realizable = layout.is_some()`), and
+/// - [`Response::Bandpass`] / [`Response::Bandstop`] → four rows:
+///   [`RealizationTechnique::EdgeCoupled`], [`RealizationTechnique::Hairpin`],
+///   and [`RealizationTechnique::Combline`] (via [`design_demo_from`]; metrics
+///   from [`Designed::report`], `realizable = layout.is_some()`), and
 ///   [`RealizationTechnique::LumpedLc`] (via [`design_lumped_from`]; metrics from
 ///   [`LumpedDesigned::verdict`] on `Ok`, `realizable = false` with zeroed
 ///   metrics on `Err`).
@@ -1367,6 +1413,7 @@ pub fn compare_techniques(spec: &FilterSpec) -> Vec<TechniqueComparison> {
         Response::Bandpass | Response::Bandstop => {
             let edge = design_demo_from(spec.clone(), Topology::EdgeCoupled);
             let hairpin = design_demo_from(spec.clone(), Topology::Hairpin);
+            let combline = design_demo_from(spec.clone(), Topology::Combline);
             // The lumped flow has its own fallible ladder synthesis; an
             // unrealizable ladder degrades to a not-realizable row (zeroed
             // metrics, no verdict) rather than panicking.
@@ -1406,6 +1453,7 @@ pub fn compare_techniques(spec: &FilterSpec) -> Vec<TechniqueComparison> {
             vec![
                 from_distributed(RealizationTechnique::EdgeCoupled, &edge),
                 from_distributed(RealizationTechnique::Hairpin, &hairpin),
+                from_distributed(RealizationTechnique::Combline, &combline),
                 lumped_row,
             ]
         }
@@ -1465,7 +1513,8 @@ pub struct OverlayCurve {
 /// Keyed on [`FilterSpec::response`]:
 /// - [`Response::Bandpass`] / [`Response::Bandstop`] → two curves: the
 ///   coupled-resonator ideal (the [`Designed::sweep`] from
-///   [`design_demo_from`], labelled as edge-coupled / hairpin; always
+///   [`design_demo_from`], labelled as edge-coupled / hairpin / combline — they
+///   share the same coupling matrix → identical ideal `|S21|`; always
 ///   realizable — it is the synthesized response) and the lumped realized
 ///   ladder (the [`LumpedDesigned::sweep`] = `ladder_s21` from
 ///   [`design_lumped_from`]; on `Err` an empty/not-realizable curve so the
@@ -1476,12 +1525,12 @@ pub struct OverlayCurve {
 pub fn overlay_curves(spec: &FilterSpec) -> Vec<OverlayCurve> {
     match spec.response {
         Response::Bandpass | Response::Bandstop => {
-            // The coupled-resonator ideal is topology-independent (edge-coupled
-            // and hairpin synthesize the *same* response), so a single curve
-            // labelled as both — never two relabelled copies.
+            // The coupled-resonator ideal is topology-independent (edge-coupled,
+            // hairpin, and combline synthesize the *same* response), so a single
+            // curve labelled as all three — never relabelled copies.
             let coupled = design_demo_from(spec.clone(), Topology::EdgeCoupled);
             let coupled_curve = OverlayCurve {
-                label: "Coupled-resonator (edge-coupled / hairpin) — ideal".to_string(),
+                label: "Coupled-resonator (edge-coupled / hairpin / combline) — ideal".to_string(),
                 sweep: coupled.sweep,
                 realizable: true,
             };
@@ -1655,6 +1704,98 @@ mod tests {
         assert!(
             h_len < e_len * 0.7,
             "hairpin arm length ({h_len:.2} mm) ≈ λ/4 is well under the edge-coupled λ/2 ({e_len:.2} mm)"
+        );
+    }
+
+    #[test]
+    fn combline_card_routes_to_real_dimensioner() {
+        // The Combline gallery card (App.2.7, ADR-0146) must drive the REAL
+        // `dimension_combline` / `dimension_combline_layout` engine — not a stub,
+        // not an edge-coupled clone, not a hairpin clone. The demo spec must
+        // dimension as a combline board (Some(layout)) whose layout DIFFERS from
+        // BOTH the edge-coupled and hairpin boards for the same spec, while the
+        // topology-independent synthesis (coupling matrix + verdict) is SHARED,
+        // and the combline-distinct loading cap C_L is real (> 0, finite).
+        let spec = demo_spec();
+        let combline = design_demo_from(spec.clone(), Topology::Combline);
+        let edge = design_demo_from(spec.clone(), Topology::EdgeCoupled);
+        let hairpin = design_demo_from(spec, Topology::Hairpin);
+
+        // Combline dimensions onto FR-4.
+        assert!(
+            combline.layout.is_some(),
+            "demo spec dimensions as a combline board"
+        );
+        assert!(
+            combline.dim_error.is_none(),
+            "no combline dimensioning error"
+        );
+        assert_eq!(combline.topology, Topology::Combline);
+        assert_eq!(
+            combline.resonators.len(),
+            5,
+            "order-5 combline → 5 resonators"
+        );
+        assert!(combline.board_size_mm.0 > 0.0 && combline.board_size_mm.1 > 0.0);
+
+        // The shared coupled-resonator synthesis is topology-INDEPENDENT: same
+        // coupling matrix and same verdict as the edge-coupled realization (the
+        // combline card does NOT change the synthesis — only the realization).
+        assert_eq!(
+            combline.coupling.m, edge.coupling.m,
+            "combline shares the edge-coupled coupling matrix"
+        );
+        assert_eq!(
+            combline.report.pass, edge.report.pass,
+            "combline shares the edge-coupled verdict"
+        );
+
+        // ...but the realized board DIFFERS from BOTH edge-coupled AND hairpin
+        // (the card routes to the real combline dimensioner — short θ0 = λg/8
+        // lines, not the straight λ/2 edge-coupled lines nor the U-folded λ/4
+        // hairpin arms). A stub / clone of either would make these EQUAL.
+        let cb_layout = combline.layout.as_ref().unwrap();
+        let e_layout = edge.layout.as_ref().unwrap();
+        let h_layout = hairpin.layout.as_ref().unwrap();
+        assert_ne!(
+            layout_signature(cb_layout),
+            layout_signature(e_layout),
+            "combline layout must differ from the edge-coupled layout (real, not a clone)"
+        );
+        assert_ne!(
+            layout_signature(cb_layout),
+            layout_signature(h_layout),
+            "combline layout must differ from the hairpin layout (real, not a clone)"
+        );
+
+        // The combline-distinct loading cap C_L is surfaced and physical: a single
+        // value (uniform θ0 / Z0 → the same cap per resonator), strictly positive
+        // and finite. A faked / missing cap fails this.
+        let c_l = combline
+            .combline_loading_cap_f
+            .expect("combline surfaces a loading cap C_L");
+        assert!(
+            c_l > 0.0 && c_l.is_finite(),
+            "combline loading cap C_L = {c_l} F must be > 0 and finite"
+        );
+        // The edge-coupled / hairpin realizations have NO loading cap.
+        assert!(
+            edge.combline_loading_cap_f.is_none(),
+            "edge-coupled has no loading cap"
+        );
+        assert!(
+            hairpin.combline_loading_cap_f.is_none(),
+            "hairpin has no loading cap"
+        );
+
+        // The combline θ0 = π/4 resonator is a short (≈ λg/8) line — well under
+        // the straight λ/2 edge-coupled resonator — a concrete witness that the
+        // combline dimensioner (not the edge-coupled one) produced the geometry.
+        let cb_len = combline.resonators[0].length_mm;
+        let e_len = edge.resonators[0].length_mm;
+        assert!(
+            cb_len < e_len * 0.5,
+            "combline θ0=λg/8 resonator ({cb_len:.2} mm) is well under the edge-coupled λ/2 ({e_len:.2} mm)"
         );
     }
 
@@ -1999,21 +2140,23 @@ mod tests {
         // straight from that technique's freshly-built design, not a constant.
         // A constant / empty `compare_techniques` fails every assertion below.
 
-        // ---- (a) band-pass demo spec → three techniques, real metrics -------
+        // ---- (a) band-pass demo spec → four techniques, real metrics --------
         let rows = compare_techniques(&demo_spec());
         assert_eq!(
             rows.len(),
-            3,
-            "band-pass realizes edge-coupled + hairpin + lumped"
+            4,
+            "band-pass realizes edge-coupled + hairpin + combline + lumped"
         );
         assert_eq!(rows[0].technique, RealizationTechnique::EdgeCoupled);
         assert_eq!(rows[1].technique, RealizationTechnique::Hairpin);
-        assert_eq!(rows[2].technique, RealizationTechnique::LumpedLc);
+        assert_eq!(rows[2].technique, RealizationTechnique::Combline);
+        assert_eq!(rows[3].technique, RealizationTechnique::LumpedLc);
 
         // Each row's metrics equal that technique's freshly-built design's
         // graded fields (equality, not constants).
         let edge = design_demo_from(demo_spec(), Topology::EdgeCoupled);
         let hairpin = design_demo_from(demo_spec(), Topology::Hairpin);
+        let combline = design_demo_from(demo_spec(), Topology::Combline);
         let lumped = design_lumped_from(demo_spec()).expect("demo ladder is realizable");
 
         let ec = &rows[0];
@@ -2048,7 +2191,22 @@ mod tests {
         );
         assert_eq!(hp.worst_return_loss_db, hairpin.report.worst_return_loss_db);
 
-        let lc = &rows[2];
+        let cb = &rows[2];
+        assert_eq!(cb.realizable, combline.layout.is_some());
+        assert_eq!(cb.board_w_mm, combline.board_size_mm.0);
+        assert_eq!(cb.board_h_mm, combline.board_size_mm.1);
+        assert_eq!(cb.pass, Some(combline.report.pass));
+        assert_eq!(cb.order, combline.order());
+        assert_eq!(
+            cb.worst_passband_ripple_db,
+            combline.report.worst_passband_ripple_db
+        );
+        assert_eq!(
+            cb.worst_return_loss_db,
+            combline.report.worst_return_loss_db
+        );
+
+        let lc = &rows[3];
         assert!(lc.realizable, "demo ladder is realizable");
         assert_eq!(lc.board_w_mm, lumped.board_size_mm.0);
         assert_eq!(lc.board_h_mm, lumped.board_size_mm.1);
@@ -2072,15 +2230,17 @@ mod tests {
         let board_sizes = [
             (ec.board_w_mm, ec.board_h_mm),
             (hp.board_w_mm, hp.board_h_mm),
+            (cb.board_w_mm, cb.board_h_mm),
             (lc.board_w_mm, lc.board_h_mm),
         ];
         assert!(
             board_sizes.iter().any(|&b| b != board_sizes[0]),
             "the techniques must differ physically — board sizes are not all \
-             identical (edge-coupled {:?} vs hairpin {:?} vs lumped {:?})",
+             identical (edge-coupled {:?} vs hairpin {:?} vs combline {:?} vs lumped {:?})",
             board_sizes[0],
             board_sizes[1],
-            board_sizes[2]
+            board_sizes[2],
+            board_sizes[3]
         );
 
         // ---- (b) low-pass spec → exactly the stepped-impedance row ----------
@@ -2161,10 +2321,13 @@ mod tests {
         let lumped = &curves[1];
         assert!(coupled.realizable, "the synthesized ideal is realizable");
         assert!(lumped.realizable, "the demo ladder is realizable");
-        // Honest labels: the distributed pair is ONE shared ideal curve naming
-        // both edge-coupled + hairpin; the lumped is a distinct realized curve.
+        // Honest labels: the distributed techniques are ONE shared ideal curve
+        // naming edge-coupled + hairpin + combline (they share the coupled-
+        // resonator synthesis); the lumped is a distinct realized curve.
         assert!(
-            coupled.label.contains("edge-coupled") && coupled.label.contains("hairpin"),
+            coupled.label.contains("edge-coupled")
+                && coupled.label.contains("hairpin")
+                && coupled.label.contains("combline"),
             "coupled-resonator curve names both edge-coupled + hairpin (got {:?})",
             coupled.label
         );

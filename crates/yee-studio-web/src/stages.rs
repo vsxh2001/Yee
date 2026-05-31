@@ -46,6 +46,13 @@ pub enum Topology {
     /// the fractional bandwidth, and Synthesis / Layout route to the stepped
     /// renderers (the distributed five-stage rail, no Components / Tolerance).
     SteppedImpedance,
+    /// Distributed **combline** (ADR-0146, F1.2.5 / F1.2.6): capacitively-loaded
+    /// short-circuited `θ0` resonators (θ0 = π/4 = λg/8, the compact default) with
+    /// an SMD loading cap `C_L` at each open end. Shares the edge-coupled
+    /// coupled-resonator **band-pass** synthesis (same coupling matrix / response /
+    /// verdict); only the realized geometry — short θ0 lines + loading caps — and
+    /// the board differ. Routes through the distributed rail (same six stages).
+    Combline,
 }
 
 /// The product stages (the left rail order). Two stages —
@@ -99,11 +106,13 @@ impl Stage {
     /// The rail order for the active topology.
     pub fn rail(topology: Topology) -> &'static [Stage] {
         match topology {
-            // Stepped-impedance is distributed: the same five-stage rail (Spec /
-            // Technique / Synthesis / Layout / Export — no Components / Tolerance).
-            Topology::EdgeCoupled | Topology::Hairpin | Topology::SteppedImpedance => {
-                &Stage::DISTRIBUTED
-            }
+            // Stepped-impedance and combline are distributed: the same six-stage
+            // rail (Spec / Technique / Synthesis / Layout / Verify / Export — no
+            // Components / Tolerance).
+            Topology::EdgeCoupled
+            | Topology::Hairpin
+            | Topology::SteppedImpedance
+            | Topology::Combline => &Stage::DISTRIBUTED,
             Topology::LumpedLc => &Stage::LUMPED,
         }
     }
@@ -339,6 +348,10 @@ pub fn layout_stage(designed: ReadOnlySignal<Designed>) -> Element {
     let (bw, bh) = d.board_size_mm;
     let topo = d.topology_name();
     let length_label = d.length_label();
+    // The combline-distinct loading cap C_L (a single value — uniform θ0 / Z0 →
+    // the same cap at every resonator's open end). `Some` only for the combline
+    // flow; rendered as a pF line on the board card below.
+    let combline_cap_pf = d.combline_loading_cap_f.map(|c| c * 1e12);
 
     rsx! {
         div { class: "canvas-head",
@@ -358,6 +371,15 @@ pub fn layout_stage(designed: ReadOnlySignal<Designed>) -> Element {
                     span { class: "sw-cu", "● copper" }
                     span { class: "sw-sub", "● substrate" }
                     span { style: "color:#2dd4bf", "◯ port" }
+                }
+                if let Some(pf) = combline_cap_pf {
+                    p { class: "note",
+                        "Loading cap C_L ≈ "
+                        b { "{pf:.2} pF" }
+                        " per resonator · λg/8 short-circuited (θ0 = 45°) resonators. "
+                        "The SMD cap mounts at each open-end pad (surfaced as a value here, "
+                        "not yet drawn as a footprint — a polish follow-on)."
+                    }
                 }
             }
 
@@ -758,11 +780,12 @@ fn technique_status(t: RealizationTechnique) -> TechStatus {
         RealizationTechnique::EdgeCoupled => TechStatus::Live(Topology::EdgeCoupled),
         RealizationTechnique::Hairpin => TechStatus::Live(Topology::Hairpin),
         RealizationTechnique::LumpedLc => TechStatus::Live(Topology::LumpedLc),
-        // Remaining coupled-resonator distributed techniques: the live
-        // edge-coupled flow is the nearest stand-in.
-        RealizationTechnique::Combline | RealizationTechnique::Interdigital => {
-            TechStatus::Soon(Topology::EdgeCoupled)
-        }
+        // Combline is live (ADR-0146): it routes through the real
+        // `dimension_combline` / `dimension_combline_layout` engine.
+        RealizationTechnique::Combline => TechStatus::Live(Topology::Combline),
+        // Interdigital is the last roadmapped coupled-resonator technique: the
+        // live edge-coupled flow is the nearest stand-in.
+        RealizationTechnique::Interdigital => TechStatus::Soon(Topology::EdgeCoupled),
         // The stepped-impedance low-pass flow is live (ADR-0139): it routes
         // straight into the real F1.2.3 dimensioner + the low-pass response.
         RealizationTechnique::SteppedImpedance => TechStatus::Live(Topology::SteppedImpedance),
@@ -786,6 +809,7 @@ fn topology_label(t: Topology) -> &'static str {
         Topology::Hairpin => "Hairpin",
         Topology::LumpedLc => "Lumped LC",
         Topology::SteppedImpedance => "Stepped-impedance",
+        Topology::Combline => "Combline",
     }
 }
 
@@ -807,7 +831,9 @@ fn response_word(r: Response) -> &'static str {
 fn topology_response(t: Topology) -> Response {
     match t {
         Topology::SteppedImpedance => Response::Lowpass,
-        Topology::EdgeCoupled | Topology::Hairpin | Topology::LumpedLc => Response::Bandpass,
+        Topology::EdgeCoupled | Topology::Hairpin | Topology::LumpedLc | Topology::Combline => {
+            Response::Bandpass
+        }
     }
 }
 
@@ -1366,9 +1392,9 @@ pub fn technique_stage(
         },
         TechCard {
             name: "Combline",
-            desc: "grounded ¼λ + via",
-            glyph: r##"<svg viewBox="0 0 120 54"><g stroke="#6b7480" stroke-width="4" fill="none"><line x1="22" y1="10" x2="22" y2="40"/><line x1="46" y1="14" x2="46" y2="44"/><line x1="70" y1="10" x2="70" y2="40"/><line x1="94" y1="14" x2="94" y2="44"/></g></svg>"##,
-            selects: None,
+            desc: "capacitively-loaded θ0 resonators · F1.2.5–F1.2.6",
+            glyph: r##"<svg viewBox="0 0 120 54"><g stroke="#2dd4bf" stroke-width="4" fill="none"><line x1="22" y1="10" x2="22" y2="40"/><line x1="46" y1="14" x2="46" y2="44"/><line x1="70" y1="10" x2="70" y2="40"/><line x1="94" y1="14" x2="94" y2="44"/></g></svg>"##,
+            selects: Some(Topology::Combline),
         },
         TechCard {
             name: "Interdigital",
@@ -1572,7 +1598,11 @@ pub fn export_stage(
     match topology() {
         Topology::LumpedLc => export_lumped(lumped),
         Topology::SteppedImpedance => export_stepped(stepped),
-        Topology::EdgeCoupled | Topology::Hairpin => export_distributed(designed),
+        // Combline is distributed: it exports Gerber/KiCad from the same real
+        // `Layout` the board view draws, via the shared distributed export.
+        Topology::EdgeCoupled | Topology::Hairpin | Topology::Combline => {
+            export_distributed(designed)
+        }
     }
 }
 
