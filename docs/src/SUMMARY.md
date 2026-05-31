@@ -182,3 +182,4 @@
 - [ADR-0136: App.2.0 — guided technique-recommender (dual-UI entry)](decisions/0136-app-2-0-guided-technique-recommender.md)
 - [ADR-0137: Filter F1.2.3 — stepped-impedance low-pass filter synthesis + dimensions](decisions/0137-f1-2-3-stepped-impedance-lpf.md)
 - [ADR-0138: App.2.1 — light the Hairpin technique in the studio](decisions/0138-app-2-1-studio-hairpin.md)
+- [ADR-0139: App.2.2 — low-pass stepped-impedance flow in the studio](decisions/0139-app-2-2-studio-lowpass-stepped.md)
