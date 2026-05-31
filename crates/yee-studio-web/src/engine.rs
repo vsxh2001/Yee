@@ -116,7 +116,7 @@ pub struct ResonatorRow {
 /// Everything the POC's two real stages render — all from the live engine.
 pub struct Designed {
     /// The distributed realization the geometry was dimensioned for
-    /// (edge-coupled, hairpin, or combline). Drives the topology-aware Layout / Export
+    /// (edge-coupled, hairpin, combline, or interdigital). Drives the topology-aware Layout / Export
     /// labels; the synthesis / response / verdict fields are independent of it.
     pub topology: Topology,
     /// The hard-coded demo spec.
@@ -134,7 +134,7 @@ pub struct Designed {
     /// The real spec-mask verdict.
     pub report: MaskReport,
     /// The dimensioned board layout for the active distributed [`topology`]
-    /// (edge-coupled, hairpin, or combline), or `None` when the coupling is not realizable
+    /// (edge-coupled, hairpin, combline, or interdigital), or `None` when the coupling is not realizable
     /// on FR-4 (see [`dim_error`](Designed::dim_error)).
     pub layout: Option<Layout>,
     /// Per-resonator realized geometry + electricals (empty when geometry is
@@ -214,7 +214,7 @@ pub fn design_demo() -> Designed {
 /// real engine output.
 ///
 /// The synthesis / response / mask verdict are **topology-independent**
-/// (edge-coupled, hairpin, and combline all realize the *same* coupled-resonator
+/// (edge-coupled, hairpin, combline, and interdigital all realize the *same* coupled-resonator
 /// band-pass prototype); only the geometry-derived fields differ. `topology`
 /// selects the dimensioner: [`Topology::EdgeCoupled`] →
 /// [`dimension_edge_coupled`], [`Topology::Hairpin`] → [`dimension_hairpin`].
@@ -294,9 +294,10 @@ struct Geometry {
 
 /// The topology-specific output of a distributed dimensioner, normalized so the
 /// shared per-resonator electrical table + layout packaging in
-/// [`derive_geometry`] can treat edge-coupled and hairpin uniformly. (Both
-/// invert the same coupled-microstrip model; only the line width / resonator
-/// length / assembled [`Layout`] differ.)
+/// [`derive_geometry`] can treat edge-coupled, hairpin, combline, and
+/// interdigital uniformly. (All invert the same coupled-microstrip model; only
+/// the line width / resonator length / assembled [`Layout`] / loading cap
+/// differ.)
 struct SolvedDistributed {
     /// Strip / arm width for the spec `Z0`, metres.
     line_width_m: f64,
@@ -1524,7 +1525,7 @@ pub fn compare_techniques(spec: &FilterSpec) -> Vec<TechniqueComparison> {
 #[derive(Clone)]
 pub struct OverlayCurve {
     /// Honest curve label, e.g.
-    /// `"Coupled-resonator (edge-coupled / hairpin) — ideal"`.
+    /// `"Coupled-resonator (edge-coupled / hairpin / combline / interdigital) — ideal"`.
     pub label: String,
     /// The swept response (empty when not realizable).
     pub sweep: Vec<SweepPoint>,
