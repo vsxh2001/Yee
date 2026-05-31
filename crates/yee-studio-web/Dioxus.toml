@@ -7,3 +7,13 @@ name = "yee-studio-web"
 
 [web.app]
 title = "Yee Filter Studio"
+
+# App.1.2c (ADR-0135): deployed to GitHub Pages at a `/studio/` subpath of the
+# project site, alongside the mdBook docs at root. A GitHub *project* Pages site
+# serves under `https://<owner>.github.io/<repo>/` (here `/Yee/`), so the studio
+# lives at `/Yee/studio/`. dx 0.6.3 trims surrounding slashes from this value and
+# substitutes it for `{base_path}` in the generated index.html, so every emitted
+# asset/JS/wasm URL becomes `/Yee/studio/assets/…` — resolving correctly under the
+# subpath instead of a bare `/assets/…` that would 404 on the live page. The test
+# is the built HTML's URLs (see the pages.yml workflow + ADR-0135).
+base_path = "Yee/studio"
