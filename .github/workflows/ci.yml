@@ -244,15 +244,20 @@ jobs:
       - name: Cache cargo build artifacts
         uses: Swatinem/rust-cache@v2
 
-      # Filter Phase F2.3 (ADR-0115): full-wave FDTD EM simulation of a
-      # synthesized lumped-LC filter board (yee_voxel::simulate_lumped_board),
-      # cross-validated against the analytic circuit response
-      # yee_filter::ladder_s21. The `#[ignore]`'d gate runs two multi-minute
-      # FDTD solves (DUT + thru) and asserts the FDTD |S21| reproduces the
-      # band-pass shape (in-band ≈ 0 dB within a few dB, ≥ ~20 dB stopband
-      # rejection at 2.4 GHz). Mirrors the fdtd-line-eeff / mom-001 / gpu-nightly
-      # `--release --ignored` release-gate idiom (CLAUDE.md §4: never merge an
-      # unrun solver gate).
+      # Filter Phase F2.3 (ADR-0115 → re-scoped F2.3-i, ADR-0134): full-wave FDTD
+      # EM simulation of a synthesized lumped-LC filter board
+      # (yee_voxel::simulate_lumped_board — aperture lumped ports + CW + PEC-box
+      # 2-point de-embed). The `#[ignore]`'d gate asserts the EM-sim pipeline runs
+      # end-to-end AND the synthesized components demonstrably LOAD the line
+      # (≥ 6 dB deviation + spread vs the bare thru; an in-test inert control
+      # proves non-vacuity — an inert/flat response fails). The SHARP band-pass
+      # shape is NOT asserted here: it is a documented fundamental FDTD-measurement
+      # wall (ADR-0133 — a high-Q microstrip filter's CW steady-state S21 in a
+      # stable PEC box is cavity-dominated), and is cross-validated at the circuit
+      # level by ladder_s21 vs Pozar (lumped_001, ADR-0111) + the per-element
+      # reactance by aperture_port_001 / cap_cw_001 (ADR-0125/0127). Mirrors the
+      # fdtd-line-eeff / mom-001 `--release --ignored` release-gate idiom
+      # (CLAUDE.md §4: never merge an unrun solver gate).
       - name: fdtd-lumped-001 (lumped-LC EM, release, ignored)
         run: cargo test -p yee-voxel --release --test fdtd_lumped_001 -- --ignored --nocapture
 
