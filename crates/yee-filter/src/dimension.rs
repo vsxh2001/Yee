@@ -978,12 +978,14 @@ pub fn dimension_combline_layout(
 
     // Tapped input/output feeds + ports (neutral defaults, mirroring hairpin /
     // stepped-Z): feed width = line_width_m, feed length = one resonator length.
-    // The input feed taps the first resonator's open-end edge and extends in −x;
-    // the output feed taps the last resonator's open-end edge and extends in +x.
+    // The input feed taps the first resonator's side edge partway up (at tap_y, a
+    // neutral tap height) and extends in −x; the output feed taps the last
+    // resonator's side edge and extends in +x. (A combline tap is up the resonator
+    // from the grounded spine, not at the open / cap end.)
     let feed_width_m = w;
     let feed_length_m = l;
-    // A tap point partway up the open-end edge (a neutral default; qe→tap
-    // dimensioning is deferred, as in dimension_hairpin_layout).
+    // The tap height up the resonator (a neutral default; qe→tap dimensioning is
+    // deferred, as in dimension_hairpin_layout).
     let tap_y = l / 3.0;
 
     // Input feed: extends leftward (−x) from the first resonator's left edge.

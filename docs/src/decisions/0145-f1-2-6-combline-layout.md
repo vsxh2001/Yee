@@ -39,8 +39,10 @@ Composes proven primitives; no new physics, no `yee-layout` edit.
 **Gate (`dim_combline_layout_001`, non-vacuous geometry):** the demo order-5 combline
 layout has N resonator-line traces whose dimensions match `dimension_combline`
 (`line_width × resonator_length`), placed at the solved per-section gaps (consecutive
-x-pitch = `line_width + gaps_m[i]`, monotone — proving it consumes the real gaps, not a
-uniform placeholder), exactly 2 ports (ref `z0`), positive/finite bbox + rects.
+x-pitch = `line_width + gaps_m[i]` — proving it consumes the real solved gaps, not a
+uniform placeholder; the pitches are **symmetric** about the centre, not monotone,
+because the demo Chebyshev coupling is symmetric — `gaps_m = [g0, g1, g1, g0]`), exactly
+2 ports (ref `z0`), positive/finite bbox + rects.
 
 **Honest scope:** a first-class `yee-layout::combline_bpf` generator (a later refactor),
 3-D via modelling, and the SMD-cap hybrid render are out of scope; the loading caps live
