@@ -1,46 +1,94 @@
 /* ===========================================================================
-   Yee Filter Studio — design system (App.D.0, ADR-0110)
+   Yee Filter Studio — design system
 
-   The "slick" foundation: theme tokens (palette / type scale / spacing /
-   radius) + base components, applied app-wide. Dark, flat, teal accent, copper
-   + substrate-green for the board. Matches the approved brainstorm mockups
-   (.superpowers/brainstorm/.../{end-to-end-flow,topology-gallery,board-materials}.html).
+   App.3.0 (ADR-0152) "Instrument" redesign on top of App.D.0 (ADR-0110) +
+   App.2.9 (ADR-0151, responsive / AA / a11y).
+
+   The aesthetic: a *precision RF instrument*, not a generic dark dashboard.
+   The chrome echoes the board it builds — copper `#e6b24d` traces over a
+   substrate-green `#3f9e72` board — so the COPPER is the brand signature
+   (wordmark, active stage, primary CTAs, focus + hero glows). The Tailwind
+   teal `#2dd4bf` is demoted to a quiet data/info role (the |S21| trace, info
+   chips). Layered elevation, a faint dot-grid + grain texture, a radial glow
+   behind the active hero, and one orchestrated motion moment (a staggered
+   stage entrance + an SVG draw-in) make it feel like a lit instrument panel.
+
+   ALL of App.2.9 is preserved + extended: the @media responsive cascade (no
+   horizontal overflow at 390px), the AA-contrast floor (every text token
+   computes >= 4.5:1 — re-verified for the copper/substrate promotion), the
+   a11y attrs, and a `prefers-reduced-motion: reduce` block that neutralizes
+   every new animation.
    =========================================================================== */
 
-:root {
-  /* --- palette -------------------------------------------------------------- */
-  --bg: #0b0d11;            /* app background          */
-  --panel: #10151b;         /* card / panel surface    */
-  --panel-2: #0f141a;       /* alt panel surface       */
-  --panel-3: #0c1116;       /* sunken surface          */
-  --border: #222a33;        /* default border          */
-  --border-2: #1c222a;      /* subtle divider          */
-  --border-3: #2a313b;      /* control border          */
+/* --- self-hosted display + mono fonts (OFL) ---------------------------------
+   Display: Big Shoulders Display (Production Type, OFL) — a condensed
+   industrial engineering-signage grotesque; the "instrument faceplate" voice
+   for the wordmark, H1s, and stat/readout numerals. Mono: JetBrains Mono
+   (OFL) — a refined technical mono for engineering data. Neither is a banned
+   AI-slop face (no Inter/Roboto/Arial/system display, no Space Grotesk).
 
-  --text: #e6edf3;          /* primary text            */
-  --text-2: #c9d1d9;        /* body text               */
-  /* App.2.9 (ADR-0151): was #6b7480 (~4.1:1 on --bg #0b0d11, fails WCAG-AA
-     4.5:1 for normal text). Raised to #828c98 = 5.70:1 contrast on --bg —
-     clears AA, still reads as "muted" (a visible step dimmer than --muted-2
-     #8b95a1 at 6.4:1, so the muted/muted-2 hierarchy is preserved). */
+   The `@font-face` rules are emitted from `main.rs` via a `document::Style`
+   block, NOT here: dx 0.6.3 does NOT rewrite `url()` paths inside a static CSS
+   file (it would leave a bare `/assets/x.woff2` that 404s under the `/Yee/
+   studio/` base_path and is never copied to the bundle). Routing each woff2
+   through the `asset!()` macro in `main.rs` bundles + fingerprints it AND
+   prefixes the base path, so the Pages deploy is fully self-contained. */
+
+:root {
+  /* --- palette -------------------------------------------------------------
+     Warmer, deeper instrument greys (a faint copper undertone vs the old
+     neutral GitHub-dark) so the copper identity reads as integral, not
+     bolted-on. */
+  --bg: #0a0c10;            /* app background          */
+  --bg-2: #07090c;          /* deepest (vignette edge) */
+  --panel: #12161d;         /* card / panel surface    */
+  --panel-2: #0f141a;       /* alt panel surface       */
+  --panel-3: #0c1015;       /* sunken surface          */
+  --border: #232b35;        /* default border          */
+  --border-2: #1b212a;      /* subtle divider          */
+  --border-3: #2c3540;      /* control border          */
+
+  --text: #eef1f5;          /* primary text (16:1 on bg)   */
+  --text-2: #c9d1d9;        /* body text (12.6:1 on bg)    */
+  /* App.2.9 (ADR-0151): #828c98 = 5.70:1 on --bg, clears WCAG-AA 4.5:1 for
+     normal text. KEPT for the smallest captions. */
   --muted: #828c98;         /* labels / captions (AA 5.70:1 on --bg)  */
   --muted-2: #8b95a1;       /* secondary muted (6.4:1 on --bg)        */
+  /* App.3.0: a warm instrument-grey for engineering body data — 7.04:1 on
+     --panel-3, 7.22:1 on --bg; clears AA comfortably and echoes the copper
+     undertone. */
+  --muted-warm: #a39d93;
   --faint: #3a434e;         /* faintest (stage nums)   */
 
-  --accent: #2dd4bf;        /* teal accent             */
-  --accent-bg: #0e2b29;     /* teal tinted fill        */
-  --accent-soft: #79e2cf;   /* light teal (dim text)   */
-  --copper: #e6b24d;        /* copper traces           */
-  --copper-2: #c4882f;      /* copper shadow / edge    */
-  --substrate: #3f9e72;     /* substrate green         */
-  --substrate-bg: #0a2218;  /* board fill              */
+  /* --- IDENTITY: copper + substrate are the brand (App.3.0) ----------------
+     Copper #e6b24d = 10.04:1 on --bg, 9.47:1 on --panel — excellent as text
+     (wordmark / active label / numerals). Substrate #3f9e72 = 5.88:1 on --bg,
+     5.54:1 on --panel — clears AA as text/accent. */
+  --copper: #e6b24d;        /* brand: wordmark, active, CTA, hero glow */
+  --copper-2: #c4882f;      /* copper shadow / edge (6.4:1 on bg)      */
+  --copper-soft: #f2cd86;   /* lit copper (hover/highlight)            */
+  --copper-bg: #221a0c;     /* copper-tinted fill (active surface)     */
+  --copper-edge: #4a3414;   /* copper-tinted border                    */
+  --copper-glow: rgba(230, 178, 77, 0.34);
+
+  --substrate: #3f9e72;     /* substrate green (secondary identity)    */
+  --substrate-bg: #0a2218;  /* board fill                              */
   --substrate-edge: #1f5138;
+
+  /* --- teal demoted to a quiet data/info role (App.3.0) -------------------- */
+  --accent: #2dd4bf;        /* teal — now the DATA color (|S21|, info) */
+  --accent-bg: #0e2b29;     /* teal tinted fill                        */
+  --accent-soft: #79e2cf;   /* light teal                              */
+
   --fail: #e35d6a;          /* fail red                */
   --fail-bg: #2b1416;
 
-  /* --- type ---------------------------------------------------------------- */
+  /* --- type ----------------------------------------------------------------
+     Display = the instrument faceplate voice; mono = the readout; body keeps
+     a refined system sans (the brief permits this). */
+  --font-display: "Big Shoulders Display", "Arial Narrow", system-ui, sans-serif;
   --font: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
 
   /* --- spacing / radius ---------------------------------------------------- */
   --r-sm: 6px;
@@ -52,6 +100,19 @@
   --sp-4: 16px;
   --sp-5: 24px;
   --sp-6: 32px;
+
+  /* --- elevation (layered instrument depth) -------------------------------- */
+  --elev-1: 0 1px 0 rgba(255, 255, 255, 0.025) inset,
+            0 2px 6px -2px rgba(0, 0, 0, 0.55);
+  --elev-2: 0 1px 0 rgba(255, 255, 255, 0.03) inset,
+            0 8px 24px -10px rgba(0, 0, 0, 0.7),
+            0 2px 6px -3px rgba(0, 0, 0, 0.5);
+  --elev-hero: 0 1px 0 rgba(255, 255, 255, 0.045) inset,
+               0 24px 60px -22px rgba(0, 0, 0, 0.85),
+               0 6px 18px -8px rgba(0, 0, 0, 0.6);
+
+  /* one place to tune the entrance stagger step */
+  --stagger: 70ms;
 }
 
 * { box-sizing: border-box; }
@@ -60,13 +121,26 @@ html, body {
   margin: 0;
   padding: 0;
   height: 100%;
-  background: var(--bg);
   color: var(--text-2);
   font-family: var(--font);
   font-size: 14px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+
+  /* --- atmosphere: a lit instrument panel, not a flat fill -----------------
+     Layered, fixed background — a soft copper glow up top, a substrate-green
+     undertone bottom-right, a faint dot-grid lattice, and a vignette toward
+     the deep edges. Cheap (pure CSS gradients), no image requests. */
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(1100px 620px at 18% -8%, rgba(230, 178, 77, 0.10), transparent 60%),
+    radial-gradient(900px 560px at 108% 116%, rgba(63, 158, 114, 0.08), transparent 62%),
+    radial-gradient(circle at center, var(--bg) 58%, var(--bg-2) 100%),
+    radial-gradient(rgba(160, 178, 200, 0.05) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 100% 100%, 26px 26px;
+  background-position: 0 0, 0 0, 0 0, 0 0;
+  background-attachment: fixed;
 }
 
 #main, .app { height: 100%; }
@@ -83,26 +157,34 @@ html, body {
 
 /* ---- top bar ------------------------------------------------------------- */
 .topbar {
-  height: 52px;
-  flex: 0 0 52px;
-  background: #0f1318;
+  height: 56px;
+  flex: 0 0 56px;
+  background:
+    linear-gradient(180deg, rgba(230, 178, 77, 0.05), transparent 70%),
+    linear-gradient(180deg, #0e1217, #0b0e13);
   border-bottom: 1px solid var(--border-2);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 6px 18px -12px rgba(0, 0, 0, 0.8);
   display: flex;
   align-items: center;
   gap: var(--sp-3);
-  padding: 0 var(--sp-4);
+  padding: 0 var(--sp-5);
 }
+/* the brand "power" dot — now copper, the instrument's lit indicator */
 .topbar .dot {
   width: 9px; height: 9px;
   border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 8px var(--accent);
+  background: var(--copper);
+  box-shadow: 0 0 10px var(--copper), 0 0 2px var(--copper-soft);
 }
 .topbar .brand {
-  color: var(--text);
-  font-weight: 650;
-  font-size: 15px;
-  letter-spacing: 0.2px;
+  font-family: var(--font-display);
+  color: var(--copper);
+  font-weight: 700;
+  font-size: 23px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  line-height: 1;
+  text-shadow: 0 0 18px rgba(230, 178, 77, 0.28);
 }
 .topbar .spec-chip {
   color: var(--muted-2);
@@ -121,11 +203,14 @@ html, body {
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.3px;
+  font-family: var(--mono);
 }
+/* PASS = the instrument's "locked" state → copper, the brand success color */
 .chip.pass {
-  background: var(--accent-bg);
-  border: 1px solid var(--accent);
-  color: var(--accent);
+  background: var(--copper-bg);
+  border: 1px solid var(--copper);
+  color: var(--copper);
+  box-shadow: 0 0 12px -4px var(--copper-glow);
 }
 .chip.fail {
   background: var(--fail-bg);
@@ -148,10 +233,11 @@ html, body {
 
 /* stage rail */
 .rail {
-  width: 78px;
-  flex: 0 0 78px;
-  background: #0d1116;
+  width: 80px;
+  flex: 0 0 80px;
+  background: linear-gradient(180deg, #0c1015, #090c10);
   border-right: 1px solid var(--border-2);
+  box-shadow: 1px 0 0 rgba(255, 255, 255, 0.02) inset;
   display: flex;
   flex-direction: column;
   gap: var(--sp-2);
@@ -159,10 +245,10 @@ html, body {
   align-items: center;
 }
 .rail .item {
-  width: 60px;
+  width: 62px;
   height: 56px;
   border-radius: var(--r);
-  background: #161b22;
+  background: #131922;
   border: 1px solid transparent;
   display: flex;
   flex-direction: column;
@@ -171,17 +257,31 @@ html, body {
   gap: 3px;
   color: var(--muted);
   cursor: pointer;
-  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+  position: relative;
+  transition: background 140ms ease, color 140ms ease, border-color 140ms ease,
+              box-shadow 140ms ease;
 }
-.rail .item:hover { color: var(--text-2); background: #1a2029; }
+.rail .item:hover { color: var(--text-2); background: #1a212c; }
+/* active stage = copper, the brand. A left copper bar + tinted surface + glow
+   makes "you are here" unmistakable (color is reinforced by the inset bar +
+   aria-current="step" in markup). */
 .rail .item.on {
-  background: var(--accent-bg);
-  border-color: var(--accent);
-  color: var(--accent);
+  background: linear-gradient(180deg, var(--copper-bg), #131922 80%);
+  border-color: var(--copper-edge);
+  color: var(--copper);
+  box-shadow: 0 0 16px -6px var(--copper-glow);
+}
+.rail .item.on::before {
+  content: "";
+  position: absolute;
+  left: -1px; top: 12px; bottom: 12px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--copper);
+  box-shadow: 0 0 8px var(--copper-glow);
 }
 .rail .item .ic { font-size: 18px; line-height: 1; }
-/* App.2.9 (ADR-0151): 9px → 11px for legibility; nowrap keeps the longer
-   labels (Tolerance / Components) on one line within the 56px item height. */
+/* App.2.9 (ADR-0151): 11px label, nowrap keeps long labels on one line. */
 .rail .item .lab { font-size: 11px; font-weight: 600; letter-spacing: 0.2px; white-space: nowrap; }
 
 /* canvas */
@@ -191,18 +291,65 @@ html, body {
   overflow: auto;
   padding: var(--sp-5);
 }
-.canvas-head { margin-bottom: var(--sp-4); }
+.canvas-head { margin-bottom: var(--sp-5); }
 .canvas-head h1 {
-  margin: 0 0 4px;
-  font-size: 20px;
-  font-weight: 650;
+  margin: 0 0 5px;
+  font-family: var(--font-display);
+  font-size: 34px;
+  font-weight: 700;
   color: var(--text);
-  letter-spacing: 0.2px;
+  letter-spacing: 0.012em;
+  line-height: 1.02;
+  text-transform: uppercase;
 }
 .canvas-head .sub {
   margin: 0;
-  color: var(--muted);
+  color: var(--muted-2);
   font-size: 13px;
+  max-width: 80ch;
+}
+
+/* ===========================================================================
+   Staggered stage entrance — the one orchestrated motion moment (App.3.0)
+
+   The active stage is rendered inside a keyed wrapper (`.stage` in main.rs)
+   so Dioxus remounts it on every stage change, re-triggering this animation.
+   Each direct child (the canvas-head + each card/row) fades + rises in with a
+   small per-child delay. Neutralized under prefers-reduced-motion (below).
+   =========================================================================== */
+.stage > * {
+  animation: stage-rise 360ms cubic-bezier(0.22, 0.7, 0.25, 1) both;
+}
+.stage > *:nth-child(1)  { animation-delay: 0ms; }
+.stage > *:nth-child(2)  { animation-delay: calc(var(--stagger) * 1); }
+.stage > *:nth-child(3)  { animation-delay: calc(var(--stagger) * 2); }
+.stage > *:nth-child(4)  { animation-delay: calc(var(--stagger) * 3); }
+.stage > *:nth-child(5)  { animation-delay: calc(var(--stagger) * 4); }
+.stage > *:nth-child(6)  { animation-delay: calc(var(--stagger) * 5); }
+.stage > *:nth-child(n+7) { animation-delay: calc(var(--stagger) * 6); }
+
+@keyframes stage-rise {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* SVG draw-in: the |S21|/|S11| traces + the board copper sweep in when a stage
+   (re)renders. Applied to the plot/board frame's lines + polygons. */
+.plot svg polyline,
+.plot svg polygon {
+  animation: trace-draw 900ms ease-out both;
+  animation-delay: 220ms;
+}
+@keyframes trace-draw {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+/* The copper traces fade in (no transform — an SVG `scale()` is relative to the
+   user-space origin, not the polygon, and the board uses an arbitrary viewBox
+   origin, so a transform would slide the copper rather than reveal it). */
+.board-frame.hero svg polygon {
+  animation: trace-draw 760ms ease-out both;
+  animation-delay: 260ms;
 }
 
 /* ===========================================================================
@@ -210,17 +357,22 @@ html, body {
    =========================================================================== */
 
 .card {
-  background: var(--panel);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent 40%),
+    var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
   padding: var(--sp-4);
+  box-shadow: var(--elev-1);
 }
-.card.sunken { background: var(--panel-3); }
+.card.sunken { background: var(--panel-3); box-shadow: inset 0 1px 8px -4px rgba(0, 0, 0, 0.6); }
 .card h2.card-title {
   margin: 0 0 var(--sp-3);
-  font-size: 14px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--text);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   display: flex;
   align-items: center;
   gap: var(--sp-2);
@@ -232,6 +384,7 @@ html, body {
   font-weight: 500;
   text-transform: none;
   letter-spacing: 0.3px;
+  font-family: var(--mono);
 }
 
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-4); }
@@ -247,6 +400,7 @@ html, body {
   font-weight: 600;
 }
 
+/* badges default to the quiet teal info role */
 .badge {
   font-size: 9px;
   border-radius: 5px;
@@ -255,6 +409,8 @@ html, body {
   border: 1px solid var(--accent);
   color: var(--accent);
   font-weight: 600;
+  font-family: var(--mono);
+  letter-spacing: 0.04em;
 }
 .badge.soon {
   background: #1b2027;
@@ -265,10 +421,16 @@ html, body {
 /* tables */
 table { width: 100%; border-collapse: collapse; font-size: 12px; }
 th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border-2); }
-th { color: var(--muted); font-weight: 600; font-size: 11px; }
+th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
 td { color: var(--text-2); }
 .mono { font-family: var(--mono); color: var(--text); }
-.ok-mark { color: var(--accent); }
+.ok-mark { color: var(--substrate); }
 
 /* ===========================================================================
    Coupling-matrix grid
@@ -280,6 +442,7 @@ td { color: var(--text-2); }
   padding: var(--sp-3);
   border-radius: var(--r);
   border: 1px solid var(--border-2);
+  box-shadow: inset 0 1px 10px -6px rgba(0, 0, 0, 0.7);
 }
 .matrix .cell {
   min-width: 62px;
@@ -292,23 +455,36 @@ td { color: var(--text-2); }
   color: var(--muted-2);
 }
 .matrix .cell.diag { color: var(--faint); background: #0e131a; }
+/* the live couplings → copper, the signal path on the board */
 .matrix .cell.coupled {
-  color: var(--accent);
-  background: var(--accent-bg);
+  color: var(--copper);
+  background: var(--copper-bg);
   font-weight: 600;
+  box-shadow: 0 0 0 1px var(--copper-edge) inset;
 }
 
-/* small stat readouts */
+/* small stat readouts — the instrument numerals (display face, copper-lit) */
 .stats { display: flex; flex-wrap: wrap; gap: var(--sp-4); }
 .stat {
-  background: var(--panel-3);
+  background:
+    linear-gradient(180deg, rgba(230, 178, 77, 0.025), transparent 50%),
+    var(--panel-3);
   border: 1px solid var(--border-2);
   border-radius: var(--r);
   padding: var(--sp-3) var(--sp-4);
-  min-width: 120px;
+  min-width: 124px;
+  box-shadow: inset 0 1px 8px -5px rgba(0, 0, 0, 0.6);
 }
-.stat .v { font-family: var(--mono); font-size: 18px; color: var(--text); }
-.stat .l { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.stat .v {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 27px;
+  line-height: 1.05;
+  color: var(--text);
+  letter-spacing: 0.01em;
+  font-variant-numeric: tabular-nums;
+}
+.stat .l { font-size: 11px; color: var(--muted); margin-top: 3px; }
 
 .gvals { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
 .gval {
@@ -320,23 +496,26 @@ td { color: var(--text-2); }
   padding: 5px 9px;
   color: var(--text-2);
 }
-.gval b { color: var(--accent); font-weight: 600; }
+.gval b { color: var(--copper); font-weight: 600; }
 
 /* ===========================================================================
    SVG plot frame
    =========================================================================== */
 .plot {
-  background: var(--panel-3);
+  background:
+    radial-gradient(120% 100% at 50% 0%, rgba(230, 178, 77, 0.04), transparent 55%),
+    var(--panel-3);
   border: 1px solid var(--border-2);
   border-radius: var(--r);
   padding: var(--sp-3);
+  box-shadow: inset 0 1px 14px -6px rgba(0, 0, 0, 0.7);
 }
 .plot svg { display: block; width: 100%; height: auto; }
 .legend { display: flex; gap: var(--sp-4); margin-top: var(--sp-2); font-size: 11px; color: var(--muted); }
 .legend .swatch { display: inline-block; width: 14px; height: 3px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
 
 /* ===========================================================================
-   Board top-view + stackup (layout stage)
+   Board top-view + stackup (layout stage) — BOARD-AS-HERO (App.3.0)
    =========================================================================== */
 .board-frame {
   background: var(--substrate-bg);
@@ -347,8 +526,31 @@ td { color: var(--text-2); }
 }
 .board-frame svg { display: block; width: 100%; height: auto; }
 
+/* The hero workbench surface: the board/plot becomes the elevated anchor of
+   the Layout + Synthesis stages — a lifted plate over a copper-tinted glow. */
+.hero-stage {
+  position: relative;
+  border-radius: var(--r-lg);
+}
+.hero-stage::before {
+  content: "";
+  position: absolute;
+  inset: -8% -4% -14% -4%;
+  background: radial-gradient(70% 80% at 50% 38%, var(--copper-glow), transparent 70%);
+  filter: blur(8px);
+  opacity: 0.7;
+  z-index: 0;
+  pointer-events: none;
+}
+.hero-stage > * { position: relative; z-index: 1; }
+.board-frame.hero,
+.plot.hero {
+  border-color: var(--copper-edge);
+  box-shadow: var(--elev-hero), 0 0 0 1px rgba(230, 178, 77, 0.12);
+}
+
 .stack-layer { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
-.stack-layer .lbl { width: 64px; font-size: 10px; color: var(--muted-2); text-align: right; }
+.stack-layer .lbl { width: 64px; font-size: 10px; color: var(--muted-2); text-align: right; font-family: var(--mono); }
 .stack-layer .swatch {
   flex: 1;
   border-radius: 3px;
@@ -358,6 +560,7 @@ td { color: var(--text-2); }
   font-size: 10px;
   color: #00000099;
   font-weight: 600;
+  font-family: var(--mono);
 }
 .editrow {
   display: flex;
@@ -376,13 +579,15 @@ td { color: var(--text-2); }
   padding: 2px 9px;
   font-size: 11px;
 }
+/* selected pill → copper brand */
 .editrow .pill-sel {
-  background: var(--accent-bg);
-  border: 1px solid var(--accent);
-  color: var(--accent);
+  background: var(--copper-bg);
+  border: 1px solid var(--copper);
+  color: var(--copper);
   border-radius: var(--r-sm);
   padding: 3px 9px;
   font-size: 11px;
+  font-family: var(--mono);
 }
 
 .legend-row { margin-top: var(--sp-3); display: flex; gap: var(--sp-4); font-size: 11px; color: var(--muted); align-items: center; }
@@ -394,28 +599,34 @@ td { color: var(--text-2); }
    =========================================================================== */
 .tgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--sp-3); }
 .tcard {
-  background: var(--panel);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent 40%),
+    var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--r);
   padding: var(--sp-3);
   position: relative;
+  box-shadow: var(--elev-1);
 }
-.tcard:not(.soon) { cursor: pointer; transition: border-color 0.12s, transform 0.12s; }
-.tcard:not(.soon):hover { border-color: var(--accent-soft); transform: translateY(-1px); }
-/* App.2.9 (ADR-0151): make the selected technique unmistakable (was border +
-   1px inset only — too close to the hover state). Stronger 2px inset ring + a
-   soft accent glow, a faint accent-tinted surface, and a filled-accent
-   "Selected" badge (below). Stays within the teal accent identity. */
+.tcard:not(.soon) { cursor: pointer; transition: border-color 0.14s, transform 0.14s, box-shadow 0.14s; }
+.tcard:not(.soon):hover {
+  border-color: var(--copper-edge);
+  transform: translateY(-2px);
+  box-shadow: var(--elev-2), 0 0 18px -8px var(--copper-glow);
+}
+/* App.2.9 (ADR-0151): the selected technique is unmistakable. App.3.0 promotes
+   it to the copper brand — a 2px inset copper ring + a copper glow + a
+   copper-tinted surface + a filled-copper "Selected" badge. */
 .tcard.sel {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent) inset, 0 0 12px -2px var(--accent);
-  background: linear-gradient(var(--accent-bg), var(--panel) 60%);
+  border-color: var(--copper);
+  box-shadow: 0 0 0 2px var(--copper) inset, 0 0 16px -2px var(--copper-glow);
+  background: linear-gradient(var(--copper-bg), var(--panel) 62%);
 }
 .tcard.sel:hover { transform: none; }
 .tcard.sel .badge {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #07211e;
+  background: var(--copper);
+  border-color: var(--copper);
+  color: #211603;
 }
 .tcard.soon { opacity: 0.45; }
 .tcard .badge { position: absolute; top: 10px; right: 10px; }
@@ -424,6 +635,7 @@ td { color: var(--text-2); }
   background: var(--panel-3);
   border: 1px solid var(--border-2);
   border-radius: 7px;
+  box-shadow: inset 0 1px 8px -5px rgba(0, 0, 0, 0.6);
 }
 .tcard .glyph svg { width: 100%; height: 100%; }
 .tcard .name { font-weight: 600; color: var(--text); margin-top: var(--sp-2); font-size: 13px; }
@@ -436,7 +648,7 @@ td { color: var(--text-2); }
   border-left: 2px solid var(--border-3);
   padding-left: var(--sp-3);
 }
-.note.honest { border-left-color: var(--copper); color: var(--muted-2); }
+.note.honest { border-left-color: var(--copper); color: var(--muted-warm); }
 
 .fields .field {
   display: flex;
@@ -455,16 +667,18 @@ td { color: var(--text-2); }
   padding: 7px 13px;
   font-size: 12px;
   color: var(--text-2);
-  font-family: var(--font);
+  font-family: var(--mono);
 }
+/* download = the instrument's primary output → copper CTA */
 .export-row .btn.dl {
   cursor: pointer;
-  transition: border-color 0.12s, color 0.12s, background 0.12s;
+  transition: border-color 0.14s, color 0.14s, background 0.14s, box-shadow 0.14s;
 }
 .export-row .btn.dl:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--accent-bg);
+  border-color: var(--copper);
+  color: var(--copper);
+  background: var(--copper-bg);
+  box-shadow: 0 0 14px -6px var(--copper-glow);
 }
 
 /* ===========================================================================
@@ -480,19 +694,18 @@ td { color: var(--text-2); }
   padding: 3px 8px;
   width: 110px;
   text-align: right;
-  transition: border-color 0.12s, box-shadow 0.12s;
+  transition: border-color 0.14s, box-shadow 0.14s;
 }
 .spec-input:hover { border-color: var(--muted-2); }
 .spec-input:focus {
   outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent) inset;
+  border-color: var(--copper);
+  box-shadow: 0 0 0 1px var(--copper) inset, 0 0 12px -4px var(--copper-glow);
 }
-/* the spec form re-uses .field rows; align the editable control to the right */
 .fields .field .seg { margin: -3px 0; }
 
 /* ===========================================================================
-   Segmented toggle (lumped Components + BOM — E24 / E96 switch, App.D.1L)
+   Segmented toggle (lumped Components + BOM — E24 / E96 switch)
    =========================================================================== */
 .seg {
   display: inline-flex;
@@ -511,13 +724,13 @@ td { color: var(--text-2); }
   padding: 6px 16px;
   border-radius: 5px;
   cursor: pointer;
-  transition: background 0.12s, color 0.12s;
+  transition: background 0.14s, color 0.14s;
 }
 .seg-btn:hover { color: var(--text-2); }
 .seg-btn.on {
-  background: var(--accent-bg);
-  color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent) inset;
+  background: var(--copper-bg);
+  color: var(--copper);
+  box-shadow: 0 0 0 1px var(--copper) inset;
 }
 
 /* ===========================================================================
@@ -532,6 +745,7 @@ td { color: var(--text-2); }
 }
 .guided-form { margin-bottom: var(--sp-2); }
 
+/* the recommender's primary result → copper brand */
 .rec-result {
   margin-top: var(--sp-4);
   display: flex;
@@ -539,20 +753,22 @@ td { color: var(--text-2); }
   gap: var(--sp-3);
 }
 .rec-primary {
-  background: var(--accent-bg);
-  border: 1px solid var(--accent);
+  background: linear-gradient(180deg, var(--copper-bg), var(--panel-3) 80%);
+  border: 1px solid var(--copper);
   border-radius: var(--r-sm);
   padding: var(--sp-3) var(--sp-4);
+  box-shadow: 0 0 18px -8px var(--copper-glow);
 }
 .rec-head { display: flex; align-items: center; gap: var(--sp-2); }
 .rec-badge {
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--accent);
-  border: 1px solid var(--accent);
+  color: var(--copper);
+  border: 1px solid var(--copper);
   border-radius: 999px;
   padding: 2px 9px;
+  font-family: var(--mono);
 }
 .rec-name { font-size: 16px; font-weight: 700; color: var(--text); }
 .rec-rationale {
@@ -561,23 +777,20 @@ td { color: var(--text-2); }
   line-height: 1.55;
   margin: var(--sp-2) 0 var(--sp-3);
 }
-/* App.2.9 (ADR-0151): the recommender's primary "Use this" CTA. Was just
-   `cursor: pointer`, which on top of `.btn` read as a plain dark secondary
-   button. Promote it to a filled accent CTA (mirrors the `.export-row .btn.dl`
-   hover treatment but applied as the resting state) so it is unmistakably the
-   primary action. Stays within the teal accent palette. */
+/* the primary "Use this" CTA → copper, the unmistakable primary action */
 .rec-use {
   cursor: pointer;
-  background: var(--accent-bg);
-  border-color: var(--accent);
-  color: var(--accent);
+  background: var(--copper-bg);
+  border-color: var(--copper);
+  color: var(--copper);
   font-weight: 600;
-  transition: border-color 0.12s, color 0.12s, background 0.12s, transform 0.12s;
+  transition: border-color 0.14s, color 0.14s, background 0.14s, transform 0.14s, box-shadow 0.14s;
 }
 .rec-use:hover {
-  border-color: var(--accent-soft);
-  color: var(--accent-soft);
+  border-color: var(--copper-soft);
+  color: var(--copper-soft);
   transform: translateY(-1px);
+  box-shadow: 0 0 14px -6px var(--copper-glow);
 }
 
 .rec-alts { display: flex; flex-direction: column; gap: var(--sp-2); }
@@ -604,8 +817,8 @@ td { color: var(--text-2); }
   text-align: left;
   color: var(--muted);
   font-weight: 600;
-  font-size: 11px;
-  letter-spacing: 0.3px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   padding: 6px 10px;
   border-bottom: 1px solid var(--border-3);
@@ -615,28 +828,26 @@ td { color: var(--text-2); }
   border-bottom: 1px solid var(--border-2);
   color: var(--text-2);
 }
-.compare-table .compare-rec td { background: var(--accent-bg); }
-.compare-table .compare-rec td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+/* the recommended row → copper highlight */
+.compare-table .compare-rec td { background: var(--copper-bg); }
+.compare-table .compare-rec td:first-child { box-shadow: inset 2px 0 0 var(--copper); }
 
 /* ===========================================================================
-   Responsive (App.2.9, ADR-0151)
+   Responsive (App.2.9, ADR-0151) — KEPT + extended
 
-   The design system shipped with ZERO @media queries, so the fixed 78px stage
-   rail + multi-column grids + wide tables overflowed the viewport horizontally
-   on phones (≤420px). These breakpoints collapse the layout to a single column
+   The fixed stage rail + multi-column grids + wide tables overflowed phones
+   (<= 420px) before App.2.9. These breakpoints collapse to a single column
    and turn the rail into a horizontal top tab-strip so nothing exceeds the
-   viewport width. Desktop (above 760px) is untouched — every rule lives inside
-   a max-width media query, so the desktop cascade is byte-for-byte unchanged.
+   viewport width. Desktop (above 760px) is untouched.
    =========================================================================== */
 
-/* ---- tablet / phone: ≤ 760px -------------------------------------------- */
+/* ---- tablet / phone: <= 760px ------------------------------------------- */
 @media (max-width: 760px) {
   /* The body stacks: rail on top (horizontal strip), canvas below. */
   .body { flex-direction: column; }
 
-  /* Stage rail → a full-width horizontal tab-strip. It scrolls sideways inside
-     itself (the strip alone may exceed the viewport on the 8-stage lumped rail)
-     so the PAGE never gets a horizontal scrollbar. */
+  /* Stage rail -> a full-width horizontal tab-strip; scrolls sideways inside
+     itself so the PAGE never gets a horizontal scrollbar. */
   .rail {
     width: 100%;
     flex: 0 0 auto;
@@ -656,23 +867,30 @@ td { color: var(--text-2); }
     height: 48px;
     padding: 0 var(--sp-2);
   }
+  /* the active copper bar reads as a bottom underline on the horizontal strip */
+  .rail .item.on::before {
+    left: 12px; right: 12px; top: auto; bottom: -1px;
+    width: auto; height: 3px;
+    border-radius: 3px 3px 0 0;
+  }
 
   /* Multi-column layouts collapse to a single column. */
   .grid-2, .grid-3, .tgrid { grid-template-columns: 1fr; }
   .row { flex-direction: column; }
 
+  /* The hero glow can bleed past a narrow canvas; clip it locally. */
+  .hero-stage::before { inset: -4% 0 -8% 0; }
+
   /* Tighter canvas gutter on small screens. */
   .canvas { padding: var(--sp-4); }
+  .canvas-head h1 { font-size: 27px; }
 
-  /* Wide content (the coupling matrix, the compare table) scrolls inside its
-     card instead of forcing the page wide. The card's width is bounded by the
-     single-column canvas, so the overflow is contained locally. */
+  /* Wide content scrolls inside its card instead of forcing the page wide. */
   .card { overflow-x: auto; }
   .compare-table { display: block; overflow-x: auto; white-space: nowrap; }
   .matrix { max-width: 100%; }
 
-  /* Top bar wraps gracefully: the brand stays on one line, the spec chip drops
-     to a new line if there is no room rather than pushing the chip off-screen. */
+  /* Top bar wraps gracefully. */
   .topbar {
     height: auto;
     flex: 0 0 auto;
@@ -681,19 +899,18 @@ td { color: var(--text-2); }
     gap: var(--sp-2);
     row-gap: var(--sp-1);
   }
-  .topbar .brand { white-space: nowrap; }
+  .topbar .brand { white-space: nowrap; font-size: 20px; }
   .topbar .spacer { margin-left: auto; }
 }
 
-/* ---- small phone: ≤ 420px ----------------------------------------------- */
+/* ---- small phone: <= 420px ---------------------------------------------- */
 @media (max-width: 420px) {
   /* Editable controls fit the viewport instead of clipping at a fixed width. */
   .spec-input, select {
     max-width: 100%;
     width: 100%;
   }
-  /* Right-aligned spec rows: let the control take the row width on its own line
-     so the long label + the input do not overflow side-by-side. */
+  /* Right-aligned spec rows wrap so label + input never overflow side-by-side. */
   .fields .field { flex-wrap: wrap; gap: 4px; }
 
   /* Export action buttons wrap to multiple rows. */
@@ -702,4 +919,26 @@ td { color: var(--text-2); }
 
   /* Drop the canvas gutter further on the narrowest screens. */
   .canvas { padding: var(--sp-3); }
+  .canvas-head h1 { font-size: 24px; }
+}
+
+/* ===========================================================================
+   Reduced motion (App.3.0) — neutralize EVERY new animation/transition.
+   An accessibility requirement: users who prefer reduced motion get the same
+   layout with no entrance rise, no trace draw-in, and no transform hovers.
+   =========================================================================== */
+@media (prefers-reduced-motion: reduce) {
+  .stage > *,
+  .plot svg polyline,
+  .plot svg polygon,
+  .board-frame.hero svg polygon {
+    animation: none !important;
+  }
+  .stage > * { opacity: 1 !important; transform: none !important; }
+  *, *::before, *::after {
+    transition-duration: 0.001ms !important;
+    transition-delay: 0ms !important;
+  }
+  .tcard:not(.soon):hover,
+  .rec-use:hover { transform: none; }
 }
