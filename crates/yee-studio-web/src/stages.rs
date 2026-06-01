@@ -191,13 +191,13 @@ pub fn synthesis_stage(designed: ReadOnlySignal<Designed>) -> Element {
             p { class: "sub", "Lowpass prototype, external Q, and the all-pole coupling matrix — graded against the spec mask. All values are live engine output." }
         }
 
-        // ---- response plot ------------------------------------------------
-        div { class: "card", style: "margin-bottom:16px",
+        // ---- response plot (board-as-hero: the elevated workbench) --------
+        div { class: "card hero-stage", style: "margin-bottom:16px",
             h2 { class: "card-title",
                 "Ideal response vs spec mask"
                 span { class: "k", "closed-form prototype · |S21|, |S11|" }
             }
-            div { class: "plot", dangerous_inner_html: "{plot}" }
+            div { class: "plot hero", dangerous_inner_html: "{plot}" }
             div { class: "legend",
                 span { span { class: "swatch", style: "background:#2dd4bf" } "|S21| (transmission)" }
                 span { span { class: "swatch", style: "background:#6b7480" } "|S11| (reflection)" }
@@ -369,13 +369,13 @@ pub fn layout_stage(designed: ReadOnlySignal<Designed>) -> Element {
         }
 
         div { class: "row",
-            // ---- board top view ---------------------------------------------
-            div { class: "card", style: "flex:1.5",
+            // ---- board top view (board-as-hero: the elevated workbench) -----
+            div { class: "card hero-stage", style: "flex:1.5",
                 h2 { class: "card-title",
                     "Board · top view"
                     span { class: "k", "F.Cu · substrate · ports · {bw:.1} × {bh:.1} mm" }
                 }
-                div { class: "board-frame", dangerous_inner_html: "{board}" }
+                div { class: "board-frame hero", dangerous_inner_html: "{board}" }
                 div { class: "legend-row",
                     span { class: "sw-cu", "● copper" }
                     span { class: "sw-sub", "● substrate" }
@@ -2080,12 +2080,12 @@ pub fn lumped_synthesis_stage(designed: ReadOnlySignal<Option<LumpedDesigned>>) 
         }
 
         // ---- ideal ladder response vs mask --------------------------------
-        div { class: "card", style: "margin-bottom:16px",
+        div { class: "card hero-stage", style: "margin-bottom:16px",
             h2 { class: "card-title",
                 "Ideal ladder response vs spec mask"
                 span { class: "k", "ABCD cascade · |S21|, |S11|" }
             }
-            div { class: "plot", dangerous_inner_html: "{plot}" }
+            div { class: "plot hero", dangerous_inner_html: "{plot}" }
             div { class: "legend",
                 span { span { class: "swatch", style: "background:#2dd4bf" } "|S21| (transmission)" }
                 span { span { class: "swatch", style: "background:#6b7480" } "|S11| (reflection)" }
@@ -2368,13 +2368,13 @@ pub fn lumped_layout_stage(designed: ReadOnlySignal<Option<LumpedDesigned>>) -> 
             p { class: "sub", "The LC ladder placed as SMD footprints on a Z0 microstrip with a ground rail — series parts in-line, shunt parts on stubs to ground. Footprints are drawn to scale from the live board generator." }
         }
         div { class: "row",
-            // ---- board top view --------------------------------------------
-            div { class: "card", style: "flex:1.6",
+            // ---- board top view (board-as-hero: the elevated workbench) ----
+            div { class: "card hero-stage", style: "flex:1.6",
                 h2 { class: "card-title",
                     "Board · top view"
                     span { class: "k", "0603 SMD · signal · ground · {bw:.1} × {bh:.1} mm" }
                 }
-                div { class: "board-frame", dangerous_inner_html: "{board}" }
+                div { class: "board-frame hero", dangerous_inner_html: "{board}" }
                 div { class: "legend-row",
                     span { class: "sw-cu", "● copper (pads / line / rail)" }
                     span { class: "sw-sub", "● substrate" }
@@ -2505,7 +2505,7 @@ pub fn stepped_synthesis_stage(designed: ReadOnlySignal<SteppedLowpassDesigned>)
         }
 
         // ---- ideal low-pass response vs mask ------------------------------
-        div { class: "card", style: "margin-bottom:16px",
+        div { class: "card hero-stage", style: "margin-bottom:16px",
             h2 { class: "card-title",
                 "Ideal low-pass response vs spec mask"
                 span { class: "k", "closed-form |S21| at Ω = f / f_c · f_c = {fc_ghz:.3} GHz" }
@@ -2515,7 +2515,7 @@ pub fn stepped_synthesis_stage(designed: ReadOnlySignal<SteppedLowpassDesigned>)
                     span { class: "chip fail", style: "margin-left:auto", "FAIL" }
                 }
             }
-            div { class: "plot", dangerous_inner_html: "{plot}" }
+            div { class: "plot hero", dangerous_inner_html: "{plot}" }
             div { class: "legend",
                 span { span { class: "swatch", style: "background:#2dd4bf" } "|S21| (transmission)" }
                 span { span { class: "swatch", style: "background:#6b7480" } "|S11| (reflection)" }
@@ -2660,13 +2660,13 @@ pub fn stepped_layout_stage(designed: ReadOnlySignal<SteppedLowpassDesigned>) ->
         }
 
         div { class: "row",
-            // ---- board top view ---------------------------------------------
-            div { class: "card", style: "flex:1.6",
+            // ---- board top view (board-as-hero: the elevated workbench) ----
+            div { class: "card hero-stage", style: "flex:1.6",
                 h2 { class: "card-title",
                     "Board · top view"
                     span { class: "k", "F.Cu · substrate · ports · {bw:.1} × {bh:.1} mm" }
                 }
-                div { class: "board-frame", dangerous_inner_html: "{board}" }
+                div { class: "board-frame hero", dangerous_inner_html: "{board}" }
                 div { class: "legend-row",
                     span { class: "sw-cu", "● copper" }
                     span { class: "sw-sub", "● substrate" }

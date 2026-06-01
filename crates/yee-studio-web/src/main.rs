@@ -51,6 +51,33 @@ use yee_filter::FilterSpec;
 /// `asset!` macro so the web build bundles it and `dx`/trunk fingerprints it.
 const STUDIO_CSS: Asset = asset!("/assets/studio.css");
 
+// Self-hosted OFL display + mono fonts (App.3.0, ADR-0152). Routed through the
+// `asset!` macro so dx bundles + fingerprints each woff2 AND resolves it
+// against the `/Yee/studio/` base_path — a static-CSS `@font-face url()` is NOT
+// rewritten by dx 0.6.3, so the rules are emitted from the `FontFaces` Style
+// block below with these resolved paths instead. Display = Big Shoulders
+// Display (the instrument-faceplate voice: wordmark / H1 / numerals); mono =
+// JetBrains Mono (the engineering readout). Both OFL; neither is a banned face.
+const FONT_DISPLAY_600: Asset = asset!("/assets/bigshoulders-600.woff2");
+const FONT_DISPLAY_700: Asset = asset!("/assets/bigshoulders-700.woff2");
+const FONT_MONO_400: Asset = asset!("/assets/jetbrainsmono-400.woff2");
+const FONT_MONO_600: Asset = asset!("/assets/jetbrainsmono-600.woff2");
+
+/// Emit the `@font-face` rules with dx-resolved, base-path-correct, fingerprinted
+/// woff2 URLs (see the asset constants above for why this is not in studio.css).
+#[component]
+fn FontFaces() -> Element {
+    let css = format!(
+        "@font-face{{font-family:'Big Shoulders Display';font-style:normal;font-weight:600;font-display:swap;src:url({FONT_DISPLAY_600}) format('woff2');}}\
+         @font-face{{font-family:'Big Shoulders Display';font-style:normal;font-weight:700;font-display:swap;src:url({FONT_DISPLAY_700}) format('woff2');}}\
+         @font-face{{font-family:'JetBrains Mono';font-style:normal;font-weight:400;font-display:swap;src:url({FONT_MONO_400}) format('woff2');}}\
+         @font-face{{font-family:'JetBrains Mono';font-style:normal;font-weight:600;font-display:swap;src:url({FONT_MONO_600}) format('woff2');}}"
+    );
+    rsx! {
+        document::Style { {css} }
+    }
+}
+
 fn main() {
     dioxus::launch(App);
 }
@@ -99,20 +126,31 @@ fn App() -> Element {
 
     rsx! {
         document::Stylesheet { href: STUDIO_CSS }
+        FontFaces {}
         div { class: "app",
             TopBar { topology, designed, lumped, stepped }
             div { class: "body",
                 Rail { active, topology }
                 main { class: "canvas",
-                    StageCanvas {
-                        stage: active(),
-                        topology,
-                        active,
-                        spec,
-                        designed,
-                        lumped,
-                        stepped,
-                        series_e96,
+                    // App.3.0 (ADR-0152): a `key`ed wrapper around the active
+                    // stage's content. Dioxus remounts the subtree whenever the
+                    // key changes (a stage switch), which re-triggers the CSS
+                    // entrance animation (`.stage > *` staggered rise) defined in
+                    // studio.css — the one orchestrated motion moment. The class
+                    // is the animation hook; the key is the remount trigger.
+                    div {
+                        key: "{active():?}",
+                        class: "stage",
+                        StageCanvas {
+                            stage: active(),
+                            topology,
+                            active,
+                            spec,
+                            designed,
+                            lumped,
+                            stepped,
+                            series_e96,
+                        }
                     }
                 }
             }
