@@ -194,3 +194,4 @@
 - [ADR-0148: Filter F1.2.7 — interdigital dimensional synthesis](decisions/0148-f1-2-7-interdigital-synthesis.md)
 - [ADR-0149: Filter F1.2.8 — interdigital board layout](decisions/0149-f1-2-8-interdigital-layout.md)
 - [ADR-0150: App.2.8 — light the Interdigital technique in the studio](decisions/0150-app-2-8-studio-interdigital.md)
+- [ADR-0151: App.2.9 — studio responsive + accessibility + P1 polish](decisions/0151-app-2-9-studio-responsive-a11y.md)
