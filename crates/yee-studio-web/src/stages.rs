@@ -1478,7 +1478,7 @@ pub fn technique_stage(
                                 }
                             },
                             span { class: "{badge_cls}", "{badge}" }
-                            div { class: "glyph", dangerous_inner_html: "{card.glyph}" }
+                            div { class: "glyph", aria_hidden: "true", dangerous_inner_html: "{card.glyph}" }
                             div { class: "name", "{card.name}" }
                             div { class: "desc", "{card.desc}" }
                         }
@@ -1667,12 +1667,14 @@ fn export_distributed(designed: ReadOnlySignal<Designed>) -> Element {
                     }
                 }
                 div { class: "field", span { class: "name", "Board" } span { class: "val", "{bw:.1} × {bh:.1} mm" } }
+                // App.2.9 (ADR-0151): the verdict is the nominal spec-mask grade
+                // of the synthesized ideal response — label it as such.
                 div { class: "field",
-                    span { class: "name", "Spec verdict" }
+                    span { class: "name", "Spec verdict (nominal)" }
                     if d.report.pass {
-                        span { class: "val", style: "color:#2dd4bf", "PASS" }
+                        span { class: "val", style: "color:#2dd4bf", "PASS · spec mask" }
                     } else {
-                        span { class: "val", style: "color:#e35d6a", "FAIL" }
+                        span { class: "val", style: "color:#e35d6a", "FAIL · spec mask" }
                     }
                 }
             }
@@ -1760,6 +1762,11 @@ fn export_lumped(lumped: ReadOnlySignal<Option<LumpedDesigned>>) -> Element {
     };
     let (bw, bh) = d.board_size_mm;
     let parts = d.bom_e24.total_parts;
+    // App.2.9 (ADR-0151): the lowest of the two Monte-Carlo yields, used to
+    // surface a low-yield caveat so the "nominal" spec verdict (the ideal,
+    // zero-tolerance design) is not read as contradicting a low manufacturing
+    // yield. Same < 90% "low" threshold as the Tolerance / yield stage.
+    let lowest_yield = d.yield_e24.yield_pct.min(d.yield_e96.yield_pct);
 
     rsx! {
         div { class: "canvas-head",
@@ -1777,13 +1784,29 @@ fn export_lumped(lumped: ReadOnlySignal<Option<LumpedDesigned>>) -> Element {
                 div { class: "field", span { class: "name", "E24 yield" } span { class: "val", "{d.yield_e24.yield_pct:.1}%" } }
                 div { class: "field", span { class: "name", "E96 yield" } span { class: "val", "{d.yield_e96.yield_pct:.1}%" } }
                 div { class: "field", span { class: "name", "Board" } span { class: "val", "{bw:.1} × {bh:.1} mm" } }
+                // App.2.9 (ADR-0151): label the verdict "nominal (spec mask)" so it
+                // reads as the ideal zero-tolerance grade, distinct from the
+                // Monte-Carlo manufacturing yield rows above it.
                 div { class: "field",
-                    span { class: "name", "Spec verdict" }
+                    span { class: "name", "Spec verdict (nominal)" }
                     if d.verdict.pass {
-                        span { class: "val", style: "color:#2dd4bf", "PASS" }
+                        span { class: "val", style: "color:#2dd4bf", "PASS · spec mask" }
                     } else {
-                        span { class: "val", style: "color:#e35d6a", "FAIL" }
+                        span { class: "val", style: "color:#e35d6a", "FAIL · spec mask" }
                     }
+                }
+            }
+            // App.2.9 (ADR-0151): when the nominal design passes but the realized
+            // (toleranced) yield is low, the bare "PASS" above the yield rows is
+            // misleading. Surface an explicit caveat so they don't read as a
+            // contradiction. Wording only — no engine / verdict change.
+            if d.verdict.pass && lowest_yield < 90.0 {
+                div { class: "note honest",
+                    "The verdict above is " b { "nominal" } " — the ideal, zero-tolerance "
+                    "design meets the spec mask. With real ±tolerance parts the Monte-Carlo "
+                    "yield is {lowest_yield:.1}%, so a fraction of built boards will miss the "
+                    "mask. See the Tolerance / yield stage; a tighter series (E96) or a relaxed "
+                    "mask raises yield."
                 }
             }
             div { class: "export-row",
@@ -2813,12 +2836,14 @@ fn export_stepped(designed: ReadOnlySignal<SteppedLowpassDesigned>) -> Element {
                 div { class: "field", span { class: "name", "System Z0" } span { class: "val", "{d.spec.z0_ohm:.0} Ω" } }
                 div { class: "field", span { class: "name", "High / low Z" } span { class: "val", "{d.z_high():.0} / {d.z_low():.0} Ω" } }
                 div { class: "field", span { class: "name", "Board" } span { class: "val", "{bw:.1} × {bh:.1} mm" } }
+                // App.2.9 (ADR-0151): the verdict is the nominal spec-mask grade
+                // of the synthesized ideal response — label it as such.
                 div { class: "field",
-                    span { class: "name", "Spec verdict" }
+                    span { class: "name", "Spec verdict (nominal)" }
                     if d.pass {
-                        span { class: "val", style: "color:#2dd4bf", "PASS" }
+                        span { class: "val", style: "color:#2dd4bf", "PASS · spec mask" }
                     } else {
-                        span { class: "val", style: "color:#e35d6a", "FAIL" }
+                        span { class: "val", style: "color:#e35d6a", "FAIL · spec mask" }
                     }
                 }
             }

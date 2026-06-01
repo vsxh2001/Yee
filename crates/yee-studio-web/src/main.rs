@@ -172,7 +172,7 @@ fn TopBar(
 #[component]
 fn Rail(active: Signal<Stage>, topology: ReadOnlySignal<Topology>) -> Element {
     rsx! {
-        nav { class: "rail",
+        nav { class: "rail", aria_label: "Design stages",
             for stage in Stage::rail(topology()).iter().copied() {
                 {
                     let on = active() == stage;
@@ -180,8 +180,14 @@ fn Rail(active: Signal<Stage>, topology: ReadOnlySignal<Topology>) -> Element {
                         button {
                             key: "{stage:?}",
                             class: if on { "item on" } else { "item" },
+                            // A11y (App.2.9, ADR-0151): mark the active stage as the
+                            // current step (color alone is insufficient), and give
+                            // each button an accessible name — the visible label is
+                            // tiny and the leading glyph is decorative.
+                            aria_current: if on { Some("step") } else { None },
+                            aria_label: "{stage.label()}",
                             onclick: move |_| active.set(stage),
-                            span { class: "ic", "{stage.icon()}" }
+                            span { class: "ic", aria_hidden: "true", "{stage.icon()}" }
                             span { class: "lab", "{stage.label()}" }
                         }
                     }
