@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<!--
+  App.2.9 (ADR-0151): custom dx web index template. dx 0.6.3 reads a crate-root
+  `index.html` (see dioxus-cli build/web.rs `prepare_html`) and otherwise falls
+  back to its bundled default. This is a byte-for-byte copy of that default with
+  ONE change — `lang="en"` on <html> — because dx's `[web.app]` config exposes
+  only `title` + `base_path`, so a custom template is the only clean way to set
+  the document language. dx still injects the title / wasm-loader / stylesheet by
+  string-matching the </title>, </body>, </head> markers below, so they are kept
+  exactly. Do NOT add app markup here — the studio renders into #main from Rust.
+-->
+<html lang="en">
+  <head>
+    <title>{app_title}</title>
+    <meta content="text/html;charset=utf-8" http-equiv="Content-Type" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta charset="UTF-8" />
+  </head>
+  <body>
+    <div id="main"></div>
+  </body>
+</html>
