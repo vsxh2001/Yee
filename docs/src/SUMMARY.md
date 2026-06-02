@@ -196,3 +196,4 @@
 - [ADR-0150: App.2.8 — light the Interdigital technique in the studio](decisions/0150-app-2-8-studio-interdigital.md)
 - [ADR-0151: App.2.9 — studio responsive + accessibility + P1 polish](decisions/0151-app-2-9-studio-responsive-a11y.md)
 - [ADR-0152: App.3.0 — studio "Instrument" distinctiveness redesign](decisions/0152-app-3-0-studio-instrument-redesign.md)
+- [ADR-0153: FEM driven-sweep microstrip-S21 EM-verification track (7-brick decomposition)](decisions/0153-fem-em-microstrip-s21-track.md)
