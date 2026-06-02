@@ -1087,6 +1087,133 @@ impl<'m> OpenBoundarySolver<'m> {
         self.coupled_whitney
     }
 
+    /// Union caller-supplied **global edge IDs** into the PEC
+    /// (Dirichlet-eliminated) edge set, tagging interior conductors
+    /// (e.g. an embedded microstrip trace) as PEC (FEM-EM brick 1,
+    /// ADR-0153).
+    ///
+    /// The exterior-face PEC set computed at construction
+    /// ([`Self::new`]) only covers edges on [`FaceKind::Pec`]-tagged
+    /// **boundary** faces. A signal trace floating inside the mesh
+    /// volume has no exterior face, so its edges are never seen by the
+    /// face classifier. This builder lets the caller fold those
+    /// interior edges into the same private `pec_global_edges` set the
+    /// assembly primitive
+    /// ([`crate::assembly::FemEigenAssembly::assemble_complex_with_pec_edges`])
+    /// and the driven path ([`Self::assemble_driven_system`],
+    /// [`Self::sweep`], [`Self::sweep_matrix`]) already honour verbatim
+    /// — so interior PEC is inherited by every solve path with **no
+    /// further wiring**.
+    ///
+    /// The supplied IDs must live in the canonical global-edge index
+    /// space — the deduplicated first-seen ordering produced by walking
+    /// `mesh.tetrahedra` and [`crate::element::LOCAL_EDGES`]. Use
+    /// [`Self::interior_edges_matching`] to obtain IDs in exactly that
+    /// space from a world-coordinate predicate.
+    ///
+    /// The operation is a set **union**: re-tagging an edge that is
+    /// already PEC (e.g. one already on an exterior PEC face) is a
+    /// no-op, so this builder is idempotent and composes freely with
+    /// the construction-time exterior PEC set. IDs outside the valid
+    /// edge range are inserted as-is; they simply never match a real
+    /// edge during assembly and are inert.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use yee_fem::OpenBoundarySolver;
+    /// # fn demo(solver: OpenBoundarySolver<'_>) -> OpenBoundarySolver<'_> {
+    /// // Pick the interior conductor edges geometrically, then fold them
+    /// // into the PEC set. Every solve path inherits the interior PEC.
+    /// let trace_edges = solver.interior_edges_matching(|a, b| {
+    ///     (a.z - 0.5).abs() < 1e-9 && (b.z - 0.5).abs() < 1e-9
+    /// });
+    /// solver.with_interior_pec_edges(trace_edges)
+    /// # }
+    /// ```
+    pub fn with_interior_pec_edges(mut self, edges: impl IntoIterator<Item = usize>) -> Self {
+        self.pec_global_edges.extend(edges);
+        self
+    }
+
+    /// Return the **global edge IDs** whose two endpoint world
+    /// coordinates satisfy `pred`, in the canonical global-edge index
+    /// space (FEM-EM brick 1, ADR-0153).
+    ///
+    /// This is the geometric edge-picker that pairs with
+    /// [`Self::with_interior_pec_edges`]: it lets a caller select a set
+    /// of interior conductor edges by position (e.g. "every edge whose
+    /// both endpoints lie on the trace footprint") without knowing the
+    /// opaque global-edge numbering.
+    ///
+    /// The implementation rebuilds the **exact** `EdgeKey` /
+    /// [`crate::element::LOCAL_EDGES`] deduplication map used by
+    /// [`crate::assembly::FemEigenAssembly::assemble_complex_with_pec_edges`]:
+    /// it walks `mesh.tetrahedra` in order, walks the six canonical
+    /// local edges per tet, and assigns each unique
+    /// lower-endpoint-first vertex pair the next free index on first
+    /// sight. That is bit-for-bit the same numbering the assembly
+    /// primitive filters against, so the returned IDs are directly
+    /// consumable by [`Self::with_interior_pec_edges`].
+    ///
+    /// `pred` is invoked once per **unique** edge with the world
+    /// coordinates of its two endpoints. The endpoint argument order is
+    /// the canonical lower-vertex-index-first orientation; predicates
+    /// that care about orientation should be symmetrised by the caller.
+    /// The returned vector is sorted ascending and free of duplicates.
+    ///
+    /// Note that this returns **all** matching edges regardless of
+    /// whether they are interior or already PEC; callers wanting a
+    /// genuinely-interior subset should difference the result against
+    /// [`Self::pec_global_edges`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use yee_fem::OpenBoundarySolver;
+    /// # fn demo(solver: &OpenBoundarySolver<'_>) -> Vec<usize> {
+    /// // Edges fully contained in the mid-plane z = 0.5.
+    /// solver.interior_edges_matching(|a, b| {
+    ///     (a.z - 0.5).abs() < 1e-9 && (b.z - 0.5).abs() < 1e-9
+    /// })
+    /// # }
+    /// ```
+    pub fn interior_edges_matching(
+        &self,
+        pred: impl Fn(Vector3<f64>, Vector3<f64>) -> bool,
+    ) -> Vec<usize> {
+        // Rebuild the canonical global-edge numbering exactly as
+        // `PmlAssemblyEdgeTable::build` / assembly's `TetEdgeTable::build`
+        // do: first-seen order over (tet, LOCAL_EDGES). We only need the
+        // deduplicated edge list (vertex-pair endpoints), so we keep a
+        // parallel index-ordered `Vec<EdgeKey>` and a dedup `HashMap`.
+        let mut edge_map: HashMap<EdgeKey, usize> = HashMap::new();
+        let mut edges: Vec<EdgeKey> = Vec::new();
+        for tet in &self.mesh.tetrahedra {
+            for &(li, lj) in LOCAL_EDGES.iter() {
+                let a = tet[li];
+                let b = tet[lj];
+                let key = EdgeKey::new(a, b);
+                edge_map.entry(key).or_insert_with(|| {
+                    edges.push(key);
+                    edges.len() - 1
+                });
+            }
+        }
+
+        let mut matched: Vec<usize> = edges
+            .iter()
+            .enumerate()
+            .filter_map(|(gid, key)| {
+                let va = self.mesh.vertices[key.from];
+                let vb = self.mesh.vertices[key.to];
+                if pred(va, vb) { Some(gid) } else { None }
+            })
+            .collect();
+        matched.sort_unstable();
+        matched
+    }
+
     /// Set the Engquist–Majda ABC bilinear-form order on
     /// [`FaceKind::Abc`]-tagged faces (Phase 4.fem.eig.3 F4).
     ///
