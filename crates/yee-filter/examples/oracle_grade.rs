@@ -133,7 +133,61 @@ fn parse_pairs<I: IntoIterator<Item = String>>(args: I) -> Vec<(f64, f64)> {
     pts
 }
 
+/// Passband (near-band) tolerance in dB: `|extracted − reference|` must stay
+/// within this over ~[1.85, 2.15] GHz.
+const PASSBAND_TOL_DB: f64 = 2.0;
+/// Stopband / rejection-skirt tolerance in dB (looser — the skirt is steep, so
+/// a small frequency offset reads as a large dB error there).
+const REJECTION_TOL_DB: f64 = 5.0;
+
+/// Worst-case band errors + asymmetry result of grading an extracted curve
+/// against the reference ladder. `asymmetry_pass` is `None` when the curve
+/// lacks the points the discriminator needs.
+struct GradeOutcome {
+    worst_pass_db: f64,
+    worst_rej_db: f64,
+    asymmetry_pass: Option<bool>,
+}
+
+/// Pure grading decision: compare each extracted point to the reference ladder
+/// and run the geometric-asymmetry discriminator. This is the function the
+/// exit-code gate AND its tests use, so the pass/fail decision can never drift
+/// from what is tested.
+fn evaluate(pairs: &[(f64, f64)]) -> GradeOutcome {
+    let ladder = reference_ladder();
+    let mut worst_pass_db = 0.0_f64;
+    let mut worst_rej_db = 0.0_f64;
+    for &(f_ghz, d_meas) in pairs {
+        let d_ref = db(ladder_s21(&ladder, f_ghz * 1e9).norm());
+        let err = (d_meas - d_ref).abs();
+        if (1.85..=2.15).contains(&f_ghz) {
+            worst_pass_db = worst_pass_db.max(err);
+        } else {
+            worst_rej_db = worst_rej_db.max(err);
+        }
+    }
+    GradeOutcome {
+        worst_pass_db,
+        worst_rej_db,
+        asymmetry_pass: asymmetry_discriminator(pairs, ASYMMETRY_MARGIN_DB).map(|v| v.pass),
+    }
+}
+
+/// The gate: a submission FAILS if either band exceeds tolerance OR the
+/// geometric-asymmetry discriminator flags it (a symmetric/inverted curve has
+/// lost the band-pass-mapping asymmetry and is not a credible EM result).
+fn outcome_failed(o: &GradeOutcome) -> bool {
+    o.worst_pass_db > PASSBAND_TOL_DB
+        || o.worst_rej_db > REJECTION_TOL_DB
+        || o.asymmetry_pass == Some(false)
+}
+
 fn main() {
+    let pairs = parse_pairs(std::env::args().skip(1));
+    if pairs.is_empty() {
+        eprintln!("usage: oracle_grade 1.6:-40.1 2.0:-0.2 2.4:-33.5 ...");
+        std::process::exit(2);
+    }
     let ladder = reference_ladder();
 
     // Passband is the -0.5 dB ripple band ~[1.9, 2.1] GHz; outside is stopband
@@ -142,54 +196,55 @@ fn main() {
         "{:>10}  {:>10}  {:>10}  {:>8}  verdict",
         "f(GHz)", "extracted", "reference", "err"
     );
-    let mut worst_pass = 0.0_f64;
-    let mut worst_rej = 0.0_f64;
-    let mut any = false;
-    let pairs = parse_pairs(std::env::args().skip(1));
     for &(f_ghz, d_meas) in &pairs {
-        any = true;
-        let f = f_ghz * 1e9;
-        let d_ref = db(ladder_s21(&ladder, f).norm());
+        let d_ref = db(ladder_s21(&ladder, f_ghz * 1e9).norm());
         let err = d_meas - d_ref;
-        let in_band = (1.85..=2.15).contains(&f_ghz);
-        let tol = if in_band { 2.0 } else { 5.0 };
-        let ok = err.abs() <= tol;
-        if in_band {
-            worst_pass = worst_pass.max(err.abs());
+        let tol = if (1.85..=2.15).contains(&f_ghz) {
+            PASSBAND_TOL_DB
         } else {
-            worst_rej = worst_rej.max(err.abs());
-        }
+            REJECTION_TOL_DB
+        };
         println!(
             "{:>10.4}  {:>10.3}  {:>10.3}  {:>+8.3}  {}",
             f_ghz,
             d_meas,
             d_ref,
             err,
-            if ok { "ok" } else { "FAIL" }
+            if err.abs() <= tol { "ok" } else { "FAIL" }
         );
     }
-    if any {
+
+    let outcome = evaluate(&pairs);
+    println!(
+        "\nworst passband err = {:.3} dB (tol {})   worst rejection err = {:.3} dB (tol {})",
+        outcome.worst_pass_db, PASSBAND_TOL_DB, outcome.worst_rej_db, REJECTION_TOL_DB
+    );
+    if let Some(v) = asymmetry_discriminator(&pairs, ASYMMETRY_MARGIN_DB) {
         println!(
-            "\nworst passband err = {:.3} dB (tol 2.0)   worst rejection err = {:.3} dB (tol 5.0)",
-            worst_pass, worst_rej
+            "\n[asymmetry] depth(1.6 GHz)={:.2} dB  depth(2.4 GHz)={:.2} dB  margin={:+.2} dB  -> {}",
+            v.depth_lo_db,
+            v.depth_hi_db,
+            v.margin_db,
+            if v.pass {
+                "PASS (lower notch deeper: physical microstrip signature)"
+            } else {
+                "FLAG (symmetric/inverted: not a geometry-aware EM result)"
+            }
         );
-        // Geometric-asymmetry discriminator over the extracted curve.
-        if let Some(v) = asymmetry_discriminator(&pairs, ASYMMETRY_MARGIN_DB) {
-            println!(
-                "\n[asymmetry] depth(1.6 GHz)={:.2} dB  depth(2.4 GHz)={:.2} dB  margin={:+.2} dB  -> {}",
-                v.depth_lo_db,
-                v.depth_hi_db,
-                v.margin_db,
-                if v.pass {
-                    "PASS (lower notch deeper: physical microstrip signature)"
-                } else {
-                    "FLAG (symmetric/inverted: not a geometry-aware EM result)"
-                }
-            );
-        }
-    } else {
-        println!("usage: oracle_grade 1.6:-40.1 2.0:-0.2 2.4:-33.5 ...");
     }
+
+    // The exit code IS the gate: 0 only if every point is within tolerance AND
+    // the geometric-asymmetry discriminator passed. (The prior version always
+    // exited 0 on the CLI path, so a CI/B7 caller checking `$?` would rubber-
+    // stamp a broken submission — review P0.)
+    if outcome_failed(&outcome) {
+        eprintln!(
+            "\n[oracle_grade] FAIL: submission exceeds tolerance or fails the \
+             geometric-asymmetry discriminator"
+        );
+        std::process::exit(1);
+    }
+    println!("\n[oracle_grade] PASS");
 }
 
 /// Minimum required depth excess (lower − upper notch) for the asymmetry
@@ -210,6 +265,75 @@ mod tests {
                 (f_ghz, db(ladder_s21(ladder, f_ghz * 1e9).norm()))
             })
             .collect()
+    }
+
+    #[test]
+    fn gate_predicate_flags_each_failure_mode_independently() {
+        // All-pass: within both tolerances, asymmetry passed -> NOT failed.
+        assert!(!outcome_failed(&GradeOutcome {
+            worst_pass_db: 0.1,
+            worst_rej_db: 0.1,
+            asymmetry_pass: Some(true),
+        }));
+        // Passband over tolerance alone -> failed.
+        assert!(outcome_failed(&GradeOutcome {
+            worst_pass_db: PASSBAND_TOL_DB + 0.5,
+            worst_rej_db: 0.1,
+            asymmetry_pass: Some(true),
+        }));
+        // Rejection over tolerance alone -> failed.
+        assert!(outcome_failed(&GradeOutcome {
+            worst_pass_db: 0.1,
+            worst_rej_db: REJECTION_TOL_DB + 0.5,
+            asymmetry_pass: Some(true),
+        }));
+        // Within tolerance but asymmetry FLAGGED -> failed (the anti-fitted-
+        // artifact path: a symmetric/inverted curve must not pass the gate).
+        assert!(outcome_failed(&GradeOutcome {
+            worst_pass_db: 0.1,
+            worst_rej_db: 0.1,
+            asymmetry_pass: Some(false),
+        }));
+    }
+
+    /// End-to-end: the faithful reference curve passes the FULL gate (tolerance
+    /// against itself + asymmetry). If this failed, the exit-code gate would
+    /// reject a perfect submission.
+    #[test]
+    fn gate_passes_faithful_reference_curve() {
+        let ladder = reference_ladder();
+        let curve = sample_ladder_curve(&ladder, 2001);
+        assert!(
+            !outcome_failed(&evaluate(&curve)),
+            "the faithful reference must PASS the full grading gate"
+        );
+    }
+
+    /// End-to-end: a submission matching the reference everywhere EXCEPT a +3 dB
+    /// error at 2.0 GHz (passband tol 2.0) must fail the gate -> the CLI path now
+    /// exits non-zero (review P0: it previously always exited 0).
+    #[test]
+    fn gate_fails_over_tolerance_submission() {
+        let ladder = reference_ladder();
+        let mut curve = sample_ladder_curve(&ladder, 2001);
+        // Bump the point nearest 2.0 GHz by +3 dB.
+        let idx = curve
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| (a.0 - 2.0).abs().partial_cmp(&(b.0 - 2.0).abs()).unwrap())
+            .map(|(i, _)| i)
+            .unwrap();
+        curve[idx].1 += 3.0;
+        let outcome = evaluate(&curve);
+        assert!(
+            outcome.worst_pass_db > PASSBAND_TOL_DB,
+            "worst passband err {:.3} should exceed tol after +3 dB bump",
+            outcome.worst_pass_db
+        );
+        assert!(
+            outcome_failed(&outcome),
+            "an in-band +3 dB error must fail the gate"
+        );
     }
 
     /// (a) Grading the reference against a *perturbed copy of itself* must pass
