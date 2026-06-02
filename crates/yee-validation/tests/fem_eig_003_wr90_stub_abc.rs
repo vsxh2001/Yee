@@ -127,6 +127,11 @@ use yee_validation::{CaseStatus, run_fem_eig_003_wr90_stub_abc};
 /// intrinsic floor is the binding constraint, not modal-sampling
 /// discretisation; queued for Phase 4.fem.eig.3.5 CFS-PML).
 #[test]
+#[ignore = "heavy solver test, release-gated in CI (fem-eigen-gate); skipped in the \
+            default debug `cargo test --workspace` which would time out — each fem-eig-003 \
+            test re-runs the same ~72k-tet sparse-LU 50-pt sweep (~764 s debug, 7.4 GB RSS) \
+            (CLAUDE.md §10). Run via `cargo test -p yee-validation --release --test \
+            fem_eig_003_wr90_stub_abc -- --ignored fem_eig_003_driver_runs_and_emits_finite_sweep`."]
 fn fem_eig_003_driver_runs_and_emits_finite_sweep() {
     let result = run_fem_eig_003_wr90_stub_abc().expect("fem-eig-003 driver");
 
@@ -199,6 +204,11 @@ fn fem_eig_003_driver_runs_and_emits_finite_sweep() {
 /// [`fem_eig_003_strict_passive_bound_continuum_limit`], which is
 /// `#[ignore]`'d under the same E5 escape hatch as gate (A).
 #[test]
+#[ignore = "heavy solver test, release-gated in CI (fem-eigen-gate); skipped in the \
+            default debug `cargo test --workspace` which would time out — each fem-eig-003 \
+            test re-runs the same ~72k-tet sparse-LU 50-pt sweep (~764 s debug, 7.4 GB RSS) \
+            (CLAUDE.md §10). Run via `cargo test -p yee-validation --release --test \
+            fem_eig_003_wr90_stub_abc -- --ignored fem_eig_003_passive_structure_no_amplification`."]
 fn fem_eig_003_passive_structure_no_amplification() {
     let result = run_fem_eig_003_wr90_stub_abc().expect("fem-eig-003 driver");
     assert!(
@@ -252,6 +262,11 @@ fn fem_eig_003_passive_structure_no_amplification() {
 /// new PmlConfig::default() = (κ=2, m=3, t=16, α_order=1), |S_11| band
 /// runs at `[s11_db -71.53, -55.58] dB` — well below 1.0 magnitude.
 #[test]
+#[ignore = "heavy solver test, release-gated in CI (fem-eigen-gate); skipped in the \
+            default debug `cargo test --workspace` which would time out — each fem-eig-003 \
+            test re-runs the same ~72k-tet sparse-LU 50-pt sweep (~764 s debug, 7.4 GB RSS) \
+            (CLAUDE.md §10). Run via `cargo test -p yee-validation --release --test \
+            fem_eig_003_wr90_stub_abc -- --ignored fem_eig_003_strict_passive_bound_continuum_limit`."]
 fn fem_eig_003_strict_passive_bound_continuum_limit() {
     let result = run_fem_eig_003_wr90_stub_abc().expect("fem-eig-003 driver");
     let strict_passive_ok = result.s11_magnitude.iter().all(|&m| m < 1.0);
@@ -269,6 +284,11 @@ fn fem_eig_003_strict_passive_bound_continuum_limit() {
 /// tens-of-dB jump across one bin; this gate canaries against that
 /// failure mode without depending on the absolute absorption floor.
 #[test]
+#[ignore = "heavy solver test, release-gated in CI (fem-eigen-gate); skipped in the \
+            default debug `cargo test --workspace` which would time out — each fem-eig-003 \
+            test re-runs the same ~72k-tet sparse-LU 50-pt sweep (~764 s debug, 7.4 GB RSS) \
+            (CLAUDE.md §10). Run via `cargo test -p yee-validation --release --test \
+            fem_eig_003_wr90_stub_abc -- --ignored fem_eig_003_sweep_smoothness_no_spurious_resonance`."]
 fn fem_eig_003_sweep_smoothness_no_spurious_resonance() {
     let result = run_fem_eig_003_wr90_stub_abc().expect("fem-eig-003 driver");
     assert!(
@@ -300,6 +320,11 @@ fn fem_eig_003_sweep_smoothness_no_spurious_resonance() {
 /// from -60 dB to -200 dB (FEM_EIG_003_S11_DB_MIN); the lower bound
 /// flags numerical pathology, not physical over-absorption.
 #[test]
+#[ignore = "heavy solver test, release-gated in CI (fem-eigen-gate); skipped in the \
+            default debug `cargo test --workspace` which would time out — each fem-eig-003 \
+            test re-runs the same ~72k-tet sparse-LU 50-pt sweep (~764 s debug, 7.4 GB RSS) \
+            (CLAUDE.md §10). Run via `cargo test -p yee-validation --release --test \
+            fem_eig_003_wr90_stub_abc -- --ignored fem_eig_003_strict_absorption_floor_gate`."]
 fn fem_eig_003_strict_absorption_floor_gate() {
     let result = run_fem_eig_003_wr90_stub_abc().expect("fem-eig-003 driver");
     assert!(

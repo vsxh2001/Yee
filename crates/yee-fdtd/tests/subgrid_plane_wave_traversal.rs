@@ -173,6 +173,10 @@ const PROBES_C: [(usize, usize, usize); 5] = [
 /// J-side ghost re-balance; deferred to a future Phase 2.fdtd.7.y.α
 /// spec amendment.
 #[test]
+#[ignore = "heavy solver test, release-gated in CI (fdtd-heavy-validation-gate); \
+            skipped in the default debug `cargo test --workspace` which would time out \
+            (CLAUDE.md §10). Run via `cargo test -p yee-fdtd --release --test \
+            subgrid_plane_wave_traversal -- --ignored subgrid_plane_wave_matches_coarse_reference`."]
 fn subgrid_plane_wave_matches_coarse_reference() {
     // ---- Subgridded run ---------------------------------------------------
     let coarse_grid = YeeGrid::vacuum(NX_C, NY_C, NZ_C, DX_C);

@@ -393,3 +393,76 @@ jobs:
       # job to the ~7-8 min assertion run.
       - name: mom-001 dipole (NEC-4 87+j41 Ω, release, ignored)
         run: cargo test -p yee-mom --release --test dipole -- --ignored dipole_z_at_resonance --nocapture
+
+  fem-eigen-gate:
+    name: FEM eigen gates (fem-eig-001/003, release)
+    runs-on: ubuntu-latest
+    # No `needs: lint-test`: builds only the yee-validation tree in `--release`,
+    # in parallel with the other release gates. These FEM gates are
+    # `#[ignore]`'d for the default debug `cargo test --workspace` (CLAUDE.md
+    # §10): fem-eig-001 re-runs a 9720-tet LOBPCG eigensolve per test (~12 s
+    # debug × 4), and EVERY fem-eig-003 test re-runs the same ~72k-tet sparse-LU
+    # 50-pt sweep (~764 s debug, 7.4 GB RSS) — left non-ignored they timed out
+    # the workspace lint-test job. This gate runs them in `--release`. Mirrors
+    # the `mom-001` / FDTD `--release --ignored` release-gate idiom (CLAUDE.md
+    # §4: never merge an unrun solver gate).
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.92"
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # fem-eig-001 is fast in release (the four 9720-tet LOBPCG asserts run in
+      # well under a minute total), so `--ignored` runs all four cavity gates.
+      - name: fem-eig-001 rectangular cavity (Pozar TE101, release, ignored)
+        run: cargo test -p yee-validation --release --test fem_eig_001_rectangular_cavity -- --ignored --nocapture
+
+      # fem-eig-003: all five tests re-run the SAME ~72k-tet sparse-LU 50-pt
+      # sweep. A single solve measured ~458 s in `--release` and allocates
+      # ~7.4 GB RSS. `--test-threads=1` is MANDATORY: libtest runs a binary's
+      # tests in parallel by default, and five concurrent ~7.4 GB solves
+      # (~37 GB peak) OOM-kill both the bounded dev box (12g) and the
+      # ~16 GB GitHub `ubuntu-latest` runner (verified: bare `--include-ignored`
+      # SIGKILL'd in 38 s). Serialized, peak RSS is ~7.4 GB (fits) and the five
+      # solves run in ≈ 38 min — within the gate's time budget — exercising
+      # maximal coverage: driver smoke, gate (B) passive, gate (C) smoothness,
+      # plus the two strict continuum-limit gates (strict-passive `|S11| < 1`
+      # and the CFS-PML absorption floor). The v3.5.2 PML retune
+      # (PmlConfig::default = κ=2, m=3, thickness_cells=16, α_grading_order=1)
+      # drives the band to ≈ [-71.5, -55.6] dB / |S11| ≈ 1e-3, so all five pass
+      # (measured in this PR's release verification).
+      - name: fem-eig-003 WR-90 stub CFS-PML sweep (release, all ignored, serial)
+        run: cargo test -p yee-validation --release --test fem_eig_003_wr90_stub_abc -- --include-ignored --test-threads=1 --nocapture
+
+  fdtd-heavy-validation-gate:
+    name: FDTD heavy validation gates (release)
+    runs-on: ubuntu-latest
+    # No `needs: lint-test`: builds only the yee-fdtd tree in `--release`, in
+    # parallel with the other release gates. These three integration tests are
+    # `#[ignore]`'d for the default debug `cargo test --workspace` (CLAUDE.md
+    # §10) because each runs a multi-hundred-step FDTD solve that is far too
+    # slow in debug (percell_eps_r ~360 s, ntff ~83 s, subgrid ~30 s debug) and
+    # was timing out the workspace lint-test job. `--include-ignored` runs each
+    # file's ignored heavy test plus any always-on smoke (e.g. the subgrid
+    # 0.4 s short-window smoke). Mirrors the `mom-001` / FDTD `--release
+    # --ignored` release-gate idiom (CLAUDE.md §4: never merge an unrun gate).
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.92"
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: heterogeneous-substrate + ntff-dipole + subgrid-traversal (release, ignored)
+        run: cargo test -p yee-fdtd --release --test heterogeneous_substrate --test ntff_dipole --test subgrid_plane_wave_traversal -- --include-ignored --nocapture
