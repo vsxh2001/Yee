@@ -55,8 +55,14 @@ jobs:
       - name: cargo clippy (workspace, no-default-features)
         run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
 
+      # `--exclude yee-py`: the PyO3 cdylib bindings compile fine standalone
+      # (`cargo test -p yee-py`) but fail under workspace-wide `--no-default-features`
+      # feature unification (yee-py/src/fem.rs loses an API gated behind a dep's
+      # default features). yee-py is covered by the `python-bindings` job, which
+      # now also runs its Rust tests via `cargo test -p yee-py` (correct feature
+      # resolution). So the workspace lint-test excludes it.
       - name: cargo test (workspace, no-default-features)
-        run: cargo test --workspace --no-default-features
+        run: cargo test --workspace --no-default-features --exclude yee-py
 
       - name: Upload validation artifacts
         # github.sha is a 40-char hex SHA, not attacker-controlled, so
@@ -152,6 +158,13 @@ jobs:
         run: ../../.venv/bin/pytest tests/ -v
       - name: cargo clippy (yee-py)
         run: cargo clippy -p yee-py --all-targets -- -D warnings
+      # yee-py's Rust unit tests run HERE (the workspace lint-test excludes
+      # yee-py): standalone `-p yee-py` uses correct feature resolution, and this
+      # job has Python + fontconfig set up. `--no-default-features` keeps it
+      # aligned with the lint-test profile and avoids the PyO3 extension-module
+      # link issue.
+      - name: cargo test (yee-py, no-default-features)
+        run: cargo test -p yee-py --no-default-features
 
   fdtd-coupling-gate:
     name: FDTD propagation ε_eff gate (fdtd-line-eeff, release)
@@ -417,6 +430,15 @@ jobs:
 
       - name: Cache cargo build artifacts
         uses: Swatinem/rust-cache@v2
+
+      # yee-validation pulls plotters -> yeslogic-fontconfig-sys, whose build
+      # script needs libfontconfig1-dev (without it the gate fails to BUILD,
+      # not on a test assertion). The lint-test + python-bindings jobs already
+      # install this; the FDTD gates don't (yee-fdtd/voxel don't pull plotters).
+      - name: Install system deps (fontconfig for plotters)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev pkg-config
 
       # fem-eig-001 is fast in release (the four 9720-tet LOBPCG asserts run in
       # well under a minute total), so `--ignored` runs all four cavity gates.
