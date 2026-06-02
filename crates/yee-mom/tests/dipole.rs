@@ -25,7 +25,15 @@ fn z_in_from_s11(s11: Complex64, z0: f64) -> Complex64 {
 /// Geometry: L = 1.0 m, radius = 5 mm, cylinder lateral surface (no end
 /// caps), delta-gap at central edge. Resonance frequency f = c/(2L).
 /// Reference: NEC-4 finite-radius wire MoM, `Z ≈ 87 + j41 Ω`.
+///
+/// `#[ignore]`'d for the default debug `cargo test` (the 24×176 solve runs
+/// ~7-8 min in `--release` but 60-90 min in debug — CLAUDE.md §10 — which
+/// times out the workspace lint-test CI job). Run as a release gate by the
+/// `MoM dipole gate (mom-001, release)` CI job:
+/// `cargo test -p yee-mom --release --test dipole -- --ignored`.
 #[test]
+#[ignore = "mom-001: release-gated (~7-8 min release / 60-90 min debug, CLAUDE.md §10); \
+            run via `cargo test -p yee-mom --release --test dipole -- --ignored`"]
 fn dipole_z_at_resonance() {
     let mesh = fixtures::cylinder::thin_cylinder(1.0, 0.005, N_AXIAL, N_AROUND);
     let f0 = yee_core::units::C0 / 2.0;
@@ -55,13 +63,19 @@ fn dipole_z_at_resonance() {
     );
 }
 
-/// Phase 1 diagnostic: always-on, never asserts. Prints port edge count,
-/// port edge lengths, total RWG count, Z_in, |Z_in|/arg, LU residual,
-/// per-port-edge currents (to detect orientation flips), and a radius /
-/// mesh sweep showing the convergence behaviour. Numbers are read
-/// manually from `--nocapture` output to triangulate any future
-/// `dipole_z_at_resonance` regression.
+/// Phase 1 diagnostic: never asserts. Prints port edge count, port edge
+/// lengths, total RWG count, Z_in, |Z_in|/arg, LU residual, per-port-edge
+/// currents (to detect orientation flips), and a radius / mesh sweep showing
+/// the convergence behaviour. Numbers are read manually from `--nocapture`
+/// output to triangulate any future `dipole_z_at_resonance` regression.
+///
+/// `#[ignore]`'d (the 6-mesh sweep is even slower than `dipole_z_at_resonance`
+/// in debug). This is a manual diagnostic, NOT part of the mom-001 CI gate
+/// (which name-filters to `dipole_z_at_resonance`); run it on demand with
+/// `cargo test -p yee-mom --release --test dipole -- --ignored dipole_z_diagnostics --nocapture`.
 #[test]
+#[ignore = "manual diagnostic 6-mesh sweep (not in the CI gate); run on demand via \
+            `cargo test -p yee-mom --release --test dipole -- --ignored dipole_z_diagnostics`"]
 fn dipole_z_diagnostics() {
     let mesh = fixtures::cylinder::thin_cylinder(1.0, 0.005, N_AXIAL, N_AROUND);
     let basis = yee_mom::__internal::build_basis(&mesh).expect("basis");

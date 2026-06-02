@@ -361,3 +361,35 @@ jobs:
         run: cargo test -p yee-fdtd --release --test reactive_deembed_001 -- --include-ignored
       - name: lumped-rlc-twoway no-regression (single-edge two-way, release)
         run: cargo test -p yee-fdtd --release --test lumped_rlc_twoway_001 -- --include-ignored
+
+  mom-dipole-gate:
+    name: MoM dipole gate (mom-001, release)
+    runs-on: ubuntu-latest
+    # No `needs: lint-test`: builds only the yee-mom tree in `--release`, in
+    # parallel with the other release gates. The mom-001 finite-radius
+    # half-wave dipole solve (24×176 cylinder) runs ~7-8 min in `--release`
+    # but 60-90 min in debug (CLAUDE.md §10), so the dipole tests are
+    # `#[ignore]`'d for the default debug `cargo test --workspace` (which was
+    # timing out the lint-test job). This gate runs `dipole_z_at_resonance` in
+    # release — the NEC-4 finite-radius reference Z ≈ 87 + j41 Ω (±5 % Re /
+    # ±10 % Im). Mirrors the FDTD release-gate idiom (CLAUDE.md §4: never merge
+    # an unrun solver gate).
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.92"
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # Name-filter to `dipole_z_at_resonance` (the NEC-4 assertion). A bare
+      # `-- --ignored` would ALSO run the manual `dipole_z_diagnostics` 6-mesh
+      # sweep and the pre-existing `dipole_full_sweep` 21-point sweep (hours,
+      # even in release) — neither asserts the gate, so the filter keeps this
+      # job to the ~7-8 min assertion run.
+      - name: mom-001 dipole (NEC-4 87+j41 Ω, release, ignored)
+        run: cargo test -p yee-mom --release --test dipole -- --ignored dipole_z_at_resonance --nocapture
