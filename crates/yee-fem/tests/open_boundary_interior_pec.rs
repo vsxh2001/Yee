@@ -50,30 +50,35 @@ fn omega_10ghz() -> f64 {
     2.0 * PI * 10.0e9
 }
 
-/// Discover the exterior-face count of `mesh` from the authoritative
-/// source — the constructor's own length-mismatch error — then build an
-/// all-PEC-exterior [`OpenBoundarySolver`] over a unit-cube-style air
-/// mesh (empty material DB → vacuum everywhere).
-///
-/// Passing a deliberately-wrong (length-0) `face_kinds` makes
-/// [`OpenBoundarySolver::new`] report `"... exterior-face count N"`; we
-/// parse the trailing integer rather than re-deriving the private
-/// exterior-face enumeration in the test.
+/// Count the exterior faces of `mesh` by the multiplicity-one face
+/// filter (a triangular face shared by exactly one tetrahedron is on the
+/// boundary). This is the same mesh-only computation the sibling
+/// `open_boundary_sweep_matrix` fixture uses, so the count matches
+/// [`OpenBoundarySolver::new`]'s internal exterior-face enumeration
+/// without depending on the wording of any constructor error string.
+fn exterior_face_count(mesh: &TetMesh3D) -> usize {
+    let mut face_map: std::collections::HashMap<[usize; 3], usize> =
+        std::collections::HashMap::new();
+    const TET_FACES: [[usize; 3]; 4] = [[1, 2, 3], [0, 2, 3], [0, 1, 3], [0, 1, 2]];
+    for tet in &mesh.tetrahedra {
+        for &[a, b, c] in TET_FACES.iter() {
+            let mut key = [tet[a], tet[b], tet[c]];
+            key.sort_unstable();
+            *face_map.entry(key).or_insert(0) += 1;
+        }
+    }
+    face_map.values().filter(|&&c| c == 1).count()
+}
+
+/// Build an all-PEC-exterior [`OpenBoundarySolver`] over an air mesh
+/// (empty material DB → vacuum everywhere). The exterior-face count is
+/// derived directly from the mesh topology so the all-PEC `face_kinds`
+/// vector has exactly the length the constructor expects.
 fn all_pec_solver(mesh: &TetMesh3D) -> OpenBoundarySolver<'_> {
-    // `OpenBoundarySolver` is not `Debug`, so we can't use `expect_err`;
-    // match the Result by hand.
-    let msg = match OpenBoundarySolver::new(mesh, Vec::new(), Vec::new(), MaterialDatabase::new()) {
-        Ok(_) => panic!("length-0 face_kinds must mismatch the exterior-face count"),
-        Err(e) => e.to_string(),
-    };
-    let n_exterior: usize = msg
-        .rsplit(|c: char| !c.is_ascii_digit())
-        .find(|tok| !tok.is_empty())
-        .and_then(|tok| tok.parse().ok())
-        .unwrap_or_else(|| panic!("could not parse exterior-face count from error: {msg}"));
+    let n_exterior = exterior_face_count(mesh);
     assert!(
         n_exterior > 0,
-        "parsed a zero exterior-face count from error: {msg}"
+        "a cavity mesh must have a non-empty exterior boundary"
     );
 
     OpenBoundarySolver::new(
