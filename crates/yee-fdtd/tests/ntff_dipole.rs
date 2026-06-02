@@ -24,6 +24,10 @@ use std::f64::consts::FRAC_PI_2;
 use yee_fdtd::{CpmlParams, NtffParams, NtffState, WalkingSkeletonSolver, YeeGrid};
 
 #[test]
+#[ignore = "heavy solver test, release-gated in CI (fdtd-heavy-validation-gate); \
+            skipped in the default debug `cargo test --workspace` which would time out \
+            (CLAUDE.md §10). Run via `cargo test -p yee-fdtd --release --test ntff_dipole \
+            -- --ignored ntff_recovers_dipole_pattern_broadside`."]
 fn ntff_recovers_dipole_pattern_broadside() {
     const N: usize = 50;
     const DX: f64 = 1.0e-3; // 1 mm

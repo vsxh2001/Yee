@@ -89,6 +89,10 @@ fn dft_at(trace: &[f64], omega: f64, dt: f64) -> Complex64 {
 }
 
 #[test]
+#[ignore = "heavy solver test, release-gated in CI (fdtd-heavy-validation-gate); \
+            skipped in the default debug `cargo test --workspace` which would time out \
+            (CLAUDE.md §10). Run via `cargo test -p yee-fdtd --release --test \
+            heterogeneous_substrate -- --ignored percell_eps_r_produces_fresnel_reflection`."]
 fn percell_eps_r_produces_fresnel_reflection() {
     const N: usize = 120;
     const DX: f64 = 1.0e-3;

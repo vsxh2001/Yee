@@ -31,6 +31,10 @@
 use yee_validation::{CaseStatus, run_fem_eig_001_rectangular_cavity};
 
 #[test]
+#[ignore = "heavy solver test, release-gated in CI (fem-eigen-gate); skipped in the \
+            default debug `cargo test --workspace` which would time out (CLAUDE.md §10). \
+            Run via `cargo test -p yee-validation --release --test \
+            fem_eig_001_rectangular_cavity -- --ignored fem_eig_001_te101_within_zero_point_three_percent`."]
 fn fem_eig_001_te101_within_zero_point_three_percent() {
     let result = run_fem_eig_001_rectangular_cavity().expect("fem-eig-001 driver");
     assert_eq!(
@@ -42,6 +46,10 @@ fn fem_eig_001_te101_within_zero_point_three_percent() {
 }
 
 #[test]
+#[ignore = "heavy solver test, release-gated in CI (fem-eigen-gate); skipped in the \
+            default debug `cargo test --workspace` which would time out (CLAUDE.md §10). \
+            Run via `cargo test -p yee-validation --release --test \
+            fem_eig_001_rectangular_cavity -- --ignored fem_eig_001_lowest_mode_matches_pozar_te101`."]
 fn fem_eig_001_lowest_mode_matches_pozar_te101() {
     let result = run_fem_eig_001_rectangular_cavity().expect("fem-eig-001 driver");
     // Hard gate (1): TE_{101} within ±0.3 % of 9.660 GHz.
@@ -54,6 +62,10 @@ fn fem_eig_001_lowest_mode_matches_pozar_te101() {
 }
 
 #[test]
+#[ignore = "heavy solver test, release-gated in CI (fem-eigen-gate); skipped in the \
+            default debug `cargo test --workspace` which would time out (CLAUDE.md §10). \
+            Run via `cargo test -p yee-validation --release --test \
+            fem_eig_001_rectangular_cavity -- --ignored fem_eig_001_mode_ordering_matches_pozar_table_within_one_percent`."]
 fn fem_eig_001_mode_ordering_matches_pozar_table_within_one_percent() {
     let result = run_fem_eig_001_rectangular_cavity().expect("fem-eig-001 driver");
     // Hard gate (2): every one of the ten lowest modes matches the
@@ -77,6 +89,10 @@ fn fem_eig_001_mode_ordering_matches_pozar_table_within_one_percent() {
 }
 
 #[test]
+#[ignore = "heavy solver test, release-gated in CI (fem-eigen-gate); skipped in the \
+            default debug `cargo test --workspace` which would time out (CLAUDE.md §10). \
+            Run via `cargo test -p yee-validation --release --test \
+            fem_eig_001_rectangular_cavity -- --ignored fem_eig_001_no_spurious_mode_below_te101`."]
 fn fem_eig_001_no_spurious_mode_below_te101() {
     let result = run_fem_eig_001_rectangular_cavity().expect("fem-eig-001 driver");
     // Hard gate (3): no spurious gradient-kernel mode appears below
