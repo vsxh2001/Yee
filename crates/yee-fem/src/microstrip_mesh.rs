@@ -62,7 +62,8 @@
 //! exactly. See [`layered_microstrip_mesh`] for the centring rule.
 
 use nalgebra::Vector3;
-use yee_mesh::{Error, MaterialTag, TetMesh3D};
+use yee_core::Error;
+use yee_mesh::{MaterialTag, TetMesh3D};
 
 use crate::material::{Material, MaterialDatabase};
 
@@ -131,6 +132,9 @@ pub const FR4_EPS_R: f64 = 4.4;
 ///   (these are also re-checked by the inner `cavity_uniform`);
 /// * `sub_h >= box_h` (the substrate must leave room for air above);
 /// * `trace_w > box_w`;
+/// * `trace_w < dx = box_w / nx` (the trace is narrower than one mesh
+///   column and would be unresolved — raise `nx` instead of getting a
+///   silently widened footprint);
 /// * the substrate/air interface `z = sub_h` does not land on a mesh
 ///   plane — i.e. `sub_h` is not an integer multiple of `dz = box_h / nz`
 ///   (checked to a relative tolerance of `1e-9 · dz`). Choose `nz` so
@@ -140,11 +144,12 @@ pub const FR4_EPS_R: f64 = 4.4;
 ///
 /// ```
 /// use yee_fem::microstrip_mesh::{layered_microstrip_mesh, FR4_TAG, AIR_TAG};
-/// // 4 mm × 4 mm box, 10 mm line, 1 mm substrate, 0.5 mm trace.
-/// // box_h = 4 mm, nz = 8 → dz = 0.5 mm, so z = 1 mm is the 2nd plane.
+/// // 4 mm × 4 mm box, 10 mm line, 1 mm substrate, 1 mm trace.
+/// // box_h = 4 mm, nz = 8 → dz = 0.5 mm, so z = 1 mm is the 2nd plane;
+/// // box_w = 4 mm, nx = 8 → dx = 0.5 mm, so the 1 mm trace is 2 columns.
 /// let (mesh, db, ground, trace) =
-///     layered_microstrip_mesh(4e-3, 4e-3, 10e-3, 1e-3, 0.5e-3, 4, 10, 8).unwrap();
-/// assert_eq!(mesh.n_tets(), 4 * 10 * 8 * 6);
+///     layered_microstrip_mesh(4e-3, 4e-3, 10e-3, 1e-3, 1e-3, 8, 10, 8).unwrap();
+/// assert_eq!(mesh.n_tets(), 8 * 10 * 8 * 6);
 /// // Substrate is the bottom 1/4 of the box height (1 mm of 4 mm).
 /// let n_fr4 = mesh
 ///     .tetrahedron_material
@@ -226,7 +231,8 @@ pub fn layered_microstrip_mesh(
 
     // Box: x ∈ [0, box_w] (width), y ∈ [0, line_len] (propagation),
     // z ∈ [0, box_h] (substrate-normal). Kuhn-6 per brick.
-    let mut mesh = TetMesh3D::cavity_uniform(box_w, line_len, box_h, nx, ny, nz)?;
+    let mut mesh = TetMesh3D::cavity_uniform(box_w, line_len, box_h, nx, ny, nz)
+        .map_err(|e| Error::Invalid(e.to_string()))?;
 
     // Per-tet ε_r repaint by centroid (mirrors
     // `crates/yee-fem/tests/dispersive_solve.rs` centroid-repaint): a tet
@@ -252,20 +258,30 @@ pub fn layered_microstrip_mesh(
         )
         .with_material(AIR_TAG, Material::default());
 
-    // Trace x-window, centred on the box and snapped to lattice columns so
-    // the trace edges fall on x = i·dx grid lines. With dx = box_w / nx,
-    // the half-width in columns is round((trace_w / 2) / dx), clamped to
-    // [1, ...] so the window is never empty (at least one column-pair
-    // straddling the centre) but never wider than the box.
+    // Trace x-window, centred on the box and snapped to WHOLE lattice
+    // columns so the trace edges fall on x = i·dx grid lines. The trace
+    // must be resolved by at least one mesh column: a sub-column `trace_w`
+    // is REJECTED (rather than silently widened to a full cell, which would
+    // distort the PEC footprint the ε_eff gate reads), so the caller raises
+    // `nx`. The effective width is `trace_cols · dx` — equal to `trace_w`
+    // exactly when `trace_w` is a multiple of `dx`, otherwise snapped to the
+    // nearest whole column (within ½ dx).
     let dx = box_w / nx as f64;
-    let centre_col_f = (box_w / 2.0) / dx;
-    // Snap the trace centre to the nearest lattice column index, then take
-    // a symmetric half-width in whole columns.
-    let half_cols = ((trace_w / 2.0) / dx).round().max(1.0);
-    let lo_col = (centre_col_f - half_cols).round().max(0.0);
-    let hi_col = (centre_col_f + half_cols).round().min(nx as f64);
-    let x_lo = lo_col * dx;
-    let x_hi = hi_col * dx;
+    if trace_w < dx {
+        return Err(Error::Invalid(format!(
+            "layered_microstrip_mesh: trace_w ({trace_w}) is narrower than one mesh column \
+             dx = box_w / nx = {dx}; the trace would be unresolved. Increase nx so the trace \
+             spans at least one cell."
+        )));
+    }
+    // Whole columns spanning the trace, centred on the box. Splitting
+    // (nx − trace_cols) evenly keeps the strip symmetric about x = box_w/2
+    // when their parities match; otherwise it is off-centre by at most ½ dx.
+    let trace_cols = ((trace_w / dx).round() as usize).clamp(1, nx);
+    let lo_col = (nx - trace_cols) / 2;
+    let hi_col = lo_col + trace_cols;
+    let x_lo = lo_col as f64 * dx;
+    let x_hi = hi_col as f64 * dx;
 
     // Geometric tolerances: a small fraction of the smallest in-plane cell
     // so an endpoint exactly on a lattice line passes but the next line

@@ -28,13 +28,17 @@ use yee_mesh::TetMesh3D;
 // (sub_h = 1 mm) is exactly n_sub = 2 cells: z = 1 mm lands on mesh plane
 // 2 of 8 (a cell boundary, never mid-cell). Substrate therefore occupies
 // the bottom 2/8 = 1/4 of the box height.
+//
+// In x: box_w = 4 mm, nx = 8 → dx = 0.5 mm, so trace_w = 1 mm is exactly
+// 2 whole columns — the trace footprint is resolved (not snapped) and
+// centred on x = 2 mm (columns 3..5).
 // ---------------------------------------------------------------------
 const BOX_W: f64 = 4.0e-3;
 const BOX_H: f64 = 4.0e-3;
 const LINE_LEN: f64 = 10.0e-3;
 const SUB_H: f64 = 1.0e-3;
-const TRACE_W: f64 = 0.5e-3;
-const NX: usize = 4;
+const TRACE_W: f64 = 1.0e-3;
+const NX: usize = 8;
 const NY: usize = 10;
 const NZ: usize = 8;
 
@@ -191,5 +195,18 @@ fn off_plane_substrate_is_rejected() {
     assert!(
         err.is_err(),
         "an off-plane sub_h must be rejected so the interface stays a cell boundary"
+    );
+}
+
+/// A trace narrower than one mesh column must be REJECTED, not silently
+/// widened to a full cell (which would distort the PEC footprint the ε_eff
+/// gate reads). dx = box_w / nx = 0.5 mm here; trace_w = 0.3 mm underflows it,
+/// so the caller is told to raise nx rather than getting a wrong-width trace.
+#[test]
+fn trace_narrower_than_one_column_is_rejected() {
+    let err = layered_microstrip_mesh(BOX_W, BOX_H, LINE_LEN, SUB_H, 0.3e-3, NX, NY, NZ);
+    assert!(
+        err.is_err(),
+        "a sub-column trace_w must be rejected so the trace footprint is never silently widened"
     );
 }
