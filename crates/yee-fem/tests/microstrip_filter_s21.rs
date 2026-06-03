@@ -873,9 +873,9 @@ fn fem_filter_s21_vs_ladder() {
     //     it (a real win). It does NOT clear with this port (lift-but-short:
     //     worst in-band err ≈ 34.9 dB ≫ the 2 dB oracle tol), so this branch
     //     records the honest MISS margin and does NOT assert the mask — no
-    //     weakening to force green. If a future higher-fidelity port (numerical
-    //     cross-section aperture coupling) lifts the curve into the mask,
-    //     `strict_pass` flips and this asserts the real pass automatically.
+    //     weakening to force green. If a future follow-on (finer coupling-gap
+    //     mesh and/or a still-higher-fidelity aperture-coupling port) lifts the
+    //     curve into the mask, `strict_pass` flips and this asserts it automatically.
     if strict_pass {
         // A genuine in-mask pass: assert it loudly (the FEM driven-sweep track
         // would have delivered its original goal — a validated in-mask filter).
@@ -892,8 +892,10 @@ fn fem_filter_s21_vs_ladder() {
             "[N3] STRICT MASK: MISS by {worst_pass_db:.2} dB in-band (lift-but-short — \
              the numerical port lifted the peak {lift_over_v1_db:+.2} dB over the v1 floor \
              but the 2-port + 3-resonator path stops ~{:.0} dB below the 0 dB Cheb passband). \
-             This is the honest documented result; the remaining gap is a higher-fidelity \
-             port follow-on (numerical cross-section aperture coupling), NOT a mesh/LU limit.",
+             This is the honest documented result; the residual gap is NOT isolated by this \
+             brick — candidates are resonator-coupling + gap-mesh fidelity at this coarse mesh \
+             and, secondarily, a still-higher-fidelity port (cross-section aperture coupling). \
+             It is NOT a mesh/LU-SCALING wall: the 51k-tet sparse LU fits the box with room.",
             worst_pass_db,
         );
     }
