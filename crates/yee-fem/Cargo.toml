@@ -45,6 +45,15 @@ num-complex     = { workspace = true }
 # acyclic — yee-mom depends only on yee-core/yee-mesh/yee-io (+ optional
 # yee-cuda) with no edge back to yee-fem.
 yee-mom         = { workspace = true }
+# FEM-EM brick K1 (ADR-0155): the coupled-resonator-k extraction API in
+# `src/coupled_resonator_k.rs` reuses the SHIPPED peak-split primitive
+# `yee_filter::extract_coupling` (interior local maxima → two strongest →
+# k = (f_hi²−f_lo²)/(f_hi²+f_lo²)) so the split formula is single-sourced with
+# the F1.1b DSP gate rather than re-derived inline. Promoted from a dev-dep to
+# a production (non-dev) dependency because `src/` now calls it. ACYCLIC:
+# `yee-filter` depends only on `yee-synth`/`yee-layout` (pure, serde-only) with
+# no edge back to `yee-fem` (confirmed), so this introduces no dependency cycle.
+yee-filter      = { workspace = true }
 thiserror       = { workspace = true }
 tracing         = { workspace = true }
 
@@ -53,12 +62,9 @@ tracing         = { workspace = true }
 # `assemble_port_face_block_projected*` use `assert_relative_eq!`.
 approx = "0.5"
 # FEM-EM brick 7 (ADR-0153): the 3-pole microstrip-filter S21 driven-sweep
-# gate (`tests/microstrip_filter_s21.rs`) uses `yee-filter` for (a) the
-# edge-coupled dimensional synthesis (`dimension_edge_coupled` — resonator
-# length / coupling gaps / line width for the 2 GHz / 10% FBW / 0.5 dB Cheb
-# spec) and (b) the oracle `ladder_s21` reference + grading logic the test
-# grades the extracted FEM S21 against. dev-only (test-side); `yee-filter`
-# depends on `yee-synth`/`yee-layout` (pure, serde-only) with no edge back to
-# `yee-fem`, so this introduces no dependency cycle.
-yee-filter = { workspace = true }
+# gate (`tests/microstrip_filter_s21.rs`) uses `yee-filter` (now a production
+# dep above) for the edge-coupled dimensional synthesis + oracle grading. The
+# K1 coupling gate (`tests/fem_coupling_001.rs`) uses `yee-synth` (re-exported
+# via `yee-filter`) only indirectly; `yee-synth` stays a dev-dep for the
+# filter-S21 test's direct use.
 yee-synth  = { workspace = true }
