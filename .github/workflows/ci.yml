@@ -150,14 +150,6 @@ jobs:
           python -m venv .venv
           .venv/bin/pip install --upgrade pip
           .venv/bin/pip install maturin pytest numpy
-      # Swatinem/rust-cache can restore a STALE yee-py artifact whose cargo
-      # fingerprint matches the cache, so maturin reuses an old .so instead of
-      # rebuilding. Observed: the built `yee` module had run_skin_depth
-      # (lib.rs:53) but NOT the adjacent run_lc_resonance (lib.rs:55) — a
-      # pre-2fd0428 build — failing 3 pytest cases. Force a fresh yee-py compile
-      # so maturin installs the current bindings (deps stay cached).
-      - name: Force-rebuild yee-py (avoid stale cached extension)
-        run: cargo clean -p yee-py
       - name: maturin develop (yee-py)
         working-directory: crates/yee-py
         run: ../../.venv/bin/maturin develop --release
