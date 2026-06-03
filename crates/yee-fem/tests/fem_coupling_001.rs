@@ -12,29 +12,38 @@
 //!    probe's valley was 19.4 dB below, so 6 dB has honest headroom; this is a
 //!    *re-smearing tripwire* — a future regression that over-couples the feeds
 //!    or coarsens the mesh until the two peaks merge into one bump fails here.
-//! 2. **`|k_fem − k_imp| / k_imp ≤ 0.30`** where
-//!    `k_imp = coupling_coefficient(&coupled_microstrip(W,S,h,ε_r))` (the
-//!    synthesis-side Kirschning-Jansen reference). The probe measured 25.6 %
-//!    vs `k_imp` (and 17.2 % vs the like-for-like ε_eff-split `k_eps`), so 30 %
-//!    has headroom AND catches a real regression (a floored / smeared k).
+//! 2. **`|k_fem − k_eps| / k_eps ≤ 0.30`** where `k_eps` is the even/odd
+//!    ε_eff-split `(f_e²−f_o²)/(f_e²+f_o²)` from the Kirschning-Jansen
+//!    `coupled_microstrip` even/odd ε_eff — the **like-for-like** analytic
+//!    predictor of a resonant split (the FEM measures a resonant split, so this
+//!    is the matching reference). The probe measured 17.2 % vs `k_eps`, so 30 %
+//!    has headroom AND catches a real regression (a floored / smeared k). The
+//!    impedance-k `k_imp = coupling_coefficient(...)` is **reported for
+//!    traceability** but is NOT the gate ref: K2 (ADR-0155 Update) found `k_imp`
+//!    and `k_eps` diverge at strong coupling (`k_imp/k_eps = 1.375` at
+//!    S = 1.5 mm, outside the `[1.0,1.3]` comparability band the src encodes),
+//!    so grading a resonant-split measurement vs `k_imp` is apples-to-oranges at
+//!    tight gaps.
 //!
 //! ## Non-circular
 //!
-//! The reference is the Kirschning-Jansen quasi-static closed-form
-//! ([`yee_layout::coupling_coefficient`] / [`yee_layout::coupled_microstrip`]);
-//! the FEM is a full-wave Maxwell solve on the meshed geometry — the analytic
-//! model does not set up the FEM mesh. The two-peaks tripwire + the k-tolerance
-//! are real measured quantities (not a tautology), so a regression that smears
-//! the peaks or floors `k` cannot pass.
+//! The reference is the Kirschning-Jansen quasi-static closed-form — the gate
+//! grades `k_fem` against `k_eps`, derived from the even/odd ε_eff of
+//! [`yee_layout::coupled_microstrip`] (the same closed-form family as
+//! [`yee_layout::coupling_coefficient`]); the FEM is a full-wave Maxwell solve
+//! on the meshed geometry — the analytic model does not set up the FEM mesh. The
+//! two-peaks tripwire + the k-tolerance are real measured quantities (not a
+//! tautology), so a regression that smears the peaks or floors `k` cannot pass.
 //!
 //! ## Tolerance honesty
 //!
 //! The 30 % tolerance and 6 dB valley margin are NOT to be weakened to force
-//! green. The probe measured 17–26 % and a 19.4 dB valley; there is a KNOWN
-//! systematic (both FEM peaks pulled low by finite mesh dispersion + the
-//! feed-gap capacitive load) that a finer mesh / a Qe-de-embedded peak would
-//! tighten (a K2+ lever, documented, not hidden). The gate reports BOTH
-//! analytic references (`k_imp`, `k_eps`) for traceability.
+//! green. The probe measured 17.2 % vs the gate ref `k_eps` (and 25.6 % vs the
+//! impedance-k `k_imp`) and a 19.4 dB valley; there is a KNOWN systematic (both
+//! FEM peaks pulled low by finite mesh dispersion + the feed-gap capacitive
+//! load) that a finer mesh / a Qe-de-embedded peak would tighten (documented,
+//! not hidden). The gate reports BOTH analytic references (`k_eps` graded,
+//! `k_imp` for traceability).
 //!
 //! ## GATING — CRITICAL
 //!
@@ -55,8 +64,8 @@ use yee_layout::{coupled_microstrip, coupling_coefficient};
 /// step over 2.10–2.70 GHz, ~14 points across a ~140 MHz split).
 const N_PTS: usize = 61;
 
-/// k-tolerance vs the synthesis-side `coupling_coefficient` (`k_imp`). The probe
-/// measured 25.6 %; 30 % has headroom and catches a real regression. Do NOT
+/// k-tolerance vs the like-for-like ε_eff-split (`k_eps`). The probe measured
+/// 17.2 % vs `k_eps`; 30 % has headroom and catches a real regression. Do NOT
 /// weaken to force green (ADR-0155).
 const K_TOL_FRAC: f64 = 0.30;
 
@@ -71,7 +80,8 @@ const VALLEY_MARGIN_DB: f64 = 6.0;
 /// (W = 1 mm, S = 2 mm, h = 1 mm, ε_r = 4.4, f0 = 2.4 GHz), prints the full
 /// auditable |S21|(f) spectrum + the k references + peak/valley structure, then
 /// asserts the two real tripwires (resolvable peaks with a ≥ 6 dB valley margin;
-/// `|k_fem − k_imp| / k_imp ≤ 0.30`).
+/// `|k_fem − k_eps| / k_eps ≤ 0.30` vs the like-for-like ε_eff-split, with
+/// `k_imp` reported for traceability).
 #[test]
 #[ignore = "K1 gate: multi-minute driven SWEEP (one per-ω sparse LU per point); run only in --release, boxed"]
 fn fem_coupling_001() {
@@ -117,8 +127,8 @@ fn fem_coupling_001() {
          peak dB (lo / hi)  : {:.2} / {:.2}\n\
          valley             : {:.2} dB  (margin below shallower peak = {:.2} dB; need ≥ {:.1})\n\
          k_fem  (split)     : {:.4}\n\
-         k_imp  (analytic)  : {:.4}  -> err {:.1}%   <- coupled-line `coupling_coefficient` (GATE ref)\n\
-         k_eps  (analytic)  : {:.4}  -> err {:.1}%   <- even/odd ε_eff resonant-split (traceability)\n\
+         k_imp  (analytic)  : {:.4}  -> err {:.1}%   <- coupled-line `coupling_coefficient` (traceability; diverges at strong coupling)\n\
+         k_eps  (analytic)  : {:.4}  -> err {:.1}%   <- even/odd ε_eff resonant-split (GATE ref, like-for-like)\n\
          k tolerance        : {:.1}%\n\
          ==============================================",
         wall,
@@ -164,23 +174,31 @@ fn fem_coupling_001() {
         VALLEY_MARGIN_DB,
     );
 
-    // ---- Tripwire (2): k within 30 % of the synthesis-side reference ---------
-    // The probe measured 25.6 % vs k_imp; 30 % has headroom AND catches a real
-    // regression (a floored / smeared k). Non-circular: KJ closed-form vs
+    // ---- Tripwire (2): k within 30 % of the like-for-like ε_eff-split --------
+    // GRADED vs the resonant-split's natural analytic predictor k_eps (the FEM
+    // measures a resonant split; k_eps is the same split formula on the analytic
+    // even/odd ε_eff). The probe measured 17.2 % vs k_eps; 30 % has headroom AND
+    // catches a real regression (a floored / smeared k). k_imp
+    // (`coupling_coefficient`) is reported for traceability but is NOT the gate
+    // ref: K2 (ADR-0155 Update) found it diverges from the resonant split at
+    // strong coupling (k_imp/k_eps = 1.375 at S = 1.5 mm, outside the [1.0,1.3]
+    // comparability band the src encodes), so grading a resonant split vs k_imp
+    // is apples-to-oranges at tight gaps. Non-circular: KJ closed-form ε_eff vs
     // full-wave FEM. Do NOT weaken to force green (ADR-0155).
     assert!(
-        err_imp <= K_TOL_FRAC * 100.0,
-        "fem-coupling-001: k off — k_fem = {:.4} vs k_imp = {:.4} \
-         (`coupling_coefficient`) is {:.1}% off, exceeding the {:.1}% gate. \
-         (vs the like-for-like ε_eff-split k_eps = {:.4}: {:.1}%.) The probe \
-         measured 25.6% vs k_imp / 17.2% vs k_eps; a materially larger error \
-         means a promotion bug (wrong geometry/sweep/peak-finder) — report the \
-         number, do NOT lower the tolerance. Full spectrum printed above.",
+        err_eps <= K_TOL_FRAC * 100.0,
+        "fem-coupling-001: k off — k_fem = {:.4} vs the like-for-like ε_eff-split \
+         k_eps = {:.4} is {:.1}% off, exceeding the {:.1}% gate. (vs the \
+         impedance-k k_imp = {:.4}, reported for traceability: {:.1}% — note k_imp \
+         diverges from the resonant split at strong coupling, K2 finding.) The \
+         probe measured 17.2% vs k_eps; a materially larger error means a \
+         promotion bug (wrong geometry/sweep/peak-finder) — report the number, \
+         do NOT lower the tolerance. Full spectrum printed above.",
         res.k_fem,
-        k_imp,
-        err_imp,
-        K_TOL_FRAC * 100.0,
         res.k_eps_ref,
         err_eps,
+        K_TOL_FRAC * 100.0,
+        k_imp,
+        err_imp,
     );
 }
