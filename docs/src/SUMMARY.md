@@ -198,3 +198,4 @@
 - [ADR-0152: App.3.0 — studio "Instrument" distinctiveness redesign](decisions/0152-app-3-0-studio-instrument-redesign.md)
 - [ADR-0153: FEM driven-sweep microstrip-S21 EM-verification track (7-brick decomposition)](decisions/0153-fem-em-microstrip-s21-track.md)
 - [ADR-0154: FEM numerical-eigenmode microstrip port (the B4 fork — higher-fidelity port)](decisions/0154-fem-numerical-eigenmode-microstrip-port.md)
+- [ADR-0155: F1.1b coupling-coefficient extraction via the FEM driven-sweep (not FDTD-resonant)](decisions/0155-f1-1b-fem-coupled-resonator-k.md)
