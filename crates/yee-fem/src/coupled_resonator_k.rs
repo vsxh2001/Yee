@@ -93,8 +93,6 @@
 //! `cargo test --workspace` never runs them, and run only in `--release`,
 //! boxed.
 
-#![allow(non_snake_case)]
-
 use std::collections::HashMap;
 use std::f64::consts::PI;
 
