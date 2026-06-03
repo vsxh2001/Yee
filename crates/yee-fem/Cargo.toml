@@ -38,6 +38,13 @@ faer            = { workspace = true }
 # already transitively present via `faer` / `nalgebra`; promoted to a
 # direct dep here for clarity.
 num-complex     = { workspace = true }
+# Phase 4 FEM-EM brick N1 (ADR-0154): the numerical-eigenmode microstrip
+# wave-port (`microstrip_port_numerical.rs`) feeds yee-mom's SHIPPED quasi-TEM
+# cross-section eigenmode (`ports::NumericalCrossSection`) as the FEM port's
+# `modal_e_t`. A production (non-dev) dependency so `src/` can build the port;
+# acyclic — yee-mom depends only on yee-core/yee-mesh/yee-io (+ optional
+# yee-cuda) with no edge back to yee-fem.
+yee-mom         = { workspace = true }
 thiserror       = { workspace = true }
 tracing         = { workspace = true }
 
@@ -55,13 +62,3 @@ approx = "0.5"
 # `yee-fem`, so this introduces no dependency cycle.
 yee-filter = { workspace = true }
 yee-synth  = { workspace = true }
-# FEM higher-fidelity-port DE-RISK PROBE (ADR-0153 fork): the
-# `fem_line_eeff_001_numerical_port` measurement in
-# `tests/microstrip_eeff.rs` feeds yee-mom's SHIPPED quasi-TEM
-# cross-section eigenmode (`ports::NumericalCrossSection`) as the FEM
-# port's `modal_e_t`, to measure whether the true transverse field lifts
-# |S21| out of the analytic-v1 ~0.089 modal-overlap floor. dev-only
-# (test-side, probe — not a production dependency). `yee-mom` depends only
-# on yee-core/yee-mesh/yee-io (+ optional yee-cuda) with no edge back to
-# `yee-fem`, so this introduces no dependency cycle.
-yee-mom    = { workspace = true }
