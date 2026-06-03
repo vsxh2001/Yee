@@ -13,6 +13,13 @@ default = []
 [dependencies]
 yee-core        = { workspace = true }
 yee-mesh        = { workspace = true }
+# Phase 4 FEM-EM brick B3 (ADR-0153): the quasi-TEM microstrip wave-port
+# closures in `microstrip_port.rs` reuse the Hammerstad-Jensen `eps_eff`
+# synthesis from `yee-layout` (validated by `geo_002_hammerstad`). A normal
+# (non-dev) dependency so both `src/` and the integration tests can call it;
+# `yee-layout` is a pure-geometry crate (serde-only) with no edge back to
+# `yee-fem`/`yee-mesh`/`yee-core`, so this introduces no dependency cycle.
+yee-layout      = { workspace = true }
 nalgebra        = { workspace = true }
 # `nalgebra-sparse` is not in `[workspace.dependencies]` at the base SHA
 # (Phase 4 T4 lane brief notes the gap as an out-of-lane finding); declared

@@ -53,6 +53,7 @@ pub mod dispersive;
 pub mod element;
 pub mod material;
 pub mod microstrip_mesh;
+pub mod microstrip_port;
 pub mod open_boundary;
 pub mod pml_mesh;
 pub mod solve;
@@ -67,6 +68,10 @@ pub use element::{
 };
 pub use material::{Material, MaterialDatabase, MaterialPole};
 pub use microstrip_mesh::{AIR_TAG, FR4_EPS_R, FR4_TAG, layered_microstrip_mesh};
+pub use microstrip_port::{
+    beta_microstrip, microstrip_port, microstrip_port_windowed, modal_e_t_microstrip,
+    modal_e_t_microstrip_windowed,
+};
 pub use open_boundary::{
     AbcOrder, DrivenSystem, FaceKind, OpenBoundarySolver, PmlConfig, PmlMeshMeta, PmlRegion,
     PortDefinition, PortId, PortMode, SParameters, SParametersMatrix,
