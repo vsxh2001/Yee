@@ -7655,6 +7655,7 @@ dependencies = [
  "yee-mesh",
  "yee-mom",
  "yee-plotters",
+ "yee-surrogate",
  "yee-synth",
 ]
 

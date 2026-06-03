@@ -47,6 +47,14 @@ thiserror    = { workspace = true }
 # does not depend on `yee-design` re-exporting a parser surface.
 toml         = "0.8"
 
+[dev-dependencies]
+# F1.2.1.0 (ADR-0157): the `bo-coupling-001` gate wires the EI/GP Bayesian
+# optimizer (`yee_surrogate::minimize`) around the FEM coupling-k objective
+# (`yee_fem::coupled_resonator_k`, already a dep) to refine a single
+# inter-resonator gap with the EM in the loop. dev-only — the BO is exercised
+# solely by the gate test, not by any production validation driver.
+yee-surrogate = { workspace = true }
+
 # Phase 4.fem.eig.3.5.1 R2 — CFS-PML grading-parameter ablation sweep
 # binary. Runs locally (75 min worst-case in --release on the
 # §4 ablation grid). Not a CI gate; the winning row's parameters land
