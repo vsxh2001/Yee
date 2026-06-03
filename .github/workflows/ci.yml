@@ -469,8 +469,9 @@ jobs:
       # FEM-EM brick K1 (ADR-0155): coupled-microstrip resonator-pair coupling
       # `k` gate. One driven sparse-LU sweep (~61 pts) on a ~63k-tet FR-4
       # coupled pair; asserts two resolvable transmission peaks (valley ≥ 6 dB
-      # below the shallower peak — a re-smearing tripwire) AND |k_fem − k_imp| /
-      # k_imp ≤ 0.30 vs the Kirschning-Jansen `coupling_coefficient`.
+      # below the shallower peak — a re-smearing tripwire) AND |k_fem − k_eps| /
+      # k_eps ≤ 0.30 vs the like-for-like ε_eff-split (ADR-0155 K2 finding;
+      # k_imp `coupling_coefficient` reported for traceability).
       # `#[ignore]`'d (CLAUDE.md §10) so the default debug `cargo test
       # --workspace` never runs it; run here in `--release`. Multi-minute (the
       # de-risk probe measured ~280 s); fits the GitHub runner (the long-thin
@@ -482,8 +483,9 @@ jobs:
       # single point into a curve. THREE driven sweeps at S = 1.5 / 2.0 / 3.0 mm
       # (61 / 61 / 91 pts; the widest gap gets the finest step for its narrower
       # split); asserts every gap resolves two peaks, `k_fem` is strictly
-      # monotone-decreasing in the gap, and each gap is within 30 % of
-      # `coupling_coefficient(S)`. `#[ignore]`'d so the default debug `cargo test
+      # monotone-decreasing in the gap, and each gap is within 30 % of the
+      # like-for-like ε_eff-split `k_eps(S)` (ADR-0155 K2 finding). `#[ignore]`'d
+      # so the default debug `cargo test
       # --workspace` never runs it; run here in `--release`. ~16 min (three K1-
       # sized sweeps); fits the GitHub runner (the long-thin box keeps the per-ω
       # faer sparse-LU bandwidth low).

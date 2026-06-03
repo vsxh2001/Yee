@@ -75,9 +75,10 @@ const GAPS_M: [f64; 3] = [1.5e-3, 2.0e-3, 3.0e-3];
 /// two tighter gaps keep the K1-proven 61 pts). See the module docs.
 const N_PTS: [usize; 3] = [61, 61, 91];
 
-/// Per-gap k-tolerance vs the synthesis-side `coupling_coefficient` (`k_imp`).
-/// Same walking-skeleton 30 % as the K1 gate. Do NOT weaken to force green
-/// (ADR-0155).
+/// Per-gap k-tolerance vs the like-for-like ε_eff-split (`k_eps`). Same
+/// walking-skeleton 30 % as the K1 gate (`k_imp` diverges from the resonant
+/// split at strong coupling — reported for traceability, not gated). Do NOT
+/// weaken to force green (ADR-0155).
 const K_TOL_FRAC: f64 = 0.30;
 
 /// Required valley depth below the shallower peak (dB) for "two resolvable
