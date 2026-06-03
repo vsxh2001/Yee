@@ -83,8 +83,9 @@ use std::f64::consts::PI;
 use nalgebra::Vector3;
 use yee_core::units::C0;
 use yee_fem::{
-    FaceKind, MaterialDatabase, OpenBoundarySolver, PortDefinition, SParametersMatrix,
-    layered_microstrip_mesh, microstrip_port, microstrip_port_windowed,
+    FaceKind, MaterialDatabase, MicrostripPortGeom, OpenBoundarySolver, PortDefinition,
+    SParametersMatrix, layered_microstrip_mesh, microstrip_port, microstrip_port_numerical,
+    microstrip_port_windowed,
 };
 use yee_mesh::TetMesh3D;
 
@@ -812,5 +813,258 @@ fn fem_line_eeff_001() {
         s11_best < 0.8,
         "matched-thru |S11|(L2) = {s11_best:.4} ({s11_db:.1} dB) is implausibly high \
          for a clean wave-port; the port is grossly mismatched"
+    );
+}
+
+// =====================================================================
+// FEM NUMERICAL-EIGENMODE-PORT STRAIGHT-LINE |S21| GATE (ADR-0154 N2)
+//
+// THE QUESTION THE GATE LOCKS IN: feeding yee-mom's SHIPPED quasi-TEM
+// cross-section eigenmode field as the FEM port's `modal_e_t` lifts |S21|
+// out of the ~0.089 (−21 dB) modal-overlap floor the analytic-v1 flat-Ez
+// port hits (B4 measured |S21|≈0.0888/0.0889 in `fem_line_eeff_001`). The
+// ADR-0154 de-risk probe proved it (|S21|≈0.778, |S11|≈0.087, ε_eff 0.61%,
+// independently re-verified); N2 promotes that measurement into a real
+// PASS/FAIL gate with a |S21|≥0.6 re-flooring tripwire.
+//
+// This gate mirrors the `fem_line_eeff_001` straight-line setup EXACTLY
+// (same mesh/box/interior-PEC/coupled-Whitney/two-length extraction, same
+// analytic-HJ β so the ONLY changed variable vs v1 is the modal SHAPE),
+// but builds its port from the production `yee_fem::microstrip_port_numerical`
+// API (brick N1) rather than the inline probe helpers that previously
+// lived here (those moved into `src/microstrip_port_numerical.rs`).
+//
+// Frame map (yee-mom 2-D cross-section → FEM port face), now owned by the
+// production API and documented in `src/microstrip_port_numerical.rs`:
+//   * FEM port face is the (x, z) plane (propagation ŷ); ground at z=0,
+//     trace top at z=sub_h, air above. Dominant field is substrate-normal.
+//   * yee-mom coord0 (x_width) ↔ FEM x, coord1 (substrate-normal) ↔ FEM z;
+//     `e_tangential_at(p.x, p.z)` → `[ex, e_normal]` →
+//     `Vector3::new(ex, 0.0, e_normal)`.
+//
+// The cross-section is built strip-as-hole at the VALIDATED density
+// (20×12, thin one-cell strip) at THIS line's physical box (BOX_W=6mm,
+// SUB_H=1mm FR-4, TRACE_W=1mm), so the eigenmode is the true transverse
+// mode of the SAME cross-section the FEM volume carries.
+// =====================================================================
+
+/// The numerical-port geometry for this line: the production
+/// `MicrostripPortGeom` for the BOX_W×BOX_H box on SUB_H FR-4 with a
+/// TRACE_W strip — the same cross-section the FEM volume carries.
+fn numerical_port_geom() -> MicrostripPortGeom {
+    MicrostripPortGeom {
+        trace_w: TRACE_W,
+        sub_h: SUB_H,
+        eps_r: EPS_R,
+        box_w: BOX_W,
+        box_h: BOX_H,
+    }
+}
+
+/// Drive one length with the numerical-eigenmode port and return
+/// `(S21, |S11|)` at the band centre — the numerical-port analogue of
+/// `solve_line`. Same mesh / interior-PEC / coupled-Whitney path as the
+/// analytic gate; ONLY the port `modal_e_t` differs (it is the production
+/// `yee_fem::microstrip_port_numerical` numerical eigenmode). The port is
+/// built from `geom` via the N1 API; each of the two port faces gets its
+/// own `microstrip_port_numerical` call (a sub-second 2-D eigensolve each)
+/// because a `PortDefinition` holds non-`Clone` boxed closures.
+fn solve_line_numerical(
+    line_len: f64,
+    ny: usize,
+    geom: &MicrostripPortGeom,
+) -> (num_complex::Complex64, f64) {
+    let (mesh, material_db, ground_pred, trace_pred) =
+        layered_microstrip_mesh(BOX_W, BOX_H, line_len, SUB_H, TRACE_W, NX, ny, NZ)
+            .expect("layered_microstrip_mesh must build for the chosen geometry");
+
+    let n_exterior = exterior_face_count(&mesh);
+    let picker = OpenBoundarySolver::new(
+        &mesh,
+        vec![FaceKind::Pec; n_exterior],
+        Vec::new(),
+        MaterialDatabase::new(),
+    )
+    .expect("picker solver must build");
+    let ground_edges = picker.interior_edges_matching(&ground_pred);
+    let trace_edges = picker.interior_edges_matching(&trace_pred);
+    let mut interior_pec: Vec<usize> = ground_edges;
+    interior_pec.extend(trace_edges.iter().copied());
+    interior_pec.sort_unstable();
+    interior_pec.dedup();
+    assert!(
+        !trace_edges.is_empty(),
+        "trace_pred must select at least one interior edge on the z = sub_h trace footprint"
+    );
+    let centroids = picker.exterior_face_centroids();
+    let kinds = classify_microstrip_faces(&centroids, line_len);
+    drop(picker);
+
+    // Build the numerical-eigenmode port from the production N1 API — one
+    // PortDefinition per face (boxed closures are not Clone).
+    let port_0 = microstrip_port_numerical(geom, F_TEST)
+        .expect("numerical-eigenmode port (face 0) must build");
+    let port_1 = microstrip_port_numerical(geom, F_TEST)
+        .expect("numerical-eigenmode port (face 1) must build");
+    let solver = OpenBoundarySolver::new(&mesh, kinds, vec![port_0, port_1], material_db)
+        .expect("two-port numerical-port microstrip solver must build")
+        .with_interior_pec_edges(interior_pec.iter().copied())
+        // Mandatory for the microstrip quasi-TEM port (B4): the default
+        // lumped-centroid path collapses the absorbing block; the exact-Whitney
+        // 3-pt-Gauss path lets a wave propagate.
+        .with_coupled_whitney(true);
+
+    let omega = 2.0 * PI * F_TEST;
+    let sweep: SParametersMatrix = solver
+        .sweep_matrix(&[omega])
+        .expect("driven sweep_matrix must succeed");
+    let s = &sweep.s[0];
+    (s[(1, 0)], s[(0, 0)].norm())
+}
+
+/// **THE GATE** (ADR-0154 N2). Drives a straight FR-4 microstrip line of
+/// two lengths through the production numerical-eigenmode wave-port
+/// ([`yee_fem::microstrip_port_numerical`], brick N1), extracts the guided
+/// phase constant β via the wrap-free two-length method, and asserts:
+///
+/// 1. **`|S21|(L2) ≥ 0.6`** — the re-flooring tripwire. The analytic-v1
+///    port floors at `|S21| ≈ 0.089` (≈ −21 dB/port modal-overlap loss);
+///    the numerical eigenmode lifts it to `≈ 0.778` (ADR-0154 probe,
+///    independently re-verified). The `0.6` lower bound sits well below
+///    the measured `0.778` yet far above the v1 floor, so it catches a
+///    promotion regression (a broken frame map or wrong cross-section
+///    density would re-floor `|S21|`) with margin.
+/// 2. **`|S11|(L2) ≤ 0.2`** — the matched-thru port presents a low
+///    reflection (probe measured `≈ 0.087`); a gross port mismatch /
+///    regression would push it up.
+/// 3. **ε_eff rel-err `≤ 5 %`** vs Hammerstad-Jensen — the phase fidelity
+///    is unchanged from v1 (`≈ 0.61 %`); the numerical shape lifts the
+///    *amplitude* without disturbing the *phase* the two-length method
+///    consumes.
+///
+/// ## Why the numerical eigenmode (the v1 ~9 % overlap floor)
+///
+/// The analytic v1 `modal_e_t` is `E_z`-dominant but only ~9 % overlaps
+/// the true quasi-TEM eigenmode (flat in `x`, idealised gap/air `z`-profile,
+/// drops the in-plane `E_x`); the driven projection onto it caps `|S21|`
+/// at the ~0.089 modal-overlap floor (B4 `fem_line_eeff_001`). Feeding
+/// yee-mom's SHIPPED quasi-TEM cross-section eigenmode as the modal shape
+/// (the only changed variable — β stays analytic-HJ) lifts the overlap and
+/// the amplitude.
+///
+/// ## Two design choices the gate inherits from B4 (see the forensic probes)
+///
+/// 1. **Coupled-Whitney is mandatory** (`with_coupled_whitney(true)`): the
+///    default lumped-centroid path collapses the `jβ B_port` absorbing
+///    block at the single face centroid for the `E_z` mode (hard wall).
+/// 2. **The box is 6 × 6 mm**: a tighter 4 mm PEC shield clips the fringing
+///    field and pulls ε_eff ~5 % below the open-microstrip HJ value.
+///
+/// ## MEASURED RESULT (ADR-0154 de-risk probe, --release boxed)
+///
+/// ```text
+///   |S21|(L1) ≈ 0.778   |S21|(L2) ≈ 0.778   (~8.7× the v1 0.089 floor)
+///   |S11|(L2) ≈ 0.087
+///   ε_eff_fem  vs HJ    ≈ 0.61 %
+/// ```
+///
+/// Boxed run command:
+/// ```text
+/// YEE_BOX_DIR=$(pwd) YEE_BOX_MEM=14g YEE_BOX_CPUS=3 scripts/yee-box.sh \
+///   cargo test -p yee-fem --release --test microstrip_eeff \
+///   -- --ignored fem_line_eeff_numerical_001 --nocapture
+/// ```
+#[test]
+#[ignore = "multi-minute driven SOLVE (two per-ω sparse LUs + 2-D eigensolves); run only in --release, boxed"]
+fn fem_line_eeff_numerical_001() {
+    let omega = 2.0 * PI * F_TEST;
+    let eps_eff_hj = yee_layout::eps_eff(TRACE_W, SUB_H, EPS_R);
+    let geom = numerical_port_geom();
+
+    // ── Two-length driven sweep with the production NUMERICAL port. ──
+    let (s21_l1, s11_l1) = solve_line_numerical(L1, NY1, &geom);
+    let (s21_l2, s11_l2) = solve_line_numerical(L2, NY2, &geom);
+
+    let phase_l1 = s21_l1.arg();
+    let phase_l2 = s21_l2.arg();
+    let dphi = wrap_pi(phase_l2 - phase_l1);
+    let beta = -dphi / (L2 - L1);
+    let eps_eff_fem = (beta * C0 / omega).powi(2);
+    let rel_err = (eps_eff_fem - eps_eff_hj).abs() / eps_eff_hj;
+
+    let s21_v1_baseline = 0.089_f64; // B4 measured analytic-v1 |S21| floor
+    let mag_l1 = s21_l1.norm();
+    let mag_l2 = s21_l2.norm();
+    let lift_l2 = mag_l2 / s21_v1_baseline;
+
+    eprintln!(
+        "\n==== N2 NUMERICAL-PORT GATE RESULT ====\n\
+         |S21|(L1)         : {mag_l1:.4}  (arg {phase_l1:.4} rad)\n\
+         |S21|(L2)         : {mag_l2:.4}  (arg {phase_l2:.4} rad)\n\
+         |S21| v1 baseline : {s21_v1_baseline:.4}  (analytic flat-Ez floor)\n\
+         |S21| lift (L2)   : {lift_l2:.2}×  vs v1\n\
+         |S11|(L1)         : {s11_l1:.4}\n\
+         |S11|(L2)         : {s11_l2:.4}\n\
+         Δφ (wrapped)      : {dphi:.4} rad\n\
+         β (measured)      : {beta:.3} rad/m\n\
+         ε_eff_fem         : {eps_eff_fem:.4}\n\
+         ε_eff_HJ (ref)    : {eps_eff_hj:.4}\n\
+         rel err (phase)   : {:.2}%\n\
+         passed |S21|≥0.6  : {}\n\
+         passed |S11|≤0.2  : {}\n\
+         passed ε_eff≤5%   : {}\n\
+         =======================================",
+        rel_err * 100.0,
+        mag_l2 >= 0.6,
+        s11_l2 <= 0.2,
+        rel_err <= 0.05,
+    );
+
+    // Non-degeneracy first (a collapsed/hard-wall port gives |S21|→0 with a
+    // meaningless phase — surface that before the amplitude tripwire fires).
+    assert!(
+        beta.is_finite() && mag_l1.is_finite() && mag_l2.is_finite() && mag_l2 > 0.0,
+        "pipeline degenerated: β={beta}, |S21|(L1)={mag_l1}, |S21|(L2)={mag_l2} \
+         — a zero/NaN |S21| means the numerical port collapsed to a hard wall"
+    );
+
+    // β must be positive: the two-length extraction assumes a wrap-free window
+    // (β·ΔL < π). A negative β (wrap straddle) would still yield a positive
+    // ε_eff through the squaring in GATE 3, so guard it explicitly — mirrors
+    // the analytic `fem_line_eeff_001` gate's β>0 assertion.
+    assert!(
+        beta > 0.0,
+        "two-length β extraction gave non-positive β={beta} — the wrap-free \
+         window (β·ΔL < π) was violated; geometry/frequency needs adjustment"
+    );
+
+    // GATE 1 — the re-flooring tripwire. The numerical eigenmode lifts |S21|
+    // to ≈0.778 (probe, re-verified); 0.6 catches a promotion regression
+    // (frame map / cross-section density bug) that would re-floor it toward
+    // the v1 0.089. Do NOT lower this threshold to force green.
+    assert!(
+        mag_l2 >= 0.6,
+        "N2 |S21|(L2) = {mag_l2:.4} fell below the 0.6 re-flooring tripwire \
+         (probe measured ≈0.778, v1 analytic floor ≈0.089). A low |S21| means \
+         the numerical port regressed toward the modal-overlap floor — most \
+         likely the frame map or cross-section density in \
+         `microstrip_port_numerical`. Report the number; do NOT lower the threshold."
+    );
+
+    // GATE 2 — matched-thru reflection. The numerical port matches well
+    // (probe |S11|(L2) ≈ 0.087); a gross mismatch / regression pushes it up.
+    assert!(
+        s11_l2 <= 0.2,
+        "N2 |S11|(L2) = {s11_l2:.4} exceeds the 0.2 matched-thru bound \
+         (probe measured ≈0.087) — the numerical port is mismatched/regressed"
+    );
+
+    // GATE 3 — ε_eff phase fidelity vs Hammerstad-Jensen (unchanged from v1
+    // ≈0.61%; the numerical shape lifts amplitude, not phase).
+    assert!(
+        rel_err <= 0.05,
+        "N2 ε_eff_fem = {eps_eff_fem:.4} vs Hammerstad-Jensen {eps_eff_hj:.4} \
+         → rel err {:.2}% exceeds the 5% target",
+        rel_err * 100.0,
     );
 }
