@@ -7482,6 +7482,7 @@ dependencies = [
  "yee-filter",
  "yee-layout",
  "yee-mesh",
+ "yee-mom",
  "yee-synth",
 ]
 
