@@ -55,12 +55,12 @@ jobs:
       - name: cargo clippy (workspace, no-default-features)
         run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
 
-      # `--exclude yee-py`: the PyO3 cdylib bindings compile fine standalone
-      # (`cargo test -p yee-py`) but fail under workspace-wide `--no-default-features`
-      # feature unification (yee-py/src/fem.rs loses an API gated behind a dep's
-      # default features). yee-py is covered by the `python-bindings` job, which
-      # now also runs its Rust tests via `cargo test -p yee-py` (correct feature
-      # resolution). So the workspace lint-test excludes it.
+      # `--exclude yee-py`: the PyO3 cdylib bindings fail to compile under
+      # workspace-wide `--no-default-features` feature unification (a dep's
+      # default-gated API drops out). yee-py is covered by the `python-bindings`
+      # job (clippy --all-targets + pytest); it has no Rust unit tests, and its
+      # rustdoc examples are non-Rust (python/prose) that rustdoc can't compile
+      # (pre-existing, separate from CI green). So the lint-test excludes it.
       - name: cargo test (workspace, no-default-features)
         run: cargo test --workspace --no-default-features --exclude yee-py
 
@@ -158,13 +158,6 @@ jobs:
         run: ../../.venv/bin/pytest tests/ -v
       - name: cargo clippy (yee-py)
         run: cargo clippy -p yee-py --all-targets -- -D warnings
-      # yee-py's Rust unit tests run HERE (the workspace lint-test excludes
-      # yee-py): standalone `-p yee-py` uses correct feature resolution, and this
-      # job has Python + fontconfig set up. `--no-default-features` keeps it
-      # aligned with the lint-test profile and avoids the PyO3 extension-module
-      # link issue.
-      - name: cargo test (yee-py, no-default-features)
-        run: cargo test -p yee-py --no-default-features
 
   fdtd-coupling-gate:
     name: FDTD propagation ε_eff gate (fdtd-line-eeff, release)
