@@ -168,8 +168,23 @@ impl CoupledResonatorGeom {
     /// `S`, plus `CLEARANCE_X` each side); `box_h` is `sub_h + 5 mm` air snapped
     /// so `sub_h` lands on a z-plane.
     pub fn probe() -> Self {
+        Self::probe_with_gap(2.0e-3)
+    }
+
+    /// The ADR-0155 probe geometry at an arbitrary coupling gap `gap_s` (metres),
+    /// keeping every other probe parameter fixed (W = 1 mm, h = 1 mm, ε_r = 4.4,
+    /// f0 = 2.4 GHz, 6 mm-tall open box). [`probe`](Self::probe) is exactly
+    /// `probe_with_gap(2.0e-3)`.
+    ///
+    /// `box_w` is re-derived for the new gap (two `W`-wide strips with gap `S`,
+    /// plus [`CLEARANCE_X`] each side, so the PEC walls stay ≥ 2.5·h clear and
+    /// do not load the line — B4); `box_h` is `sub_h + 5 mm` air snapped so
+    /// `sub_h` lands on a z-plane (the snap is gap-independent). This is the
+    /// constructor the k-vs-gap monotonicity gate (`fem-coupling-002`, ADR-0155
+    /// K2) sweeps, so the box-extent derivation stays single-sourced rather than
+    /// duplicated per gap.
+    pub fn probe_with_gap(gap_s: f64) -> Self {
         let trace_w = 1.0e-3;
-        let gap_s = 2.0e-3;
         let sub_h = 1.0e-3;
         let air_h = 5.0e-3;
         // x: two strips with a gap S, plus clearance both sides.
@@ -710,6 +725,44 @@ mod tests {
              should agree to ~15% (ratio {ratio:.2}); a larger ratio means the gap is too tight \
              for the two definitions to be compared like-for-like"
         );
+    }
+
+    /// `probe()` is exactly `probe_with_gap(2.0e-3)` (the refactor that extracted
+    /// the gap-parameterized constructor must not have changed the default), and
+    /// `probe_with_gap` widens `box_w` by exactly the gap change (the PEC walls
+    /// stay `CLEARANCE_X` clear of the two-strip pattern at any gap) while leaving
+    /// the gap-independent `box_h` snap untouched. This guards the K2 gate's
+    /// per-gap geometry against a box-derivation drift. FAST (no FEM solve).
+    #[test]
+    fn probe_with_gap_matches_default_and_scales_box_w() {
+        assert_eq!(
+            CoupledResonatorGeom::probe(),
+            CoupledResonatorGeom::probe_with_gap(2.0e-3),
+            "probe() must equal probe_with_gap(2 mm) — the K2 refactor changed the default"
+        );
+
+        let g15 = CoupledResonatorGeom::probe_with_gap(1.5e-3);
+        let g30 = CoupledResonatorGeom::probe_with_gap(3.0e-3);
+        // box_w widens by exactly the gap delta (clearance + 2·W are fixed).
+        assert!(
+            ((g30.box_w - g15.box_w) - (3.0e-3 - 1.5e-3)).abs() < 1e-12,
+            "box_w must widen by exactly the gap change: dW={:.6}mm vs dS={:.6}mm",
+            (g30.box_w - g15.box_w) * 1e3,
+            (3.0e-3 - 1.5e-3) * 1e3
+        );
+        // box_h is gap-independent (the z-snap does not see the gap).
+        assert!(
+            (g15.box_h - g30.box_h).abs() < 1e-12,
+            "box_h must be gap-independent (it only snaps sub_h onto a z-plane)"
+        );
+        // Each gap still clears CLEARANCE_X on both sides of the two-strip span.
+        for g in [&g15, &g30] {
+            let two_strip_span = 2.0 * g.trace_w + g.gap_s;
+            assert!(
+                (g.box_w - (two_strip_span + 2.0 * CLEARANCE_X)).abs() < 1e-12,
+                "box_w must be the two-strip span + CLEARANCE_X each side"
+            );
+        }
     }
 
     /// Sanity: the resolved probe geometry lands near the probe's measured

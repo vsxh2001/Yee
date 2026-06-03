@@ -478,6 +478,18 @@ jobs:
       - name: fem coupled-resonator k (fem-coupling-001, release, ignored)
         run: cargo test -p yee-fem --release --test fem_coupling_001 -- --ignored --nocapture
 
+      # FEM-EM brick K2 (ADR-0155): k-vs-gap MONOTONICITY — strengthens the K1
+      # single point into a curve. THREE driven sweeps at S = 1.5 / 2.0 / 3.0 mm
+      # (61 / 61 / 91 pts; the widest gap gets the finest step for its narrower
+      # split); asserts every gap resolves two peaks, `k_fem` is strictly
+      # monotone-decreasing in the gap, and each gap is within 30 % of
+      # `coupling_coefficient(S)`. `#[ignore]`'d so the default debug `cargo test
+      # --workspace` never runs it; run here in `--release`. ~16 min (three K1-
+      # sized sweeps); fits the GitHub runner (the long-thin box keeps the per-ω
+      # faer sparse-LU bandwidth low).
+      - name: fem coupled-resonator k vs gap (fem-coupling-002, release, ignored)
+        run: cargo test -p yee-fem --release --test fem_coupling_002 -- --ignored --nocapture
+
   fdtd-heavy-validation-gate:
     name: FDTD heavy validation gates (release)
     runs-on: ubuntu-latest
