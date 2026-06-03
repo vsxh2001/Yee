@@ -1028,6 +1028,16 @@ fn fem_line_eeff_numerical_001() {
          — a zero/NaN |S21| means the numerical port collapsed to a hard wall"
     );
 
+    // β must be positive: the two-length extraction assumes a wrap-free window
+    // (β·ΔL < π). A negative β (wrap straddle) would still yield a positive
+    // ε_eff through the squaring in GATE 3, so guard it explicitly — mirrors
+    // the analytic `fem_line_eeff_001` gate's β>0 assertion.
+    assert!(
+        beta > 0.0,
+        "two-length β extraction gave non-positive β={beta} — the wrap-free \
+         window (β·ΔL < π) was violated; geometry/frequency needs adjustment"
+    );
+
     // GATE 1 — the re-flooring tripwire. The numerical eigenmode lifts |S21|
     // to ≈0.778 (probe, re-verified); 0.6 catches a promotion regression
     // (frame map / cross-section density bug) that would re-floor it toward

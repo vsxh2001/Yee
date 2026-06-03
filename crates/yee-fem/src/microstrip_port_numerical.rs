@@ -68,7 +68,9 @@
 //! [`microstrip_port_numerical`] runs the yee-mom 2-D eigensolve **once**
 //! per call (sub-second on the internal validated-density mesh) and wraps
 //! the resulting mode in an [`Arc`] so the returned port's `modal_e_t`
-//! closure shares it. The β is the analytic Hammerstad-Jensen
+//! closure takes shared ownership of the heap-allocated eigenmode without
+//! a `Copy` bound (the β closure captures only scalars). The β is the
+//! analytic Hammerstad-Jensen
 //! [`crate::beta_microstrip`] (the eigensolve's own β is *not* used for
 //! the absorbing-boundary impedance — only the modal *shape* comes from
 //! the eigensolve), so the only changed variable vs the analytic v1 port
@@ -86,9 +88,10 @@ use crate::open_boundary::PortDefinition;
 
 /// Internal cross-section subdivisions for the numerical eigensolve.
 ///
-/// Mirrors the validated `20 × 10` density of
+/// Based on the validated `20 × 10` reference density of
 /// `yee-mom/tests/eigensolver_microstrip_quasi_tem.rs`, with `ny` bumped
-/// to `12` so a 1 mm substrate inside a 6 mm box is two cells tall
+/// to `12` (production density `20 × 12`) so a 1 mm substrate inside a
+/// 6 mm box is two cells tall
 /// (`dy = 0.5 mm`) and the strip hole is a clean one-cell band — the same
 /// `dx ≈ dz ≈ 0.5 mm` aspect the FEM volume cross-section carries
 /// (`NX = NZ = 12` over 6 mm). This is the density the ADR-0154 probe
@@ -142,7 +145,7 @@ fn microstrip_cross_section(
     t_strip: f64,
     nx: usize,
     ny: usize,
-) -> yee_mesh::TriMesh2D {
+) -> Result<yee_mesh::TriMesh2D, Error> {
     let xs: Vec<f64> = (0..=nx).map(|i| box_w * (i as f64) / (nx as f64)).collect();
     let ys: Vec<f64> = (0..=ny).map(|j| box_h * (j as f64) / (ny as f64)).collect();
     let xc = box_w / 2.0;
@@ -179,8 +182,13 @@ fn microstrip_cross_section(
             tags.push(tag);
         }
     }
+    // `TriMesh2D::new` validates the cross-section (≥1 triangle, in-bounds
+    // indices, CCW winding); a degenerate geometry (e.g. `trace_w ≥ box_w`
+    // yielding zero cells) surfaces as `yee_mesh::Error`. Map it to the
+    // crate-wide `yee_core::Error` and propagate instead of panicking on a
+    // library `Result` path.
     yee_mesh::TriMesh2D::new(vertices, triangles, None, Some(tags))
-        .expect("shielded-microstrip cross-section mesh invariants")
+        .map_err(|e| Error::Invalid(format!("microstrip cross-section: {e}")))
 }
 
 /// Construct a **numerical-eigenmode** quasi-TEM microstrip wave-port
@@ -212,11 +220,12 @@ fn microstrip_cross_section(
 ///
 /// # Errors
 ///
-/// Returns the yee-mom solve error (a [`yee_core::Error`], the crate-wide
-/// error type) if the quasi-TEM cross-section eigensolve fails to surface
-/// a propagating mode on the built mesh — e.g. a degenerate geometry that
-/// carries no quasi-TEM mode. (The eigensolve error type *is* already
-/// [`yee_core::Error`], so the mapping is the identity.)
+/// Returns a [`yee_core::Error`] (the crate-wide error type) if either the
+/// cross-section mesh build fails (a degenerate geometry — e.g.
+/// `trace_w ≥ box_w` — yielding an invalid `TriMesh2D`) or the yee-mom
+/// quasi-TEM eigensolve fails to surface a propagating mode. The eigensolve
+/// already returns [`yee_core::Error`] (propagated unchanged); the mesh
+/// builder's `yee_mesh::Error` is mapped to [`yee_core::Error::Invalid`].
 pub fn microstrip_port_numerical(
     geom: &MicrostripPortGeom,
     f_hz: f64,
@@ -232,7 +241,7 @@ pub fn microstrip_port_numerical(
         t_strip,
         XSEC_NX,
         XSEC_NY,
-    );
+    )?;
 
     // Material tags: air tag 0 = (1, 0); FR-4 tag 1 = (eps_r, 0); μ_r = 1.
     let mut eps: HashMap<u32, Complex64> = HashMap::new();
@@ -247,8 +256,9 @@ pub fn microstrip_port_numerical(
     // surfaces it unchanged — no error-variant remapping needed.
     mode.solve(f_hz)?;
 
-    // Share the solved mode between the absorbing-impedance β closure (which
-    // does not touch it) and the modal-shape closure that samples it.
+    // The modal-shape closure takes shared ownership of the solved mode via
+    // an `Arc` (cheap to hold, no `Copy` bound); the β closure below captures
+    // only scalars and does not touch it.
     let mode = Arc::new(mode);
 
     let (trace_w, sub_h, eps_r) = (geom.trace_w, geom.sub_h, geom.eps_r);
