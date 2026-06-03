@@ -1,27 +1,39 @@
-//! FEM-EM brick B7 (ADR-0153) — 3-pole microstrip-filter S21 from the FEM
-//! driven sweep, graded against the analytic `ladder_s21` reference.
+//! FEM-EM brick N3 (ADR-0154) — 3-pole microstrip-filter S21 from the FEM
+//! driven sweep, re-graded with the HIGH-FIDELITY numerical-eigenmode port,
+//! against the analytic `ladder_s21` reference.
 //!
-//! This is the **culmination** of the FEM-EM driven-sweep track. Bricks B1
-//! (interior-PEC edges), B2 (`layered_microstrip_mesh`), B3 (quasi-TEM
-//! wave-port) and B4 (straight-line ε_eff = 0.61 % of Hammerstad-Jensen — the
-//! port physics is *proven*) are merged. B7 composes them into a coupled-
-//! resonator **band-pass filter** geometry, drives a two-port `sweep_matrix`
-//! over the band, de-embeds the feed reference plane, extracts |S21|(f), and
-//! grades the curve against the 3-pole Chebyshev 0.5 dB / 2 GHz / 10 % FBW
-//! `ladder_s21` reference — including the geometric-asymmetry discriminator
+//! This is the **payoff** of the FEM-EM driven-sweep track. Bricks B1–B4
+//! (ADR-0153: interior-PEC edges, `layered_microstrip_mesh`, the quasi-TEM
+//! wave-port, the straight-line ε_eff = 0.61 % of Hammerstad-Jensen) plus N1+N2
+//! (ADR-0154: the production numerical-eigenmode port `microstrip_port_numerical`,
+//! which on a straight line lifts |S21| 0.089 → 0.778 and matches the port,
+//! |S11| 0.087) are merged. This test composes them into a coupled-resonator
+//! **band-pass filter** geometry, drives a two-port `sweep_matrix` over the
+//! band, de-embeds the feed reference plane, extracts |S21|(f), and grades the
+//! curve against the 3-pole Chebyshev 0.5 dB / 2 GHz / 10 % FBW `ladder_s21`
+//! reference — including the geometric-asymmetry discriminator
 //! (`depth(1.6 GHz) > depth(2.4 GHz)`).
+//!
+//! Originally (ADR-0153 B7) this ran with the v1 ANALYTIC flat-`E_z` port and
+//! floored at ~−42 dB (the ~−21 dB/port modal-overlap loss × two ports). N3
+//! swaps in the numerical eigenmode (recentred per off-centre feed via
+//! [`yee_fem::microstrip_port_numerical_at`]) and re-grades.
 //!
 //! ## Honest framing (read before the gate)
 //!
-//! Per ADR-0153 this is "a geometry + de-embed exercise on a proven port",
-//! but it is also the **hardest, most open brick**. The deliverable is an
-//! HONEST first graded filter curve, not necessarily a strict pass. The gate
-//! therefore asserts only the checks that the coarse-mesh / analytic-port
-//! solve actually supports (see [`fem_filter_s21_vs_ladder`] for the exact
-//! assertions and the measured curve), and records the full |S21|(f) table +
-//! the gap to the ideal mask in the docstring. Weakening or faking the grade
-//! is not a valid outcome; an imperfect-but-recognisable curve with an honest
-//! assessment is.
+//! N3 is **research-open**: the line is proven, but a filter adds resonator
+//! coupling + gap-mesh sensitivity the line never exercised, so whether the
+//! *filter* clears the strict Cheb mask is genuinely unknown a priori. The
+//! deliverable is an HONEST graded filter curve. The gate asserts only the
+//! measurement-driven checks the solve actually supports (the lift over the v1
+//! floor, the asymmetry discriminator, the band-pass turnover — see
+//! [`fem_filter_s21_vs_ladder`]) and asserts the strict mask ONLY IF the
+//! measurement clears it; it records the full |S21|(f) table + the honest
+//! mask margin otherwise. The MEASURED outcome is LIFT-BUT-SHORT: a +15 dB
+//! lift over the v1 floor, correct asymmetry, but the strict mask still missed
+//! by ~35 dB (the multi-resonator path, not just the port, caps the level).
+//! Weakening or faking the grade is not a valid outcome; a documented
+//! lift-but-short with a quantified mask margin is.
 //!
 //! ## Geometry — edge-coupled 3-pole, FR-4
 //!
@@ -73,8 +85,8 @@ use std::f64::consts::PI;
 
 use nalgebra::Vector3;
 use yee_fem::{
-    FaceKind, MaterialDatabase, OpenBoundarySolver, PortDefinition, SParametersMatrix, TraceRect,
-    beta_microstrip, layered_microstrip_filter_mesh, modal_e_t_microstrip_windowed,
+    FaceKind, MaterialDatabase, MicrostripPortGeom, OpenBoundarySolver, SParametersMatrix,
+    TraceRect, beta_microstrip, layered_microstrip_filter_mesh, microstrip_port_numerical_at,
 };
 use yee_filter::{
     Approximation, FilterSpec, LumpedLadder, Response, SpecMask, dimension_edge_coupled,
@@ -150,10 +162,12 @@ struct FilterGeometry {
     /// One-sided feed length (m) at each end (the de-embed reference length).
     feed_len: f64,
     /// `x` centre (m) of the INPUT feed (port 0, `y = 0` end-cap). The
-    /// quasi-TEM wave-port window is centred here — NOT at the box centre —
-    /// because the feed is a narrow off-centre strip and a box-centred
-    /// uniform-`x` mode mostly misses it (the dominant fix that lifted |S21|
-    /// ~13 dB out of the noise floor; see the module-level honest framing).
+    /// numerical-eigenmode wave-port is RECENTRED here — NOT at the box centre
+    /// `box_w/2` where the cross-section places its trace — because the feed is
+    /// a narrow off-centre strip; `microstrip_port_numerical_at` shifts the
+    /// eigenmode sampling by `box_w/2 − feed_xc` so the modal peak lands under
+    /// the actual feed (a box-centred mode would mostly miss it). See the
+    /// module-level honest framing.
     feed_xc_in: f64,
     /// `x` centre (m) of the OUTPUT feed (port 1, `y = box_len` end-cap).
     feed_xc_out: f64,
@@ -357,31 +371,42 @@ fn solve_filter(geom: &FilterGeometry, omegas: &[f64]) -> SParametersMatrix {
     let kinds = classify_filter_faces(&centroids, geom.box_len);
     drop(picker);
 
-    // Feed-line wave-port: a quasi-TEM 50 Ω microstrip mode, x-windowed on the
-    // FEED's x-centre (not the box centre). The feed is a narrow off-centre
-    // strip; a box-centred uniform-x E_z mode (the B4 straight-line port, where
-    // the trace WAS centred) mostly excites air/PEC away from the feed and
-    // couples ~13 dB worse here. The raised-cosine window (half-width 2·w) is
-    // `microstrip_port_windowed`'s shape, recentred per-port on the actual
-    // feed. β uses the feed width (the port face sees a uniform 50 Ω line,
-    // whatever the coupled-resonator interior does).
-    let make_port = |xc: f64| {
-        let w = geom.line_w;
-        let win = 2.0 * w;
-        let beta = move |omega: f64| beta_microstrip(w, SUB_H, EPS_R, omega);
-        let e_t = move |p: Vector3<f64>| modal_e_t_microstrip_windowed(xc, win, SUB_H, p);
-        PortDefinition::single_mode(Box::new(beta), Box::new(e_t))
+    // Feed-line wave-port: the HIGH-FIDELITY numerical quasi-TEM eigenmode
+    // (ADR-0154 N1, `microstrip_port_numerical_at`) replacing the v1 analytic
+    // windowed E_z shape that floored B7 at ~−42 dB. The numerical eigenmode
+    // is the true transverse mode of the feed's (box_w × box_h) FR-4 cross-
+    // section; on the straight line it lifts |S21| 0.089→0.778 and matches the
+    // port (|S11| 0.087). β stays analytic Hammerstad-Jensen on the FEED width
+    // (the port face sees a uniform 50 Ω line, whatever the coupled-resonator
+    // interior does); only the modal SHAPE is numerical.
+    //
+    // x-RECENTERING (critical): the numerical cross-section centres its trace
+    // at box_w/2, but the filter's two feeds are OFF-CENTRE at DIFFERENT x
+    // (input near one box edge, output near the other — staggered resonators).
+    // `microstrip_port_numerical_at(geom, x_center, f)` shifts the eigenmode
+    // sampling by box_w/2 − x_center so the modal peak lands under the actual
+    // feed strip; sampling the box-centred mode unshifted would place the peak
+    // over air/PEC and re-introduce the very overlap loss the numerical port
+    // removes (the v1 windowed port recentred per-feed for the same reason).
+    // The shape is frequency-independent (one eigensolve at the band centre
+    // F0); β(ω) carries the dispersion, exactly as the v1 port did. Each face
+    // gets its own call (boxed closures are not Clone).
+    let port_geom = MicrostripPortGeom {
+        trace_w: geom.line_w,
+        sub_h: SUB_H,
+        eps_r: EPS_R,
+        box_w: geom.box_w,
+        box_h: geom.box_h,
     };
+    let port_in = microstrip_port_numerical_at(&port_geom, geom.feed_xc_in, F0)
+        .expect("numerical-eigenmode port (input feed) must build");
+    let port_out = microstrip_port_numerical_at(&port_geom, geom.feed_xc_out, F0)
+        .expect("numerical-eigenmode port (output feed) must build");
 
-    let solver = OpenBoundarySolver::new(
-        &mesh,
-        kinds,
-        vec![make_port(geom.feed_xc_in), make_port(geom.feed_xc_out)],
-        material_db,
-    )
-    .expect("two-port filter solver must build")
-    .with_interior_pec_edges(interior_pec.iter().copied())
-    .with_coupled_whitney(true);
+    let solver = OpenBoundarySolver::new(&mesh, kinds, vec![port_in, port_out], material_db)
+        .expect("two-port filter solver must build")
+        .with_interior_pec_edges(interior_pec.iter().copied())
+        .with_coupled_whitney(true);
 
     solver
         .sweep_matrix(omegas)
@@ -479,25 +504,46 @@ const REJECTION_TOL_DB: f64 = 5.0;
 /// by at least this. Mirrors `oracle_grade::ASYMMETRY_MARGIN_DB`.
 const ASYMMETRY_MARGIN_DB: f64 = 1.0;
 
-/// FEM-EM brick B7 (ADR-0153) — 3-pole microstrip-filter S21 driven sweep vs
-/// the analytic ladder reference.
+/// The v1 ANALYTIC flat-`E_z` wave-port in-band peak (dB) measured by the
+/// original B7 (ADR-0153, base `22da1c2`): the curve floored at ≈−42.4 dB
+/// in-band (−42.39 dB @ 2.10 GHz) through TWO analytic ports' ~−21 dB/port
+/// modal-overlap loss. ADR-0154 N3 re-grades with the numerical-eigenmode
+/// port; the in-band peak MUST lift well clear of this v1 floor (the
+/// re-flooring tripwire — a promotion regression toward the analytic floor
+/// is the failure this catches).
+const V1_FLOOR_PEAK_DB: f64 = -42.4;
+
+/// N3 re-flooring tripwire (dB): the numerical-port in-band peak must clear
+/// the v1 floor by at least this margin. MEASURED N3 in-band peak is
+/// −27.38 dB @ 2.00 GHz — a +15.0 dB lift over the v1 −42.4 dB floor. This
+/// 9 dB bar sits ~6 dB BELOW the measured −27.38 dB (catches a regression
+/// with margin) and ~9 dB ABOVE the v1 floor (so the v1 analytic port could
+/// NOT pass it): a defensible measured-truth threshold, not a wish.
+const N3_MIN_LIFT_OVER_V1_DB: f64 = 9.0;
+
+/// FEM-EM brick N3 (ADR-0154) — 3-pole microstrip-filter S21 re-graded with the
+/// HIGH-FIDELITY numerical-eigenmode wave-port, vs the analytic ladder reference.
 ///
 /// Builds the edge-coupled 3-pole filter, drives `sweep_matrix` over
-/// 1.6–2.4 GHz, de-embeds the feed reference planes, extracts |S21|(f), and
-/// grades it against the 3-pole Cheb 0.5 dB / 2 GHz / 10 % FBW `ladder_s21`
-/// reference + the geometric-asymmetry discriminator.
+/// 1.6–2.4 GHz through TWO `microstrip_port_numerical_at` ports (ADR-0154 N1,
+/// recentred per off-centre feed), de-embeds the feed reference planes,
+/// extracts |S21|(f), and grades it against the 3-pole Cheb 0.5 dB / 2 GHz /
+/// 10 % FBW `ladder_s21` reference + the geometric-asymmetry discriminator.
+/// This is N3's payoff question: with two high-fidelity ports, does the FILTER
+/// clear the strict Cheb mask?
 ///
-/// ## What this asserts (HONEST)
+/// ## What this asserts (HONEST, MEASUREMENT-DRIVEN)
 ///
-/// The strict `oracle_grade` mask (passband |err| ≤ 2 dB, rejection |err| ≤
-/// 5 dB) is the *target*, and is computed + printed every run — but it MISSES
-/// by ~42 dB in-band and CANNOT pass with this analytic port (the modal-overlap
-/// IL floor; see the honest verdict). The gate therefore does NOT assert the
-/// absolute-level mask (no weakening to force green). It asserts the three
-/// checks the coarse-mesh / analytic-port solve genuinely supports:
+/// MEASURED ANSWER (below): **LIFT-BUT-SHORT.** The numerical port lifts the
+/// in-band peak +15.0 dB over the v1 analytic floor and grows the asymmetry
+/// margin, but the strict `oracle_grade` mask (passband |err| ≤ 2 dB, rejection
+/// |err| ≤ 5 dB) still MISSES by ~35 dB in-band (the 2-port + 3-resonator path,
+/// not just the port, caps the absolute level). The gate therefore does NOT
+/// assert the absolute-level mask (no weakening to force green); it asserts:
 ///
-/// 1. **Non-degenerate transmission** — the in-band peak is well above the
-///    solve noise floor (a collapsed port or broken mesh would sit in noise).
+/// 1. **A real lift over the v1 floor** — in-band peak ≥ `V1_FLOOR_PEAK_DB` +
+///    `N3_MIN_LIFT_OVER_V1_DB` (the re-flooring tripwire; a port-promotion
+///    regression would re-floor it toward the v1 −42.4 dB).
 /// 2. **The geometric-asymmetry discriminator (the brick's NAMED check)** —
 ///    `depth(1.6 GHz) > depth(2.4 GHz)` by ≥ 1 dB: the FEM curve reproduces the
 ///    correct band-pass-mapping asymmetry SIGN that a symmetric/inverted
@@ -505,71 +551,73 @@ const ASYMMETRY_MARGIN_DB: f64 = 1.0;
 /// 3. **A band-pass turnover** — the in-band peak stands above the deeper band
 ///    edge (a real centre bump, not a monotonic ramp / flat line).
 ///
-/// The full curve, the strict-mask gap, and the honest verdict are recorded in
-/// the MEASURED block below and printed by the test with `--nocapture`.
+/// The strict mask is asserted ONLY IF the measurement actually clears it (it
+/// does not yet — `strict_pass` is `false`); the honest MISS margin is recorded
+/// and printed instead. The full curve + verdict are in the MEASURED block.
 ///
-/// ## MEASURED RESULT (boxed --release, base 22da1c2; 51 336 tets, 73.9 s)
+/// ## MEASURED RESULT (boxed --release, base 192cb54; 51 336 tets, 77.4 s)
 ///
 /// Edge-coupled 3-pole, 14.0 × 77.6 × 6.0 mm box, w = 1.912 mm,
-/// `dx/dy/dz = 0.6/2.5/0.5 mm`, feed = 8 mm. |S21| after feed de-embed:
+/// `dx/dy/dz = 0.6/2.5/0.5 mm`, feed = 8 mm. NUMERICAL-eigenmode ports
+/// (`microstrip_port_numerical_at`), recentred on the input feed (xc ≈
+/// 3.46 mm) and output feed (xc ≈ 10.54 mm); box centre is 7.0 mm — both feeds
+/// off-centre. |S21| after feed de-embed:
 ///
 /// ```text
-///   f(GHz)   S21 dB (FEM)   ref dB (ladder)
-///   1.60      −44.62         −41.77
-///   1.80      −43.30         −20.81
-///   1.90      −42.87          −0.75
-///   2.00      −42.65          0.00   ← reference passband centre
-///   2.10      −42.39         −0.32   ← FEM in-band peak
-///   2.20      −42.46         −17.83
-///   2.40      −43.15         −36.27
+///   f(GHz)   S21 dB (FEM, numerical port)   ref dB (ladder)
+///   1.60      −30.92                         −41.77
+///   1.80      −29.36                         −20.81
+///   1.90      −28.67                          −0.75
+///   2.00      −27.38                          0.00   ← reference passband centre + FEM peak
+///   2.05      −35.44                          −0.50
+///   2.10      −29.36                          −0.32
+///   2.20      −28.68                         −17.83
+///   2.40      −28.82                         −36.26
 ///
-///   in-band peak       : −42.39 dB @ 2.10 GHz
-///   turnover           : +2.23 dB (in-band peak above the deeper band edge)
-///   asymmetry (NAMED)  : depth(1.6)=44.62 dB > depth(2.4)=43.15 dB, +1.47 dB → PASS
-///   strict oracle mask : MISS (worst in-band err ≈ 42.6 dB vs the 0 dB reference)
+///   in-band peak       : −27.38 dB @ 2.00 GHz   (v1 analytic floor: −42.4 dB)
+///   lift over v1 floor : +15.0 dB
+///   turnover           : +3.54 dB (in-band peak above the deeper band edge)
+///   asymmetry (NAMED)  : depth(1.6)=30.92 dB > depth(2.4)=28.82 dB, +2.10 dB → PASS
+///   strict oracle mask : MISS by ~34.9 dB in-band (worst err vs the 0 dB reference)
 /// ```
 ///
-/// ## Honest verdict
+/// ## Honest verdict — LIFT-BUT-SHORT
 ///
-/// This is a **recognisable-but-imperfect** first FEM filter curve, not a
-/// strict-mask pass — exactly the honest deliverable the brick asked for.
+/// Exactly the outcome ADR-0154 §Consequences flagged as moderate-confidence:
+/// the numerical port lifts the floor dramatically but the *filter* stops short
+/// of the strict mask.
 ///
-/// * **What is real:** a genuine, non-degenerate FEM transmission response
-///   that (a) peaks near the 2 GHz band centre (overall peak @ 2.10 GHz),
-///   (b) bumps up over the band edges by +2.23 dB (a frequency-selective
-///   pass/stop shape, not a flat line), and (c) reproduces the CORRECT
-///   geometric-asymmetry SIGN — the lower 1.6 GHz notch is deeper than the
-///   upper 2.4 GHz notch by +1.47 dB, the band-pass-mapping signature the
-///   reference has and a fitted/symmetric artifact does not. The gate asserts
-///   exactly these three (non-degeneracy + the named asymmetry discriminator +
-///   the turnover).
+/// * **What the numerical port bought (vs the v1 analytic floor):** the
+///   in-band peak rose −42.39 → −27.38 dB (a **+15.0 dB lift**), the band-edge
+///   levels rose ~−43 → ~−29/−31 dB, the turnover grew +2.23 → +3.54 dB, and
+///   the asymmetry margin grew +1.47 → +2.10 dB. The lift confirms the
+///   higher-fidelity modal shape raised the port↔FEM modal overlap (the N2
+///   straight-line case lifted |S21| 0.089 → 0.778 / |S11| → 0.087). This is a
+///   real, geometry-aware bandpass with the correct asymmetry SIGN, not a
+///   fitted artifact.
 ///
-/// * **The gap to the ideal — and what it is:** the whole curve sits at
-///   ~−42 to −44 dB while the reference passband is 0 dB — a ~42 dB in-band
-///   miss on the strict absolute-level Chebyshev mask. This is the **analytic
-///   wave-port modal-overlap insertion-loss floor**, *not* a mesh/LU-scaling
-///   limit. B4 already documented that ONE matched straight-line port through
-///   this analytic E_z quasi-TEM mode transmits only |S21| ≈ 0.089 (−21 dB) —
-///   the analytic mode partially overlaps the true microstrip eigenmode, so
-///   most incident power is lost in the projection (the phase is coherent,
-///   which is why B4's ε_eff worked, but the amplitude is weak). Here the
-///   signal traverses TWO such ports plus the lossy coupled-resonator
-///   interior, so the floor roughly doubles to ~−42 dB and the 0.5 dB
-///   Chebyshev passband cannot climb out of it. The fix is a higher-fidelity
-///   port (a true numerical cross-section eigenmode, or aperture/frill
-///   coupling), NOT a finer mesh: the 51 k-tet `faer` sparse LU fits the 14 g
-///   box with room to spare (~3 s/point; an 80 k-tet refinement also fit and
-///   did NOT lift the curve), so this is a port-fidelity boundary, not the
-///   B5/scaling boundary.
+/// * **Why it still MISSES the strict mask (~35 dB in-band):** unlike the N2
+///   matched straight-line thru (|S21| ≈ 0.778), the filter inserts THREE
+///   coupled λ_g/2 resonators between the two ports. The signal must traverse
+///   two weak edge-coupling gaps plus the lossy resonator interior at a COARSE
+///   `dx/dy = 0.6/2.5 mm` mesh; the per-port match no longer translates into a
+///   low-IL passband (the in-band |S21| peak is ≈ 0.043, far below the line's
+///   0.778). The remaining gap is **resonator-coupling + gap-mesh fidelity**
+///   (and, secondarily, a still-higher-fidelity port — numerical cross-section
+///   aperture coupling), a finer-mesh / coupling-extraction follow-on, NOT a
+///   mesh/LU-scaling wall (the 51 k-tet `faer` sparse LU fits the 14 g box with
+///   room to spare, ~3 s/point). A documented lift-but-short with a quantified
+///   mask margin is the correct ADR-0154 N3 deliverable.
 ///
-/// * **Two levers that mattered en route** (recorded so they are not
-///   re-derived): (1) the wave-port modal window must be centred on the
-///   FEED's `x`, not the box centre — the feed is a narrow off-centre strip
-///   and a box-centred uniform-`x` mode mostly misses it; recentring lifted
-///   |S21| ~13 dB out of the noise floor and is what makes the asymmetry
-///   resolvable. (2) `with_coupled_whitney(true)` is mandatory (B4 finding;
-///   the lumped-centroid path collapses the absorbing block for the
-///   substrate-normal `E_z` mode).
+/// * **Two levers that mattered (recorded so they are not re-derived):**
+///   (1) the numerical eigenmode must be RECENTRED on each FEED's `x`
+///   (`microstrip_port_numerical_at`), because the filter's two feeds are
+///   off-centre at different `x` while the cross-section centres its trace at
+///   `box_w/2`; sampling the box-centred mode unshifted would place the modal
+///   peak over air/PEC and re-introduce the overlap loss the numerical port
+///   removes. (2) `with_coupled_whitney(true)` is mandatory (B4 finding; the
+///   lumped-centroid path collapses the absorbing block for the substrate-
+///   normal `E_z` mode).
 ///
 /// Run command (printed table + grade with `--nocapture`):
 /// ```text
@@ -596,7 +644,7 @@ fn fem_filter_s21_vs_ladder() {
         0.5e-3, // dz (2 substrate cells)
     );
     eprintln!(
-        "[B7] filter mesh: box=({:.1},{:.1},{:.1})mm  n=({},{},{})  tets={}  w={:.3}mm  feed={:.1}mm  eps_eff(w)={:.4}",
+        "[N3] filter mesh: box=({:.1},{:.1},{:.1})mm  n=({},{},{})  tets={}  w={:.3}mm  feed={:.1}mm  eps_eff(w)={:.4}",
         geom.box_w * 1e3,
         geom.box_len * 1e3,
         geom.box_h * 1e3,
@@ -698,23 +746,37 @@ fn fem_filter_s21_vs_ladder() {
         .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
         .map(|(f, _)| *f)
         .unwrap_or(f64::NAN);
+
+    // N3 lift over the v1 analytic-port floor — the headline number. The strict
+    // Cheb passband is 0 dB; the gap to the mask is `worst_pass_db`. A positive
+    // lift over V1_FLOOR_PEAK_DB is the evidence the numerical eigenmode raised
+    // the modal overlap (the line case lifted |S21| 0.089→0.778; here the
+    // 2-port + 3-resonator filter lifts the in-band PEAK but stops short of the
+    // mask — see the honest verdict below).
+    let lift_over_v1_db = passband_peak_db - V1_FLOOR_PEAK_DB;
     eprintln!(
-        "\n==== B7 GRADE ====\n\
+        "\n==== N3 GRADE (numerical-eigenmode port; ADR-0154) ====\n\
          tets               : {}\n\
          wall               : {:.1} s\n\
          in-band peak       : {:.2} dB @ {:.2} GHz (overall peak @ {:.2} GHz)\n\
+         v1 floor (ref)     : {:.2} dB  (analytic flat-Ez port, B7 base 22da1c2)\n\
+         lift over v1 floor : {:+.2} dB  (tripwire ≥ {:.1} dB)\n\
          band edges         : {:.2} dB @1.6  {:.2} dB @2.4\n\
          turnover           : {:+.2} dB (in-band peak above the deeper edge)\n\
          worst passband err : {:.2} dB vs ref (oracle tol {:.1})\n\
          worst rejection err: {:.2} dB vs ref (oracle tol {:.1})\n\
+         strict-mask margin : MISS by {:.2} dB in-band (gap to the 0 dB Cheb passband)\n\
          asymmetry (NAMED)  : depth(1.6)={:.2} dB  depth(2.4)={:.2} dB  margin={:+.2} dB  -> {}\n\
          strict oracle mask : {}\n\
-         ==================",
+         ========================================================",
         geom.total_tets(),
         wall,
         passband_peak_db,
         f_inband_peak,
         f_peak_ghz,
+        V1_FLOOR_PEAK_DB,
+        lift_over_v1_db,
+        N3_MIN_LIFT_OVER_V1_DB,
         edge_lo_db,
         edge_hi_db,
         turnover_db,
@@ -722,6 +784,7 @@ fn fem_filter_s21_vs_ladder() {
         PASSBAND_TOL_DB,
         worst_rej_db,
         REJECTION_TOL_DB,
+        worst_pass_db,
         depth_lo,
         depth_hi,
         asym_margin,
@@ -736,47 +799,59 @@ fn fem_filter_s21_vs_ladder() {
         .map(|(f, d)| format!("{f:.3}:{d:.2}"))
         .collect::<Vec<_>>()
         .join(" ");
-    eprintln!("[B7] oracle_grade pairs: {pairs}");
+    eprintln!("[N3] oracle_grade pairs: {pairs}");
 
-    // ---- Assertions (HONEST: assert only what genuinely holds) ----
+    // ---- Assertions (HONEST, MEASUREMENT-DRIVEN: assert only what holds) ----
     //
-    // The strict oracle mask does NOT pass and CANNOT pass with this port: the
-    // analytic E_z quasi-TEM wave-port has a large, ~frequency-flat
-    // modal-overlap insertion-loss floor (B4 documented ~−21 dB for ONE matched
-    // straight-line port; here the signal traverses TWO such ports plus the
-    // lossy coupled-resonator interior, so the whole curve sits ~−42 dB). The
-    // reference passband is 0 dB, so the absolute-level mask is off by ~42 dB
-    // everywhere in-band — a PORT-FIDELITY gap, not a mesh/LU-scaling one (the
-    // LU fits the 14 g box with room to spare). This is the honest verdict; the
-    // strict-mask numbers are printed above for the record.
+    // ADR-0154 N3 re-grades the filter with the NUMERICAL-eigenmode port that,
+    // on a straight line, lifted |S21| 0.089→0.778 and matched the port (N2,
+    // independently verified). The research-open question this gate answers
+    // honestly: with two high-fidelity ports, does the FILTER clear the strict
+    // Cheb mask, or does resonator coupling / gap mesh cap it short?
     //
-    // What the coarse-mesh / analytic-port solve DOES capture, and what this
-    // gate therefore asserts:
+    // MEASURED ANSWER: LIFT-BUT-SHORT (see the MEASURED block in the docstring).
+    // The in-band peak rose to −27.38 dB (a +15.0 dB lift over the v1 −42.4 dB
+    // analytic floor) and the asymmetry margin grew (+2.10 dB vs the v1 +1.47),
+    // but the curve still sits ~27 dB below the 0 dB Cheb passband (worst
+    // in-band err ≈ 34.9 dB) — so the STRICT MASK still MISSES. The honest
+    // verdict (port fidelity vs the multi-resonator path) is in the docstring.
+    //
+    // The gate therefore asserts the three things that ARE true regardless of
+    // the mask, plus the strict mask ONLY IF it actually clears (it does not):
 
-    // (1) Non-degenerate transmission: a real propagating wave reaches port 2
-    //     (the peak is well above the solve's ~−65 dB noise floor). A collapsed
-    //     port (the lumped-centroid failure mode) or a broken mesh would sit in
-    //     the noise.
+    // (1) Non-degenerate transmission AND a real lift over the v1 floor. A
+    //     collapsed port (lumped-centroid failure) or a broken mesh would sit
+    //     in noise; a promotion regression in `microstrip_port_numerical[_at]`
+    //     (wrong frame map / cross-section density / x-recentre) would re-floor
+    //     the peak back toward the v1 −42.4 dB. The measured peak is −27.38 dB,
+    //     a +15.0 dB lift; the 9 dB tripwire (≈6 dB below the measurement, ≈9 dB
+    //     above the v1 floor) catches a re-flooring with margin without
+    //     asserting a depth the 2-port filter path does not deliver.
     assert!(
-        passband_peak_db.is_finite() && passband_peak_db > -55.0,
-        "B7 NO-GO: in-band peak {passband_peak_db:.2} dB is in the noise floor — no transmitted \
-         wave reached port 2 (port collapsed or mesh broken). Full curve printed above."
+        passband_peak_db.is_finite(),
+        "N3 NO-GO: in-band peak is not finite ({passband_peak_db}) — the driven solve \
+         degenerated (port collapsed or mesh broken). Full curve printed above."
+    );
+    assert!(
+        lift_over_v1_db >= N3_MIN_LIFT_OVER_V1_DB,
+        "N3 re-flooring tripwire: in-band peak {passband_peak_db:.2} dB lifted only \
+         {lift_over_v1_db:+.2} dB over the v1 analytic floor {V1_FLOOR_PEAK_DB:.2} dB \
+         (need ≥ {N3_MIN_LIFT_OVER_V1_DB:.1} dB). A small lift means the numerical port \
+         regressed toward the modal-overlap floor — most likely the frame map, the \
+         cross-section density, or the x-recentre in `microstrip_port_numerical_at`. \
+         Report the number; do NOT lower the threshold. Full curve printed above."
     );
 
     // (2) The geometric-asymmetry discriminator — the brick's NAMED check — must
     //     PASS: the lower stopband notch (1.6 GHz) is genuinely deeper than the
     //     upper (2.4 GHz). This is the band-pass-mapping signature the reference
     //     has and a symmetric/inverted (fitted-artifact) curve does NOT; it is
-    //     the anti-"flat/symmetric curve is not evidence" guard. The FEM curve
-    //     reproduces the CORRECT asymmetry SIGN with margin ≥ 1 dB — a real,
-    //     geometry-aware result, even though the absolute Chebyshev depth is
-    //     unreachable through the lossy port. (If a future higher-fidelity port
-    //     lifts the curve onto the strict mask, `strict_pass` flips and the
-    //     run additionally clears the absolute-level mask; we do not assert that
-    //     here because it does not yet hold — no weakening to force green.)
+    //     the anti-"flat/symmetric curve is not evidence" guard. The numerical-
+    //     port FEM curve reproduces the CORRECT asymmetry SIGN with margin
+    //     +2.10 dB (≥ 1 dB) — a real, geometry-aware result.
     assert!(
         asym_pass,
-        "B7: geometric-asymmetry discriminator FAILED — depth(1.6 GHz)={depth_lo:.2} dB is NOT \
+        "N3: geometric-asymmetry discriminator FAILED — depth(1.6 GHz)={depth_lo:.2} dB is NOT \
          deeper than depth(2.4 GHz)={depth_hi:.2} dB by the required {ASYMMETRY_MARGIN_DB} dB \
          (margin {asym_margin:+.2} dB). A symmetric/inverted curve has lost the band-pass-mapping \
          asymmetry and is not credited as a geometry-aware EM result. Full curve printed above."
@@ -784,17 +859,44 @@ fn fem_filter_s21_vs_ladder() {
 
     // (3) A genuine band-pass turnover: the in-band peak stands above the deeper
     //     band edge (the response bumps up near band centre rather than ramping
-    //     monotonically). A modest >0.2 dB bar — the coarse-mesh / lossy-port
-    //     bump is shallow (~1–3 dB), so this certifies the SHAPE is frequency-
-    //     selective without demanding a depth the port cannot deliver.
+    //     monotonically). Measured turnover ≈ +3.5 dB; the >0.2 dB bar certifies
+    //     the SHAPE is frequency-selective without demanding a depth the
+    //     2-port + 3-resonator path does not deliver.
     assert!(
         turnover_db > 0.2,
-        "B7: no band-pass turnover — in-band peak {passband_peak_db:.2} dB is not above the \
+        "N3: no band-pass turnover — in-band peak {passband_peak_db:.2} dB is not above the \
          deeper band edge (edges {edge_lo_db:.2}/{edge_hi_db:.2} dB; turnover {turnover_db:+.2} dB). \
          The response is monotonic, not a recognisable band-pass. Full curve printed above."
     );
 
-    let _ = strict_pass; // reported above; not asserted (port-floor gap is honest)
+    // (4) Strict Cheb mask — assert it ONLY IF the measurement actually clears
+    //     it (a real win). It does NOT clear with this port (lift-but-short:
+    //     worst in-band err ≈ 34.9 dB ≫ the 2 dB oracle tol), so this branch
+    //     records the honest MISS margin and does NOT assert the mask — no
+    //     weakening to force green. If a future higher-fidelity port (numerical
+    //     cross-section aperture coupling) lifts the curve into the mask,
+    //     `strict_pass` flips and this asserts the real pass automatically.
+    if strict_pass {
+        // A genuine in-mask pass: assert it loudly (the FEM driven-sweep track
+        // would have delivered its original goal — a validated in-mask filter).
+        assert!(
+            worst_pass_db <= PASSBAND_TOL_DB && worst_rej_db <= REJECTION_TOL_DB,
+            "internal: strict_pass set but tolerances not met (pass {worst_pass_db:.2}, \
+             rej {worst_rej_db:.2})"
+        );
+    } else {
+        // Honest lift-but-short: the mask is MISSED. We assert the measured
+        // lift (done in (1)) and the asymmetry (done in (2)); we deliberately
+        // do NOT assert the absolute-level mask. Record the margin for the log.
+        eprintln!(
+            "[N3] STRICT MASK: MISS by {worst_pass_db:.2} dB in-band (lift-but-short — \
+             the numerical port lifted the peak {lift_over_v1_db:+.2} dB over the v1 floor \
+             but the 2-port + 3-resonator path stops ~{:.0} dB below the 0 dB Cheb passband). \
+             This is the honest documented result; the remaining gap is a higher-fidelity \
+             port follow-on (numerical cross-section aperture coupling), NOT a mesh/LU limit.",
+            worst_pass_db,
+        );
+    }
 }
 
 /// Linear interpolation of the `(f_ghz, dB)` curve at `f_ghz` (clamped to the

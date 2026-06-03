@@ -230,6 +230,62 @@ pub fn microstrip_port_numerical(
     geom: &MicrostripPortGeom,
     f_hz: f64,
 ) -> Result<PortDefinition, Error> {
+    // The cross-section places the trace at `box_w / 2`; a centred feed
+    // (`x_center == box_w / 2`) needs no x-shift. Delegate to the
+    // recentered variant with the trace's own centre so the sampling map
+    // is the identity in `x` — keeping this constructor exactly as before.
+    microstrip_port_numerical_at(geom, geom.box_w / 2.0, f_hz)
+}
+
+/// Construct a **numerical-eigenmode** quasi-TEM microstrip wave-port whose
+/// transverse modal shape is **recentred** on an arbitrary feed `x`-centre
+/// `x_center` (metres).
+///
+/// Identical to [`microstrip_port_numerical`] in every respect — same
+/// `(box_w × box_h)` FR-4 cross-section, same once-only `with_quasi_tem`
+/// eigensolve (Arc-shared across the closures), same analytic-HJ β — except
+/// the sampled cross-section coordinate is shifted by
+/// `box_w / 2 − x_center` in `x` before the eigenmode lookup:
+///
+/// ```text
+///   modal_e_t(p) = mode.e_tangential_at(p.x − x_center + box_w/2, p.z)
+/// ```
+///
+/// so the eigenmode (solved with its trace at the cross-section centre
+/// `box_w / 2`) lands its peak under a feed whose actual trace centre is
+/// `x_center`. With `x_center == box_w / 2` the shift is zero and this is
+/// bit-identical to [`microstrip_port_numerical`].
+///
+/// # Why a recentred variant exists (the filter feeds are off-centre)
+///
+/// On a straight line the trace is box-centred, so the unshifted
+/// [`microstrip_port_numerical`] aligns. A multi-resonator filter staggers
+/// its feeds across `x`: the input feed sits near one box edge, the output
+/// feed near the other, and neither is at `box_w / 2`. Sampling the
+/// box-centred eigenmode without a shift would place the high-fidelity
+/// modal peak over air/PEC away from the actual feed strip, re-introducing
+/// exactly the modal-overlap loss the numerical port removes (the analytic
+/// v1 windowed port recentred per-feed for the same reason — recentring
+/// lifted |S21| ~13 dB out of the noise floor; see
+/// `microstrip_filter_s21.rs`). This variant restores the spatial alignment
+/// for off-centre feeds.
+///
+/// # Arguments
+///
+/// - `geom` — the shared straight-microstrip cross-section geometry.
+/// - `x_center` — the feed trace centre `x` (metres) the modal peak is
+///   shifted onto; pass `geom.box_w / 2.0` for a centred feed.
+/// - `f_hz` — eigensolve frequency.
+///
+/// # Errors
+///
+/// Same as [`microstrip_port_numerical`]: a degenerate cross-section mesh
+/// or a failed quasi-TEM eigensolve surfaces as [`yee_core::Error`].
+pub fn microstrip_port_numerical_at(
+    geom: &MicrostripPortGeom,
+    x_center: f64,
+    f_hz: f64,
+) -> Result<PortDefinition, Error> {
     // One-cell-thick signal strip (matches the probe's
     // `t_strip = box_h / ny`), so the strip hole is a clean one-cell band.
     let t_strip = geom.box_h / (XSEC_NY as f64);
@@ -262,13 +318,16 @@ pub fn microstrip_port_numerical(
     let mode = Arc::new(mode);
 
     let (trace_w, sub_h, eps_r) = (geom.trace_w, geom.sub_h, geom.eps_r);
+    // Cross-section trace sits at box_w/2; shift the sample so the mode's
+    // peak aligns with the feed's actual x-centre. dx = box_w/2 − x_center.
+    let x_shift = geom.box_w / 2.0 - x_center;
     let beta = move |omega: f64| beta_microstrip(trace_w, sub_h, eps_r, omega);
     let e_t = move |p: Vector3<f64>| {
         // yee-mom coord0 = x_width, coord1 = substrate-normal. Sample at
-        // (x = p.x, substrate-normal = p.z); returns [E_x, E_normal]. Map
-        // the substrate-normal component onto FEM ẑ; the propagation-axis
-        // (ŷ) component is 0 for a transverse modal shape.
-        let et = mode.e_tangential_at(p.x, p.z);
+        // (x = p.x + x_shift, substrate-normal = p.z); returns
+        // [E_x, E_normal]. Map the substrate-normal component onto FEM ẑ;
+        // the propagation-axis (ŷ) component is 0 for a transverse shape.
+        let et = mode.e_tangential_at(p.x + x_shift, p.z);
         Vector3::new(et[0], 0.0, et[1])
     };
 

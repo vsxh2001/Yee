@@ -75,7 +75,9 @@ pub use microstrip_port::{
     beta_microstrip, microstrip_port, microstrip_port_windowed, modal_e_t_microstrip,
     modal_e_t_microstrip_windowed,
 };
-pub use microstrip_port_numerical::{MicrostripPortGeom, microstrip_port_numerical};
+pub use microstrip_port_numerical::{
+    MicrostripPortGeom, microstrip_port_numerical, microstrip_port_numerical_at,
+};
 pub use open_boundary::{
     AbcOrder, DrivenSystem, FaceKind, OpenBoundarySolver, PmlConfig, PmlMeshMeta, PmlRegion,
     PortDefinition, PortId, PortMode, SParameters, SParametersMatrix,
