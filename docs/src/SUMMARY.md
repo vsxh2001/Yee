@@ -197,3 +197,4 @@
 - [ADR-0151: App.2.9 — studio responsive + accessibility + P1 polish](decisions/0151-app-2-9-studio-responsive-a11y.md)
 - [ADR-0152: App.3.0 — studio "Instrument" distinctiveness redesign](decisions/0152-app-3-0-studio-instrument-redesign.md)
 - [ADR-0153: FEM driven-sweep microstrip-S21 EM-verification track (7-brick decomposition)](decisions/0153-fem-em-microstrip-s21-track.md)
+- [ADR-0154: FEM numerical-eigenmode microstrip port (the B4 fork — higher-fidelity port)](decisions/0154-fem-numerical-eigenmode-microstrip-port.md)
