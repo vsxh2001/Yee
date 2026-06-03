@@ -396,10 +396,19 @@ fn db(mag: f64) -> f64 {
 ///
 /// Each feed is a straight `feed_len` 50 Ω microstrip whose quasi-TEM phase
 /// constant is `β = (ω/c)·√ε_eff(w)`. The two feeds add a total electrical
-/// length `2·β·feed_len` of phase to S21 (and the reference planes are moved
-/// to the filter ports by removing it). The feed is closely matched (~50 Ω),
-/// so its magnitude effect is small; we de-embed phase only (the standard
-/// reference-plane shift), which is what the asymmetry / shape grading needs.
+/// length `2·β·feed_len` of phase to S21. The feed is closely matched (~50 Ω),
+/// so its magnitude effect is small; we de-embed phase only (a unit-magnitude
+/// rotation), which is what the asymmetry / shape grading — all |S21|-MAGNITUDE
+/// checks — needs.
+///
+/// CAVEAT (n=3): the last resonator is even-indexed and ends at `feed_len +
+/// res_l`, so the OUTPUT feed is actually `feed_len + stagger` long; removing
+/// `2·β·feed_len` therefore leaves ~`β·stagger` of output-feed phase
+/// uncompensated. This does NOT affect any gate assertion (all magnitude;
+/// de-embed is a unit-magnitude rotation that cannot change |S21|), but the
+/// de-embedded S21 *phase* is not exactly at the output resonator reference
+/// plane — pass the actual per-port feed lengths before any phase / group-delay
+/// analysis.
 fn deembed_feed(
     s21_raw: num_complex::Complex64,
     omega: f64,
