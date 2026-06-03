@@ -303,3 +303,178 @@ pub fn layered_microstrip_mesh(
 
     Ok((mesh, material_db, ground_pred, trace_pred))
 }
+
+/// An axis-aligned trace rectangle on the `z = sub_h` conductor plane, in
+/// mesh world coordinates (FEM-EM brick 7, ADR-0153).
+///
+/// `x ∈ [x0, x0 + w]`, `y ∈ [y0, y0 + l]`. Used by
+/// [`layered_microstrip_filter_mesh`] to describe an arbitrary multi-strip
+/// trace footprint (coupled resonators + feed lines) rather than the single
+/// centred strip of [`layered_microstrip_mesh`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TraceRect {
+    /// Lower-`x` edge of the rectangle, metres.
+    pub x0: f64,
+    /// Lower-`y` edge of the rectangle, metres.
+    pub y0: f64,
+    /// Width along `x`, metres.
+    pub w: f64,
+    /// Length along `y`, metres.
+    pub l: f64,
+}
+
+impl TraceRect {
+    /// Construct a [`TraceRect`] from its lower corner and extents.
+    pub fn new(x0: f64, y0: f64, w: f64, l: f64) -> Self {
+        Self { x0, y0, w, l }
+    }
+}
+
+/// Build a layered microstrip tetrahedral volume mesh whose conductor
+/// footprint is an **arbitrary union of axis-aligned trace rectangles** on the
+/// `z = sub_h` plane, plus the per-tet material database and the ground/trace
+/// interior-PEC edge predicates (FEM-EM brick 7, ADR-0153).
+///
+/// This is the multi-strip generalisation of [`layered_microstrip_mesh`]: the
+/// box, z-stack, FR-4 centroid repaint and `ground_pred` are identical, but the
+/// returned `trace_pred` selects every edge whose **both** endpoints lie on the
+/// `z = sub_h` plane *and* inside (the closure of) **any** rectangle in
+/// `traces`. That lets a caller tag a coupled-resonator filter pattern — three
+/// staggered λ/2 strips plus two feed lines — as a single interior-PEC trace
+/// network. The trace runs along `y` (propagation) and is offset/staggered in
+/// `x`/`y` by the rectangle list.
+///
+/// The box spans `[0, box_w] × [0, box_len] × [0, box_h]` in `(x, y, z)`; axes
+/// match [`layered_microstrip_mesh`] (`z` substrate-normal, `y` propagation,
+/// `x` cross-section width). Per-tet ε_r is repainted by centroid exactly as in
+/// [`layered_microstrip_mesh`] (FR-4 below `z = sub_h`, air above).
+///
+/// # Arguments
+///
+/// * `box_w`, `box_len`, `box_h` — box extents along `x`, `y`, `z` (m).
+/// * `sub_h` — substrate thickness (m); must place `z = sub_h` on a mesh plane.
+/// * `traces` — the trace rectangles on the `z = sub_h` plane (m).
+/// * `nx`, `ny`, `nz` — Kuhn-brick subdivisions.
+///
+/// # Returns
+///
+/// `(mesh, material_db, ground_pred, trace_pred)` — same shape as
+/// [`layered_microstrip_mesh`]; `trace_pred` selects edges inside any
+/// rectangle in `traces` on the `z = sub_h` plane.
+///
+/// # Errors
+///
+/// Returns [`Error::Invalid`] on the same extent / subdivision / interface-on-
+/// mesh-plane conditions as [`layered_microstrip_mesh`], and additionally if
+/// `traces` is empty.
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
+pub fn layered_microstrip_filter_mesh(
+    box_w: f64,
+    box_len: f64,
+    box_h: f64,
+    sub_h: f64,
+    traces: Vec<TraceRect>,
+    nx: usize,
+    ny: usize,
+    nz: usize,
+) -> Result<
+    (
+        TetMesh3D,
+        MaterialDatabase,
+        impl Fn(Vector3<f64>, Vector3<f64>) -> bool,
+        impl Fn(Vector3<f64>, Vector3<f64>) -> bool,
+    ),
+    Error,
+> {
+    for (name, v) in [
+        ("box_w", box_w),
+        ("box_h", box_h),
+        ("box_len", box_len),
+        ("sub_h", sub_h),
+    ] {
+        if !(v.is_finite() && v > 0.0) {
+            return Err(Error::Invalid(format!(
+                "layered_microstrip_filter_mesh: {name} must be a positive finite extent, got {v}"
+            )));
+        }
+    }
+    if nx == 0 || ny == 0 || nz == 0 {
+        return Err(Error::Invalid(format!(
+            "layered_microstrip_filter_mesh: nx, ny, nz must all be >= 1, got ({nx}, {ny}, {nz})"
+        )));
+    }
+    if sub_h >= box_h {
+        return Err(Error::Invalid(format!(
+            "layered_microstrip_filter_mesh: sub_h ({sub_h}) must be strictly less than box_h \
+             ({box_h})"
+        )));
+    }
+    if traces.is_empty() {
+        return Err(Error::Invalid(
+            "layered_microstrip_filter_mesh: traces must be non-empty".to_string(),
+        ));
+    }
+
+    let dz = box_h / nz as f64;
+    let n_sub_f = sub_h / dz;
+    let n_sub = n_sub_f.round();
+    if (n_sub_f - n_sub).abs() > 1e-9 * (1.0 + n_sub.abs()) {
+        return Err(Error::Invalid(format!(
+            "layered_microstrip_filter_mesh: substrate/air interface z = sub_h ({sub_h}) does not \
+             land on a mesh plane — sub_h / dz = {n_sub_f} (dz = {dz}). Choose nz so \
+             sub_h * nz / box_h is an integer."
+        )));
+    }
+
+    let mut mesh = TetMesh3D::cavity_uniform(box_w, box_len, box_h, nx, ny, nz)
+        .map_err(|e| Error::Invalid(e.to_string()))?;
+
+    for (tet_idx, tet) in mesh.tetrahedra.iter().enumerate() {
+        let centroid_z = 0.25
+            * (mesh.vertices[tet[0]].z
+                + mesh.vertices[tet[1]].z
+                + mesh.vertices[tet[2]].z
+                + mesh.vertices[tet[3]].z);
+        mesh.tetrahedron_material[tet_idx] = if centroid_z < sub_h { FR4_TAG } else { AIR_TAG };
+    }
+
+    let material_db = MaterialDatabase::new()
+        .with_material(
+            FR4_TAG,
+            Material {
+                eps_inf: FR4_EPS_R,
+                mu_r: 1.0,
+                poles: vec![],
+            },
+        )
+        .with_material(AIR_TAG, Material::default());
+
+    let z_tol = 1e-6 * box_h;
+    // In-plane tolerance: a fraction of the smaller in-plane cell so an
+    // endpoint exactly on a rectangle edge that coincides with a lattice line
+    // passes, but the next lattice line over does not.
+    let dx = box_w / nx as f64;
+    let dy = box_len / ny as f64;
+    let xy_tol = 1e-6 * dx.min(dy);
+
+    let ground_pred =
+        move |a: Vector3<f64>, b: Vector3<f64>| -> bool { a.z.abs() < z_tol && b.z.abs() < z_tol };
+
+    // Point-in-any-rectangle (closed) test on the (x, y) plane.
+    let in_any = move |p: &Vector3<f64>, rects: &[TraceRect]| -> bool {
+        rects.iter().any(|r| {
+            p.x >= r.x0 - xy_tol
+                && p.x <= r.x0 + r.w + xy_tol
+                && p.y >= r.y0 - xy_tol
+                && p.y <= r.y0 + r.l + xy_tol
+        })
+    };
+
+    let trace_pred = move |a: Vector3<f64>, b: Vector3<f64>| -> bool {
+        let on_top = (a.z - sub_h).abs() < z_tol && (b.z - sub_h).abs() < z_tol;
+        on_top && in_any(&a, &traces) && in_any(&b, &traces)
+    };
+
+    Ok((mesh, material_db, ground_pred, trace_pred))
+}

@@ -45,3 +45,13 @@ tracing         = { workspace = true }
 # Phase 4.fem.eig.3.5.6 — element-layer unit tests for
 # `assemble_port_face_block_projected*` use `assert_relative_eq!`.
 approx = "0.5"
+# FEM-EM brick 7 (ADR-0153): the 3-pole microstrip-filter S21 driven-sweep
+# gate (`tests/microstrip_filter_s21.rs`) uses `yee-filter` for (a) the
+# edge-coupled dimensional synthesis (`dimension_edge_coupled` — resonator
+# length / coupling gaps / line width for the 2 GHz / 10% FBW / 0.5 dB Cheb
+# spec) and (b) the oracle `ladder_s21` reference + grading logic the test
+# grades the extracted FEM S21 against. dev-only (test-side); `yee-filter`
+# depends on `yee-synth`/`yee-layout` (pure, serde-only) with no edge back to
+# `yee-fem`, so this introduces no dependency cycle.
+yee-filter = { workspace = true }
+yee-synth  = { workspace = true }
