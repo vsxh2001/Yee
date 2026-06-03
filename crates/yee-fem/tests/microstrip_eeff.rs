@@ -299,6 +299,15 @@ fn extract_eps_eff(variant: ModalVariant) -> (f64, f64, f64) {
     let phase_l2 = s21_l2.arg();
     let dphi = wrap_pi(phase_l2 - phase_l1);
     let beta = -dphi / (L2 - L1);
+    // Latent sign-wrap guard: a forward-propagating guided wave has β > 0.
+    // A non-positive β means the wrapped phase difference straddled the
+    // ±π wrap window (β·ΔL must stay < π for the two-length method to be
+    // unambiguous). Not triggered at 2 GHz / 20 mm (β·ΔL ≈ 1.49 rad), but
+    // protects against a future geometry/frequency change that violates it.
+    assert!(
+        beta > 0.0,
+        "two-length β extraction gave non-positive β — check the wrap-free window (β·ΔL must be < π)"
+    );
     let eps_eff_fem = (beta * C0 / omega).powi(2);
 
     let eps_eff_hj = yee_layout::eps_eff(TRACE_W, SUB_H, EPS_R);
@@ -464,16 +473,21 @@ fn fem_line_eeff_001_experiments() {
 /// Box-loading + cross-section-convergence probe — the recorded evidence
 /// for why the gate box is 6 mm (not a tighter 4 mm). NOT a gate.
 ///
-/// Measured at 2 GHz, v1 + coupled-Whitney, two-length method:
+/// Measured at 2 GHz, v1 + coupled-Whitney, two-length method. Each row
+/// runs its OWN (L1, ny1)/(L2, ny2) pair chosen for matched dy — so the
+/// tight-box refinement rows at finer dx use L1 = 24 mm (ny1 = 12, dy =
+/// 2.0 mm) rather than 20 mm to keep dy matched against L2 = 40 mm
+/// (ny2 = 20); all other rows use L1 = 20 mm / L2 = 40 mm. The β
+/// extraction is per-row self-consistent regardless of the absolute L1.
 ///
 /// ```text
-///   box(mm)  dx(mm)  ε_eff_fem   rel-err vs HJ 3.1715
-///   4×4      0.500     3.0234     4.67%   ← tight box loads the line
-///   4×4      0.333     2.9954     5.55%   ← refining the TIGHT box
-///   4×4      0.250     2.9835     5.93%     converges to ~2.98 (NOT HJ)
-///   6×4      0.500     3.1134     1.83%   ← pull x-walls out
-///   6×6      0.500     3.1523     0.61%   ← walls clear → ON HJ  «GATE»
-///   8×8      0.500     3.2110     1.25%
+///   box(mm)  dx(mm)  L1/L2(mm)   ε_eff_fem   rel-err vs HJ 3.1715
+///   4×4      0.500   20/40         3.0234     4.67%   ← tight box loads the line
+///   4×4      0.333   24/40         2.9954     5.55%   ← refining the TIGHT box
+///   4×4      0.250   20/40         2.9835     5.93%     converges to ~2.98 (NOT HJ)
+///   6×4      0.500   20/40         3.1134     1.83%   ← pull x-walls out
+///   6×6      0.500   20/40         3.1523     0.61%   ← walls clear → ON HJ  «GATE»
+///   8×8      0.500   20/40         3.2110     1.25%
 /// ```
 ///
 /// The tight 4 mm PEC box clips the trace's fringing field and pulls
@@ -590,12 +604,32 @@ fn probe_geom(
 /// wave actually accumulates in the dielectric+trace volume.
 ///
 /// This probe proves it by driving the SAME structure with a **deliberately
-/// wrong** port β — one computed assuming ε_r = 1 (β = ω/c, ~2.1× too
+/// wrong** port β — e.g. one computed assuming ε_r = 1 (β = ω/c, ~2.1× too
 /// small) — while keeping the correct `E_z` shape, and showing the
 /// *measured* ε_eff still lands near the true Hammerstad-Jensen value
 /// (the FEM physics is unchanged; only the absorbing impedance is
 /// mistuned, which costs port match / |S21| amplitude but not the
 /// propagation phase).
+///
+/// ## MEASURED RESULT (boxed --release, base 2f4fcc8)
+///
+/// ```text
+///   port β assumes   MEASURED ε_eff   rel-err   |S21|(L1)  |S21|(L2)
+///   ε_r = 4.4         3.1523           0.61%     0.0888     0.0889   (correct β)
+///   ε_r = 1.0         2.9968           5.51%     0.0763     0.0882   (β 2.1× low)
+///   ε_r = 2.0         3.1024           2.18%     0.0845     0.0886
+///   ε_r = 10          3.0744           3.06%     0.0826     0.0887   (β 1.5× high)
+/// ```
+///
+/// The measured ε_eff stays in **3.0–3.15 (it tracks the FEM volume's own
+/// propagation ≈ HJ) regardless of the port's assumed β (ε_r 1 → 10)** —
+/// i.e. the gate measures physics, not match-by-construction. Crucially
+/// **|S21| stays ~0.08 in every row (it does NOT collapse to noise)**, so
+/// the transmitted wave — and therefore its phase — is meaningful even when
+/// the port impedance is badly mistuned. (The correct-β row is the closest
+/// to HJ because a well-matched absorbing port gives the cleanest reference
+/// planes; a mistuned β degrades the de-embed slightly but never flips the
+/// conclusion.)
 #[test]
 #[ignore = "forensic probe; run explicitly — does real LU solves"]
 fn fem_line_eeff_001_noncircular() {
@@ -768,11 +802,14 @@ fn fem_line_eeff_001() {
         },
     );
 
-    // Secondary: the matched thru should present a low |S11| (clean port).
-    // Loose bound on the coarse mesh — a systemic port mismatch would push
-    // |S11| toward 1; we only flag a grossly reflective port here.
+    // Secondary: the matched thru should present a moderate |S11| (the
+    // analytic E_z mode only partially overlaps the true eigenmode, so the
+    // amplitude match is imperfect — measured ≈ 0.573 — but a systemic port
+    // mismatch / regression would push |S11| toward 1). The 0.8 bound sits
+    // comfortably above the measured 0.573 yet tight enough to catch a
+    // port-match regression that the loose 0.9 would have missed.
     assert!(
-        s11_best < 0.9,
+        s11_best < 0.8,
         "matched-thru |S11|(L2) = {s11_best:.4} ({s11_db:.1} dB) is implausibly high \
          for a clean wave-port; the port is grossly mismatched"
     );

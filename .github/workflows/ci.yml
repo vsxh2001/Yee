@@ -455,6 +455,17 @@ jobs:
       - name: fem-eig-003 WR-90 stub CFS-PML sweep (release, all ignored, serial)
         run: cargo test -p yee-validation --release --test fem_eig_003_wr90_stub_abc -- --include-ignored --test-threads=1 --nocapture
 
+      # FEM-EM brick B4 (ADR-0153): straight-microstrip ε_eff driven-sweep
+      # gate. Two driven sparse-LU solves on a ≲14k-tet FR-4 line; recovers
+      # ε_eff to 0.61 % of Hammerstad-Jensen via the wrap-free two-length
+      # phase method. `#[ignore]`'d (CLAUDE.md §10) so the default debug
+      # `cargo test --workspace` never runs it; run here in `--release`. The
+      # NAME FILTER is deliberate — only the gate runs in CI; the three
+      # forensic probes (`_experiments`, `_convergence`, `_noncircular`) are
+      # explicit-only and would add minutes for no CI signal.
+      - name: mom microstrip eps_eff (fem-line-eeff-001, release, ignored)
+        run: cargo test -p yee-fem --release --test microstrip_eeff -- --ignored fem_line_eeff_001 --nocapture
+
   fdtd-heavy-validation-gate:
     name: FDTD heavy validation gates (release)
     runs-on: ubuntu-latest
