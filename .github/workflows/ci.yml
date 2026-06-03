@@ -466,6 +466,18 @@ jobs:
       - name: mom microstrip eps_eff (fem-line-eeff-001, release, ignored)
         run: cargo test -p yee-fem --release --test microstrip_eeff -- --ignored fem_line_eeff_001 --nocapture
 
+      # FEM-EM brick K1 (ADR-0155): coupled-microstrip resonator-pair coupling
+      # `k` gate. One driven sparse-LU sweep (~61 pts) on a ~63k-tet FR-4
+      # coupled pair; asserts two resolvable transmission peaks (valley ≥ 6 dB
+      # below the shallower peak — a re-smearing tripwire) AND |k_fem − k_imp| /
+      # k_imp ≤ 0.30 vs the Kirschning-Jansen `coupling_coefficient`.
+      # `#[ignore]`'d (CLAUDE.md §10) so the default debug `cargo test
+      # --workspace` never runs it; run here in `--release`. Multi-minute (the
+      # de-risk probe measured ~280 s); fits the GitHub runner (the long-thin
+      # box keeps the per-ω faer sparse-LU bandwidth low).
+      - name: fem coupled-resonator k (fem-coupling-001, release, ignored)
+        run: cargo test -p yee-fem --release --test fem_coupling_001 -- --ignored --nocapture
+
   fdtd-heavy-validation-gate:
     name: FDTD heavy validation gates (release)
     runs-on: ubuntu-latest
