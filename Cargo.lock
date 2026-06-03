@@ -7479,8 +7479,10 @@ dependencies = [
  "thiserror 1.0.69",
  "tracing",
  "yee-core",
+ "yee-filter",
  "yee-layout",
  "yee-mesh",
+ "yee-synth",
 ]
 
 [[package]]

@@ -67,7 +67,9 @@ pub use element::{
     assemble_tet_element_complex, assemble_tet_element_complex_anisotropic,
 };
 pub use material::{Material, MaterialDatabase, MaterialPole};
-pub use microstrip_mesh::{AIR_TAG, FR4_EPS_R, FR4_TAG, layered_microstrip_mesh};
+pub use microstrip_mesh::{
+    AIR_TAG, FR4_EPS_R, FR4_TAG, TraceRect, layered_microstrip_filter_mesh, layered_microstrip_mesh,
+};
 pub use microstrip_port::{
     beta_microstrip, microstrip_port, microstrip_port_windowed, modal_e_t_microstrip,
     modal_e_t_microstrip_windowed,
