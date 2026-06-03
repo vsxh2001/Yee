@@ -104,6 +104,55 @@ validate the *physics* on a directly-built geometry first.
 
 ---
 
+## Update (2026-06-03) — K2 finding: grade vs the ε_eff-split, not the impedance-k
+
+**K2 (k-vs-gap monotonicity, `fem-coupling-002`) confirmed the FEM coupling-`k`
+is physically sound.** Across S = 1.5 / 2.0 / 3.0 mm (W = 1 mm, h = 1 mm,
+ε_r = 4.4, f0 = 2.4 GHz; only the gap moves) `k_fem` is **strictly
+monotone-decreasing — 0.0611 > 0.0481 > 0.0321** — tracking the analytic
+fall-off, and **two transmission peaks resolve at every gap** (valley 14–21 dB
+below the shallower peak, all far past the 6 dB re-smearing tripwire). The
+extraction is reliable over the whole gap range, which is exactly what K2 was
+built to stress (a curve is far harder to fluke than the K1 single point).
+
+**But K2 exposed that the two analytic "coupling coefficients" diverge at strong
+coupling.** The impedance-`k` `coupling_coefficient` (`k_imp = (Z0e−Z0o)/(Z0e+Z0o)`)
+and the ε_eff-split (`k_eps = (f_e²−f_o²)/(f_e²+f_o²)`) are *not* the same number
+as the gap closes: at S = 1.5 mm `k_imp/k_eps = 1.375`, **outside the `[1.0,1.3]`
+"comparable" band the src already encodes** (`analytic_k_references_finite_positive_and_agree`).
+The FEM measures a **resonant split**, so grading it against `k_imp` is
+apples-to-oranges at tight gaps:
+
+| S (mm) | k_fem | vs k_eps (like-for-like) | vs k_imp (impedance) |
+|--------|-------|--------------------------|----------------------|
+| 1.5 | 0.0611 | **10.5 %** | 34.9 % (> 30 % gate) |
+| 2.0 | 0.0481 | 17.2 % | 25.6 % |
+| 3.0 | 0.0321 | 21.7 % | 7.4 % |
+
+The S = 1.5 mm row is the **best** fit vs the like-for-like `k_eps` (10.5 %) yet
+*fails* a 30 % gate measured against `k_imp` (34.9 %) — not because `k` is floored
+or smeared (its valley is the deepest of the three, −63.7 dB) but purely because
+`k_imp` has drifted away from the resonant split it is being compared to.
+
+**Resolution (maintainer-endorsed).** Both `fem-coupling-001` (K1) and
+`fem-coupling-002` (K2) now grade `k_fem` against the **like-for-like ε_eff-split
+`k_eps`** (≤ 30 %, the **same** tolerance — a *reference correction*, not a
+weakening), reporting `k_imp` for traceability with the strong-coupling
+divergence noted inline. `k_eps` is also a Kirschning-Jansen closed-form (the
+even/odd ε_eff of `coupled_microstrip`), so the gate stays non-circular (KJ
+closed-form vs full-wave FEM). Both gates are green: K1 17.2 % vs `k_eps`; K2
+10.5 / 17.2 / 21.7 % across the three gaps.
+
+**Design-loop implication (for F1.2.1).** The synthesis side
+(`dimension_edge_coupled`) targets the *impedance*-`k`, but the EM realizes the
+*resonant-split* `k` — and the two diverge at strong coupling. The F1.2.1 EM-in-
+the-loop (BO) refinement should therefore target the **resonant-`k`** (or
+explicitly account for the `k_imp`↔`k_eps` divergence at tight gaps) rather than
+assume the impedance-`k` is what the simulator returns. This is the canonical
+reference choice now — **do not reopen it**.
+
+---
+
 ## References
 - De-risk probe: `spike/fem-coupled-k-probe` (`933940f`),
   `crates/yee-fem/tests/coupled_k_probe.rs` (the K1 seed).
