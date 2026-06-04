@@ -163,34 +163,41 @@ pub fn run_synth(
     };
     println!("  substrate: eps_r = {eps_r:.4}   h = {h_mm:.4} mm");
 
-    let dims = match dimension_edge_coupled(&proj, &substrate) {
-        Ok(dims) => dims,
-        Err(e) => {
-            // Surface the unrealizable-coupling (or topology/order) error and
-            // exit non-zero — never silently skip the dimensions.
-            eprintln!("  ERROR: cannot dimension edge-coupled filter: {e}");
-            println!("VERDICT: FAIL (dimensioning)");
-            return Ok(ExitCode::FAILURE);
-        }
-    };
+    // Planar edge-coupled dimensioning + printout — ONLY when not `--lumped`.
+    // The lumped-LC board (ADR-0158) does not depend on edge-coupled
+    // realizability on this substrate, so under `--lumped` we must neither fail
+    // here (a spec that is lumped-realizable but distributed-unrealizable would
+    // otherwise spuriously exit 1) nor print the irrelevant planar dimensions.
+    if !lumped {
+        let dims = match dimension_edge_coupled(&proj, &substrate) {
+            Ok(dims) => dims,
+            Err(e) => {
+                // Surface the unrealizable-coupling (or topology/order) error and
+                // exit non-zero — never silently skip the dimensions.
+                eprintln!("  ERROR: cannot dimension edge-coupled filter: {e}");
+                println!("VERDICT: FAIL (dimensioning)");
+                return Ok(ExitCode::FAILURE);
+            }
+        };
 
-    println!("  physical dimensions (edge-coupled half-wave microstrip):");
-    println!(
-        "    line width       = {:.6e} m  ({:.4} mm)",
-        dims.line_width_m,
-        dims.line_width_m * 1e3
-    );
-    println!(
-        "    resonator length = {:.6e} m  ({:.4} mm)",
-        dims.resonator_length_m,
-        dims.resonator_length_m * 1e3
-    );
-    for (i, (gap, k)) in dims.gaps_m.iter().zip(dims.target_k.iter()).enumerate() {
+        println!("  physical dimensions (edge-coupled half-wave microstrip):");
         println!(
-            "    gap[{i}] = {:.6e} m  ({:.4} mm)   target_k = {k:.6}",
-            gap,
-            gap * 1e3
+            "    line width       = {:.6e} m  ({:.4} mm)",
+            dims.line_width_m,
+            dims.line_width_m * 1e3
         );
+        println!(
+            "    resonator length = {:.6e} m  ({:.4} mm)",
+            dims.resonator_length_m,
+            dims.resonator_length_m * 1e3
+        );
+        for (i, (gap, k)) in dims.gaps_m.iter().zip(dims.target_k.iter()).enumerate() {
+            println!(
+                "    gap[{i}] = {:.6e} m  ({:.4} mm)   target_k = {k:.6}",
+                gap,
+                gap * 1e3
+            );
+        }
     }
 
     // ---- optional layout exports (SVG / Gerber / KiCad) ------------------
@@ -204,9 +211,10 @@ pub fn run_synth(
             let ladder = synthesize_lumped(&proj)
                 .map_err(|e| anyhow::anyhow!("failed to synthesize lumped LC ladder: {e}"))?;
             let board = lumped_board(&ladder, &substrate, footprint);
+            let n_placements = board.placements.len();
             println!(
                 "  lumped board: {} components ({} resonators), footprint {:?}",
-                board.placements.len(),
+                n_placements,
                 ladder.resonators.len(),
                 footprint
             );

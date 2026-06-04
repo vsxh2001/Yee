@@ -89,11 +89,17 @@ fn cli_lumped_gerber() {
     const RESONATORS: usize = 5; // order-5 Chebyshev fixture
     const N_COMPONENTS: usize = 2 * RESONATORS; // an L + a C per resonator
     let n_regions = lumped.matches("G36*").count();
-    assert!(
-        n_regions >= 2 * N_COMPONENTS,
-        "lumped Gerber has {n_regions} filled regions; expected ≥ {} \
-         (2 pads × {N_COMPONENTS} components) plus signal line + ground rail",
-        2 * N_COMPONENTS
+    // Exact expected count for the deterministic N=5 board: 2·N_COMPONENTS = 20
+    // component pads + 1 ground rail + 3 signal-line segments = 24. An equality
+    // (vs a ≥ lower bound) also catches a pad/segment-LOSS regression;
+    // `lumped_board` is deterministic, so a legitimate board-generation change
+    // updates this expected value with intent.
+    const EXPECTED_G36: usize = 2 * N_COMPONENTS + 4; // 20 pads + ground rail + 3 line segments
+    assert_eq!(
+        n_regions, EXPECTED_G36,
+        "lumped Gerber has {n_regions} filled (G36*) regions; expected {EXPECTED_G36} \
+         (2 pads × {N_COMPONENTS} components + ground rail + 3 line segments). A mismatch means \
+         the lumped board geometry changed — update EXPECTED_G36 with intent if deliberate."
     );
 
     // The `--lumped` branch must actually be taken: the lumped board Gerber must
