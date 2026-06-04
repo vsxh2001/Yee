@@ -15,7 +15,7 @@ use std::process::ExitCode;
 
 use yee_filter::{
     FilterSpec, Footprint, check_mask, dimension_edge_coupled, dimension_edge_coupled_layout,
-    ideal_response, lumped_board, synthesize, synthesize_lumped,
+    ideal_response, ladder_s21_lossy, lumped_board, synthesize, synthesize_lumped,
 };
 use yee_io::touchstone::{File, Format, FreqUnit};
 use yee_layout::Substrate;
@@ -45,6 +45,18 @@ const SPAN_MULT: f64 = 6.0;
 /// (`synthesize_lumped` → `lumped_board`) on the SAME `--eps-r`/`--h-mm`
 /// substrate, using the supplied SMD `footprint`. The synthesis printout and the
 /// Touchstone `.s2p` are unaffected by `--lumped`.
+///
+/// `q_unloaded` (F2-Q, ADR-0161) selects the **response** written to the `.s2p`
+/// (and the optional `--plot`): `None` (default) keeps the lossless closed-form
+/// `ideal_response` — byte-identical to before; `Some(q)` with finite `q > 0`
+/// sweeps the realistic **finite-Q lumped-LC** response (`synthesize_lumped` →
+/// `ladder_s21_lossy(&ladder, f, q)`), so the exported Touchstone carries the
+/// midband insertion loss / rounded corners a built filter actually measures.
+/// It is independent of `--lumped` (the lumped ladder is always synthesizable
+/// for a band-pass spec) and does not affect the mask verdict, which always
+/// grades the ideal `proj` via `check_mask`. A non-finite or `q <= 0` value is
+/// rejected with an error + [`ExitCode::FAILURE`] (never silently treated as
+/// ideal).
 // The CLI options are a flat thread-through of independent `synth` flags; a
 // builder/struct here would only obscure the one-to-one mapping with the clap
 // `Synth` variant.
@@ -60,6 +72,7 @@ pub fn run_synth(
     kicad_pcb: Option<&Path>,
     lumped: bool,
     footprint: Footprint,
+    q_unloaded: Option<f64>,
 ) -> Result<ExitCode> {
     let text = std::fs::read_to_string(spec_path)
         .with_context(|| format!("failed to read filter spec {}", spec_path.display()))?;
@@ -93,9 +106,43 @@ pub fn run_synth(
         println!("    [ {} ]", cells.join("  "));
     }
 
-    // ---- ideal-response sweep --------------------------------------------
+    // ---- response sweep (ideal lossless OR finite-Q lumped) --------------
+    // `--q-unloaded` (ADR-0161) routes the response written to the .s2p (and
+    // the optional --plot): unset → the lossless closed-form `ideal_response`
+    // (byte-identical to before); set → the realistic finite-Q lumped-LC
+    // realization `ladder_s21_lossy`. The mask verdict below is independent —
+    // it always grades the ideal `proj` via `check_mask`.
     let freqs = sweep_freqs(spec.f0_hz, spec.fbw);
-    let s21 = ideal_response(&proj, &freqs);
+    let s21: Vec<Complex64> = match q_unloaded {
+        None => ideal_response(&proj, &freqs),
+        Some(q) => {
+            // Reject a non-finite / non-positive Q: the user asked for a
+            // finite-Q response, so silently falling back to lossless would be
+            // wrong. (ladder_s21_lossy itself treats q<=0 as lossless.)
+            if !q.is_finite() || q <= 0.0 {
+                anyhow::bail!(
+                    "--q-unloaded must be a finite quality factor > 0 (got {q}); \
+                     omit the flag for the ideal lossless response"
+                );
+            }
+            // The finite-Q response uses the lumped-LC realization (the same
+            // ladder `--lumped` exports as a board); always synthesizable for a
+            // band-pass spec, independent of `--lumped`.
+            let ladder = synthesize_lumped(&proj)
+                .map_err(|e| anyhow::anyhow!("failed to synthesize lumped LC ladder: {e}"))?;
+            let s21: Vec<Complex64> = freqs
+                .iter()
+                .map(|&f| ladder_s21_lossy(&ladder, f, q))
+                .collect();
+            // Realized midband insertion loss at the sweep point nearest f0.
+            let il_db = midband_insertion_loss_db(&freqs, &s21, spec.f0_hz);
+            println!(
+                "  finite-Q response (Q_unloaded = {q:.4}): midband insertion loss = {il_db:.4} dB"
+            );
+            println!("  .s2p carries the finite-Q lumped-LC response (not the ideal lossless one)");
+            s21
+        }
+    };
 
     // ---- spec-mask verdict -----------------------------------------------
     // Grade over the same sweep so the in-band ripple/RL is well-sampled.
@@ -121,7 +168,14 @@ pub fn run_synth(
     let out_path = output
         .map(PathBuf::from)
         .unwrap_or_else(|| spec_path.with_extension("s2p"));
-    write_s2p(&out_path, spec.z0_ohm, &freqs, &s21)
+    // The comment self-describes which response the .s2p carries. The default
+    // (ideal) string is kept byte-for-byte so an unset `--q-unloaded` run is
+    // byte-identical to the pre-ADR-0161 behavior.
+    let s2p_comment = match q_unloaded {
+        None => " yee filter synth — ideal closed-form response".to_string(),
+        Some(q) => format!(" yee filter synth — finite-Q lumped response (Q_unloaded = {q})"),
+    };
+    write_s2p(&out_path, spec.z0_ohm, &freqs, &s21, &s2p_comment)
         .with_context(|| format!("failed to write Touchstone {}", out_path.display()))?;
     println!("  wrote Touchstone: {}", out_path.display());
 
@@ -254,6 +308,23 @@ pub fn run_synth(
     }
 }
 
+/// Realized midband insertion loss `−20·log10|S21|` at the swept frequency
+/// nearest `f0`. Used to report the finite-Q realization's passband loss.
+fn midband_insertion_loss_db(freqs: &[f64], s21: &[Complex64], f0: f64) -> f64 {
+    let idx = freqs
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| {
+            (*a - f0)
+                .abs()
+                .partial_cmp(&(*b - f0).abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    -20.0 * s21[idx].norm().max(1e-12).log10()
+}
+
 /// Linear sweep of `SWEEP_POINTS` frequencies centred on `f0`, spanning
 /// `f0·(1 ± SPAN_MULT·fbw/2)` (clamped to be strictly positive).
 fn sweep_freqs(f0: f64, fbw: f64) -> Vec<f64> {
@@ -265,15 +336,30 @@ fn sweep_freqs(f0: f64, fbw: f64) -> Vec<f64> {
         .collect()
 }
 
-/// Build and write a 2-port Touchstone file for a reciprocal, symmetric
-/// lossless filter: `S21 = S12` from the ideal response, `S11 = S22` from
-/// `|S11|² = 1 − |S21|²` (zero phase, magnitude model).
-fn write_s2p(path: &Path, z0: f64, freqs: &[f64], s21: &[Complex64]) -> yee_io::Result<()> {
+/// Build and write a 2-port Touchstone file for a reciprocal, symmetric filter:
+/// `S21 = S12` from the response, `S11 = S22` from `|S11|² = 1 − |S21|²`
+/// (magnitude model). S21 is taken real and S11 is placed in **quadrature**
+/// (`S11 = j·|S11|`) so the symmetric reciprocal matrix `[[jS11, S21],[S21,
+/// jS11]]` has eigenvalues `S21 ± j·|S11|`, both of modulus `√(|S21|²+|S11|²) =
+/// 1` — i.e. it is unitary (passive). A real S11 (the previous form) gives the
+/// eigenvalue `|S21|+|S11| > 1`, a passivity violation that `yee_io::touchstone`
+/// rejects on read-back; the quadrature phase is the correct physical relation
+/// for a lossless symmetric reciprocal 2-port and leaves every magnitude
+/// (`|S21|`, `|S11|`) unchanged.
+fn write_s2p(
+    path: &Path,
+    z0: f64,
+    freqs: &[f64],
+    s21: &[Complex64],
+    comment: &str,
+) -> yee_io::Result<()> {
     let mut data = Vec::with_capacity(freqs.len());
     for s21f in s21 {
         let s21_mag = s21f.norm().min(1.0);
         let s11_mag = (1.0 - s21_mag * s21_mag).max(0.0).sqrt();
-        let s11 = Complex64::new(s11_mag, 0.0);
+        // S11 in quadrature with the (real) S21 → the symmetric reciprocal
+        // matrix is unitary/passive (see fn docs).
+        let s11 = Complex64::new(0.0, s11_mag);
         let s21c = Complex64::new(s21_mag, 0.0);
         // Row-major n×n: [S11, S12, S21, S22].
         data.push(vec![s11, s21c, s21c, s11]);
@@ -285,7 +371,7 @@ fn write_s2p(path: &Path, z0: f64, freqs: &[f64], s21: &[Complex64]) -> yee_io::
         format: Format::RealImag,
         freq_hz: freqs.to_vec(),
         data,
-        comments: vec![" yee filter synth — ideal closed-form response".to_string()],
+        comments: vec![comment.to_string()],
     };
     yee_io::touchstone::write(path, &file)
 }
