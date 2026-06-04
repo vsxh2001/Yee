@@ -203,3 +203,4 @@
 - [ADR-0157: F1.2.1.0 — single-gap surrogate-BO EM-in-loop dimensional refinement (walking skeleton)](decisions/0157-f1-2-1-0-bo-em-in-loop-gap-refine.md)
 - [ADR-0158: F2.2-cli — wire lumped-board manufacturing export into `yee filter synth`](decisions/0158-f2-2-cli-lumped-board-export.md)
 - [ADR-0159: F1.2.1.1 — EM coupling design-curve gap correction (full-wave filter S21 toward the mask)](decisions/0159-f1-2-1-1-em-coupling-design-curve-gap-correct.md)
+- [ADR-0160: Finite-Q (realistic) lumped filter response + Cohn dissipation-loss gate](decisions/0160-finite-q-lumped-response.md)
