@@ -69,7 +69,7 @@ The shipped pieces, one line each:
 
 The current shipped scope is Filter Phase F0 → F1.0 (synthesis core +
 parametric geometry); dimensional synthesis and full-wave verification
-(§7) are the forward-looking F1.1+ roadmap.
+(§8) are the forward-looking F1.1+ roadmap.
 
 ## 2. Approximation: lowpass-prototype g-values
 
@@ -223,7 +223,53 @@ own ripple / return-loss / rejection mask. The `yee filter synth --plot`
 CLI renders the swept `|S21|` with the mask overlaid (the spec→visual
 pipe), via the `yee-plotters` `draw_sparam_with_mask` overlay.
 
-## 6. From abstract circuit to geometry
+## 6. Dissipation loss & the finite-Q response
+
+The §5 ideal response is **lossless** — it assumes `|S11|² = 1 − |S21|²`,
+so the passband is flat-topped with zero insertion loss. A *built* filter
+never is: every L and C has a finite **unloaded quality factor** `Q_u`
+(chip inductors `Q ≈ 30–100`, capacitors higher), and that dissipation
+rounds the passband corners, fills the return-loss notches, and — most
+visibly — adds a **midband insertion loss**. For a narrow-band filter that
+loss is given in closed form by Cohn's dissipation formula:
+
+```text
+IL₀ (dB) ≈ 4.343 · ( Σ_{k=1}^{N} g_k ) / ( Q_u · FBW )
+```
+
+with the lowpass-prototype `g_k` of §2 and the fractional bandwidth `FBW`
+(Cohn, "Dissipation Loss in Multiple-Coupled-Resonator Filters," *Proc.
+IRE*, 1959; Hong-Lancaster §3.2). A 3-pole 0.5 dB Chebyshev (`Σg ≈ 4.29`)
+at `FBW = 10 %`, `Q_u = 100` loses `≈ 1.86 dB` at band centre — small but
+never zero.
+
+Yee models this with `yee_filter::ladder_s_params_lossy` (and its
+`ladder_s21_lossy` projection): the synthesized lumped-LC ladder gets a
+loss element on each resonator sized so its unloaded Q equals `Q_u` — a
+series resistance `R = ω₀L / Q_u` on a series branch, a shunt conductance
+`G = ω₀C / Q_u` on a shunt branch (`ω₀` the band centre). The full lossy
+two-port `(S11, S21)` is read from the cascaded `ABCD` matrix (Pozar Table
+4.2):
+
+```text
+Δ   = A + B/Z₀ + C·Z₀ + D
+S21 = 2 / Δ
+S11 = ( A + B/Z₀ − C·Z₀ − D ) / Δ
+```
+
+Unlike the lossless §5 form, a dissipative two-port is *strictly passive* —
+`|S11|² + |S21|² < 1`, the deficit being the power absorbed in the
+resonators — not unitary. Gate `lumped-q-001` checks the realised midband
+loss against Cohn's formula (within the narrowband approximation, ≤ 15 %;
+measured 2.2 %).
+
+The realistic response is user-reachable: `yee filter synth --q-unloaded
+<Q>` writes the finite-Q two-port as a Touchstone `.s2p` (ADR-0161);
+omitting the flag keeps the ideal lossless response of §5. This is the
+curve a vector network analyser actually measures — the honest companion
+to the ideal target the dimensional synthesis (§8) aims at.
+
+## 7. From abstract circuit to geometry
 
 The coupling matrix is technology-agnostic; turning it into a
 manufacturable structure is technology-specific. For the planar
@@ -239,9 +285,9 @@ Microstrip Computer-Aided Design," *IEEE MTT-S Digest*, 1980; Pozar
 (`Vec<Polygon>` of traces plus port references and a bounding box) with a
 dependency-free SVG preview. This is the **dimensions → geometry**
 direction only; the **coupling-matrix → dimensions** mapping is the
-dimensional-synthesis step of §7.
+dimensional-synthesis step of §8.
 
-## 7. Dimensional synthesis & full-wave verification (forward-looking)
+## 8. Dimensional synthesis & full-wave verification (forward-looking)
 
 Closing the loop — turning a target coupling matrix into the gaps and
 lengths that actually realise it, and proving the realised structure
@@ -273,7 +319,7 @@ bandpass filter — spec → synthesis → layout → FDTD S-parameters within a
 matching geometry. Manufacturing export (KiCad/Gerber for planar and
 lumped, STEP for waveguide) is the final stage.
 
-## 8. References
+## 9. References
 
 - Matthaei, G. L., Young, L., and Jones, E. M. T. *Microwave Filters,
   Impedance-Matching Networks, and Coupling Structures.* McGraw-Hill,
@@ -284,7 +330,11 @@ lumped, STEP for waveguide) is the final stage.
   lowpass→bandpass transform; §3.8 microstrip design equations.)
 - Hong, J.-S., and Lancaster, M. J. *Microstrip Filters for RF/Microwave
   Applications.* Wiley, 2001. (Ch. 8 coupling coefficients and external
-  Q; chs. 5–6 edge-coupled and hairpin microstrip filters.)
+  Q; chs. 5–6 edge-coupled and hairpin microstrip filters; §3.2 the
+  finite-Q dissipation-loss formula of §6.)
+- Cohn, S. B. "Dissipation Loss in Multiple-Coupled-Resonator Filters."
+  *Proc. IRE* 47.8 (1959), pp. 1342–1348. (The `4.343·Σg/(Q_u·FBW)`
+  midband-loss formula; the `lumped-q-001` reference for §6.)
 - Cameron, R. J. "Advanced Coupling Matrix Synthesis Techniques for
   Microwave Filters." *IEEE Trans. Microwave Theory Tech.* 51.1 (2003),
   pp. 1–10. (Cross-coupled / elliptic synthesis; later-phase work.)
