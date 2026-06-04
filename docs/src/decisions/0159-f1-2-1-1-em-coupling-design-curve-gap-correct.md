@@ -81,6 +81,47 @@ mom-002/003, fem-eig-006.
 
 ---
 
+## Outcome (SHIPPED — B1 merge `b09db3a`, B2 merge `71c0262`)
+
+**B1 — `correct_gap_fem_k` (the corrector) — VALIDATED.** A 20.3 %-off seed gap (2.000 mm,
+k_fem=0.0481) converged to 2.0 % off (2.125 mm, k_fem=0.0392) in 3 FEM evals on the smooth K(gap)
+(gate `fem-coupling-correct-001`). The EM-in-loop geometry-correction mechanism works. Reviewer no P0.
+
+**B2 — apply to the filter + re-grade — the thesis is REFUTED (honest NO-GO, gate GREEN).** Two
+orchestrator fixes were needed first: (i) `coupled_resonator_k`'s sweep band was **hardcoded
+2.10–2.70 GHz** (the K1/K2 probe's f0=2.4 GHz) → the filter's f0=2.0 GHz resonances (~1.9–2.05 GHz)
+fell below it → every eval `!peaks_resolvable`; fixed to **track f0** via the analytic even/odd split
+(`f_lo=f_e_lo−0.20·fc`, `f_hi=f_e_hi+0.12·fc`) — **K1/K2 regression-confirmed GREEN** (k_fem
+0.0612/0.0464/0.0295 monotone). (ii) the design-curve base box was oversized (~160k tets, OOM) →
+matched the shipped `probe_with_gap` config (2.5·h clearance, ~80k tets).
+
+Measured (boxed, `--release`, self-verified + reviewer APPROVE / gate-honesty sound):
+
+- **`target_k=0.0756` is UNREACHABLE as a resonant-split k** on the 1.912 mm / FR-4 line — the
+  resonant-split k **saturates ≈0.064** at the tight-gap floor (evals 1.25→0.0476, 0.875→0.0625,
+  0.594→0.0641, 0.523→0.0570). The correction drives the gaps **1.622 → 0.594 mm** (best 15.2 % off,
+  converged=false). The **impedance-k synthesis target over-specifies the coupling** vs what a
+  resonant-split can deliver on this geometry.
+- The corrected filter **LIFTS the in-band peak +5.83 dB** over N3 (−27.38 → −21.55 dB) — stronger
+  coupling genuinely helps — but **still MISSES the strict Cheb mask by ~26 dB** and remains a
+  ~−22 dB flat shelf, with the asymmetry margin degraded to +0.70 dB (N3 was +2.10 dB) by the
+  over-tightened gaps.
+
+**DECISIVE CONCLUSION: dimensioning-correction is a real but MINOR lever (~+6 dB); the dominant floor
+is the aperture-coupling PORT fidelity (the ADR-0154 N3 finding), NOT gap dimensioning.** Neither this
+per-gap correction nor a multi-D ASM over gaps (**B3 — NOT pursued**, same port wall) clears the mask
+without a higher-fidelity aperture-coupling port. **The F1.2.1.x EM-in-loop dimensioning track is
+port-floored and CLOSED.** A mask-clearing full-wave filter S21 needs the **deferred higher-fidelity
+port** (aperture/frill reciprocity or a numerical-eigenmode aperture port) — a multi-week,
+maintainer-funded track; do NOT auto-start it, and do NOT reopen B3.
+
+**What durably landed:** the `correct_gap_fem_k` corrector (B1, reusable) + the **f0-tracking band fix
+to `coupled_resonator_k`** (a genuine bug fix — the function silently only worked at f0=2.4 GHz; now
+correct for any filter f0, K1/K2-regression-green) + the honest B2 gate (`#[ignore]`'d, run boxed
+on-demand; NOT in routine CI — the mechanism is covered by B1 + K1/K2).
+
+---
+
 ## References
 - The EM objective (fine model, smooth K(gap) confirmed): `yee_fem::coupled_resonator_k`
   (`crates/yee-fem/src/coupled_resonator_k.rs`); the smoothness sweep data in
