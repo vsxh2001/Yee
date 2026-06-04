@@ -492,6 +492,21 @@ jobs:
       - name: fem coupled-resonator k vs gap (fem-coupling-002, release, ignored)
         run: cargo test -p yee-fem --release --test fem_coupling_002 -- --ignored --nocapture
 
+      # F1.2.1.0 (ADR-0157): single-gap surrogate-BO EM-in-loop dimensional
+      # refinement — the design engine's walking skeleton. A 1-D Bayesian
+      # optimizer (`yee_surrogate::minimize`, EI/GP) drives the FEM resonant-
+      # split coupling-k (`yee_fem::coupled_resonator_k`) from an off-target
+      # seed gap (2.0 mm, k_fem ≈ 0.0481 → ~20 % off TARGET_K = 0.040) to the
+      # target, closing the ~17–26 % impedance-vs-resonant divergence the
+      # analytic dimensioner cannot. HEAVY: the BO closure calls one FEM driven
+      # sweep per eval — 12 sequential evals + 2 confirmation evals ≈ 57 min in
+      # `--release` (each sweep is multi-minute, like fem-coupling-001).
+      # `#[ignore]`'d so the default debug `cargo test --workspace` never runs
+      # it; run here in `--release` (the long-thin coupled-pair box keeps the
+      # per-ω faer sparse-LU bandwidth low, so it fits the GitHub runner).
+      - name: bo coupled-resonator gap refine (bo-coupling-001, release, ignored)
+        run: cargo test -p yee-validation --release --test bo_coupling_001 -- --ignored --nocapture
+
   fdtd-heavy-validation-gate:
     name: FDTD heavy validation gates (release)
     runs-on: ubuntu-latest
