@@ -395,6 +395,18 @@ fn db(mag: f64) -> f64 {
     20.0 * mag.log10()
 }
 
+/// The driven-sweep frequency band straddling the analytic even/odd resonance
+/// split [`f_e_lo`, `f_e_hi`] (both Hz, f_e_lo <= f_e_hi). Tracks f0 via the
+/// split centre — NOT a hardcoded 2.4 GHz band — so coupled_resonator_k works
+/// at any resonator f0 (the filter design-curve uses f0=2.0 GHz). Extends 20%
+/// of the split centre below f_e_lo (FEM peaks shift LOW from mesh dispersion +
+/// feed-gap loading) and 12% above f_e_hi for the upper shoulder. Returns
+/// (f_lo_band, f_hi_band) in Hz.
+fn sweep_band(f_e_lo: f64, f_e_hi: f64) -> (f64, f64) {
+    let f_center = 0.5 * (f_e_lo + f_e_hi);
+    (f_e_lo - 0.20 * f_center, f_e_hi + 0.12 * f_center)
+}
+
 /// Extract the coupled-resonator coupling coefficient `k` from a FEM
 /// frequency-domain `S21` driven sweep.
 ///
@@ -409,10 +421,12 @@ fn db(mag: f64) -> f64 {
 /// [`CoupledKResult`] with `k_fem = (f_hi²−f_lo²)/(f_hi²+f_lo²)` alongside the
 /// two analytic references.
 ///
-/// The sweep band is fixed at 2.10–2.70 GHz (centred on the probe's f0 =
-/// 2.4 GHz, spanning both analytic resonances with valley + shoulders). `n_pts`
-/// sets the resolution across the split; the probe used 61 (10 MHz step). A
-/// `n_pts < 5` is clamped up to 5 so the peak-finder has interior points.
+/// The sweep band TRACKS f0 via the analytic even/odd split (see
+/// [`sweep_band`]): it extends 20 % of the split centre below the lower
+/// resonance and 12 % above the upper one, so the sweep works at any
+/// resonator f0 (the filter design-curve uses f0 = 2.0 GHz). `n_pts` sets the
+/// resolution across the split; the probe used 61 (10 MHz step). A `n_pts < 5`
+/// is clamped up to 5 so the peak-finder has interior points.
 ///
 /// # Cost
 ///
@@ -456,9 +470,8 @@ pub fn coupled_resonator_k(
     // ~1.9-2.7 GHz, covering the old hardcoded band (re-validated by re-running
     // fem-coupling-001/002).
     let n_pts = n_pts.max(5);
-    let f_center = 0.5 * (f_e_lo + f_e_hi);
-    let f_lo_band = f_e_lo - 0.20 * f_center;
-    let f_hi_band = f_e_hi + 0.12 * f_center;
+    // Band derivation lives in `sweep_band` (fn doc carries the rationale).
+    let (f_lo_band, f_hi_band) = sweep_band(f_e_lo, f_e_hi);
     let freqs_hz: Vec<f64> = (0..n_pts)
         .map(|i| f_lo_band + (f_hi_band - f_lo_band) * (i as f64) / ((n_pts - 1) as f64))
         .collect();
@@ -932,6 +945,63 @@ mod tests {
             "at S/W=2 the coupled-line k_imp ({k_imp:.4}) and resonant-split k_eps ({k_eps:.4}) \
              should agree to ~15% (ratio {ratio:.2}); a larger ratio means the gap is too tight \
              for the two definitions to be compared like-for-like"
+        );
+    }
+
+    /// The driven-sweep band straddles the analytic even/odd split at ANY f0 —
+    /// the f0-tracking fix (ADR-0159): the band is derived from the split centre,
+    /// not the old hardcoded 2.10–2.70 GHz probe band, so it brackets BOTH peaks
+    /// at f0 = 2.0 GHz (filter design-curve) as well as f0 = 2.4 GHz (K1/K2
+    /// probe). A peak falling outside the band is the exact bug this guards.
+    /// FAST (pure arithmetic, no FEM solve).
+    #[test]
+    fn sweep_band_brackets_split_and_tracks_f0() {
+        // Representative splits: tight at f0 = 2.0 GHz and 2.4 GHz, plus a wider
+        // strong-coupling split at 2.0 GHz.
+        let cases = [
+            (1.97e9, 2.03e9), // tight split, f0 ≈ 2.0 GHz
+            (2.36e9, 2.44e9), // tight split, f0 ≈ 2.4 GHz
+            (1.90e9, 2.10e9), // wider strong-coupling split, f0 ≈ 2.0 GHz
+        ];
+
+        for (f_e_lo, f_e_hi) in cases {
+            let (f_lo_band, f_hi_band) = sweep_band(f_e_lo, f_e_hi);
+
+            // The band strictly straddles BOTH analytic peaks (the core property:
+            // a peak outside the band is the exact bug that was fixed).
+            assert!(
+                f_lo_band < f_e_lo,
+                "lower band edge {f_lo_band:.4e} must sit below f_e_lo {f_e_lo:.4e}"
+            );
+            assert!(
+                f_hi_band > f_e_hi,
+                "upper band edge {f_hi_band:.4e} must sit above f_e_hi {f_e_hi:.4e}"
+            );
+            // No non-positive sweep frequency.
+            assert!(
+                f_lo_band > 0.0,
+                "lower band edge {f_lo_band:.4e} must be positive"
+            );
+            // Non-degenerate band (cannot invert).
+            assert!(
+                f_hi_band > f_lo_band,
+                "band must be non-degenerate: f_hi_band {f_hi_band:.4e} > f_lo_band {f_lo_band:.4e}"
+            );
+            // The lower margin (20 % of centre) exceeds the upper margin (12 %).
+            assert!(
+                (f_e_lo - f_lo_band) > (f_hi_band - f_e_hi),
+                "lower margin (20% of centre) must exceed upper margin (12%)"
+            );
+        }
+
+        // The f0 = 2.0 GHz band's lower edge sits BELOW the old hardcoded 2.10 GHz
+        // floor — i.e. this test FAILS against the old hardcoded 2.10–2.70 GHz band
+        // for the 2.0 GHz case (proves it guards the f0-tracking regression).
+        let (f_lo_band_2g, _) = sweep_band(1.97e9, 2.03e9);
+        assert!(
+            f_lo_band_2g < 2.10e9,
+            "f0 = 2.0 GHz lower band edge {f_lo_band_2g:.4e} must fall below the old hardcoded \
+             2.10 GHz floor (the regression the f0-tracking fix closes)"
         );
     }
 
