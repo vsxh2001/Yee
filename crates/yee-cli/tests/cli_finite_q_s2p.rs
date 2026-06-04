@@ -99,6 +99,24 @@ fn midband_il_db(s2p: &Path) -> f64 {
     -20.0 * s21.norm().max(1e-12).log10()
 }
 
+/// Read the `.s2p` back and return the midband power sum `|S11|² + |S21|²` at
+/// the swept frequency nearest `f0`. For a true lossless 2-port this is ≈ 1
+/// (unitary); for a dissipative (finite-Q) one it is `< 1`, the deficit being
+/// the absorbed power. S11 is index `[0]`, S21 is index `[1*2+0] = 2`.
+fn midband_power_sum(s2p: &Path) -> f64 {
+    let file = yee_io::touchstone::read(s2p).expect("read written .s2p");
+    let idx = file
+        .freq_hz
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| (*a - F0_HZ).abs().partial_cmp(&(*b - F0_HZ).abs()).unwrap())
+        .map(|(i, _)| i)
+        .unwrap();
+    let s11: Complex64 = file.data[idx][0];
+    let s21: Complex64 = file.data[idx][2];
+    s11.norm_sqr() + s21.norm_sqr()
+}
+
 /// Cohn dissipation-loss reference `4.343·Σg/(Q_u·FBW)` (dB), with Σg the sum
 /// of the reactive prototype elements g[1..=N] — computed independently of the
 /// CLI from `yee_synth::prototype` so the gate is non-circular.
@@ -131,21 +149,25 @@ fn cli_finite_q_s2p() {
 
     let il_q = midband_il_db(&out_q);
     let il_cohn = cohn_il_db();
+    let power_q = midband_power_sum(&out_q);
 
-    // ---- (2) ideal .s2p: byte-differs + IL ≈ 0 dB -----------------------
+    // ---- (2) ideal .s2p: byte-differs + IL ≈ 0 dB + lossless ------------
     let out_ideal = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cli_finite_q_out_ideal.s2p");
     let (ok_i, stdout_i) = run_synth(&out_ideal, None);
     assert!(ok_i, "ideal synth exited non-zero; stdout:\n{stdout_i}");
     let il_ideal = midband_il_db(&out_ideal);
+    let power_ideal = midband_power_sum(&out_ideal);
 
     let bytes_q = std::fs::read(&out_q).expect("read finite-Q .s2p bytes");
     let bytes_ideal = std::fs::read(&out_ideal).expect("read ideal .s2p bytes");
 
     println!(
         "cli-finite-q-s2p: IL_q = {il_q:.4} dB | IL_cohn = {il_cohn:.4} dB \
-         (rel err {:.2} %) | IL_ideal = {il_ideal:.4} dB | byte-differ = {}",
+         (rel err {:.2} %) | IL_ideal = {il_ideal:.4} dB | byte-differ = {} | \
+         midband |S11|²+|S21|²: finite-Q = {power_q:.4} (absorbed {:.4}), ideal = {power_ideal:.4}",
         100.0 * (il_q - il_cohn).abs() / il_cohn,
         bytes_q != bytes_ideal,
+        1.0 - power_q,
     );
 
     // Assertion (1): finite-Q midband IL matches Cohn within 15 %.
@@ -155,6 +177,22 @@ fn cli_finite_q_s2p() {
         "finite-Q midband IL {il_q:.4} dB disagrees with Cohn {il_cohn:.4} dB by \
          {:.2} % (> 15 %)",
         100.0 * rel_err
+    );
+
+    // Assertion (1b) — ABSORPTION: the finite-Q .s2p must be a TRUE lossy
+    // 2-port (S11 the real absorptive reflection from the ABCD), so at midband
+    // |S11|²+|S21|² < 1; a fictitious lossless S11 = √(1−|S21|²) placeholder
+    // would force == 1. This is the assertion that would have caught the old
+    // bug (insertion loss mis-attributed to reflection, |S11|²+|S21|² ≡ 1).
+    assert!(
+        power_q < 0.999,
+        "finite-Q midband |S11|²+|S21|² = {power_q:.6} is not < 0.999 — the .s2p \
+         claims a LOSSLESS filter (S11 placeholder), not the true absorptive response"
+    );
+    // And it must stay passive (no spurious gain) on read-back.
+    assert!(
+        power_q > 0.0,
+        "finite-Q midband |S11|²+|S21|² = {power_q:.6} must be positive"
     );
 
     // Assertion (2a): the finite-Q file byte-differs from the ideal file —
@@ -168,6 +206,12 @@ fn cli_finite_q_s2p() {
     assert!(
         il_ideal <= 0.2,
         "ideal midband IL {il_ideal:.4} dB is not ~0 dB (lossless response expected)"
+    );
+    // Assertion (2c): the ideal .s2p IS energy-conserving (|S11|²+|S21|² ≈ 1) —
+    // the true lossless reflection, the complement of the finite-Q absorption.
+    assert!(
+        (power_ideal - 1.0).abs() < 1e-6,
+        "ideal midband |S11|²+|S21|² = {power_ideal:.6} is not ≈ 1 (lossless expected)"
     );
     // The finite-Q loss must be materially above the lossless floor (sanity).
     assert!(

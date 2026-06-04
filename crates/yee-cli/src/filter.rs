@@ -15,7 +15,7 @@ use std::process::ExitCode;
 
 use yee_filter::{
     FilterSpec, Footprint, check_mask, dimension_edge_coupled, dimension_edge_coupled_layout,
-    ideal_response, ladder_s21_lossy, lumped_board, synthesize, synthesize_lumped,
+    ideal_response, ladder_s_params_lossy, lumped_board, synthesize, synthesize_lumped,
 };
 use yee_io::touchstone::{File, Format, FreqUnit};
 use yee_layout::Substrate;
@@ -46,17 +46,19 @@ const SPAN_MULT: f64 = 6.0;
 /// substrate, using the supplied SMD `footprint`. The synthesis printout and the
 /// Touchstone `.s2p` are unaffected by `--lumped`.
 ///
-/// `q_unloaded` (F2-Q, ADR-0161) selects the **response** written to the `.s2p`
-/// (and the optional `--plot`): `None` (default) keeps the lossless closed-form
-/// `ideal_response` — byte-identical to before; `Some(q)` with finite `q > 0`
-/// sweeps the realistic **finite-Q lumped-LC** response (`synthesize_lumped` →
-/// `ladder_s21_lossy(&ladder, f, q)`), so the exported Touchstone carries the
-/// midband insertion loss / rounded corners a built filter actually measures.
-/// It is independent of `--lumped` (the lumped ladder is always synthesizable
-/// for a band-pass spec) and does not affect the mask verdict, which always
-/// grades the ideal `proj` via `check_mask`. A non-finite or `q <= 0` value is
-/// rejected with an error + [`ExitCode::FAILURE`] (never silently treated as
-/// ideal).
+/// `q_unloaded` (F2-Q, ADR-0161) selects the **`(S11, S21)` response** written
+/// to the `.s2p` (and the optional `--plot`'s `|S21|`): `None` (default) keeps
+/// the lossless closed-form `ideal_response`, with `S11` the true lossless
+/// reflection in quadrature (`j·√(1−|S21|²)`); `Some(q)` with finite `q > 0`
+/// sweeps the realistic **finite-Q lumped-LC TRUE lossy 2-port**
+/// (`synthesize_lumped` → `ladder_s_params_lossy(&ladder, f, q)`), so the
+/// exported Touchstone carries the midband insertion loss / rounded corners a
+/// built filter measures **and the true absorptive reflection** (`|S11|²+|S21|²
+/// < 1`), not a lossless `√(1−|S21|²)` placeholder. It is independent of
+/// `--lumped` (the lumped ladder is always synthesizable for a band-pass spec)
+/// and does not affect the mask verdict, which always grades the ideal `proj`
+/// via `check_mask`. A non-finite or `q <= 0` value is rejected with an error +
+/// [`ExitCode::FAILURE`] (never silently treated as ideal).
 // The CLI options are a flat thread-through of independent `synth` flags; a
 // builder/struct here would only obscure the one-to-one mapping with the clap
 // `Synth` variant.
@@ -107,18 +109,25 @@ pub fn run_synth(
     }
 
     // ---- response sweep (ideal lossless OR finite-Q lumped) --------------
-    // `--q-unloaded` (ADR-0161) routes the response written to the .s2p (and
-    // the optional --plot): unset → the lossless closed-form `ideal_response`
-    // (byte-identical to before); set → the realistic finite-Q lumped-LC
-    // realization `ladder_s21_lossy`. The mask verdict below is independent —
-    // it always grades the ideal `proj` via `check_mask`.
+    // `--q-unloaded` (ADR-0161) routes the `(S11, S21)` response written to the
+    // .s2p (and the optional --plot's |S21|): unset → the lossless closed-form
+    // `ideal_response`, with S11 the true lossless reflection placed in
+    // quadrature (`S11 = j·√(1−|S21|²)`, see `write_s2p`); set → the realistic
+    // finite-Q lumped-LC realization, with S11 the **true absorptive**
+    // reflection from the same ABCD as S21 (`ladder_s_params_lossy`), so the
+    // exported Touchstone is a true lossy 2-port (`|S11|²+|S21|² < 1`), not a
+    // lossless placeholder. The mask verdict below is independent — it always
+    // grades the ideal `proj` via `check_mask`.
     let freqs = sweep_freqs(spec.f0_hz, spec.fbw);
-    let s21: Vec<Complex64> = match q_unloaded {
-        None => ideal_response(&proj, &freqs),
+    let s_params: Vec<(Complex64, Complex64)> = match q_unloaded {
+        None => ideal_response(&proj, &freqs)
+            .into_iter()
+            .map(lossless_s_pair)
+            .collect(),
         Some(q) => {
             // Reject a non-finite / non-positive Q: the user asked for a
             // finite-Q response, so silently falling back to lossless would be
-            // wrong. (ladder_s21_lossy itself treats q<=0 as lossless.)
+            // wrong. (ladder_s_params_lossy itself treats q<=0 as lossless.)
             if !q.is_finite() || q <= 0.0 {
                 anyhow::bail!(
                     "--q-unloaded must be a finite quality factor > 0 (got {q}); \
@@ -127,22 +136,32 @@ pub fn run_synth(
             }
             // The finite-Q response uses the lumped-LC realization (the same
             // ladder `--lumped` exports as a board); always synthesizable for a
-            // band-pass spec, independent of `--lumped`.
+            // band-pass spec, independent of `--lumped`. S11 and S21 both come
+            // from one ABCD, so S11 is the TRUE absorptive reflection.
             let ladder = synthesize_lumped(&proj)
                 .map_err(|e| anyhow::anyhow!("failed to synthesize lumped LC ladder: {e}"))?;
-            let s21: Vec<Complex64> = freqs
+            let s_params: Vec<(Complex64, Complex64)> = freqs
                 .iter()
-                .map(|&f| ladder_s21_lossy(&ladder, f, q))
+                .map(|&f| ladder_s_params_lossy(&ladder, f, q))
                 .collect();
             // Realized midband insertion loss at the sweep point nearest f0.
-            let il_db = midband_insertion_loss_db(&freqs, &s21, spec.f0_hz);
+            let idx = nearest_freq_index(&freqs, spec.f0_hz);
+            let (s11_mid, s21_mid) = s_params[idx];
+            let il_db = -20.0 * s21_mid.norm().max(1e-12).log10();
+            let absorbed = 1.0 - (s11_mid.norm_sqr() + s21_mid.norm_sqr());
             println!(
                 "  finite-Q response (Q_unloaded = {q:.4}): midband insertion loss = {il_db:.4} dB"
             );
-            println!("  .s2p carries the finite-Q lumped-LC response (not the ideal lossless one)");
-            s21
+            println!(
+                "  .s2p carries the TRUE lossy 2-port (midband |S11|²+|S21|² = {:.4}, \
+                 absorbed = {absorbed:.4}); not a lossless placeholder",
+                s11_mid.norm_sqr() + s21_mid.norm_sqr()
+            );
+            s_params
         }
     };
+    // Transmission magnitudes for the optional --plot.
+    let s21: Vec<Complex64> = s_params.iter().map(|&(_, s21)| s21).collect();
 
     // ---- spec-mask verdict -----------------------------------------------
     // Grade over the same sweep so the in-band ripple/RL is well-sampled.
@@ -175,7 +194,7 @@ pub fn run_synth(
         None => " yee filter synth — ideal closed-form response".to_string(),
         Some(q) => format!(" yee filter synth — finite-Q lumped response (Q_unloaded = {q})"),
     };
-    write_s2p(&out_path, spec.z0_ohm, &freqs, &s21, &s2p_comment)
+    write_s2p(&out_path, spec.z0_ohm, &freqs, &s_params, &s2p_comment)
         .with_context(|| format!("failed to write Touchstone {}", out_path.display()))?;
     println!("  wrote Touchstone: {}", out_path.display());
 
@@ -308,10 +327,10 @@ pub fn run_synth(
     }
 }
 
-/// Realized midband insertion loss `−20·log10|S21|` at the swept frequency
-/// nearest `f0`. Used to report the finite-Q realization's passband loss.
-fn midband_insertion_loss_db(freqs: &[f64], s21: &[Complex64], f0: f64) -> f64 {
-    let idx = freqs
+/// Index of the swept frequency nearest `f0` (used to report the midband
+/// insertion loss / absorption). Returns 0 for an empty / degenerate sweep.
+fn nearest_freq_index(freqs: &[f64], f0: f64) -> usize {
+    freqs
         .iter()
         .enumerate()
         .min_by(|(_, a), (_, b)| {
@@ -321,8 +340,19 @@ fn midband_insertion_loss_db(freqs: &[f64], s21: &[Complex64], f0: f64) -> f64 {
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
         .map(|(i, _)| i)
-        .unwrap_or(0);
-    -20.0 * s21[idx].norm().max(1e-12).log10()
+        .unwrap_or(0)
+}
+
+/// Map a lossless transfer `S21` to the `(S11, S21)` pair written for the ideal
+/// (no `--q-unloaded`) path. The transmission is taken real with `|S21| ≤ 1`,
+/// and S11 is the **true lossless reflection** placed in quadrature
+/// (`S11 = j·√(1−|S21|²)`): for a lossless reciprocal symmetric 2-port this is
+/// the exact reflection (it makes `|S11|²+|S21|² = 1` *and* the S-matrix
+/// unitary/passive). This reproduces the prior ideal-path bytes exactly.
+fn lossless_s_pair(s21: Complex64) -> (Complex64, Complex64) {
+    let s21_mag = s21.norm().min(1.0);
+    let s11_mag = (1.0 - s21_mag * s21_mag).max(0.0).sqrt();
+    (Complex64::new(0.0, s11_mag), Complex64::new(s21_mag, 0.0))
 }
 
 /// Linear sweep of `SWEEP_POINTS` frequencies centred on `f0`, spanning
@@ -336,33 +366,33 @@ fn sweep_freqs(f0: f64, fbw: f64) -> Vec<f64> {
         .collect()
 }
 
-/// Build and write a 2-port Touchstone file for a reciprocal, symmetric filter:
-/// `S21 = S12` from the response, `S11 = S22` from `|S11|² = 1 − |S21|²`
-/// (magnitude model). S21 is taken real and S11 is placed in **quadrature**
-/// (`S11 = j·|S11|`) so the symmetric reciprocal matrix `[[jS11, S21],[S21,
-/// jS11]]` has eigenvalues `S21 ± j·|S11|`, both of modulus `√(|S21|²+|S11|²) =
-/// 1` — i.e. it is unitary (passive). A real S11 (the previous form) gives the
-/// eigenvalue `|S21|+|S11| > 1`, a passivity violation that `yee_io::touchstone`
-/// rejects on read-back; the quadrature phase is the correct physical relation
-/// for a lossless symmetric reciprocal 2-port and leaves every magnitude
-/// (`|S21|`, `|S11|`) unchanged.
+/// Build and write a 2-port Touchstone file for a reciprocal, symmetric filter
+/// from the per-frequency `(S11, S21)` pairs the caller supplies. The matrix is
+/// `[[S11, S21], [S21, S11]]` (reciprocal `S12 = S21`, symmetric `S22 = S11`);
+/// the **caller** owns the physics, so `write_s2p` writes the given complex
+/// values verbatim and never re-derives S11.
+///
+/// - Ideal path: S11 is the true lossless reflection in quadrature
+///   (`S11 = j·√(1−|S21|²)`, [`lossless_s_pair`]) → `|S11|²+|S21|² = 1`, unitary.
+/// - Finite-Q path: S11 and S21 are the **true** lossy 2-port from one ABCD
+///   ([`ladder_s_params_lossy`]) → `|S11|²+|S21|² < 1` (absorption), still
+///   passive (`σ_max = √(|S11|²+|S21|²) < 1`), so `yee_io::touchstone` accepts
+///   it on read-back.
+///
+/// (A real S11 with `|S11| = √(1−|S21|²)`, the original form, gave the
+/// eigenvalue `|S21|+|S11| > 1` — a passivity violation `touchstone::read`
+/// rejects, and it also mis-attributed absorptive loss to reflection.)
 fn write_s2p(
     path: &Path,
     z0: f64,
     freqs: &[f64],
-    s21: &[Complex64],
+    s_params: &[(Complex64, Complex64)],
     comment: &str,
 ) -> yee_io::Result<()> {
     let mut data = Vec::with_capacity(freqs.len());
-    for s21f in s21 {
-        let s21_mag = s21f.norm().min(1.0);
-        let s11_mag = (1.0 - s21_mag * s21_mag).max(0.0).sqrt();
-        // S11 in quadrature with the (real) S21 → the symmetric reciprocal
-        // matrix is unitary/passive (see fn docs).
-        let s11 = Complex64::new(0.0, s11_mag);
-        let s21c = Complex64::new(s21_mag, 0.0);
-        // Row-major n×n: [S11, S12, S21, S22].
-        data.push(vec![s11, s21c, s21c, s11]);
+    for &(s11, s21) in s_params {
+        // Row-major n×n: [S11, S12, S21, S22]; reciprocal + symmetric.
+        data.push(vec![s11, s21, s21, s11]);
     }
     let file = File {
         n_ports: 2,
