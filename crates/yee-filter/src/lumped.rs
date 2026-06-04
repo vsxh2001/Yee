@@ -235,8 +235,49 @@ pub fn ladder_s21(ladder: &LumpedLadder, f_hz: f64) -> Complex64 {
 /// This is an internal realized-response helper, **not** part of the documented
 /// public API — it is `#[doc(hidden)] pub` so the `lumped-q-001` gate (a
 /// separate crate) can validate the finite-Q response against Cohn's formula.
+///
+/// Returns only `S21`; see [`ladder_s_params_lossy`] for the full `(S11, S21)`
+/// pair (this function delegates to it, so there is a single ABCD impl and
+/// `S21` is bit-identical to the two-output form).
 #[doc(hidden)]
 pub fn ladder_s21_lossy(ladder: &LumpedLadder, f_hz: f64, q_unloaded: f64) -> Complex64 {
+    ladder_s_params_lossy(ladder, f_hz, q_unloaded).1
+}
+
+/// Realized `(S11, S21)` of the lumped LC ladder at `f_hz` for per-resonator
+/// unloaded quality factor `q_unloaded`, terminated in `ladder.z0_ohm` at both
+/// ports.
+///
+/// Forms the total ABCD of the resonator cascade **once** (same lossy element
+/// model as [`ladder_s21_lossy`] — series `R = ω₀L/Q_u`, shunt `G = ω₀C/Q_u`)
+/// and converts to S-parameters for equal real `Z0` terminations (Pozar
+/// Table 4.2):
+///
+/// ```text
+/// Δ   = A + B/Z0 + C·Z0 + D
+/// S21 = 2 / Δ
+/// S11 = (A + B/Z0 − C·Z0 − D) / Δ
+/// ```
+///
+/// For a **lossless** ladder (`q_unloaded = ∞` or non-positive → `R = G = 0`)
+/// the network is reciprocal and unitary, so `|S11|² + |S21|² = 1`; for a
+/// **finite** `Q` it is dissipative (absorptive) and *passive*, so
+/// `|S11|² + |S21|² < 1` (the deficit is power absorbed in the resonator
+/// losses). This is the **true** lossy 2-port S11 — the absorptive reflection —
+/// not a lossless `√(1−|S21|²)` placeholder.
+///
+/// `ladder_s21_lossy` returns `.1` of this, so the two share one ABCD
+/// implementation and `S21` is bit-identical.
+///
+/// This is an internal realized-response helper, **not** part of the documented
+/// public API — it is `#[doc(hidden)] pub` so the gates / CLI can read the true
+/// lossy reflection without a separate ABCD reimplementation.
+#[doc(hidden)]
+pub fn ladder_s_params_lossy(
+    ladder: &LumpedLadder,
+    f_hz: f64,
+    q_unloaded: f64,
+) -> (Complex64, Complex64) {
     let z0 = Complex64::new(ladder.z0_ohm, 0.0);
     let omega = std::f64::consts::TAU * f_hz;
     let omega0 = std::f64::consts::TAU * ladder.f0_hz;
@@ -296,7 +337,12 @@ pub fn ladder_s21_lossy(ladder: &LumpedLadder, f_hz: f64, q_unloaded: f64) -> Co
         d = nd;
     }
 
-    Complex64::new(2.0, 0.0) / (a + b / z0 + c * z0 + d)
+    // ABCD → S for equal real Z0 terminations (Pozar Table 4.2). S21 keeps the
+    // exact `2/Δ` form ladder_s21_lossy returned before this refactor.
+    let denom = a + b / z0 + c * z0 + d;
+    let s21 = Complex64::new(2.0, 0.0) / denom;
+    let s11 = (a + b / z0 - c * z0 - d) / denom;
+    (s11, s21)
 }
 
 /// The realized-response spec-mask verdict for a [`LumpedLadder`].
@@ -512,5 +558,52 @@ mod tests {
             lossy < lossless,
             "finite-Q |S21|={lossy} should be below lossless |S21|={lossless}"
         );
+    }
+
+    #[test]
+    fn s_params_lossy_s21_matches_scalar_helper() {
+        // ladder_s_params_lossy(..).1 must be bit-identical to ladder_s21_lossy
+        // (the single-ABCD-impl invariant): the scalar helper now delegates to
+        // the two-output form.
+        let (ladder, f0) = tiny_ladder();
+        for &f in &[f0, 0.8 * f0, 1.3 * f0, 1.0e9, 3.5e9] {
+            for &q in &[f64::INFINITY, 0.0, 30.0, 100.0] {
+                let s21_scalar = ladder_s21_lossy(&ladder, f, q);
+                let (_s11, s21_pair) = ladder_s_params_lossy(&ladder, f, q);
+                assert_eq!(
+                    s21_pair, s21_scalar,
+                    "S21 from the pair differs from the scalar helper at f={f:e}, q={q}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn s_params_energy_balance_lossless_vs_lossy() {
+        // The true lossy 2-port S11 from the ABCD must satisfy the energy
+        // balance: lossless (Q=∞ / Q<=0) is unitary so |S11|²+|S21|² == 1; a
+        // finite Q is absorptive so |S11|²+|S21|² < 1 (power is dissipated).
+        // This is exactly the property that distinguishes the TRUE lossy S11
+        // from a lossless √(1−|S21|²) placeholder (which would force == 1).
+        let (ladder, f0) = tiny_ladder();
+        for &f in &[f0, 0.9 * f0, 1.2 * f0] {
+            // Lossless: unitary within numerical tolerance.
+            for &q_lossless in &[f64::INFINITY, 0.0, -5.0] {
+                let (s11, s21) = ladder_s_params_lossy(&ladder, f, q_lossless);
+                let power = s11.norm_sqr() + s21.norm_sqr();
+                assert!(
+                    (power - 1.0).abs() < 1e-9,
+                    "lossless |S11|²+|S21|²={power} != 1 at f={f:e}, q={q_lossless}"
+                );
+            }
+            // Finite Q: strictly absorptive (and still passive, ≤ 1).
+            let (s11, s21) = ladder_s_params_lossy(&ladder, f, 100.0);
+            let power = s11.norm_sqr() + s21.norm_sqr();
+            assert!(
+                power < 1.0 - 1e-9,
+                "finite-Q |S11|²+|S21|²={power} should be < 1 (absorption) at f={f:e}"
+            );
+            assert!(power > 0.0, "power {power} must be positive at f={f:e}");
+        }
     }
 }

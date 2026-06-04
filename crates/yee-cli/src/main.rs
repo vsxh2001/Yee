@@ -323,6 +323,13 @@ enum FilterCommand {
         /// (default), or `0805`. Ignored unless `--lumped` is set.
         #[arg(long, value_enum, default_value_t = FootprintArg::Smd0603)]
         footprint: FootprintArg,
+        /// Per-resonator unloaded quality factor `Q_u` (ADR-0161). When set,
+        /// the exported Touchstone `.s2p` (and `--plot`) carries the realistic
+        /// finite-Q lumped-LC response (`ladder_s21_lossy`) — with midband
+        /// insertion loss and rounded passband corners — instead of the ideal
+        /// lossless one. Independent of `--lumped`. Must be finite and `> 0`.
+        #[arg(long)]
+        q_unloaded: Option<f64>,
     },
 }
 
@@ -518,6 +525,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 kicad_pcb,
                 lumped,
                 footprint,
+                q_unloaded,
             } => filter::run_synth(
                 &spec,
                 output.as_deref(),
@@ -529,6 +537,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 kicad_pcb.as_deref(),
                 lumped,
                 footprint.to_footprint(),
+                q_unloaded,
             ),
         },
         Command::Design {

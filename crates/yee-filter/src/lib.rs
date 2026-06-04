@@ -64,12 +64,13 @@ pub mod lumped;
 pub use lumped::{
     LcBranch, LcResonator, LumpedError, LumpedLadder, MaskVerdict, mask_verdict, synthesize_lumped,
 };
-// `ladder_s21` / `ladder_s21_lossy` are `#[doc(hidden)] pub`: the
-// realized-response ABCD helpers (lossless and finite-Q), kept out of the
+// `ladder_s21` / `ladder_s21_lossy` / `ladder_s_params_lossy` are
+// `#[doc(hidden)] pub`: the realized-response ABCD helpers (lossless and
+// finite-Q S21, plus the full lossy `(S11, S21)` pair), kept out of the
 // documented API surface but reachable by the `lumped_001` / `lumped_q_001`
-// gates.
+// gates and the CLI's finite-Q Touchstone export.
 #[doc(hidden)]
-pub use lumped::{ladder_s21, ladder_s21_lossy};
+pub use lumped::{ladder_s_params_lossy, ladder_s21, ladder_s21_lossy};
 
 /// Monte-Carlo tolerance / yield analysis (Filter Phase F2.4): snap each L/C to
 /// an E-series value, perturb within tolerance over many seeded trials, and
