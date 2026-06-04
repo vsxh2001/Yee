@@ -492,6 +492,21 @@ jobs:
       - name: fem coupled-resonator k vs gap (fem-coupling-002, release, ignored)
         run: cargo test -p yee-fem --release --test fem_coupling_002 -- --ignored --nocapture
 
+      # F1.2.1.1 brick B1 (ADR-0159): FEM-k per-gap coupling design-curve
+      # CORRECTOR. Bisects the gap onto the FEM-measured K(gap) curve until the
+      # realized resonant-split coupling hits a synthesis target (k_target =
+      # 0.040), fixing the impedance-k-vs-resonant-k divergence (k_imp ≠ k_eps;
+      # ADR-0155 K2) that floors the 3-pole filter S21 at ~−27 dB. Asserts the
+      # root-find converged within 8 % of the target inside a 6-eval budget on the
+      # [1.0,4.0] mm bracket, and that the corrected gap moved a real margin off
+      # the deliberately-mis-dimensioned 2.0 mm seed (~20 % off). `#[ignore]`'d so
+      # the default debug `cargo test --workspace` never runs it; run here in
+      # `--release`. ~25 min (one K1-sized driven sweep per bisection eval, ~5-6
+      # evals); fits the GitHub runner (the long-thin coupled-pair box keeps the
+      # per-ω faer sparse-LU bandwidth low).
+      - name: fem coupling gap corrector (fem-coupling-correct-001, release, ignored)
+        run: cargo test -p yee-fem --release --test fem_coupling_correct_001 -- --ignored --nocapture
+
       # F1.2.1.0 (ADR-0157): single-gap surrogate-BO EM-in-loop dimensional
       # refinement — the design engine's walking skeleton. A 1-D Bayesian
       # optimizer (`yee_surrogate::minimize`, EI/GP) drives the FEM resonant-

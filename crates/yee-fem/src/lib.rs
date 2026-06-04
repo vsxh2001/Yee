@@ -61,7 +61,9 @@ pub mod pml_mesh;
 pub mod solve;
 
 pub use assembly::{AssembledMatrices, AssembledMatricesComplex, FemEigenAssembly};
-pub use coupled_resonator_k::{CoupledKResult, CoupledResonatorGeom, coupled_resonator_k};
+pub use coupled_resonator_k::{
+    CoupledKResult, CoupledResonatorGeom, GapCorrection, correct_gap_fem_k, coupled_resonator_k,
+};
 pub use dispersive::{BULK_TAG, DispersiveEigenpair, DispersiveError, DispersiveSolver};
 pub use element::{
     LOCAL_EDGES, NedelecTetElement, NedelecTetElementComplex, assemble_abc_face_block,
