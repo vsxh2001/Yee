@@ -185,8 +185,8 @@ pub fn synthesize_lumped(project: &FilterProject) -> Result<LumpedLadder, Lumped
     })
 }
 
-/// Forward transmission `S21` of the [`LumpedLadder`] at `f_hz`, by cascading
-/// each resonator's ABCD matrix between a `Z0` source and a `Z0` load.
+/// Forward transmission `S21` of the **lossless** [`LumpedLadder`] at `f_hz`, by
+/// cascading each resonator's ABCD matrix between a `Z0` source and a `Z0` load.
 ///
 /// Each shunt resonator contributes a shunt admittance ABCD `[[1, 0], [Y, 1]]`
 /// with `Y = jωC + 1/(jωL)`; each series resonator contributes a series
@@ -194,16 +194,62 @@ pub fn synthesize_lumped(project: &FilterProject) -> Result<LumpedLadder, Lumped
 /// the ordered matrix product, and with equal `Z0` terminations
 /// `S21 = 2 / (A + B/Z0 + C·Z0 + D)` (Pozar eq. 4.74).
 ///
+/// This is the **lossless** (ideal, infinite-Q) response; it is exactly the
+/// `q_unloaded = ∞` case of [`ladder_s21_lossy`] and delegates to it, so there
+/// is a single ABCD implementation (DRY) and the lossless path is provably the
+/// `Q = ∞` limit. The public signature and bit-for-bit behaviour are unchanged
+/// for existing callers.
+///
 /// This is an internal realized-response helper, **not** part of the documented
 /// public API — it is `#[doc(hidden)] pub` solely so the
 /// [`lumped_001`](../../tests/lumped_001.rs) integration gate (a separate crate)
 /// can verify the LC realization reproduces the synthesized response.
 #[doc(hidden)]
 pub fn ladder_s21(ladder: &LumpedLadder, f_hz: f64) -> Complex64 {
+    ladder_s21_lossy(ladder, f_hz, f64::INFINITY)
+}
+
+/// Forward transmission `S21` of the [`LumpedLadder`] at `f_hz` with a finite
+/// per-resonator **unloaded quality factor** `q_unloaded` (ADR-0160).
+///
+/// Identical ABCD cascade to [`ladder_s21`], except each resonator gains a
+/// dissipation term sized so its unloaded Q at band-centre `ω₀ = 2π·f0`
+/// (`ladder.f0_hz`) is `q_unloaded` (Cohn 1959; Hong & Lancaster §3.2):
+///
+/// - **series-branch** resonator — series impedance `Z = R + jωL + 1/(jωC)`
+///   with `R = ω₀·L / q_unloaded` (so the branch unloaded Q is `ω₀L/R`);
+/// - **shunt-branch** resonator — shunt admittance `Y = G + jωC + 1/(jωL)`
+///   with `G = ω₀·C / q_unloaded` (so the branch unloaded Q is `ω₀C/G`).
+///
+/// `q_unloaded` is the single lumped unloaded Q modelling each resonator's
+/// dissipation (surface-mount inductors `Q ≈ 30–100`); finite Q produces
+/// midband insertion loss, rounded passband corners, and a shallower rejection
+/// skirt. With equal `Z0` terminations `S21 = 2 / (A + B/Z0 + C·Z0 + D)`
+/// (Pozar eq. 4.74).
+///
+/// `q_unloaded = f64::INFINITY` (or any non-positive value) gives `R = G = 0`,
+/// i.e. the lossless response **bit-identical** to [`ladder_s21`] — no
+/// division by zero or NaN. The midband insertion loss this produces matches
+/// Cohn's closed form `4.343·Σg/(Q_u·FBW)` (validated by `lumped-q-001`).
+///
+/// This is an internal realized-response helper, **not** part of the documented
+/// public API — it is `#[doc(hidden)] pub` so the `lumped-q-001` gate (a
+/// separate crate) can validate the finite-Q response against Cohn's formula.
+#[doc(hidden)]
+pub fn ladder_s21_lossy(ladder: &LumpedLadder, f_hz: f64, q_unloaded: f64) -> Complex64 {
     let z0 = Complex64::new(ladder.z0_ohm, 0.0);
     let omega = std::f64::consts::TAU * f_hz;
+    let omega0 = std::f64::consts::TAU * ladder.f0_hz;
     let j = Complex64::new(0.0, 1.0);
     let jw = j * omega;
+    // Guard q_unloaded <= 0 (and +∞): a non-positive or infinite Q means "no
+    // loss", i.e. inv_q = 0, so R = G = 0 and the result is bit-identical to the
+    // lossless cascade. This avoids any divide-by-zero / NaN.
+    let inv_q = if q_unloaded.is_finite() && q_unloaded > 0.0 {
+        1.0 / q_unloaded
+    } else {
+        0.0
+    };
 
     // Start from the identity ABCD and right-multiply each resonator's matrix.
     let mut a = Complex64::new(1.0, 0.0);
@@ -217,8 +263,9 @@ pub fn ladder_s21(ladder: &LumpedLadder, f_hz: f64) -> Complex64 {
         // Element ABCD [[ea, eb], [ec, ed]].
         let (ea, eb, ec, ed) = match res.branch {
             LcBranch::Series => {
-                // Series impedance Z = jωL + 1/(jωC).
-                let z = jw * l + Complex64::new(1.0, 0.0) / (jw * cap);
+                // Series impedance Z = R + jωL + 1/(jωC), R = ω₀·L/Q_u.
+                let r = Complex64::new(omega0 * res.l_henry * inv_q, 0.0);
+                let z = r + jw * l + Complex64::new(1.0, 0.0) / (jw * cap);
                 (
                     Complex64::new(1.0, 0.0),
                     z,
@@ -227,8 +274,9 @@ pub fn ladder_s21(ladder: &LumpedLadder, f_hz: f64) -> Complex64 {
                 )
             }
             LcBranch::Shunt => {
-                // Shunt admittance Y = jωC + 1/(jωL).
-                let y = jw * cap + Complex64::new(1.0, 0.0) / (jw * l);
+                // Shunt admittance Y = G + jωC + 1/(jωL), G = ω₀·C/Q_u.
+                let g = Complex64::new(omega0 * res.c_farad * inv_q, 0.0);
+                let y = g + jw * cap + Complex64::new(1.0, 0.0) / (jw * l);
                 (
                     Complex64::new(1.0, 0.0),
                     Complex64::new(0.0, 0.0),
@@ -405,5 +453,64 @@ mod tests {
         // S21 at f0 is finite and well-formed.
         let s21 = ladder_s21(&ladder, f0);
         assert!(s21.norm().is_finite());
+    }
+
+    /// A hand-built 2-resonator ladder for the finite-Q unit tests.
+    fn tiny_ladder() -> (LumpedLadder, f64) {
+        let f0 = 2.0e9;
+        let omega0 = std::f64::consts::TAU * f0;
+        let ladder = LumpedLadder {
+            f0_hz: f0,
+            fbw: 0.1,
+            z0_ohm: 50.0,
+            resonators: vec![
+                LcResonator {
+                    branch: LcBranch::Shunt,
+                    l_henry: 1.0 / (omega0 * omega0 * 1e-12),
+                    c_farad: 1e-12,
+                },
+                LcResonator {
+                    branch: LcBranch::Series,
+                    l_henry: 1.0 / (omega0 * omega0 * 2e-12),
+                    c_farad: 2e-12,
+                },
+            ],
+        };
+        (ladder, f0)
+    }
+
+    #[test]
+    fn lossy_q_infinity_bit_equals_lossless() {
+        // q_unloaded = ∞ must be the bit-identical lossless response, at f0 and
+        // off-centre. (ladder_s21 itself delegates to the Q=∞ case, so this also
+        // proves the single-ABCD-implementation refactor preserved behaviour.)
+        let (ladder, f0) = tiny_ladder();
+        for &f in &[f0, 0.8 * f0, 1.3 * f0, 1.0e9, 3.5e9] {
+            let lossless = ladder_s21(&ladder, f);
+            let lossy_inf = ladder_s21_lossy(&ladder, f, f64::INFINITY);
+            assert_eq!(
+                lossy_inf, lossless,
+                "Q=∞ lossy S21 not bit-identical to lossless at f={f:e}"
+            );
+            // A non-positive Q is also treated as "no loss" (guarded, no NaN).
+            let lossy_zero = ladder_s21_lossy(&ladder, f, 0.0);
+            assert_eq!(lossy_zero, lossless, "Q<=0 must be lossless at f={f:e}");
+            let lossy_neg = ladder_s21_lossy(&ladder, f, -10.0);
+            assert_eq!(lossy_neg, lossless, "Q<0 must be lossless at f={f:e}");
+        }
+    }
+
+    #[test]
+    fn finite_q_reduces_transmission() {
+        // Finite unloaded Q is dissipative, so |S21(f0)| must drop below the
+        // lossless value, and the result stays finite (no NaN/inf).
+        let (ladder, f0) = tiny_ladder();
+        let lossless = ladder_s21(&ladder, f0).norm();
+        let lossy = ladder_s21_lossy(&ladder, f0, 100.0).norm();
+        assert!(lossy.is_finite(), "finite-Q |S21| not finite: {lossy}");
+        assert!(
+            lossy < lossless,
+            "finite-Q |S21|={lossy} should be below lossless |S21|={lossless}"
+        );
     }
 }
