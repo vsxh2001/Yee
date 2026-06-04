@@ -610,22 +610,26 @@ fn bisect_monotone_dec(
     let mut best_err = f64::INFINITY;
     // Fraction of the current bracket to nudge by when a midpoint is unusable.
     let nudge_frac = 0.25;
-    // Track whether the previous midpoint was usable, to decide nudging.
-    let mut last_unusable = false;
+    // Count consecutive unusable midpoints, to nudge progressively further per
+    // miss (a FIXED nudge would re-probe the SAME point on a 2nd consecutive
+    // miss, stalling until the budget drains; scaling by the count explores new
+    // points each time).
+    let mut consecutive_unusable: usize = 0;
 
     while n_evals < max_evals {
         let span = hi - lo;
         let mut mid = 0.5 * (lo + hi);
-        // If the previous sample at the midpoint was unusable, perturb the probe
-        // toward `hi` so we do not re-sample the identical bad point.
-        if last_unusable {
-            mid = (mid + nudge_frac * span).min(hi);
+        // If recent midpoints were unusable, perturb the probe toward `hi` —
+        // progressively further per consecutive miss — so we explore new points
+        // instead of re-sampling the same bad one.
+        if consecutive_unusable > 0 {
+            mid = (mid + nudge_frac * consecutive_unusable as f64 * span).min(hi);
         }
 
         n_evals += 1;
         match eval(mid) {
             Some(y) if y.is_finite() => {
-                last_unusable = false;
+                consecutive_unusable = 0;
                 let err = (y - target).abs() / target.abs();
                 if err < best_err {
                     best_err = err;
@@ -643,8 +647,9 @@ fn bisect_monotone_dec(
                 }
             }
             _ => {
-                // Unusable eval: keep the bracket, nudge next probe (counted).
-                last_unusable = true;
+                // Unusable eval: keep the bracket, nudge the next probe further
+                // (counted against the budget).
+                consecutive_unusable += 1;
             }
         }
     }
