@@ -138,9 +138,23 @@ fn objective(x_norm: &DVector<f64>) -> f64 {
 /// than recovered from `y_best`, so the printed audit shows the true `k_fem`).
 fn measure_k(gap_m: f64) -> f64 {
     let geom = CoupledResonatorGeom::probe_with_gap(gap_m);
-    coupled_resonator_k(&geom, N_PTS)
-        .expect("confirmation eval: coupled_resonator_k failed at a bracketed gap")
-        .k_fem
+    let res = coupled_resonator_k(&geom, N_PTS)
+        .expect("confirmation eval: coupled_resonator_k failed at a bracketed gap");
+    // Guard the confirmation path: a gap with < 2 resolvable peaks yields
+    // k_fem = NaN, which would make the mechanism assertion fail with a
+    // MISLEADING message (NaN comparisons are always false). Surface the real
+    // cause instead. The BO bracket [1.5, 3.0] mm is K2-validated-resolvable so
+    // this should not fire — it is a defensive diagnostic for a future
+    // bracket/geometry change.
+    assert!(
+        res.k_fem.is_finite(),
+        "confirmation eval at gap = {:.4} mm returned non-finite k_fem (peaks_resolvable = {}): \
+         the gap produced < 2 resolvable split peaks, so the EM coupling is undefined there — a \
+         bracket/geometry issue, NOT a mechanism failure",
+        gap_m * 1e3,
+        res.peaks_resolvable,
+    );
+    res.k_fem
 }
 
 /// `bo-coupling-001` — BO with the FEM coupling-k in the loop drives an
@@ -155,7 +169,7 @@ fn measure_k(gap_m: f64) -> f64 {
 ///     -- --ignored --nocapture
 /// ```
 #[test]
-#[ignore = "heavy: 14 sequential FEM driven sweeps (~57 min); run boxed in --release"]
+#[ignore = "heavy: 12 BO + 2 confirmation = 14 sequential FEM driven sweeps (~57 min); run boxed in --release"]
 fn bo_coupling_001_em_in_loop_gap_refine() {
     // ---- 1-D BO over the normalized gap bracket -------------------------
     // 12 evals total (3 LHS initial + 9 EI iters). The seed (2.0 mm) is the
