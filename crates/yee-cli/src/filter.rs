@@ -14,8 +14,8 @@ use num_complex::Complex64;
 use std::process::ExitCode;
 
 use yee_filter::{
-    FilterSpec, check_mask, dimension_edge_coupled, dimension_edge_coupled_layout, ideal_response,
-    synthesize,
+    FilterSpec, Footprint, check_mask, dimension_edge_coupled, dimension_edge_coupled_layout,
+    ideal_response, lumped_board, synthesize, synthesize_lumped,
 };
 use yee_io::touchstone::{File, Format, FreqUnit};
 use yee_layout::Substrate;
@@ -37,9 +37,14 @@ const SPAN_MULT: f64 = 6.0;
 /// prints a diagnostic and returns a non-zero [`ExitCode`] — it is never
 /// silently skipped.
 ///
-/// `--layout-svg` / `--gerber` / `--kicad-pcb` all emit the same edge-coupled
-/// [`Layout`]; it is built **once** (via `dimension_edge_coupled_layout`) when
-/// any of them is set, so the SVG, Gerber, and KiCad board can never diverge.
+/// `--layout-svg` / `--gerber` / `--kicad-pcb` all emit the **same** single
+/// [`Layout`]; it is built **once** when any of them is set, so the SVG, Gerber,
+/// and KiCad board can never diverge. With `lumped == false` (default) that
+/// layout is the edge-coupled distributed layout (`dimension_edge_coupled_layout`);
+/// with `lumped == true` (F2.2, ADR-0158) it is the lumped-LC board
+/// (`synthesize_lumped` → `lumped_board`) on the SAME `--eps-r`/`--h-mm`
+/// substrate, using the supplied SMD `footprint`. The synthesis printout and the
+/// Touchstone `.s2p` are unaffected by `--lumped`.
 // The CLI options are a flat thread-through of independent `synth` flags; a
 // builder/struct here would only obscure the one-to-one mapping with the clap
 // `Synth` variant.
@@ -53,6 +58,8 @@ pub fn run_synth(
     layout_svg: Option<&Path>,
     gerber: Option<&Path>,
     kicad_pcb: Option<&Path>,
+    lumped: bool,
+    footprint: Footprint,
 ) -> Result<ExitCode> {
     let text = std::fs::read_to_string(spec_path)
         .with_context(|| format!("failed to read filter spec {}", spec_path.display()))?;
@@ -156,42 +163,66 @@ pub fn run_synth(
     };
     println!("  substrate: eps_r = {eps_r:.4}   h = {h_mm:.4} mm");
 
-    let dims = match dimension_edge_coupled(&proj, &substrate) {
-        Ok(dims) => dims,
-        Err(e) => {
-            // Surface the unrealizable-coupling (or topology/order) error and
-            // exit non-zero — never silently skip the dimensions.
-            eprintln!("  ERROR: cannot dimension edge-coupled filter: {e}");
-            println!("VERDICT: FAIL (dimensioning)");
-            return Ok(ExitCode::FAILURE);
-        }
-    };
+    // Planar edge-coupled dimensioning + printout — ONLY when not `--lumped`.
+    // The lumped-LC board (ADR-0158) does not depend on edge-coupled
+    // realizability on this substrate, so under `--lumped` we must neither fail
+    // here (a spec that is lumped-realizable but distributed-unrealizable would
+    // otherwise spuriously exit 1) nor print the irrelevant planar dimensions.
+    if !lumped {
+        let dims = match dimension_edge_coupled(&proj, &substrate) {
+            Ok(dims) => dims,
+            Err(e) => {
+                // Surface the unrealizable-coupling (or topology/order) error and
+                // exit non-zero — never silently skip the dimensions.
+                eprintln!("  ERROR: cannot dimension edge-coupled filter: {e}");
+                println!("VERDICT: FAIL (dimensioning)");
+                return Ok(ExitCode::FAILURE);
+            }
+        };
 
-    println!("  physical dimensions (edge-coupled half-wave microstrip):");
-    println!(
-        "    line width       = {:.6e} m  ({:.4} mm)",
-        dims.line_width_m,
-        dims.line_width_m * 1e3
-    );
-    println!(
-        "    resonator length = {:.6e} m  ({:.4} mm)",
-        dims.resonator_length_m,
-        dims.resonator_length_m * 1e3
-    );
-    for (i, (gap, k)) in dims.gaps_m.iter().zip(dims.target_k.iter()).enumerate() {
+        println!("  physical dimensions (edge-coupled half-wave microstrip):");
         println!(
-            "    gap[{i}] = {:.6e} m  ({:.4} mm)   target_k = {k:.6}",
-            gap,
-            gap * 1e3
+            "    line width       = {:.6e} m  ({:.4} mm)",
+            dims.line_width_m,
+            dims.line_width_m * 1e3
         );
+        println!(
+            "    resonator length = {:.6e} m  ({:.4} mm)",
+            dims.resonator_length_m,
+            dims.resonator_length_m * 1e3
+        );
+        for (i, (gap, k)) in dims.gaps_m.iter().zip(dims.target_k.iter()).enumerate() {
+            println!(
+                "    gap[{i}] = {:.6e} m  ({:.4} mm)   target_k = {k:.6}",
+                gap,
+                gap * 1e3
+            );
+        }
     }
 
     // ---- optional layout exports (SVG / Gerber / KiCad) ------------------
-    // Build the edge-coupled layout ONCE when any exporter is requested, so the
+    // Build the export layout ONCE when any exporter is requested, so the
     // `--layout-svg`, `--gerber`, and `--kicad-pcb` outputs can never diverge.
+    // `--lumped` (F2.2, ADR-0158) selects the lumped-LC board (signal line +
+    // ground rail + every L/C component pad) over the planar edge-coupled
+    // layout; both reuse the SAME `substrate` built above from `--eps-r`/`--h-mm`.
     if layout_svg.is_some() || gerber.is_some() || kicad_pcb.is_some() {
-        let layout = dimension_edge_coupled_layout(&proj, &substrate)
-            .map_err(|e| anyhow::anyhow!("failed to build layout: {e}"))?;
+        let layout = if lumped {
+            let ladder = synthesize_lumped(&proj)
+                .map_err(|e| anyhow::anyhow!("failed to synthesize lumped LC ladder: {e}"))?;
+            let board = lumped_board(&ladder, &substrate, footprint);
+            let n_placements = board.placements.len();
+            println!(
+                "  lumped board: {} components ({} resonators), footprint {:?}",
+                n_placements,
+                ladder.resonators.len(),
+                footprint
+            );
+            board.layout
+        } else {
+            dimension_edge_coupled_layout(&proj, &substrate)
+                .map_err(|e| anyhow::anyhow!("failed to build layout: {e}"))?
+        };
         if let Some(svg_path) = layout_svg {
             std::fs::write(svg_path, layout.to_svg())
                 .with_context(|| format!("failed to write layout SVG {}", svg_path.display()))?;
