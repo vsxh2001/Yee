@@ -445,13 +445,20 @@ pub fn coupled_resonator_k(
     let (f_e_lo, f_e_hi) = (f_even.min(f_odd), f_even.max(f_odd));
     let k_eps_ref = (f_e_hi * f_e_hi - f_e_lo * f_e_lo) / (f_e_hi * f_e_hi + f_e_lo * f_e_lo);
 
-    // ---- Sweep band: straddle f_even / f_odd with margin ----------------
-    // Centre the band on 2.4 GHz and span generously past both analytic
-    // resonances so the two FEM peaks (which may shift low from mesh dispersion
-    // + feed-gap loading) are captured with valley + shoulders.
+    // ---- Sweep band: straddle the analytic even/odd split with margin ----
+    // The band TRACKS f0 via the analytic split (f_e_lo / f_e_hi above), NOT a
+    // hardcoded 2.4 GHz centre: coupled_resonator_k must work at the resonators'
+    // actual f0. The filter design-curve (ADR-0159 B2) uses f0 = 2.0 GHz, whose
+    // split sits ~1.9-2.05 GHz — BELOW the old hardcoded 2.10-2.70 GHz probe band,
+    // so every eval returned !peaks_resolvable. We extend 20 % below f_e_lo (FEM
+    // peaks shift LOW from mesh dispersion + feed-gap loading) and 12 % above
+    // f_e_hi for the upper shoulder. At the K1/K2 probe f0 = 2.4 GHz this spans
+    // ~1.9-2.7 GHz, covering the old hardcoded band (re-validated by re-running
+    // fem-coupling-001/002).
     let n_pts = n_pts.max(5);
-    let f_lo_band = 2.10e9;
-    let f_hi_band = 2.70e9;
+    let f_center = 0.5 * (f_e_lo + f_e_hi);
+    let f_lo_band = f_e_lo - 0.20 * f_center;
+    let f_hi_band = f_e_hi + 0.12 * f_center;
     let freqs_hz: Vec<f64> = (0..n_pts)
         .map(|i| f_lo_band + (f_hi_band - f_lo_band) * (i as f64) / ((n_pts - 1) as f64))
         .collect();

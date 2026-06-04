@@ -85,8 +85,9 @@ use std::f64::consts::PI;
 
 use nalgebra::Vector3;
 use yee_fem::{
-    FaceKind, MaterialDatabase, MicrostripPortGeom, OpenBoundarySolver, SParametersMatrix,
-    TraceRect, beta_microstrip, layered_microstrip_filter_mesh, microstrip_port_numerical_at,
+    CoupledResonatorGeom, FaceKind, MaterialDatabase, MicrostripPortGeom, OpenBoundarySolver,
+    SParametersMatrix, TraceRect, beta_microstrip, correct_gap_fem_k,
+    layered_microstrip_filter_mesh, microstrip_port_numerical_at,
 };
 use yee_filter::{
     Approximation, FilterSpec, LumpedLadder, Response, SpecMask, dimension_edge_coupled,
@@ -190,6 +191,13 @@ impl FilterGeometry {
 /// `feed_len` is the straight feed-line length at each end (a known de-embed
 /// reference length); a longer feed buys a cleaner reference plane but more
 /// cells.
+///
+/// `gaps_override` lets a caller substitute its own inter-resonator gaps
+/// (length `N − 1 = 2`) for the analytically dimensioned `dims.gaps_m`. The N3
+/// gate passes `None` (the analytic impedance-k gaps — its behaviour is
+/// BYTE-IDENTICAL); the B2 corrected-gap gate passes `Some(&corrected_gaps)`
+/// (the FEM resonant-split design-curve gaps, ADR-0159). All other geometry
+/// (line width, resonator length, stagger, feeds, box) is unchanged.
 #[allow(clippy::too_many_arguments)]
 fn build_edge_coupled_geometry(
     clearance_x: f64,
@@ -198,6 +206,7 @@ fn build_edge_coupled_geometry(
     dx_target: f64,
     dy_target: f64,
     dz: f64,
+    gaps_override: Option<&[f64]>,
 ) -> FilterGeometry {
     // 1. Synthesize the physical dimensions.
     let project = synthesize(&reference_spec());
@@ -210,7 +219,22 @@ fn build_edge_coupled_geometry(
     let dims = dimension_edge_coupled(&project, &sub).expect("edge-coupled 3-pole synthesizes");
     let w = dims.line_width_m;
     let res_l = dims.resonator_length_m;
-    let gaps = dims.gaps_m; // length N-1 = 2 for a 3-pole filter
+    // The inter-resonator gaps: the analytic impedance-k gaps by default, or a
+    // caller-supplied override (B2 corrected resonant-split gaps). The override
+    // must match the synthesized gap count (N − 1).
+    let gaps: Vec<f64> = match gaps_override {
+        Some(g) => {
+            assert_eq!(
+                g.len(),
+                dims.gaps_m.len(),
+                "gaps_override length ({}) must match the synthesized gap count ({})",
+                g.len(),
+                dims.gaps_m.len(),
+            );
+            g.to_vec()
+        }
+        None => dims.gaps_m,
+    };
     let n = gaps.len() + 1; // 3 resonators
 
     // 2. Lay the N resonators in mesh coords. Long axis = y (propagation),
@@ -465,7 +489,7 @@ fn fem_filter_s21_probe() {
         ("medium  ", 1.3e-3, 4.0e-3, 0.5e-3, 2.5e-3, 5.0e-3, 8.0e-3),
         ("fine    ", 1.0e-3, 3.0e-3, 0.5e-3, 3.0e-3, 5.0e-3, 8.0e-3),
     ] {
-        let geom = build_edge_coupled_geometry(clr, air, feed, dx, dy, dz);
+        let geom = build_edge_coupled_geometry(clr, air, feed, dx, dy, dz, None);
         eprintln!(
             "[probe] {label}: box=({:.1},{:.1},{:.1})mm  n=({},{},{})  tets={}  feed={:.1}mm",
             geom.box_w * 1e3,
@@ -520,6 +544,14 @@ const V1_FLOOR_PEAK_DB: f64 = -42.4;
 /// with margin) and ~9 dB ABOVE the v1 floor (so the v1 analytic port could
 /// NOT pass it): a defensible measured-truth threshold, not a wish.
 const N3_MIN_LIFT_OVER_V1_DB: f64 = 9.0;
+
+/// The N3 (ADR-0154) MEASURED in-band peak (dB) with the IMPEDANCE-k gaps and the
+/// numerical-eigenmode port: −27.38 dB @ 2.00 GHz (the lift-but-short baseline,
+/// boxed --release, base 192cb54). The B2 corrected-gap gate PRINTS its in-band
+/// peak relative to this number; B2 does NOT hard-assert an improvement over it
+/// (the orchestrator pins the measured B2 peak as a regression tripwire AFTER
+/// seeing the real number — so a gap-interaction regression cannot fake-green).
+const N3_BASELINE_PEAK_DB: f64 = -27.38;
 
 /// FEM-EM brick N3 (ADR-0154) — 3-pole microstrip-filter S21 re-graded with the
 /// HIGH-FIDELITY numerical-eigenmode wave-port, vs the analytic ladder reference.
@@ -642,6 +674,7 @@ fn fem_filter_s21_vs_ladder() {
         0.6e-3, // dx (trace ~3 cells, gap ~2.7 cells)
         2.5e-3, // dy (resonator ~16 cells)
         0.5e-3, // dz (2 substrate cells)
+        None,   // analytic impedance-k gaps (N3 baseline — unchanged)
     );
     eprintln!(
         "[N3] filter mesh: box=({:.1},{:.1},{:.1})mm  n=({},{},{})  tets={}  w={:.3}mm  feed={:.1}mm  eps_eff(w)={:.4}",
@@ -901,6 +934,586 @@ fn fem_filter_s21_vs_ladder() {
     }
 }
 
+// =====================================================================
+// FEM-EM brick B2 (ADR-0159) — corrected-gap filter S21 re-grade
+// =====================================================================
+
+/// Synthesis sweep band for the corrected-gap re-grade — IDENTICAL to the N3
+/// gate (1.6–2.4 GHz, 17 points / 50 MHz spacing) so the two curves are graded
+/// on the same frequency grid. Returned as `(freqs_hz, omegas)`.
+fn band_1p6_to_2p4_17pts() -> (Vec<f64>, Vec<f64>) {
+    let n_pts = 17;
+    let f_lo = 1.6e9;
+    let f_hi = 2.4e9;
+    let freqs_hz: Vec<f64> = (0..n_pts)
+        .map(|i| f_lo + (f_hi - f_lo) * (i as f64) / ((n_pts - 1) as f64))
+        .collect();
+    let omegas: Vec<f64> = freqs_hz.iter().map(|f| 2.0 * PI * f).collect();
+    (freqs_hz, omegas)
+}
+
+/// Graded outcome of a filter |S21|(f) sweep vs the analytic ladder reference.
+/// Bundles the corrected-gap re-grade so the B2 gate's prints + asserts read off
+/// one struct (the same quantities the N3 gate computes inline).
+struct GradedCurve {
+    /// `(f_GHz, |S21| dB)` after feed de-embed, on the 17-point band.
+    curve: Vec<(f64, f64)>,
+    /// In-band (`[1.85, 2.15]` GHz) peak |S21| (dB).
+    passband_peak_db: f64,
+    /// In-band peak frequency (GHz).
+    f_inband_peak_ghz: f64,
+    /// Band-edge levels (dB) at 1.6 / 2.4 GHz (interpolated).
+    edge_lo_db: f64,
+    edge_hi_db: f64,
+    /// Turnover (dB): in-band peak above the deeper of the two band edges.
+    turnover_db: f64,
+    /// Asymmetry margin (dB): `depth(1.6 GHz) − depth(2.4 GHz)` (depth = −dB).
+    asym_margin_db: f64,
+    /// Worst |err| vs the ladder reference over the passband window (dB).
+    worst_pass_db: f64,
+    /// Worst |err| vs the ladder reference outside the passband (dB).
+    worst_rej_db: f64,
+}
+
+/// Sweep a filter geometry, de-embed the feeds, and grade |S21|(f) against the
+/// analytic 3-pole Cheb ladder on the standard 17-point band — the shared
+/// measurement path the B2 corrected-gap gate uses. (The N3 baseline gate keeps
+/// its own byte-identical inline copy; this helper is additive and used only by
+/// B2.) `label` tags the printed |S21|(f) table.
+fn sweep_and_grade(geom: &FilterGeometry, label: &str) -> GradedCurve {
+    let (freqs_hz, omegas) = band_1p6_to_2p4_17pts();
+    let t0 = std::time::Instant::now();
+    let sweep = solve_filter(geom, &omegas);
+    let wall = t0.elapsed().as_secs_f64();
+
+    let ladder = reference_ladder();
+    let mut curve: Vec<(f64, f64)> = Vec::with_capacity(freqs_hz.len());
+    eprintln!(
+        "\n[{label}] |S21|(f) ({} pts, sweep {:.1} s):\n{:>8}  {:>10}  {:>10}  {:>10}  {:>10}",
+        freqs_hz.len(),
+        wall,
+        "f(GHz)",
+        "|S21|raw",
+        "|S21|deemb",
+        "S21 dB",
+        "ref dB",
+    );
+    for (k, &omega) in omegas.iter().enumerate() {
+        let s = &sweep.s[k];
+        let s21_raw = s[(1, 0)];
+        let s21 = deembed_feed(s21_raw, omega, geom.line_w, geom.feed_len);
+        let d = db(s21.norm());
+        let f_ghz = freqs_hz[k] / 1e9;
+        let ref_db = db(ladder_s21(&ladder, freqs_hz[k]).norm());
+        curve.push((f_ghz, d));
+        eprintln!(
+            "{:>8.3}  {:>10.4}  {:>10.4}  {:>10.2}  {:>10.2}",
+            f_ghz,
+            s21_raw.norm(),
+            s21.norm(),
+            d,
+            ref_db,
+        );
+    }
+
+    // Grade vs the reference (mirrors oracle_grade::evaluate / the N3 gate).
+    let mut worst_pass_db = 0.0_f64;
+    let mut worst_rej_db = 0.0_f64;
+    for &(f_ghz, d_meas) in &curve {
+        let d_ref = db(ladder_s21(&ladder, f_ghz * 1e9).norm());
+        let err = (d_meas - d_ref).abs();
+        if (1.85..=2.15).contains(&f_ghz) {
+            worst_pass_db = worst_pass_db.max(err);
+        } else {
+            worst_rej_db = worst_rej_db.max(err);
+        }
+    }
+
+    let depth_at = |f_ghz: f64| -> f64 { -interp_db(&curve, f_ghz) };
+    let asym_margin_db = depth_at(1.6) - depth_at(2.4);
+
+    let passband_peak_db = curve
+        .iter()
+        .filter(|(f, _)| (1.85..=2.15).contains(f))
+        .map(|(_, d)| *d)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let f_inband_peak_ghz = curve
+        .iter()
+        .filter(|(f, _)| (1.85..=2.15).contains(f))
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+        .map(|(f, _)| *f)
+        .unwrap_or(f64::NAN);
+    let edge_lo_db = interp_db(&curve, 1.6);
+    let edge_hi_db = interp_db(&curve, 2.4);
+    let turnover_db = passband_peak_db - edge_lo_db.min(edge_hi_db);
+
+    GradedCurve {
+        curve,
+        passband_peak_db,
+        f_inband_peak_ghz,
+        edge_lo_db,
+        edge_hi_db,
+        turnover_db,
+        asym_margin_db,
+        worst_pass_db,
+        worst_rej_db,
+    }
+}
+
+/// FEM-EM brick B2 (ADR-0159) — 3-pole microstrip-filter S21 re-graded after
+/// re-realizing the inter-resonator gaps on the **FEM resonant-split coupling
+/// design-curve** (the Hong-Lancaster full-wave coupling design), vs the
+/// analytic ladder reference.
+///
+/// ## The decisive test
+///
+/// The N3 result ([`fem_filter_s21_vs_ladder`]) floors the full-wave filter S21
+/// at ≈−27.38 dB in-band. The diagnosed root cause (ADR-0155 K2 / ADR-0159): the
+/// analytic dimensioner ([`yee_filter::dimension_edge_coupled`]) sizes the
+/// inter-resonator gaps with the IMPEDANCE-k
+/// (`yee_layout::coupling_coefficient = (Z0e−Z0o)/(Z0e+Z0o)`), which **diverges
+/// ~37 % from the physically-realized RESONANT-SPLIT k** at the tight gaps a
+/// filter uses (`k_imp ≠ k_eps`). In filter theory the coupling coefficient is
+/// DEFINED as the resonant-split `k = (f_hi²−f_lo²)/(f_hi²+f_lo²)` — exactly what
+/// [`yee_fem::coupled_resonator_k`] measures full-wave.
+///
+/// B2 re-realizes the SAME synthesis `target_k` (≈0.0756 for this spec, the
+/// `FBW·m_{i,i+1}` constant from [`EdgeCoupledDimensions::target_k`]) as a
+/// resonant-split k via B1's [`yee_fem::correct_gap_fem_k`] (a bisection on the
+/// monotone-decreasing FEM `K(gap)` curve, ~5-6 FEM sweeps per gap), rebuilds the
+/// filter with the corrected gaps, re-sweeps the SAME 17-point 1.6–2.4 GHz band,
+/// and re-grades vs the Chebyshev mask — recording whether the corrected filter
+/// clears (or materially approaches) the mask vs the −27.38 dB N3 baseline.
+///
+/// ## Measured finding (this run; ADR-0159)
+///
+/// The design-curve MECHANISM works on the filter geometry (the f0-tracking band
+/// resolves the split; `correct_gap_fem_k` traces `K(gap)`), BUT `target_k≈0.0756`
+/// is **UNREACHABLE** as a resonant-split k on the 1.912 mm / FR-4 line — the
+/// resonant-split k saturates ≈0.064 at the tight-gap floor (so the correction
+/// does not converge, best ≈15 % off, and drives the gaps 1.622 → 0.594 mm). The
+/// corrected filter LIFTS the in-band peak **+5.8 dB** over N3 (−27.38 → −21.55 dB)
+/// — stronger coupling helps — but STILL misses the strict Cheb mask by ~26 dB and
+/// the response is a ~−22 dB flat shelf. **Conclusion: dimensioning-correction is a
+/// real but MINOR lever; the dominant floor is the aperture-coupling PORT fidelity
+/// (the ADR-0154 N3 finding), NOT gap dimensioning** — neither this correction nor
+/// a multi-D ASM over gaps (B3) clears the mask without a higher-fidelity port.
+///
+/// ## Non-circularity
+///
+/// The correction target is the SYNTHESIS `target_k` — a fixed design constant
+/// (`FBW · m_{i,i+1}`), NOT any FEM measurement. The corrected gap is found by
+/// driving the INDEPENDENT full-wave `coupled_resonator_k` FEM measurement to
+/// that constant. The re-graded S21 is then an independent FEM driven-sweep on
+/// the rebuilt geometry. Nothing in the loop reads the filter's own S21 to set
+/// the gap, so a curve that improves is real EM evidence, not a fit.
+///
+/// ## Outcome handling — mechanism + lift asserted, finding recorded
+///
+/// The gate PRINTS the full corrected |S21|(f) table + the in-band peak vs the
+/// −27.38 dB N3 baseline + the strict-mask margin, and asserts the TRUE,
+/// reproducible results: (a) the correction MECHANISM (a finite K(gap) was traced
+/// — the f0-tracking band resolves the split on the filter geometry); (b) the gaps
+/// moved materially off the impedance-k gaps, in the TIGHTER (stronger-coupling)
+/// direction; (c) the curve is finite with a band-pass turnover; (d) the measured
+/// in-band peak LIFTED ≥ 3 dB over N3 (measured +5.83 dB — the quantified
+/// dimensioning lever, pinned after the orchestrator saw the real number); (e) the
+/// asymmetry sign is preserved (the N3 ≥1 dB margin is RECORDED-not-asserted, since
+/// the strong-coupling-floor gaps degrade it to +0.70 dB). It does NOT assert
+/// convergence or mask-clearing (both false — target_k is unreachable and the
+/// filter remains port-floored): those are RECORDED as the honest finding, not
+/// faked green, and no physics tolerance is weakened.
+///
+/// ## GATING — CRITICAL (heavy; run by the orchestrator, boxed, `--release`)
+///
+/// This is the heaviest gate in the file: `correct_gap_fem_k` runs ~5-6
+/// [`yee_fem::coupled_resonator_k`] FEM driven sweeps PER gap (one per bisection
+/// eval; the two gaps are equal by symmetry, so the gate corrects ONCE and
+/// reuses), THEN one full 17-point filter `sweep_matrix`. Budget ~45-60 min.
+/// `#[ignore]`'d so the debug `cargo test --workspace` never runs it; run only in
+/// `--release`, boxed:
+///
+/// ```text
+/// YEE_BOX_DIR=$(pwd) YEE_BOX_MEM=14g YEE_BOX_CPUS=3 scripts/yee-box.sh bash -c '\
+///   cargo test -p yee-fem --release --test microstrip_filter_s21 \
+///   -- --ignored fem_filter_s21_corrected_gaps --nocapture'
+/// ```
+#[test]
+#[ignore = "B2 gate: ~5-6 FEM sweeps per gap (gap correction) + one 17-pt filter sweep; ~45-60 min — run only in --release, boxed"]
+fn fem_filter_s21_corrected_gaps() {
+    // ---- 1. Synthesize + dimension (identical to build_edge_coupled_geometry) -
+    let project = synthesize(&reference_spec());
+    let sub = Substrate {
+        eps_r: EPS_R,
+        height_m: SUB_H,
+        loss_tangent: 0.0,
+        metal_thickness_m: 0.0,
+    };
+    let dims = dimension_edge_coupled(&project, &sub).expect("edge-coupled 3-pole synthesizes");
+    let w = dims.line_width_m;
+    let imp_gaps = dims.gaps_m.clone(); // analytic impedance-k gaps (the N3 baseline)
+    let target_k = dims.target_k.clone(); // FBW·m_{i,i+1} synthesis constants (length N-1=2)
+    assert_eq!(
+        target_k.len(),
+        2,
+        "3-pole filter has N-1 = 2 inter-resonator gaps"
+    );
+
+    eprintln!(
+        "[B2] synthesis: w={:.4}mm res_l={:.4}mm  impedance-k gaps={:?}mm  target_k={:?}",
+        w * 1e3,
+        dims.resonator_length_m * 1e3,
+        imp_gaps.iter().map(|g| g * 1e3).collect::<Vec<_>>(),
+        target_k,
+    );
+
+    // ---- 2. Build the FEM design-curve base CoupledResonatorGeom --------------
+    // CORRECTNESS INVARIANT #1: trace_w MUST be the filter's resonator width
+    // (dims.line_width_m), NOT the K1 probe's 1 mm — a different width gives a
+    // DIFFERENT K(gap) design curve and would correct to the wrong gap.
+    //
+    // Box extents MATCH the SHIPPED K1/K2 `CoupledResonatorGeom::probe_with_gap`
+    // config — the proven-tractable, k-VALIDATED open box: CLEARANCE_X = 2.5·h =
+    // 2.5 mm each side in x, air_h = 5 mm above (box_h = 6 mm at h = 1 mm). The
+    // 2.5·h clearance is the B4 "walls don't load the line" floor that K1/K2
+    // measured k against (k_fem ≈ k_eps within tolerance). NOTE: the 6 mm-each-
+    // side clearance B4 used for ABSOLUTE ε_eff is overkill for k (a peak-LOCATION
+    // ratio) and — at the filter's 1.912 mm width — inflates the pair mesh to
+    // ~160k tets, which OOMs the 12 g box. correct_gap_fem_k holds box_w FIXED
+    // while sweeping gap_s, so box_w is sized for the WIDEST bracket gap (gap_hi);
+    // tighter-gap trials simply sit in a slightly-more-open box (the B4 direction).
+    let gap_lo = 0.5e-3; // = DX, the tightest gap the 0.5 mm cross-section pitch resolves.
+    let gap_hi = 2.0e-3; // target_k≈0.076 roots at a TIGHT gap (<1.622mm imp-gap); 2mm is a safe upper bracket.
+    let tol_frac = 0.08;
+    let max_evals = 6;
+    let n_pts = 61;
+    let clearance_x = 2.5e-3; // CLEARANCE_X: 2.5·h, the K1/K2-validated open-box wall clearance.
+    let base = CoupledResonatorGeom {
+        trace_w: w,
+        gap_s: gap_hi, // irrelevant on the base (the corrector sweeps gap_s); set to the widest.
+        sub_h: SUB_H,
+        eps_r: EPS_R,
+        f0_hz: F0,
+        // Two w-wide strips + the widest bracket gap + CLEARANCE_X both sides
+        // (= probe_with_gap's `CLEARANCE_X + W + S + W + CLEARANCE_X`).
+        box_w: 2.0 * clearance_x + 2.0 * w + gap_hi,
+        box_h: SUB_H + 5.0e-3, // sub + 5 mm air = 6 mm (probe_with_gap's open half-space).
+    };
+    eprintln!(
+        "[B2] design-curve base: trace_w={:.4}mm sub_h={:.3}mm eps_r={} f0={:.2}GHz \
+         box_w={:.3}mm box_h={:.3}mm  bracket=[{:.2},{:.2}]mm tol={:.0}% max_evals={} n_pts={}",
+        base.trace_w * 1e3,
+        base.sub_h * 1e3,
+        base.eps_r,
+        base.f0_hz / 1e9,
+        base.box_w * 1e3,
+        base.box_h * 1e3,
+        gap_lo * 1e3,
+        gap_hi * 1e3,
+        tol_frac * 100.0,
+        max_evals,
+        n_pts,
+    );
+
+    // ---- 3. Correct each gap onto the FEM resonant-split design curve ---------
+    // The two target_k are equal by symmetry; we loop for generality + print each
+    // (the corrector prints its per-eval bisection trajectory under --nocapture).
+    // To avoid paying for an identical heavy correction twice, we cache the result
+    // per distinct target_k value.
+    let t_corr = std::time::Instant::now();
+    let mut corrected_gaps: Vec<f64> = Vec::with_capacity(target_k.len());
+    let mut any_converged = false;
+    let mut cache: Vec<(f64, yee_fem::GapCorrection)> = Vec::new();
+    for (i, &kt) in target_k.iter().enumerate() {
+        // Reuse a cached correction if this target_k was already solved (the
+        // symmetric 3-pole has two equal targets — one heavy solve, not two).
+        let corr = if let Some((_, c)) = cache.iter().find(|(k, _)| (k - kt).abs() < 1e-12) {
+            eprintln!(
+                "[B2] gap[{i}] target_k={kt:.4}: REUSING cached correction (equal target by symmetry)"
+            );
+            *c
+        } else {
+            let c = correct_gap_fem_k(&base, kt, gap_lo, gap_hi, tol_frac, max_evals, n_pts);
+            cache.push((kt, c));
+            c
+        };
+        eprintln!(
+            "[B2] gap[{i}] correction: target_k={:.4}  k_fem={:.4}  gap={:.4}mm  \
+             n_evals={}  converged={}  (impedance-k gap was {:.4}mm)",
+            corr.k_target,
+            corr.k_fem,
+            corr.gap_m * 1e3,
+            corr.n_evals,
+            corr.converged,
+            imp_gaps[i] * 1e3,
+        );
+        any_converged |= corr.converged;
+        // Use the best gap whether or not it converged (non-convergence is an
+        // honest finding; we still rebuild with the best available gap).
+        corrected_gaps.push(corr.gap_m);
+    }
+    let corr_wall = t_corr.elapsed().as_secs_f64();
+    eprintln!(
+        "[B2] gap correction wall: {:.1} s  impedance-k gaps={:?}mm -> corrected gaps={:?}mm",
+        corr_wall,
+        imp_gaps.iter().map(|g| g * 1e3).collect::<Vec<_>>(),
+        corrected_gaps.iter().map(|g| g * 1e3).collect::<Vec<_>>(),
+    );
+
+    // ---- 4. Rebuild the filter with the corrected gaps (same mesh params as N3) -
+    let geom = build_edge_coupled_geometry(
+        2.5e-3, // x clearance each side (N3 filter-mesh value)
+        5.0e-3, // air height
+        8.0e-3, // feed length (de-embed reference)
+        0.6e-3, // dx
+        2.5e-3, // dy
+        0.5e-3, // dz
+        Some(&corrected_gaps),
+    );
+    eprintln!(
+        "[B2] corrected-gap filter mesh: box=({:.1},{:.1},{:.1})mm  n=({},{},{})  tets={}  \
+         w={:.3}mm  feed={:.1}mm",
+        geom.box_w * 1e3,
+        geom.box_len * 1e3,
+        geom.box_h * 1e3,
+        geom.nx,
+        geom.ny,
+        geom.nz,
+        geom.total_tets(),
+        geom.line_w * 1e3,
+        geom.feed_len * 1e3,
+    );
+
+    // ---- 5. Re-sweep + de-embed + re-grade over the SAME 17-point band --------
+    let graded = sweep_and_grade(&geom, "B2 corrected-gap");
+
+    // ---- 6. Full report (the orchestrator reads this) ------------------------
+    let lift_over_v1_db = graded.passband_peak_db - V1_FLOOR_PEAK_DB;
+    let lift_over_n3_db = graded.passband_peak_db - N3_BASELINE_PEAK_DB;
+    let depth_lo = -interp_db(&graded.curve, 1.6);
+    let depth_hi = -interp_db(&graded.curve, 2.4);
+    let asym_pass = graded.asym_margin_db >= ASYMMETRY_MARGIN_DB;
+    let strict_pass = graded.worst_pass_db <= PASSBAND_TOL_DB
+        && graded.worst_rej_db <= REJECTION_TOL_DB
+        && asym_pass;
+
+    eprintln!(
+        "\n==== B2 CORRECTED-GAP GRADE (FEM resonant-split design curve; ADR-0159) ====\n\
+         impedance-k gaps    : {:?} mm  (N3 baseline)\n\
+         corrected gaps      : {:?} mm  (FEM resonant-split design curve)\n\
+         gap shift           : {:?} mm\n\
+         any correction conv : {}\n\
+         tets                : {}\n\
+         in-band peak        : {:.2} dB @ {:.2} GHz\n\
+         N3 baseline peak    : {:.2} dB  (impedance-k gaps, ADR-0154 N3)\n\
+         lift over N3        : {:+.2} dB  (PRINTED — orchestrator pins as a tripwire)\n\
+         v1 floor (ref)      : {:.2} dB  (analytic flat-Ez port, B7)\n\
+         lift over v1 floor  : {:+.2} dB\n\
+         band edges          : {:.2} dB @1.6  {:.2} dB @2.4\n\
+         turnover            : {:+.2} dB (in-band peak above the deeper edge)\n\
+         worst passband err  : {:.2} dB vs ref (oracle tol {:.1})\n\
+         worst rejection err : {:.2} dB vs ref (oracle tol {:.1})\n\
+         strict-mask margin  : {} by {:.2} dB in-band (gap to the 0 dB Cheb passband)\n\
+         asymmetry (NAMED)   : depth(1.6)={:.2} dB  depth(2.4)={:.2} dB  margin={:+.2} dB -> {}\n\
+         strict oracle mask  : {}\n\
+         ===========================================================================",
+        imp_gaps.iter().map(|g| g * 1e3).collect::<Vec<_>>(),
+        corrected_gaps.iter().map(|g| g * 1e3).collect::<Vec<_>>(),
+        corrected_gaps
+            .iter()
+            .zip(imp_gaps.iter())
+            .map(|(c, i)| (c - i) * 1e3)
+            .collect::<Vec<_>>(),
+        any_converged,
+        geom.total_tets(),
+        graded.passband_peak_db,
+        graded.f_inband_peak_ghz,
+        N3_BASELINE_PEAK_DB,
+        lift_over_n3_db,
+        V1_FLOOR_PEAK_DB,
+        lift_over_v1_db,
+        graded.edge_lo_db,
+        graded.edge_hi_db,
+        graded.turnover_db,
+        graded.worst_pass_db,
+        PASSBAND_TOL_DB,
+        graded.worst_rej_db,
+        REJECTION_TOL_DB,
+        if strict_pass { "CLEARS" } else { "MISS" },
+        graded.worst_pass_db,
+        depth_lo,
+        depth_hi,
+        graded.asym_margin_db,
+        if asym_pass { "PASS" } else { "FLAG" },
+        if strict_pass { "PASS" } else { "MISS" },
+    );
+
+    // Machine-readable curve for the oracle_grade CLI.
+    let pairs: String = graded
+        .curve
+        .iter()
+        .map(|(f, d)| format!("{f:.3}:{d:.2}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    eprintln!("[B2] oracle_grade pairs: {pairs}");
+
+    // ---- 7. Assertions — HONEST, matched to the MEASURED finding -------------
+    //
+    // B2's measured outcome (ADR-0159, this run): the design-curve correction
+    // MECHANISM works on the real filter geometry — the f0-tracking sweep band
+    // resolves the split at every eval and the corrector traces K(gap) — BUT the
+    // synthesis impedance-k target (target_k ≈ 0.0756) is UNREACHABLE as a
+    // resonant-split k on the 1.912 mm / FR-4 line: k saturates ≈ 0.064 at the
+    // tight-gap floor (evals 1.25→0.0476, 0.875→0.0625, 0.594→0.0641,
+    // 0.523→0.0570 — capped + noisy at tight gaps), so the correction does NOT
+    // converge (best ≈ 15 % off) and drives the gaps to the strong-coupling floor
+    // (1.622 → 0.594 mm). The resulting filter LIFTS the in-band peak +5.8 dB over
+    // the N3 baseline (−27.38 → −21.55 dB) — confirming stronger coupling helps —
+    // but STILL misses the strict Cheb mask by ~26 dB and the response is a ~−22 dB
+    // flat shelf, not a clean band-pass. CONCLUSION: dimensioning-correction is a
+    // real but MINOR lever; the dominant floor is the aperture-coupling PORT
+    // fidelity (the ADR-0154 N3 finding), NOT gap dimensioning — so neither this
+    // correction nor a multi-D ASM over gaps (B3) can clear the mask without a
+    // higher-fidelity port. The gate therefore asserts the MECHANISM + the measured
+    // LIFT (the true, reproducible results) and RECORDS the unreachability /
+    // mask-miss / port-bound conclusion. It does NOT assert convergence or
+    // mask-clearing (both false) — this records a real NO-GO, NOT a fake pass, and
+    // does NOT weaken any physics tolerance.
+    let lift_min_db = 3.0; // conservative floor below the measured +5.83 dB lift.
+    let best_kfem = cache.first().map(|(_, c)| c.k_fem).unwrap_or(f64::NAN);
+
+    // (a) MECHANISM — the f0-tracking band resolved the split and the corrector
+    //     traced a finite K(gap) (best k_fem finite). This is the band/box fix
+    //     working on the filter geometry. Convergence is NOT required: target_k is
+    //     unreachable here, which is the finding (recorded below), not a bug.
+    assert!(
+        best_kfem.is_finite(),
+        "B2 NO-GO: the design-curve correction produced no finite k_fem — the f0-tracking \
+         sweep failed to resolve the split on the filter geometry (band/box regression). \
+         Trajectory printed above."
+    );
+    if !any_converged {
+        eprintln!(
+            "[B2] FINDING: target_k={:.4} UNREACHABLE as a resonant-split k on this geometry \
+             — best k_fem={:.4} ({:.1}% off) at the {:.3}mm gap floor; the resonant-split k \
+             saturates ≈0.064 for the {:.3}mm trace. The impedance-k synthesis target \
+             over-specifies the coupling. NOT a bug — the design-curve MECHANISM works; the \
+             geometry caps the achievable coupling.",
+            target_k[0],
+            best_kfem,
+            (best_kfem - target_k[0]).abs() / target_k[0] * 100.0,
+            corrected_gaps[0] * 1e3,
+            w * 1e3,
+        );
+    }
+
+    // (b) The correction MOVED every gap materially off the impedance-k gap, and in
+    //     the TIGHTER direction (stronger coupling — the impedance-k under-couples,
+    //     k_imp ≠ resonant-split k, ADR-0155 K2). Unconditional (the move is the
+    //     mechanism, independent of convergence).
+    for (i, (&corr_gap, &imp_gap)) in corrected_gaps.iter().zip(imp_gaps.iter()).enumerate() {
+        let move_m = (corr_gap - imp_gap).abs();
+        assert!(
+            move_m >= 0.05e-3,
+            "B2: corrected gap[{i}] {:.4}mm differs from the impedance-k gap {:.4}mm by only \
+             {:.4}mm (need ≥ 0.05mm). The design curve should MOVE the gap off the (divergent) \
+             impedance-k value; a near-zero move means a no-op. Table printed above.",
+            corr_gap * 1e3,
+            imp_gap * 1e3,
+            move_m * 1e3,
+        );
+        assert!(
+            corr_gap < imp_gap,
+            "B2: corrected gap[{i}] {:.4}mm is not TIGHTER than the impedance-k gap {:.4}mm — \
+             the resonant-split design curve should tighten the gap (the impedance-k \
+             under-couples). Table printed above.",
+            corr_gap * 1e3,
+            imp_gap * 1e3,
+        );
+    }
+
+    // (c) The corrected |S21| curve is all-finite with a genuine band-pass turnover
+    //     (in-band peak strictly above the deeper band edge) — a real pass/stop
+    //     shape, not a degenerate / monotonic curve.
+    assert!(
+        graded.curve.iter().all(|(_, d)| d.is_finite()) && graded.passband_peak_db.is_finite(),
+        "B2 NO-GO: the corrected-gap |S21| curve has a non-finite point — the driven solve \
+         degenerated (port collapsed or mesh broken). Table printed above."
+    );
+    assert!(
+        graded.turnover_db > 0.2,
+        "B2: no band-pass turnover — in-band peak {:.2} dB is not above the deeper band edge \
+         (edges {:.2}/{:.2} dB; turnover {:+.2} dB). Table printed above.",
+        graded.passband_peak_db,
+        graded.edge_lo_db,
+        graded.edge_hi_db,
+        graded.turnover_db,
+    );
+
+    // (d) The MEASURED LIFT — the headline reproducible result: correcting the gaps
+    //     onto the (best-achievable) resonant-split coupling lifts the in-band peak
+    //     a real margin over the N3 impedance-k baseline. The quantified
+    //     dimensioning lever (+5.83 dB measured; pinned at ≥ +3 dB).
+    assert!(
+        lift_over_n3_db >= lift_min_db,
+        "B2: in-band peak {:.2} dB did NOT lift ≥ {:.1} dB over the N3 baseline {:.2} dB \
+         (measured lift {:+.2} dB). The design-curve gap correction should raise the in-band \
+         peak (stronger, more-correct coupling); a regression below the pinned lift means the \
+         corrector or the filter build broke. Table printed above.",
+        graded.passband_peak_db,
+        lift_min_db,
+        N3_BASELINE_PEAK_DB,
+        lift_over_n3_db,
+    );
+
+    // (e) Geometric-asymmetry SIGN is preserved (depth(1.6) > depth(2.4)). The very
+    //     tight corrected gaps DEGRADE the asymmetry margin (measured +0.70 dB, vs
+    //     N3's +2.10 dB) — RECORD that (part of the over-tightening finding) and
+    //     assert only that the sign survives, not the ≥ 1 dB N3 margin.
+    assert!(
+        depth_lo > depth_hi,
+        "B2: geometric-asymmetry SIGN lost — depth(1.6 GHz)={depth_lo:.2} dB is not deeper than \
+         depth(2.4 GHz)={depth_hi:.2} dB. The corrected gaps inverted the band-pass-mapping \
+         asymmetry. Table printed above.",
+    );
+    if !asym_pass {
+        eprintln!(
+            "[B2] RECORD: asymmetry margin {:+.2} dB is below the N3 {:.1} dB threshold — the \
+             strong-coupling-floor gaps ({:.3}mm) degrade the asymmetry (N3 was +2.10 dB). Sign \
+             preserved (depth 1.6 > 2.4). Part of the over-tightening finding.",
+            graded.asym_margin_db,
+            ASYMMETRY_MARGIN_DB,
+            corrected_gaps[0] * 1e3,
+        );
+    }
+
+    // (f) Strict Cheb mask — assert ONLY IF the measurement clears it (it does NOT:
+    //     MISS by ~26 dB in-band). Never weaken / force it.
+    if strict_pass {
+        assert!(
+            graded.worst_pass_db <= PASSBAND_TOL_DB && graded.worst_rej_db <= REJECTION_TOL_DB,
+            "internal: strict_pass set but tolerances not met (pass {:.2}, rej {:.2})",
+            graded.worst_pass_db,
+            graded.worst_rej_db,
+        );
+        eprintln!(
+            "[B2] STRICT MASK CLEARS (unexpected): worst passband err {:.2} dB ≤ {:.1}, worst \
+             rejection err {:.2} dB ≤ {:.1}. The EM-in-loop gap correction closed the N3 floor.",
+            graded.worst_pass_db, PASSBAND_TOL_DB, graded.worst_rej_db, REJECTION_TOL_DB,
+        );
+    } else {
+        eprintln!(
+            "[B2] STRICT MASK: MISS by {:.2} dB in-band (in-band peak {:.2} dB; passband \
+             reference ~0 dB). The corrected-gap filter LIFTS {:+.2} dB over N3 but remains a \
+             ~−22 dB flat shelf — the dominant floor is the aperture-coupling PORT fidelity \
+             (ADR-0154 N3), NOT gap dimensioning. Dimensioning is a real but MINOR lever; \
+             neither this correction nor a multi-D ASM over gaps clears the mask without a \
+             higher-fidelity port. Recorded honestly — no fake pass, no weakened tolerance.",
+            graded.worst_pass_db, graded.passband_peak_db, lift_over_n3_db,
+        );
+    }
+}
+
 /// Linear interpolation of the `(f_ghz, dB)` curve at `f_ghz` (clamped to the
 /// endpoints). Mirrors `oracle_grade::interp_db`.
 fn interp_db(pts: &[(f64, f64)], f_ghz: f64) -> f64 {
@@ -937,7 +1550,8 @@ mod unit {
     /// z-plane. Fast (no solve) — runs in the default `cargo test`.
     #[test]
     fn geometry_is_well_formed() {
-        let geom = build_edge_coupled_geometry(2.5e-3, 5.0e-3, 8.0e-3, 1.6e-3, 5.0e-3, 0.5e-3);
+        let geom =
+            build_edge_coupled_geometry(2.5e-3, 5.0e-3, 8.0e-3, 1.6e-3, 5.0e-3, 0.5e-3, None);
         // 3 resonators + input feed + output feed.
         assert_eq!(geom.traces.len(), 5, "3 resonators + 2 feeds");
         // Box clears the trace x-span.
