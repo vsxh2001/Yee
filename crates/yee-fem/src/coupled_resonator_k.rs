@@ -542,6 +542,202 @@ pub fn coupled_resonator_k(
     })
 }
 
+/// Outcome of a per-gap FEM-k coupling design-curve root-find
+/// ([`correct_gap_fem_k`], ADR-0159 B1).
+///
+/// Reports the corrected gap, the FEM-measured coupling there, the synthesis
+/// target it was driven to, how many FEM sweeps it cost, and whether the search
+/// hit the requested tolerance. When `converged` is `false`, [`gap_m`](Self::gap_m)
+/// / [`k_fem`](Self::k_fem) hold the **best** (closest-to-target) usable eval the
+/// bisection saw before exhausting `max_evals` (or finding no usable eval — in
+/// which case `k_fem` is NaN).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GapCorrection {
+    /// The corrected edge-to-edge coupling gap `S` (metres) that realizes
+    /// `k_fem ≈ k_target` — the best gap the bisection found.
+    pub gap_m: f64,
+    /// The FEM-measured resonant-split coupling [`CoupledKResult::k_fem`] at
+    /// [`gap_m`](Self::gap_m). NaN if no usable eval was obtained.
+    pub k_fem: f64,
+    /// The synthesis-side target coupling the root-find drove toward (a fixed
+    /// design constant, NOT a measurement — keeps the gate non-circular).
+    pub k_target: f64,
+    /// Number of [`coupled_resonator_k`] FEM sweeps spent (each midpoint eval,
+    /// including any unusable / nudged ones, counts as one).
+    pub n_evals: usize,
+    /// `true` iff a usable eval landed within `tol_frac` of `k_target`
+    /// (`|k_fem − k_target| / k_target ≤ tol_frac`) inside `max_evals`.
+    pub converged: bool,
+}
+
+/// Bisection root-find of a **monotone-decreasing** scalar function toward a
+/// target value, tolerant of a single noisy / unusable evaluation.
+///
+/// `eval(x)` returns `Some(y)` for a usable sample (finite) or `None` for an
+/// unusable one (a noisy / failed evaluation — e.g. a FEM sweep whose peaks did
+/// not resolve). Because `y(x)` is decreasing, the working bracket maintains
+/// `y(lo) ≥ target ≥ y(hi)` conceptually: at each midpoint `mid`,
+///
+/// * `y(mid) > target` ⇒ we are still on the high side ⇒ move the LOW edge up
+///   (`lo = mid`) to search the larger-`x` (smaller-`y`) half;
+/// * `y(mid) ≤ target` ⇒ move the HIGH edge down (`hi = mid`).
+///
+/// The loop stops as soon as a usable sample satisfies
+/// `|y − target| / |target| ≤ tol_frac` (`converged = true`), or when the eval
+/// budget `max_evals` is spent (`converged = false`). It returns the best
+/// (closest-to-target) usable `(x, y)` seen, the eval count, and the flag.
+///
+/// **Outlier robustness (why bisection, not secant):** if `eval(mid)` is `None`
+/// (unusable), the bracket is left untouched and the next midpoint is *nudged*
+/// a fraction of the bracket width toward `hi`, so a single bad sample neither
+/// crashes nor derails the search (secant would divide by a garbage slope). The
+/// nudge still consumes one eval against `max_evals`, so an all-`None` curve
+/// terminates honestly with `converged = false` rather than looping.
+///
+/// This is the FEM-free core of [`correct_gap_fem_k`]; the fast unit test drives
+/// it with a synthetic decreasing closure (no FEM solve).
+fn bisect_monotone_dec(
+    mut eval: impl FnMut(f64) -> Option<f64>,
+    target: f64,
+    mut lo: f64,
+    mut hi: f64,
+    tol_frac: f64,
+    max_evals: usize,
+) -> (f64, f64, usize, bool) {
+    let mut n_evals = 0usize;
+    let mut best_x = f64::NAN;
+    let mut best_y = f64::NAN;
+    let mut best_err = f64::INFINITY;
+    // Fraction of the current bracket to nudge by when a midpoint is unusable.
+    let nudge_frac = 0.25;
+    // Track whether the previous midpoint was usable, to decide nudging.
+    let mut last_unusable = false;
+
+    while n_evals < max_evals {
+        let span = hi - lo;
+        let mut mid = 0.5 * (lo + hi);
+        // If the previous sample at the midpoint was unusable, perturb the probe
+        // toward `hi` so we do not re-sample the identical bad point.
+        if last_unusable {
+            mid = (mid + nudge_frac * span).min(hi);
+        }
+
+        n_evals += 1;
+        match eval(mid) {
+            Some(y) if y.is_finite() => {
+                last_unusable = false;
+                let err = (y - target).abs() / target.abs();
+                if err < best_err {
+                    best_err = err;
+                    best_x = mid;
+                    best_y = y;
+                }
+                if err <= tol_frac {
+                    return (best_x, best_y, n_evals, true);
+                }
+                // Monotone-DECREASING: y too HIGH ⇒ need a LARGER x (smaller y).
+                if y > target {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            _ => {
+                // Unusable eval: keep the bracket, nudge next probe (counted).
+                last_unusable = true;
+            }
+        }
+    }
+
+    (best_x, best_y, n_evals, false)
+}
+
+/// Correct a coupling gap to realize a target coupling `k` via the FEM resonant
+/// split — the EM coupling **design-curve** root-find (Hong-Lancaster full-wave
+/// coupling design; ADR-0159 B1, see [[reference-em-in-loop-space-mapping]]).
+///
+/// The analytic dimensioner sizes coupling gaps from the impedance-k
+/// `(Z0e−Z0o)/(Z0e+Z0o)`, which diverges ~37 % from the FEM-realized resonant-k
+/// at the gaps a filter actually uses (k_imp ≠ k_eps; ADR-0155 K2). This drives
+/// the gap onto the **measured** `K(gap)` curve instead: it bisects
+/// `g ↦ coupled_resonator_k({..base, gap_s: g}, n_pts).k_fem` over
+/// `[gap_lo, gap_hi]` until the FEM coupling hits `k_target` within `tol_frac`.
+///
+/// `K(gap)` is **monotone-decreasing** (wider gap → weaker coupling; confirmed
+/// smooth + monotone by a 12-solve probe), so the bisection direction is: if the
+/// measured `k_fem(mid) > k_target` the coupling is too strong ⇒ the gap is too
+/// SMALL ⇒ search the larger-gap half `[mid, hi]`; otherwise search `[lo, mid]`.
+/// Bisection (not secant) is deliberate — it tolerates a single noisy / outlier
+/// extraction (the F1.2.1.0 run saw one) without dividing by a garbage slope.
+///
+/// Only `gap_s` is varied; every other field of `base` (including
+/// [`box_w`](CoupledResonatorGeom::box_w)) is held fixed, so the strips move
+/// inside an otherwise-fixed cross-section. (The `box_w`-from-gap re-derivation
+/// lives only in [`CoupledResonatorGeom::probe_with_gap`]; the solve path reads
+/// `gap_s` / `box_w` independently — confirmed.)
+///
+/// # Robustness
+///
+/// A `coupled_resonator_k` call that returns `Err`, reports
+/// `!peaks_resolvable`, or yields a non-finite `k_fem` is treated as an
+/// **unusable** sample: the bracket is left intact and the next midpoint is
+/// nudged toward `hi` (the eval is still counted against `max_evals`), so one
+/// bad sweep neither panics nor derails the search. The returned
+/// [`GapCorrection`] always holds the best usable eval seen.
+///
+/// # Cost
+///
+/// HEAVY: **one [`coupled_resonator_k`] FEM driven sweep per eval** (multi-minute
+/// each — the probe was ~280 s for 61 pts). At `max_evals = 6` this is ~5-6
+/// sweeps. Callers must `#[ignore]` + `--release` + box the test that drives it;
+/// never run it in the debug workspace test.
+pub fn correct_gap_fem_k(
+    base: &CoupledResonatorGeom,
+    k_target: f64,
+    gap_lo: f64,
+    gap_hi: f64,
+    tol_frac: f64,
+    max_evals: usize,
+    n_pts: usize,
+) -> GapCorrection {
+    // Each midpoint gap → one FEM sweep; unusable (Err / !resolvable / non-finite)
+    // maps to `None` so the bisection core nudges past it instead of crashing.
+    // A per-eval trajectory line is emitted to stderr (visible under
+    // `--nocapture`) so the heavy gate can audit the root-find path; it is
+    // diagnostic-only and never affects the returned `GapCorrection`.
+    let mut eval_idx = 0usize;
+    let eval = |g: f64| -> Option<f64> {
+        eval_idx += 1;
+        let geom = CoupledResonatorGeom { gap_s: g, ..*base };
+        let sample = match coupled_resonator_k(&geom, n_pts) {
+            Ok(res) if res.peaks_resolvable && res.k_fem.is_finite() => Some(res.k_fem),
+            _ => None,
+        };
+        match sample {
+            Some(k) => eprintln!(
+                "[correct_gap_fem_k] eval #{eval_idx}: gap={:.4}mm  k_fem={k:.4}  (target={k_target:.4})",
+                g * 1e3
+            ),
+            None => eprintln!(
+                "[correct_gap_fem_k] eval #{eval_idx}: gap={:.4}mm  UNUSABLE (err / !peaks_resolvable / non-finite) — nudging",
+                g * 1e3
+            ),
+        }
+        sample
+    };
+
+    let (gap_m, k_fem, n_evals, converged) =
+        bisect_monotone_dec(eval, k_target, gap_lo, gap_hi, tol_frac, max_evals);
+
+    GapCorrection {
+        gap_m,
+        k_fem,
+        k_target,
+        n_evals,
+        converged,
+    }
+}
+
 /// Build the two-port driven solver for the coupled pair and run the sweep.
 /// Trace (resonators + feeds) AND ground tagged interior-PEC (B1); the two
 /// y-end-caps carry the numerical-eigenmode wave-port recentred per feed
@@ -763,6 +959,104 @@ mod tests {
                 "box_w must be the two-strip span + CLEARANCE_X each side"
             );
         }
+    }
+
+    /// The bisection core finds the root of a SYNTHETIC monotone-decreasing
+    /// closure WITHOUT any FEM solve — this is the FEM-free unit test of the
+    /// [`correct_gap_fem_k`] root-find logic (the heavy gate validates it on the
+    /// real `coupled_resonator_k` curve). The closure `k(g) = 0.09 − 20.0·g` is a
+    /// clean decreasing line over `g ∈ [1e-3, 4e-3]` (k: 0.07 → 0.01); for the
+    /// target k = 0.040 the analytic root is `g* = (0.09 − 0.040)/20 = 2.5 mm`.
+    /// Asserts it converges to that root within `tol_frac` and in the
+    /// bisection-bound `⌈log2(range/(2·tol_in_g))⌉`-ish evals. FAST (no FEM).
+    #[test]
+    fn bisect_monotone_dec_finds_synthetic_root() {
+        let k_of = |g: f64| Some(0.09 - 20.0 * g);
+        let target = 0.040;
+        let (lo, hi) = (1.0e-3, 4.0e-3);
+        let tol_frac = 0.02;
+        let max_evals = 20;
+
+        let (g_star, k_star, n_evals, converged) =
+            bisect_monotone_dec(k_of, target, lo, hi, tol_frac, max_evals);
+
+        assert!(converged, "synthetic bisection must converge (clean line)");
+        let err = (k_star - target).abs() / target;
+        assert!(
+            err <= tol_frac,
+            "converged k {k_star:.5} must be within {tol_frac} of target {target} (err {err:.4})"
+        );
+        // Analytic root g* = (0.09 − target)/20 = 2.5 mm; the converged k is
+        // within tol of target, so the gap is within tol/20 of 2.5 mm.
+        let g_analytic = (0.09 - target) / 20.0;
+        assert!(
+            (g_star - g_analytic).abs() < 1.0e-4,
+            "converged gap {:.4}mm must be near the analytic root {:.4}mm",
+            g_star * 1e3,
+            g_analytic * 1e3,
+        );
+        // Bisection halves the bracket each usable step. To reach |k−target| ≤
+        // tol_frac·target the gap-error must fall below tol_frac·target/20; the
+        // step bound is ⌈log2((hi−lo)/(tol_frac·target/20))⌉.
+        let tol_g = tol_frac * target / 20.0;
+        let bound = (((hi - lo) / tol_g).log2().ceil() as usize) + 1;
+        assert!(
+            n_evals <= bound,
+            "clean bisection took {n_evals} evals, expected ≤ {bound}"
+        );
+    }
+
+    /// The bisection core tolerates a single UNUSABLE (`None`) eval without
+    /// crashing or stalling: the same synthetic line, but the first probe at the
+    /// bracket midpoint (2.5 mm) is poisoned to `None` once. The search must nudge
+    /// past it and still converge to the analytic root. This guards the
+    /// outlier-robustness contract (the F1.2.1.0 run saw one extraction outlier).
+    /// FAST (no FEM).
+    #[test]
+    fn bisect_monotone_dec_tolerates_one_outlier() {
+        let mut poisoned = false;
+        let k_of = |g: f64| {
+            // Poison exactly the first midpoint sample (g = 2.5 mm) once.
+            if !poisoned && (g - 2.5e-3).abs() < 1e-9 {
+                poisoned = true;
+                return None;
+            }
+            Some(0.09 - 20.0 * g)
+        };
+        let target = 0.040;
+        let (g_star, k_star, n_evals, converged) =
+            bisect_monotone_dec(k_of, target, 1.0e-3, 4.0e-3, 0.02, 20);
+
+        assert!(
+            converged,
+            "bisection must survive one outlier and still converge (got n_evals={n_evals})"
+        );
+        assert!(
+            (k_star - target).abs() / target <= 0.02,
+            "post-outlier converged k {k_star:.5} must be within tol of {target}"
+        );
+        assert!(
+            (g_star - (0.09 - target) / 20.0).abs() < 1.0e-4,
+            "post-outlier converged gap {:.4}mm must still be near the analytic root",
+            g_star * 1e3
+        );
+    }
+
+    /// An ALL-unusable curve terminates honestly: `correct_gap_fem_k`'s core
+    /// returns `converged = false` with `n_evals = max_evals` (it does not loop
+    /// forever) and a NaN best-k. FAST (no FEM).
+    #[test]
+    fn bisect_monotone_dec_all_unusable_terminates() {
+        let k_of = |_g: f64| None;
+        let max_evals = 6;
+        let (_g, k_star, n_evals, converged) =
+            bisect_monotone_dec(k_of, 0.040, 1.0e-3, 4.0e-3, 0.02, max_evals);
+        assert!(
+            !converged,
+            "an all-unusable curve must not report converged"
+        );
+        assert_eq!(n_evals, max_evals, "must spend the full budget, not loop");
+        assert!(k_star.is_nan(), "no usable eval ⇒ best-k is NaN");
     }
 
     /// Sanity: the resolved probe geometry lands near the probe's measured
