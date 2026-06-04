@@ -311,7 +311,49 @@ enum FilterCommand {
         /// (`.kicad_pcb`) to this path (F1.4.1b `yee_export::layout_to_kicad_pcb`).
         #[arg(long)]
         kicad_pcb: Option<PathBuf>,
+        /// Export the **lumped-LC** board (F2.2 `yee_filter::lumped_board`)
+        /// instead of the planar edge-coupled layout. The `--layout-svg`,
+        /// `--gerber`, and `--kicad-pcb` writers then emit the lumped board
+        /// (signal line + ground rail + every L/C component pad) rather than
+        /// the distributed half-wave resonators. The synthesized dimensions /
+        /// Touchstone printout is unaffected.
+        #[arg(long)]
+        lumped: bool,
+        /// SMD chip footprint for the `--lumped` board: `0402`, `0603`
+        /// (default), or `0805`. Ignored unless `--lumped` is set.
+        #[arg(long, value_enum, default_value_t = FootprintArg::Smd0603)]
+        footprint: FootprintArg,
     },
+}
+
+/// SMD chip footprint selector for `yee filter synth --lumped`.
+///
+/// A thin clap-`ValueEnum` mirror of [`yee_filter::Footprint`] so the
+/// `--footprint 0402|0603|0805` flag parses to a typed value (and rejects an
+/// unknown size at the CLI boundary). Mapped to the library enum by
+/// [`FootprintArg::to_footprint`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum FootprintArg {
+    /// 0402 (1.0 × 0.5 mm body) chip.
+    #[value(name = "0402")]
+    Smd0402,
+    /// 0603 (1.6 × 0.8 mm body) chip — the F2.2 default.
+    #[value(name = "0603")]
+    Smd0603,
+    /// 0805 (2.0 × 1.25 mm body) chip.
+    #[value(name = "0805")]
+    Smd0805,
+}
+
+impl FootprintArg {
+    /// Map the CLI selector to the [`yee_filter::Footprint`] library enum.
+    fn to_footprint(self) -> yee_filter::Footprint {
+        match self {
+            FootprintArg::Smd0402 => yee_filter::Footprint::Smd0402,
+            FootprintArg::Smd0603 => yee_filter::Footprint::Smd0603,
+            FootprintArg::Smd0805 => yee_filter::Footprint::Smd0805,
+        }
+    }
 }
 
 /// Arguments to [`run_design`], mirroring the [`Command::Design`] variant.
@@ -474,6 +516,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 layout_svg,
                 gerber,
                 kicad_pcb,
+                lumped,
+                footprint,
             } => filter::run_synth(
                 &spec,
                 output.as_deref(),
@@ -483,6 +527,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 layout_svg.as_deref(),
                 gerber.as_deref(),
                 kicad_pcb.as_deref(),
+                lumped,
+                footprint.to_footprint(),
             ),
         },
         Command::Design {
