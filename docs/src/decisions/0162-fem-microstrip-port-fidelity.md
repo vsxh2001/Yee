@@ -92,6 +92,37 @@ with ε_eff/β unchanged (N2/B4 stay green). Then B3' applies the corrected extr
 the filter field also transmits in-band, the −27 dB was largely an extraction artifact and the mask may
 be reachable; if the filter field genuinely reflects in-band, that residual is real.)
 
+## Final outcome (B2'→B3'' — SHIPPED, merge `bb9608a`; the filter floor is COUPLING, not extraction)
+
+**B2' (the extraction fix — REAL WIN):** a power-correct **E+H modal wave-port extraction** —
+`a_fwd/a_bwd = ½(projE ± projH)`, `projE = ∫(E_FEM×h_m)·ẑ/κ`, `projH = ∫(e_m×H_FEM)·ẑ/κ`,
+`κ = ∫(e_m×h_m)·ẑ` (un-conjugated, the fwd/bwd split via the H sign flip; Jin/COMSOL recipe), with the
+true modal H from `∇×E/(−jωμ)`. On the matched thru it recovers `|S21| 0.778 → 1.0001`,
+`|S11|²+|S21|² 0.6145 → 1.0037`, ε_eff 0.66 % (β unchanged). The old E-only L² normalization
+under-counted a *transmitting* port by ~40 %; this is a genuine S-parameter-correctness fix.
+
+**B3'→B3'' (the filter test — the honest reversal):** the in-situ modal reference (B3') gave a *spurious*
+in-band peak −0.86 dB (+26 dB) but an **UNPHYSICAL** curve (`|S21|→2.96`, `|S|²sum→12.7`) — standing-wave
+contamination of the in-situ reference at the reflective filter feeds; the honest gate (passivity) caught
+it. A **clean modal basis** from a matched reference line + a port-FACE E&H projection (B3'') makes the
+curve PHYSICAL (`|S21|≤0.05`, in-band `|S|²sum 0.79–0.93`) and reveals the **true** filter: in-band peak
+**−26.14 dB (only +1.24 dB over N3)**, in-band **`|S11| ≈ 0.85–0.91`** — the filter **GENUINELY REFLECTS
+in-band** (transmits ~0.2 %), mask MISS by ~33.7 dB (asymmetry PASS +2.17 dB).
+
+**DECISION / honest conclusion:** the −27 dB filter floor is **REAL coupling-bound reflection** (the
+resonators do not realize the Chebyshev in-band match), **NOT an extraction or port-fidelity artifact**.
+The B3' +26 dB was an unphysical contamination false-positive (recorded as such; no fake claimed). The
+funded port-fidelity hypothesis is **refuted as the filter floor**. **What this track delivered:** (a) a
+correct power-conserving E+H wave-port extraction (`power_modal_extract`; thru `|S21|→1`, reusable —
+though NOT yet wired into the production `extract_s_qp`, a deferred follow-on); (b) reusable diagnostics
+(`poynting_flux_audit` + `element::tet_whitney_e_and_curl`); (c) the **definitive diagnosis** — the filter
+floor is COUPLING (ADR-0159 territory; dimensioning lifted only +5.8 dB), corroborated by N3's independent
+E-only −27 dB and the physical in-band `|S|²sum`. The reviewer (APPROVE-WITH-FIXES, no P0/P1) confirmed the
+extraction math, that the reflection conclusion is sound (not an x-shift artifact — symmetric mirror feeds
+cancel in S21), and the gate honesty. **A mask-clearing full-wave filter S21 needs the COUPLING addressed
+(why the FEM filter mismatches in-band) — a different track from port-fidelity; the port/extraction is now
+exonerated as the floor.**
+
 ## Consequences
 
 - If B1+B2 confirm + fix the normalization, a mask-clearing (or much-closer) full-wave filter S21 may be
