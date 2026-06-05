@@ -201,6 +201,26 @@ fn barycentric_gradients_and_volume(vertices: &[Vector3<f64>; 4]) -> ([Vector3<f
     ([grad_0, grad_1, grad_2, grad_3], signed_volume)
 }
 
+/// Barycentric coordinates `λ_0..λ_3` of a world-space point `p` in a
+/// tetrahedron (Phase 4 ADR-0162 B2' point-location helper).
+///
+/// `λ_i(p) = δ_{i,0} + ∇λ_i · (p − v_0)` (affine, exact). Strictly inside
+/// the tet all four are in `(0, 1)`; on the boundary one or more are `0`;
+/// outside, at least one is negative. Callers use this for point-in-tet
+/// location (with a small tolerance) before evaluating the Whitney field
+/// via [`tet_whitney_e_and_curl`]. Shares the exact gradient convention of
+/// the assembly.
+pub(crate) fn tet_barycentric(vertices: &[Vector3<f64>; 4], p: Vector3<f64>) -> [f64; 4] {
+    let (grads, _v) = barycentric_gradients_and_volume(vertices);
+    let dp = p - vertices[0];
+    let mut lambda = [0.0_f64; 4];
+    for i in 0..4 {
+        lambda[i] = grads[i].dot(&dp);
+    }
+    lambda[0] += 1.0;
+    lambda
+}
+
 /// Evaluate the full 3-D Whitney-1 (Nédélec) electric field and its
 /// (constant) curl on a tetrahedron, from the six per-edge **complex**
 /// DoF amplitudes (Phase 4 ADR-0162 B1.5 Poynting-flux audit helper).

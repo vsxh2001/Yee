@@ -1,6 +1,7 @@
-//! FEM-EM port-fidelity de-risk (ADR-0162 bricks **B1 + B1.5**) — a
-//! power-balance + Poynting-flux energy audit on the matched straight
-//! microstrip THRU.
+//! FEM-EM port-fidelity de-risk + fix (ADR-0162 bricks **B1 + B1.5 +
+//! B2'**) on the matched straight microstrip THRU: a power-balance probe
+//! (B1), a Poynting-flux energy audit (B1.5), and the power-correct E+H
+//! modal-decomposition extraction that fixes the floor (B2').
 //!
 //! ## The decisive, cheap experiment
 //!
@@ -111,11 +112,23 @@ const NX: usize = 12;
 const NZ: usize = 12;
 const F_TEST: f64 = 2.0e9;
 
-// A single short thru: L1 = 20 mm, ny = 8 (dy = 2.5 mm), the same first
-// length the N2 two-length extraction uses. The power balance is
-// length-independent for a lossless line, so one solve is decisive.
+// Thru length 1: L1 = 20 mm, ny = 8 (dy = 2.5 mm), the same first length
+// the N2 two-length extraction uses. The power balance is length-
+// independent for a lossless line, so one solve decides the magnitude
+// gate; the B2' ε_eff cross-check uses a second length.
 const L_THRU: f64 = 20.0e-3;
 const NY_THRU: usize = 8;
+
+// Thru length 2 for the B2' two-length ε_eff cross-check: L2 = 40 mm,
+// ny = 16 → matched dy = 2.5 mm (identical to the N2/B4 gate), so the
+// per-cell numerical-dispersion phase cancels in the phase difference.
+const L_THRU2: f64 = 40.0e-3;
+const NY_THRU2: usize = 16;
+
+/// Wrap a phase difference into `(−π, π]` (matches the N2/B4 gate helper).
+fn wrap_pi(x: f64) -> f64 {
+    x.sin().atan2(x.cos())
+}
 
 /// Count exterior faces — same helper as the N2 gate fixture.
 fn exterior_face_count(mesh: &TetMesh3D) -> usize {
@@ -265,34 +278,59 @@ fn eps_r_at(p: Vector3<f64>) -> f64 {
 ///   B1.5 Poynting-flux energy audit (TRUE H = ∇×E/(−jωμ), no modal approx)
 ///        P_in  (into driven port 0)  = 1.7137e-10 W
 ///        P_out (out of port 1)       = 1.7107e-10 W
-///        P_out / P_in  (FIELD ratio) = 0.9982   <- THE DECISIVE NUMBER
-///        |S21|²/(1−|S11|²) (S ratio) = 0.6109   <- the SAME field, via the S-params
+///        P_out / P_in  (FIELD ratio) = 0.9982   <- B1.5 decisive (field lossless)
+///        |S21|²/(1−|S11|²) (S ratio) = 0.6109   <- the SAME field, E-only S extraction
+///
+///   B2'  power-correct E+H modal extraction (THE FIX)
+///        |S11|_B2' = 0.0581   |S21|_B2' = 1.0001   |S11|²+|S21|² = 1.0037
+///        a_fwd(0)=1.0004  a_bwd(0)=0.0582  a_fwd(1)=1.0005   (matched-thru signature)
+///        β = 74.40 rad/m   ε_eff = 3.1507  (HJ 3.1715, err 0.66%)   ← β UNCHANGED
 /// ```
 ///
-/// **Decision: EXTRACTION ARTIFACT — the port-fidelity track is
-/// SALVAGEABLE.** The B1.5 audit is decisive and overturns the B1-only
-/// reading. The solved field's true Poynting power balance is
-/// `P_out/P_in = 0.9982` — it transmits essentially **all** incident power
-/// from port 0 to port 1, losing ~0.2 %. So the ≈0.61 S-parameter balance
-/// is **NOT real loss**: the field conserves energy; the S-parameter
-/// *extraction* under-counts the transmitted power. The proof is the
-/// side-by-side `|S21|²/(1−|S11|²) = 0.6109` (the same field through the
-/// S-formula) vs `P_out/P_in = 0.9982` (the same field through Poynting) —
-/// a ~0.39 gap that is purely the extraction normalization.
+/// **B1/B1.5 decision: EXTRACTION ARTIFACT (track salvageable).** The B1.5
+/// audit overturns the B1-only reading. The solved field's true Poynting
+/// balance `P_out/P_in = 0.9982` transmits essentially **all** incident
+/// power (lossless to ~0.2 %), yet the SAME field through the E-only S
+/// extraction reads `|S21|²/(1−|S11|²) = 0.6109` — a ~0.39 gap that is
+/// purely the extraction normalization, not loss.
 ///
-/// This resolves the B1 caveat (B1's quasi-TEM power-norm lifted the
-/// balance only +0.06, leaving it ambiguous whether the residual was real
-/// loss or an approximate-modal-H artifact): with the **true** H there is
-/// **no** loss, so the residual is an extraction artifact. The B1 √ε_r
-/// power-norm helped little only because its quasi-TEM modal-H *shape* is
-/// itself approximate, not because the deficit is loss. The fix is a
-/// **flux-calibrated extraction** (normalize the modal projection so it
-/// counts the true modal power flux `½Re∫(e_m×h_m*)·ẑ` consistently) —
-/// reconsider B2 in that form rather than as the quasi-TEM √ε_r reweight.
+/// **B2' result: GO — the fix works.** The power-correct **two-field (E+H)
+/// modal decomposition** recovers `|S21| = 1.0001` (E-only floored at
+/// 0.778), a power balance `|S11|²+|S21|² = 1.0037` (E-only 0.61), with
+/// `ε_eff` unchanged at 0.66 % vs Hammerstad-Jensen (no β regression). The
+/// matched-thru modal amplitudes (`a_fwd(0)≈a_fwd(1)≈1`, `a_bwd(0)≈0.058`)
+/// are textbook. This confirms B1.5 (the deficit WAS extraction, not loss)
+/// and is the fix the filter S21 floor needs.
 ///
-/// `P_out/P_in` is robust to the H sign / `(ωμ)`-scaling convention (it
-/// cancels in the ratio) and to global field normalization, so the
-/// conclusion does not hinge on a convention choice.
+/// ## What made B2' work (three ingredients; the first two attempts failed)
+///
+/// 1. **Two-field (E+H) decomposition, not E-only.** `a_fwd =
+///    ½(proj_E+proj_H)`, `a_bwd = ½(proj_E−proj_H)` with
+///    `proj_E = ∫(E_FEM×h_m)·ŷ`, `proj_H = ∫(e_m×H_FEM)·ŷ` — the E- and
+///    H-projections add for a forward wave and subtract for a backward one,
+///    which is the incident/reflected separation the E-only L² projection
+///    cannot do. `S_pp = a_bwd(p)/a_fwd(p)`, `S_qp = a_fwd(q)/a_fwd(p)`.
+/// 2. **UN-conjugated cross products** (attempt 1 used `(e_m×H_FEM*)`,
+///    conjugating `H_FEM` → `γ*`, which broke the phase, β = −12.5, and
+///    over-counted reflection to balance 1.55). With phase-aligned modal
+///    fields the reaction products must be un-conjugated so `α = a⁺+a⁻`,
+///    `γ = a⁺−a⁻` come out clean.
+/// 3. **TRUE modal `(e_m,h_m)`, not a uniform-admittance approximation**
+///    (attempt 2 used `h_m = (β/ωμ₀)(ŷ×e_m)`, a uniform admittance that
+///    mis-weights the inhomogeneous air+dielectric cross-section → floored
+///    at |S21|=0.835). The fix samples the TRUE modal field from an
+///    interior cross-section at `y = L/2` (`H = ∇×E/(−jωμ)`, the B1.5
+///    reconstruction), de-rotated by the analytic forward phase `e^{+jβy}`
+///    — giving the correct spatially-varying admittance. Forward and
+///    backward share the same transverse profile, so the modal SHAPE is
+///    exact even with residual reflection (the contamination is a common
+///    complex scalar that cancels in every S-ratio).
+///
+/// `ŷ_prop = +ŷ` is the common Poynting axis at BOTH ports; the modal
+/// reaction-norm κ cancels in every S-ratio (so unit-power normalization is
+/// unnecessary for the S-parameters). The β/ε_eff use the wrap-free
+/// two-length phase of the B2' S21 (matched dy), directly comparable to the
+/// N2/B4 gate. **B2 productionization (replace `extract_s_qp`) is now GO.**
 #[test]
 #[ignore = "driven SOLVE (per-ω sparse LU + 2-D eigensolves); run only in --release, boxed"]
 fn port_power_balance_001() {
@@ -317,6 +355,45 @@ fn port_power_balance_001() {
     let audit = solver
         .poynting_flux_audit(omega, 0)
         .expect("Poynting-flux audit must succeed");
+
+    // ── B2': power-correct E+H modal extraction on the SAME solver. The
+    // modal pair (e_m, h_m) is the TRUE modal field sampled from the
+    // interior cross-section at y = L/2 (de-rotated by the analytic forward
+    // phase), giving the correct spatially-varying admittance; the
+    // decomposition uses the TRUE H_FEM from B1.5. ──
+    let pm_l1 = solver
+        .power_modal_extract(omega, 0, L_THRU / 2.0)
+        .expect("B2' power-modal extraction (L1) must succeed");
+    let s11_pm = pm_l1.s_column[0];
+    let s21_pm = pm_l1.s_column[1];
+    let bal_pm = s11_pm.norm_sqr() + s21_pm.norm_sqr();
+
+    // ε_eff cross-check: a SECOND length L2 (matched dy) gives the
+    // two-length phase difference arg(S21(L2))−arg(S21(L1)) = −β·ΔL, the
+    // same wrap-free extraction the N2/B4 gate uses — so ε_eff is directly
+    // comparable and any β regression shows up.
+    let (mesh2, material_db2, ground_pred2, trace_pred2) =
+        layered_microstrip_mesh(BOX_W, BOX_H, L_THRU2, SUB_H, TRACE_W, NX, NY_THRU2, NZ)
+            .expect("layered_microstrip_mesh (L2) must build");
+    let solver2 = build_thru_solver(
+        &mesh2,
+        material_db2,
+        L_THRU2,
+        &ground_pred2,
+        &trace_pred2,
+        &geom,
+    );
+    let pm_l2 = solver2
+        .power_modal_extract(omega, 0, L_THRU2 / 2.0)
+        .expect("B2' power-modal extraction (L2) must succeed");
+    let s21_pm_l2 = pm_l2.s_column[1];
+
+    let c0 = 299_792_458.0_f64;
+    let dphi = wrap_pi(s21_pm_l2.arg() - s21_pm.arg());
+    let beta_pm = -dphi / (L_THRU2 - L_THRU);
+    let eps_eff_pm = (beta_pm * c0 / omega).powi(2);
+    let eps_eff_hj = yee_layout::eps_eff(TRACE_W, SUB_H, EPS_R);
+    let eps_err = (eps_eff_pm - eps_eff_hj).abs() / eps_eff_hj;
 
     // Single frequency, 2-port: read S11 = s[(0,0)], S21 = s[(1,0)].
     let s_l2 = &sweep.s_l2[0];
@@ -352,10 +429,20 @@ fn port_power_balance_001() {
          P_in  (into driven port 0)  : {:.6e} W\n\
          P_out (out of port 1)       : {:.6e} W\n\
          per-port net leaving (W)    : [{:.4e}, {:.4e}]\n\
-         P_out/P_in  (FIELD ratio)   : {:.4}   <-- THE DECISIVE NUMBER (→1 or ≪1?)\n\
-         |S21|²/(1−|S11|²) (S ratio) : {s_param_ratio:.4}   (S-parameter analogue, cross-check)\n\
+         P_out/P_in  (FIELD ratio)   : {:.4}   <-- B1.5 DECISIVE (→1 or ≪1?)\n\
+         |S21|²/(1−|S11|²) (S ratio) : {s_param_ratio:.4}   (E-only S analogue, cross-check)\n\
          \n\
-         decision: {}\n\
+         --- B2': power-correct E+H modal extraction (THE FIX) ---\n\
+         a_fwd(0) (incident) |.|     : {:.4}\n\
+         a_bwd(0) (reflected) |.|    : {:.4}\n\
+         a_fwd(1) (transmitted) |.|  : {:.4}\n\
+         |S11|_B2'                   : {:.4}\n\
+         |S21|_B2'                   : {:.4}   <-- GO if ≥ 0.95\n\
+         |S11|²+|S21|²_B2'           : {bal_pm:.4}   <-- GO if ≥ 0.95\n\
+         β_B2' (two-length)          : {beta_pm:.3} rad/m\n\
+         ε_eff_B2'                   : {eps_eff_pm:.4}   (HJ ref {eps_eff_hj:.4}, err {:.2}%)  <-- GO if ≲ 1%\n\
+         \n\
+         B2' GATE: |S21|≥0.95 [{}]  bal≥0.95 [{}]  ε_eff≲1% [{}]  ==> {}\n\
          ==================================================",
         L_THRU * 1e3,
         F_TEST / 1e9,
@@ -368,32 +455,70 @@ fn port_power_balance_001() {
         audit.p_leaving[0],
         audit.p_leaving[1],
         audit.power_ratio,
-        if audit.power_ratio > 0.95 {
-            "P_out/P_in ≈ 1 ⇒ the SOLVED FIELD conserves energy ⇒ the ≈0.61 S-balance is an \
-             EXTRACTION ARTIFACT ⇒ port-fidelity track SALVAGEABLE (flux-calibrated extraction)"
-        } else if audit.power_ratio < 0.8 {
-            "P_out/P_in ≪ 1 ⇒ REAL volume/ABC loss in the solve ⇒ the floor is numerical/ABC \
-             dissipation (K3 Q-floor) ⇒ B2 NO-GO confirmed, re-scope to the solver/ABC"
+        pm_l1.a_fwd[0].norm(),
+        pm_l1.a_bwd[0].norm(),
+        pm_l1.a_fwd[1].norm(),
+        s11_pm.norm(),
+        s21_pm.norm(),
+        eps_err * 100.0,
+        if s21_pm.norm() >= 0.95 {
+            "PASS"
         } else {
-            "P_out/P_in in (0.8, 0.95) ⇒ PARTIAL solve loss ⇒ mixed cause; inspect before B2"
+            "FAIL"
+        },
+        if bal_pm >= 0.95 { "PASS" } else { "FAIL" },
+        if eps_err <= 0.01 { "PASS" } else { "FAIL" },
+        if s21_pm.norm() >= 0.95 && bal_pm >= 0.95 && eps_err <= 0.01 {
+            "B2' GO — power-correct extraction recovers |S21|→~1, energy-conserving, β unchanged"
+        } else {
+            "B2' SHORT — see numbers; surface the best achieved (do NOT fake the gate)"
         },
     );
 
-    // Non-degeneracy only — this is a MEASUREMENT probe. It does NOT assert
-    // a target balance or ratio (that would pre-judge the GO/NO-GO the
-    // numbers must drive). Surface a pipeline collapse, then let the
-    // printed numbers speak.
+    // ── Non-degeneracy guards (do NOT pre-judge the numbers). ──
     assert!(
-        bal_l2.is_finite() && bal_pow.is_finite() && audit.power_ratio.is_finite(),
+        bal_l2.is_finite()
+            && bal_pow.is_finite()
+            && audit.power_ratio.is_finite()
+            && bal_pm.is_finite()
+            && eps_eff_pm.is_finite(),
         "a probe output is non-finite (bal_L²={bal_l2}, bal_pow={bal_pow}, \
-         P_out/P_in={}) — the diagnostic diverged and cannot conclude",
+         P_out/P_in={}, bal_B2'={bal_pm}, ε_eff_B2'={eps_eff_pm}) — diverged",
         audit.power_ratio
     );
     assert!(
-        s21_l2.norm() > 1e-6 && s21_pow.norm() > 1e-6 && audit.p_in.abs() > 0.0,
-        "|S21| or P_in collapsed to ~0 (|S21|_L²={:.3e}, P_in={:.3e} W) — the numerical \
-         port degenerated to a hard wall; re-run/inspect before reading the ratios",
+        s21_l2.norm() > 1e-6 && audit.p_in.abs() > 0.0 && s21_pm.norm() > 1e-6 && beta_pm > 0.0,
+        "|S21| / P_in / β collapsed (|S21|_L²={:.3e}, P_in={:.3e} W, |S21|_B2'={:.3e}, \
+         β_B2'={beta_pm:.3}) — the numerical port degenerated; inspect before reading",
         s21_l2.norm(),
         audit.p_in,
+        s21_pm.norm(),
+    );
+
+    // ── B2' GO GATE (ADR-0162). The make-or-break fix: a power-correct
+    // extraction must drive the matched thru to |S21|→~1, |S11|²+|S21|²→~1,
+    // with β/ε_eff unchanged (no N2/B4 regression). A SHORT result is a
+    // valid honest outcome to surface — but the gate asserts the GO target
+    // so a passing run is unambiguous and a regression is caught. If this
+    // fires, report the printed numbers; do NOT weaken the thresholds. ──
+    assert!(
+        s21_pm.norm() >= 0.95,
+        "B2' |S21| = {:.4} fell short of the 0.95 GO target (E-only floor ≈0.778, \
+         B1.5 field-true ratio 0.998). The E+H modal decomposition did not fully \
+         recover the transmission — surface the number + the convention used; do NOT \
+         lower the threshold.",
+        s21_pm.norm()
+    );
+    assert!(
+        bal_pm >= 0.95,
+        "B2' |S11|²+|S21|² = {bal_pm:.4} fell short of the 0.95 power-balance GO target \
+         (E-only ≈0.61). The extraction is not yet power-unitary."
+    );
+    assert!(
+        eps_err <= 0.01,
+        "B2' ε_eff = {eps_eff_pm:.4} vs Hammerstad-Jensen {eps_eff_hj:.4} → {:.2}% exceeds \
+         the ~1% no-regression bound: the power-correct extraction must not disturb the \
+         phase the N2/B4 gate validates.",
+        eps_err * 100.0
     );
 }
