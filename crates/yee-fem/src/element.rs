@@ -201,6 +201,64 @@ fn barycentric_gradients_and_volume(vertices: &[Vector3<f64>; 4]) -> ([Vector3<f
     ([grad_0, grad_1, grad_2, grad_3], signed_volume)
 }
 
+/// Evaluate the full 3-D Whitney-1 (Nédélec) electric field and its
+/// (constant) curl on a tetrahedron, from the six per-edge **complex**
+/// DoF amplitudes (Phase 4 ADR-0162 B1.5 Poynting-flux audit helper).
+///
+/// Given the tet `vertices`, a world-space evaluation point `p` inside
+/// (or on the boundary of) the tet, and the six edge amplitudes
+/// `edge_amp[α]` (the global solution coefficient on local edge `α`,
+/// already multiplied by the local→global orientation sign and `0` for
+/// PEC-eliminated edges), returns
+///
+/// ```text
+///     ( E(p) = Σ_α edge_amp[α] · N_α(p) ,   ∇×E = Σ_α edge_amp[α] · (∇×N_α) )
+/// ```
+///
+/// where `N_α = λ_i ∇λ_j − λ_j ∇λ_i` and `∇×N_α = 2 ∇λ_i × ∇λ_j` for
+/// local edge `α = (i, j)` (per [`LOCAL_EDGES`]). The barycentric
+/// coordinates `λ(p)` are recovered from the gradients via
+/// `λ_i(p) = λ_i(v_0) + ∇λ_i · (p − v_0)` with `λ_i(v_0) = δ_{i0}`
+/// (affine, exact for the linear barycentric map).
+///
+/// The curl is constant on the tet, so it does not depend on `p`. This
+/// is exposed `pub(crate)` so the open-boundary Poynting-flux diagnostic
+/// reconstructs both `E` and `H = ∇×E/(−jωμ)` with the **exact same**
+/// Whitney-1 convention as the assembly.
+pub(crate) fn tet_whitney_e_and_curl(
+    vertices: &[Vector3<f64>; 4],
+    p: Vector3<f64>,
+    edge_amp: &[Complex64; 6],
+) -> (Vector3<Complex64>, Vector3<Complex64>) {
+    let (grads, _signed_volume) = barycentric_gradients_and_volume(vertices);
+
+    // Barycentric coordinates of p: λ_i(p) = δ_{i0-ref} + ∇λ_i·(p − v_0),
+    // using λ_i(v_0) = δ_{i,0}. (Affine reconstruction; exact.)
+    let dp = p - vertices[0];
+    let mut lambda = [0.0_f64; 4];
+    for i in 0..4 {
+        lambda[i] = grads[i].dot(&dp);
+    }
+    lambda[0] += 1.0; // λ_0(v_0) = 1
+
+    let mut e = Vector3::<Complex64>::zeros();
+    let mut curl = Vector3::<Complex64>::zeros();
+    for (alpha, &(i, j)) in LOCAL_EDGES.iter().enumerate() {
+        // N_α(p) = λ_i ∇λ_j − λ_j ∇λ_i   (real vector), scaled by the
+        // complex edge amplitude.
+        let n_alpha = grads[j] * lambda[i] - grads[i] * lambda[j];
+        let curl_alpha = 2.0 * grads[i].cross(&grads[j]);
+        let amp = edge_amp[alpha];
+        e.x += amp * Complex64::new(n_alpha.x, 0.0);
+        e.y += amp * Complex64::new(n_alpha.y, 0.0);
+        e.z += amp * Complex64::new(n_alpha.z, 0.0);
+        curl.x += amp * Complex64::new(curl_alpha.x, 0.0);
+        curl.y += amp * Complex64::new(curl_alpha.y, 0.0);
+        curl.z += amp * Complex64::new(curl_alpha.z, 0.0);
+    }
+    (e, curl)
+}
+
 /// Assemble the `6 × 6` Nedelec local stiffness + mass block for a
 /// single tetrahedron with **complex scalar** `ε(ω)`, `μ(ω)`
 /// (Phase 4.fem.eig.1).

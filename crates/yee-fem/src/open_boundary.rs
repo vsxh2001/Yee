@@ -176,7 +176,7 @@ use crate::element::{
     assemble_port_face_block_gauss_pts, assemble_port_face_block_projected,
     assemble_port_face_block_projected_gauss_pts, assemble_port_face_rhs_gauss_pts,
     assemble_port_modal_rhs, assemble_tet_element_complex,
-    assemble_tet_element_complex_anisotropic,
+    assemble_tet_element_complex_anisotropic, tet_whitney_e_and_curl,
 };
 use crate::material::MaterialDatabase;
 
@@ -981,6 +981,30 @@ fn cross_dot_zhat_complex(
         + cz * Complex64::new(z_hat.z, 0.0)
 }
 
+/// Compute `(E × H*) · n̂` for **complex** transverse-or-full `E` and `H`,
+/// used by the Poynting-flux energy audit
+/// [`OpenBoundarySolver::poynting_flux_audit`] (ADR-0162 B1.5). The
+/// complex Poynting vector is `S = ½ (E × H*)`; this returns the
+/// (un-halved) `(E × H*) · n̂` so the caller takes `½ Re(·)` for the
+/// time-average active power flux through the face. `H*` is the complex
+/// conjugate of `H`.
+fn cross_conj_dot_n_complex(
+    e: &Vector3<Complex64>,
+    h: &Vector3<Complex64>,
+    n_hat: &Vector3<f64>,
+) -> Complex64 {
+    let hxc = h.x.conj();
+    let hyc = h.y.conj();
+    let hzc = h.z.conj();
+    // (E × H*) = (Ey Hz* − Ez Hy*, Ez Hx* − Ex Hz*, Ex Hy* − Ey Hx*).
+    let cx = e.y * hzc - e.z * hyc;
+    let cy = e.z * hxc - e.x * hzc;
+    let cz = e.x * hyc - e.y * hxc;
+    cx * Complex64::new(n_hat.x, 0.0)
+        + cy * Complex64::new(n_hat.y, 0.0)
+        + cz * Complex64::new(n_hat.z, 0.0)
+}
+
 /// **Diagnostic output (ADR-0162 B1 de-risk).** The two S-matrices read
 /// off the *same* driven FEM field by
 /// [`OpenBoundarySolver::sweep_matrix_power_balance`]: the production
@@ -1003,6 +1027,45 @@ pub struct PowerBalanceSweep {
     /// normalization (`κ_m = Re∫(e_m×h_m*)·ẑ`, quasi-TEM modal H). Same
     /// indexing as [`Self::s_l2`].
     pub s_power: Vec<DMatrix<Complex64>>,
+}
+
+/// **Diagnostic output (ADR-0162 B1.5 de-risk).** A Poynting-flux energy
+/// audit of the solved driven field at one frequency, for one excited
+/// port, computed by [`OpenBoundarySolver::poynting_flux_audit`].
+///
+/// Reconstructs the magnetic field `H = ∇×E / (−jωμ)` from the solved
+/// electric DoFs with the **true** Whitney-1 curl (no modal-H
+/// approximation) and integrates the complex Poynting vector
+/// `S = ½(E × H*)` through every port face. The decisive quantity is
+/// [`Self::power_ratio`] = `P_out / P_in`: ≈1 means the solved field
+/// conserves energy (so the ≈0.61 S-parameter power balance is an
+/// extraction artifact, not lost power); ≪1 means the solve itself loses
+/// power to the ABC / numerical dissipation.
+#[derive(Debug, Clone)]
+pub struct PoyntingAudit {
+    /// Angular frequency (rad/s) of the audited solve.
+    pub omega: f64,
+    /// The excited (driven) port index.
+    pub driven_port: PortId,
+    /// Net **active** power flowing INTO the driven port (W), i.e.
+    /// `−½ Re ∮(E×H*)·n̂_out` over the driven port's faces (incident −
+    /// reflected). Positive when net power enters the structure there.
+    pub p_in: f64,
+    /// Total net **active** power flowing OUT of every non-driven port
+    /// (W): `+½ Re ∮(E×H*)·n̂_out` summed over the other ports' faces
+    /// (transmitted power).
+    pub p_out: f64,
+    /// Per-port net active power **leaving** the structure through that
+    /// port (W): `+½ Re ∮(E×H*)·n̂_out` over port `q`'s faces.
+    /// `p_leaving[driven_port]` is negative (net inflow at the source);
+    /// the other entries are the transmitted outflows.
+    pub p_leaving: Vec<f64>,
+    /// The decisive ratio `P_out / P_in`. For a lossless 2-port this is
+    /// `≈ 1` iff the solved field conserves energy; it equals the field's
+    /// `|S21|²/(1−|S11|²)`. `< 0.95` indicates real solve loss
+    /// (ABC / numerical dissipation), `> 0.95` an energy-conserving field
+    /// whose S-parameter power deficit is an extraction artifact.
+    pub power_ratio: f64,
 }
 
 impl<'m> OpenBoundarySolver<'m> {
@@ -2334,6 +2397,228 @@ impl<'m> OpenBoundarySolver<'m> {
 
         let alpha = overlap / Complex64::new(kappa_m, 0.0);
         Ok(alpha - Complex64::new(a_inc_q, 0.0))
+    }
+
+    /// Build the mesh's canonical global-edge numbering as a
+    /// `sorted-vertex-pair → global-edge-id` map (ADR-0162 B1.5 helper).
+    ///
+    /// Walks `self.mesh.tetrahedra` in order, visiting each tet's six
+    /// [`LOCAL_EDGES`] and assigning a fresh id on first encounter —
+    /// **bit-identical** to the numbering both
+    /// [`crate::assembly::TetEdgeTable::build`] and
+    /// `ExteriorFaceTable::build` produce, so the returned ids index the
+    /// same global-edge space as `DrivenSystem::interior_dof_of_edge`.
+    fn global_edge_id_map(&self) -> HashMap<(usize, usize), usize> {
+        let mut map: HashMap<(usize, usize), usize> = HashMap::new();
+        for tet in &self.mesh.tetrahedra {
+            for &(li, lj) in LOCAL_EDGES.iter() {
+                let (a, b) = (tet[li], tet[lj]);
+                let key = if a < b { (a, b) } else { (b, a) };
+                let next = map.len();
+                map.entry(key).or_insert(next);
+            }
+        }
+        map
+    }
+
+    /// Map each exterior-face sorted-vertex-triplet key to its (unique)
+    /// parent tet index (ADR-0162 B1.5 helper).
+    ///
+    /// An exterior face is shared by exactly one tet, so the map is
+    /// well-defined. Built once per audit by walking the tet list.
+    fn exterior_face_parent_tet(&self) -> HashMap<[usize; 3], usize> {
+        const TET_FACES: [[usize; 3]; 4] = [[1, 2, 3], [0, 2, 3], [0, 1, 3], [0, 1, 2]];
+        // Count face incidence, then keep only count-1 faces with their
+        // single parent tet.
+        let mut count: HashMap<[usize; 3], (usize, usize)> = HashMap::new();
+        for (tet_idx, tet) in self.mesh.tetrahedra.iter().enumerate() {
+            for &[a, b, c] in TET_FACES.iter() {
+                let mut key = [tet[a], tet[b], tet[c]];
+                key.sort_unstable();
+                let entry = count.entry(key).or_insert((0, tet_idx));
+                entry.0 += 1;
+                entry.1 = tet_idx;
+            }
+        }
+        count
+            .into_iter()
+            .filter_map(|(k, (c, tet_idx))| (c == 1).then_some((k, tet_idx)))
+            .collect()
+    }
+
+    /// **Diagnostic (ADR-0162 B1.5 de-risk).** Poynting-flux energy audit
+    /// of the solved driven field — distinguishes an **extraction
+    /// artifact** from **real solve loss** as the cause of the ≈0.61
+    /// S-parameter power balance the B1 probe measured.
+    ///
+    /// The B1 power-wave-normalization probe used a quasi-TEM modal-H
+    /// **approximation** and lifted the thru balance only `0.61 → 0.67`.
+    /// This audit removes that approximation entirely: it reconstructs the
+    /// **true** magnetic field `H = ∇×E / (−jωμ)` from the solved electric
+    /// DoFs via the exact Whitney-1 curl ([`tet_whitney_e_and_curl`]) and
+    /// integrates the complex Poynting vector `S = ½(E × H*)` through the
+    /// port faces (the same 3-pt Gauss faces the S-extraction uses, `n̂`
+    /// the outward port-face normal).
+    ///
+    /// For a lossless 2-port the active power into the driven port must
+    /// equal the active power out of the other port iff the **solved
+    /// field** conserves energy. The returned [`PoyntingAudit::power_ratio`]
+    /// `= P_out / P_in` therefore answers the decisive question:
+    ///
+    /// * `≈ 1` (e.g. `> 0.95`) ⇒ the field conserves energy ⇒ the ≈0.61
+    ///   S-parameter balance is an **extraction artifact** (mis-normalized
+    ///   S, physics fine) ⇒ a flux-calibrated extraction could recover it;
+    /// * `≪ 1` ⇒ **real volume / ABC loss** in the solve ⇒ the floor is
+    ///   numerical/ABC dissipation (the K3 Q-floor).
+    ///
+    /// The driven solve (assembly + LU + per-port back-substitution) is
+    /// **bit-identical** to [`Self::sweep_matrix`] / the B1 probe — the
+    /// audit reads off the same solved field, only post-processing it
+    /// through Poynting rather than the modal projection.
+    ///
+    /// `H = ∇×E/(−jωμ)` uses the per-tet absolute permeability
+    /// `μ = μ_r(tag) · μ₀` looked up from the [`MaterialDatabase`] (μ_r = 1
+    /// for the non-magnetic microstrip, so `μ = μ₀`).
+    ///
+    /// # Errors
+    ///
+    /// Propagates assembly / LU errors from the same paths as
+    /// [`Self::sweep_matrix`]; returns [`Error::Invalid`] if
+    /// `excited_port` is out of range or a port face has no parent tet
+    /// (malformed mesh).
+    pub fn poynting_flux_audit(
+        &self,
+        omega: f64,
+        excited_port: PortId,
+    ) -> Result<PoyntingAudit, Error> {
+        if excited_port >= self.ports.len() {
+            return Err(Error::Invalid(format!(
+                "OpenBoundarySolver::poynting_flux_audit: excited_port = {excited_port} \
+                 out of range (n_ports = {})",
+                self.ports.len()
+            )));
+        }
+
+        // ── Same assemble + factor + drive as `sweep_matrix`. ──
+        let system = self.assemble_driven_system(omega)?;
+        let n_interior = system.rhs.len();
+        let lu: Lu<usize, Complex64> = system.matrix.sp_lu().map_err(|e| {
+            Error::Numerical(format!(
+                "OpenBoundarySolver::poynting_flux_audit: sparse LU at omega = {omega} \
+                 failed: {e:?}"
+            ))
+        })?;
+        let rhs_p = self.build_rhs_for_excited_port(
+            omega,
+            excited_port,
+            &system.interior_dof_of_edge,
+            n_interior,
+        )?;
+        let mut rhs_mat = faer::Mat::<Complex64>::zeros(n_interior, 1);
+        for (i, &b_i) in rhs_p.iter().enumerate() {
+            rhs_mat[(i, 0)] = b_i;
+        }
+        lu.solve_in_place_with_conj(faer::Conj::No, rhs_mat.as_mut());
+        let e_interior: Vec<Complex64> = (0..n_interior).map(|i| rhs_mat[(i, 0)]).collect();
+
+        // ── Connectivity for the H reconstruction. ──
+        let edge_id = self.global_edge_id_map();
+        let parent_tet = self.exterior_face_parent_tet();
+        let mu0 = yee_core::units::MU0;
+        let neg_j_omega = Complex64::new(0.0, -omega);
+
+        let n_ports = self.ports.len();
+        let mut p_leaving = vec![0.0_f64; n_ports];
+
+        for (i, kind) in self.face_kinds.iter().enumerate() {
+            let FaceKind::WavePort(q) = *kind else {
+                continue;
+            };
+            let face = &self.exterior_faces.faces[i];
+            let face_vertices = face.world_vertices(self.mesh);
+
+            let t0 = face_vertices[1] - face_vertices[0];
+            let t1 = face_vertices[2] - face_vertices[1];
+            let face_area = 0.5 * t0.cross(&t1).norm();
+            let n_norm = face.normal.norm();
+            let n_hat = if n_norm > 0.0 {
+                face.normal / n_norm
+            } else {
+                face.normal
+            };
+
+            // Parent tet of this port face → its 4 vertices, μ, and the
+            // six edge amplitudes (sign-applied; 0 on PEC edges).
+            let mut key = face.vertices;
+            key.sort_unstable();
+            let tet_idx = *parent_tet.get(&key).ok_or_else(|| {
+                Error::Invalid(format!(
+                    "poynting_flux_audit: port face {i} has no parent tet (malformed mesh)"
+                ))
+            })?;
+            let tet = self.mesh.tetrahedra[tet_idx];
+            let tet_verts = [
+                self.mesh.vertices[tet[0]],
+                self.mesh.vertices[tet[1]],
+                self.mesh.vertices[tet[2]],
+                self.mesh.vertices[tet[3]],
+            ];
+            let tag = self.mesh.tetrahedron_material[tet_idx];
+            // μ = μ_r · μ₀ (real part of the possibly-complex μ_r; μ_r = 1
+            // for the non-magnetic microstrip).
+            let mu = Complex64::new(self.material_db.mu_at(tag, omega).re * mu0, 0.0);
+
+            let mut edge_amp = [Complex64::new(0.0, 0.0); 6];
+            for (alpha, &(li, lj)) in LOCAL_EDGES.iter().enumerate() {
+                let (a, b) = (tet[li], tet[lj]);
+                let (ka, sign) = if a < b { ((a, b), 1.0) } else { ((b, a), -1.0) };
+                let gid = *edge_id
+                    .get(&ka)
+                    .expect("tet edge missing from global edge map");
+                if let Some(dof) = system.interior_dof_of_edge[gid] {
+                    edge_amp[alpha] = Complex64::new(sign, 0.0) * e_interior[dof];
+                }
+            }
+
+            // ∮_face (E × H*)·n̂ via the same 3-pt Gauss the extraction uses.
+            // H = ∇×E / (−jωμ); the curl is constant on the tet.
+            let w_g = face_area / 3.0;
+            let mut face_flux = Complex64::new(0.0, 0.0);
+            for bary in TRI_GAUSS_3PT_BARY.iter() {
+                let p_g = bary[0] * face_vertices[0]
+                    + bary[1] * face_vertices[1]
+                    + bary[2] * face_vertices[2];
+                let (e_vec, curl_e) = tet_whitney_e_and_curl(&tet_verts, p_g, &edge_amp);
+                let h_vec = curl_e / (neg_j_omega * mu);
+                face_flux +=
+                    Complex64::new(w_g, 0.0) * cross_conj_dot_n_complex(&e_vec, &h_vec, &n_hat);
+            }
+            // ½ Re(·) = time-average active power LEAVING through this face
+            // (outward n̂). Accumulate into the owning port.
+            p_leaving[q] += 0.5 * face_flux.re;
+        }
+
+        // Net power INTO the driven port = −(net leaving it). Power OUT =
+        // sum of the (positive) outflows at the other ports.
+        let p_in = -p_leaving[excited_port];
+        let p_out: f64 = (0..n_ports)
+            .filter(|&q| q != excited_port)
+            .map(|q| p_leaving[q])
+            .sum();
+        let power_ratio = if p_in.abs() > f64::MIN_POSITIVE {
+            p_out / p_in
+        } else {
+            f64::NAN
+        };
+
+        Ok(PoyntingAudit {
+            omega,
+            driven_port: excited_port,
+            p_in,
+            p_out,
+            p_leaving,
+            power_ratio,
+        })
     }
 
     /// **Diagnostic (ADR-0162 B1 de-risk).** Run the same multi-port driven
