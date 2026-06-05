@@ -60,6 +60,38 @@ before B2+ commits.
 even a normalization problem vs the numerical Q-floor). Misfire-split: an agent writes the code, the
 orchestrator runs the (cheap) thru de-risk boxed.
 
+## De-risk outcome (B1 + B1.5 — DECISIVE; branch `feature/fem-port-power-norm`, B1 `c2f4f97`, B1.5 `cb84ab0`)
+
+Self-verified boxed on the matched straight thru (lossless FR-4, PEC metal — physically lossless):
+
+| measurement | result |
+|---|---|
+| `\|S11\|²+\|S21\|²`, current **E-only L²** extraction | **0.6145** (reproduces the smoking gun) |
+| `\|S11\|²+\|S21\|²`, **quasi-TEM √ε_r power-norm** (B1) | 0.6725 (lifts only +0.06 — the approximate modal-H *shape* barely helps) |
+| **P_out/P_in, true-field Poynting flux** `½Re∫(E×H*)·n̂`, H=∇×E/(−jωμ) (B1.5) | **0.9982** |
+| `\|S21\|²/(1−\|S11\|²)` (same field, via the S-formula) | 0.6109 |
+
+**Conclusion — the B1-only NO-GO is OVERTURNED:** the solved FEM field **conserves energy** (transmits
+0.998 of the incident power port-to-port — lossless to 0.2 %, the per-port fluxes near-equal-and-opposite
+`[−1.714e-10, +1.711e-10] W`, the lossless-2-port signature). The ~39 % deficit is therefore a **pure
+EXTRACTION-normalization artifact**, NOT real solver/ABC/numerical loss. The K3 Q-floor is **not** what
+floors a *non-resonant* thru. **⇒ the filter-S21 floor is an EXTRACTION problem (the cheap, tractable
+side of the fork), not a solver wall — the track is SALVAGEABLE.**
+
+B1.5's true H came from a new `pub(crate) element::tet_whitney_e_and_curl` (reuses the assembly's exact
+`∇×N_α = 2∇λ_i×∇λ_j` Whitney-1 curl — no re-derivation) + `OpenBoundarySolver::poynting_flux_audit`.
+
+**This reframes B2** (supersedes the table's B2): NOT "productionize the quasi-TEM √ε_r power-norm" (B1
+showed it barely helps — its modal-H *shape* is approximate), but a **flux-calibrated extraction** —
+unit-incident-power-normalize the modal projection against the **true** modal power flux (the
+Palace/COMSOL recipe Yee skipped: normalize the modal field so `½Re∫(e_m×h_m*)·ẑ = 1` first, with an
+accurate modal H — e.g. from a reference thru-solve's `∇×E`, which B1.5's evaluator now provides — then
+`a_m = ∫(E_FEM×h_m*)·ẑ`). Target: the thru `|S21| → ~1` (matching the 0.998 flux) + `|S11|²+|S21|² → 1`,
+with ε_eff/β unchanged (N2/B4 stay green). Then B3' applies the corrected extraction to the **filter**
+(heavy boxed) + a flux audit on the filter passband → does the in-band |S21| lift toward the mask? (If
+the filter field also transmits in-band, the −27 dB was largely an extraction artifact and the mask may
+be reachable; if the filter field genuinely reflects in-band, that residual is real.)
+
 ## Consequences
 
 - If B1+B2 confirm + fix the normalization, a mask-clearing (or much-closer) full-wave filter S21 may be
