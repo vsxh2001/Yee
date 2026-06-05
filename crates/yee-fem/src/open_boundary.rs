@@ -2738,7 +2738,11 @@ impl<'m> OpenBoundarySolver<'m> {
     /// `ŷ_prop` is the chosen common propagation direction (the same unit
     /// vector at every port, NOT the per-face outward normal — the
     /// forward/backward modal split needs a consistent axis). Returns one
-    /// entry per (face, gauss-point): `(p_g, w_g, e_fem, h_fem)`.
+    /// entry per (face, gauss-point): `(p_g, w_g, n̂_out, e_fem, h_fem)`,
+    /// where `n̂_out` is the face's outward unit normal (so the caller can
+    /// sample the modal reference a fixed distance INWARD from each face,
+    /// `p_g − d·n̂_out` — needed for off-centre filter feeds, whose two
+    /// uniform feed runs do not share a common interior `y`-plane).
     #[allow(clippy::type_complexity)]
     fn port_face_gauss_fields(
         &self,
@@ -2748,7 +2752,16 @@ impl<'m> OpenBoundarySolver<'m> {
         system: &DrivenSystem,
         edge_id: &HashMap<(usize, usize), usize>,
         parent_tet: &HashMap<[usize; 3], usize>,
-    ) -> Result<Vec<(Vector3<f64>, f64, Vector3<Complex64>, Vector3<Complex64>)>, Error> {
+    ) -> Result<
+        Vec<(
+            Vector3<f64>,
+            f64,
+            Vector3<f64>,
+            Vector3<Complex64>,
+            Vector3<Complex64>,
+        )>,
+        Error,
+    > {
         let mu0 = yee_core::units::MU0;
         let neg_j_omega = Complex64::new(0.0, -omega);
         let mut out = Vec::new();
@@ -2763,6 +2776,12 @@ impl<'m> OpenBoundarySolver<'m> {
             let fv = face.world_vertices(self.mesh);
             let face_area = 0.5 * (fv[1] - fv[0]).cross(&(fv[2] - fv[1])).norm();
             let w_g = face_area / 3.0;
+            let n_norm = face.normal.norm();
+            let n_hat = if n_norm > 0.0 {
+                face.normal / n_norm
+            } else {
+                face.normal
+            };
 
             let mut key = face.vertices;
             key.sort_unstable();
@@ -2796,7 +2815,7 @@ impl<'m> OpenBoundarySolver<'m> {
                 let p_g = bary[0] * fv[0] + bary[1] * fv[1] + bary[2] * fv[2];
                 let (e_vec, curl_e) = tet_whitney_e_and_curl(&tet_verts, p_g, &edge_amp);
                 let h_vec = curl_e / (neg_j_omega * mu);
-                out.push((p_g, w_g, e_vec, h_vec));
+                out.push((p_g, w_g, n_hat, e_vec, h_vec));
             }
         }
         Ok(out)
@@ -2840,27 +2859,35 @@ impl<'m> OpenBoundarySolver<'m> {
     /// mis-weights the inhomogeneous (air + dielectric) cross-section (it
     /// leaves the thru at `|S21| ≈ 0.835`). Instead — exactly what B1.5
     /// validated — the modal pair is sampled from the **true** solved field
-    /// at an **interior cross-section** `y = y_ref` (a region of near-pure
-    /// forward travel away from both port reference planes):
+    /// a fixed distance `d_ref` **inward from each port face** (along the
+    /// propagation direction into the structure), a region of near-pure
+    /// forward travel just inside the uniform feed:
     ///
     /// ```text
-    ///   sample (E_ref, H_ref) = (E, ∇×E/(−jωμ)) at (x_g, y_ref, z_g)
-    ///   de-rotate the forward propagation phase e^{−jβ y_ref}:
-    ///     e_m(x,z) = E_ref · e^{+jβ y_ref} ,  h_m(x,z) = H_ref · e^{+jβ y_ref}
+    ///   p_ref  = p_g − d_ref · n̂_out      (n̂_out = face outward normal)
+    ///   sample (E_ref, H_ref) = (E, ∇×E/(−jωμ)) at p_ref
+    ///   de-rotate the forward propagation phase the d_ref step picked up:
+    ///     e_m = E_ref · e^{+jβ d_ref} ,  h_m = H_ref · e^{+jβ d_ref}
     /// ```
     ///
-    /// De-rotating by the analytic `e^{+jβ y_ref}` (β from the port's
-    /// `beta_mode`) removes the traveling phase so `(e_m, h_m)` are the
-    /// (nearly real) transverse modal **profiles** of the true forward mode
-    /// — the correct *spatially-varying* admittance, not the uniform
-    /// approximation. They are sampled at the same transverse `(x,z)` as the
-    /// port-face Gauss points (the cross-section is `y`-invariant). Both the
+    /// **Sampling inward-from-each-face (not at one absolute `y`-plane) is
+    /// what makes this work for off-centre filter feeds**: the filter's
+    /// input feed (near `y = 0`) and output feed (near `y = box_len`) are
+    /// uniform 50 Ω runs at different `x` that share NO common interior
+    /// `y`-plane — a single absolute `y_ref` would land in the coupled-
+    /// resonator region. `p_g − d_ref·n̂_out` lands each port's reference in
+    /// its OWN feed (`d_ref < feed_len`). De-rotating by the analytic
+    /// `e^{+jβ d_ref}` (β from the port's `beta_mode`) removes the traveling
+    /// phase so `(e_m, h_m)` are the (nearly real) transverse modal
+    /// **profiles** of the true forward mode — the correct *spatially-
+    /// varying* admittance, not the uniform approximation. Both the
     /// `(e_m, h_m)` reaction-norm `κ` and the projections then use the
     /// **un-conjugated** cross products (the modal fields being
     /// phase-aligned makes the complex amplitudes `α = a⁺+a⁻`, `γ = a⁺−a⁻`
     /// come out without a spurious conjugate on the FEM field — conjugating
     /// `H_FEM` was the first-attempt bug that broke the phase / over-counted
-    /// the reflection).
+    /// the reflection). Each port is normalized by its OWN reaction-norm κ,
+    /// so the two off-centre feeds' references are consistently scaled.
     ///
     /// This is NOT the B1 √ε_r shortcut (a guessed *local-plane-wave*
     /// admittance with only an E-projection): here `h_m` is the **measured**
@@ -2877,37 +2904,44 @@ impl<'m> OpenBoundarySolver<'m> {
     ///
     /// * Assumes a single dominant propagating mode (quasi-TEM) and a common
     ///   `+ŷ` propagation axis (the straight line / the filter feed lines all
-    ///   propagate along `y`). The interior plane carries a *near*-pure
+    ///   propagate along `y`). The inward sample carries a *near*-pure
     ///   forward mode; a small residual reflection leaves the de-rotated
     ///   `(e_m, h_m)` slightly complex (the imaginary part is the
-    ///   contamination) — second-order on a matched thru.
+    ///   contamination) — second-order on a matched feed.
     /// * The de-rotation uses the analytic `β`; a β error (B4: 0.6 % vs HJ)
     ///   leaves a small residual phase, second-order in the amplitudes.
+    /// * `d_ref` must be **inside the uniform feed run** of every port
+    ///   (`d_ref < feed_len` for the filter; for a straight thru any
+    ///   `0 < d_ref < line_len` works). Too large and the inward sample
+    ///   overshoots into the coupled-resonator region (or out of the mesh) —
+    ///   the modal reference is then not a clean single mode.
     ///
     /// This is a **diagnostic** — it does not modify `extract_s_qp` /
-    /// `extract_s11`; B2 productionizes it only if the thru validation here
+    /// `extract_s11`; B2 productionizes it only if the thru validation
     /// passes (`|S21|→~1`, `|S11|²+|S21|²→~1`, β/ε_eff unchanged).
     ///
     /// # Arguments
     ///
     /// * `omega` — angular frequency (rad/s).
     /// * `driven_port` — the excited port `p`.
-    /// * `y_ref` — interior cross-section plane (m) to sample the modal
-    ///   reference from; pass the propagation midpoint (e.g. `line_len/2`),
-    ///   away from both port end-caps.
+    /// * `d_ref` — distance (m) INWARD from each port face (along
+    ///   `−n̂_out`, the propagation direction into the structure) at which to
+    ///   sample that port's modal reference. Pick a value comfortably inside
+    ///   every port's uniform feed run (`0 < d_ref < feed_len`); for a
+    ///   straight thru, e.g. `line_len/2`.
     ///
     /// # Errors
     ///
     /// Propagates assembly / LU errors; returns [`Error::Invalid`] if
     /// `driven_port` is out of range or a port face has no parent tet, and
-    /// [`Error::Numerical`] if a modal sample locates no tet, the modal
-    /// power normalization `κ_m` is numerically zero, or `a_fwd(p)` at the
-    /// driven port vanishes.
+    /// [`Error::Numerical`] if a modal sample locates no tet (e.g. `d_ref`
+    /// overshoots the mesh), the modal power normalization `κ_m` is
+    /// numerically zero, or `a_fwd(p)` at the driven port vanishes.
     pub fn power_modal_extract(
         &self,
         omega: f64,
         driven_port: PortId,
-        y_ref: f64,
+        d_ref: f64,
     ) -> Result<PowerModalExtract, Error> {
         let n_ports = self.ports.len();
         if driven_port >= n_ports {
@@ -2958,34 +2992,40 @@ impl<'m> OpenBoundarySolver<'m> {
                 continue;
             }
 
-            // TRUE modal pair, sampled from the interior cross-section at
-            // y = y_ref and de-rotated by the analytic forward phase
-            // e^{+jβ y_ref} so (e_m, h_m) are the near-real transverse modal
+            // TRUE modal pair, sampled a fixed distance `d_ref` INWARD from
+            // each port face (along −n̂_out, the propagation direction into
+            // the structure) and de-rotated by the analytic forward phase
+            // e^{+jβ d_ref} so (e_m, h_m) are the near-real transverse modal
             // PROFILES (correct spatially-varying admittance — NOT the
             // uniform-admittance approximation that floored |S21| at 0.835).
+            // Sampling INWARD-from-each-face (not at one absolute y-plane)
+            // lands each port's reference in ITS OWN uniform feed run — the
+            // filter's input/output feeds are at opposite ends and share no
+            // common interior y-plane.
             let port = &self.ports[q];
             let driving = select_driving_mode(port, q)?;
             let beta = (driving.beta_mode)(omega);
-            // De-rotation factor e^{+jβ y_ref}: strips the forward
-            // traveling phase E_ref = e_t e^{−jβ y_ref}. (It cancels in the
-            // S-ratios anyway, but de-rotating keeps κ ≈ real for a clean
-            // diagnostic + a well-conditioned un-conjugated decomposition.)
-            let derot = Complex64::from_polar(1.0, beta * y_ref);
+            // De-rotation factor e^{+jβ d_ref}: strips the forward traveling
+            // phase the sample picked up over the `d_ref` propagation inward.
+            // (It cancels in the S-ratios anyway, but de-rotating keeps κ ≈
+            // real for a well-conditioned un-conjugated decomposition.)
+            let derot = Complex64::from_polar(1.0, beta * d_ref);
 
             let mut proj_e = Complex64::new(0.0, 0.0);
             let mut proj_h = Complex64::new(0.0, 0.0);
             let mut kappa_reac = Complex64::new(0.0, 0.0);
-            for &(p_g, w_g, e_fem, h_fem) in &port_fields {
-                // Sample the true modal (E, H) at the interior plane, same
-                // transverse (x, z), and de-rotate.
-                let p_ref = Vector3::new(p_g.x, y_ref, p_g.z);
+            for &(p_g, w_g, n_out, e_fem, h_fem) in &port_fields {
+                // Sample the true modal (E, H) `d_ref` inward from the face
+                // (p_g − d_ref·n̂_out), same transverse (x, z), and de-rotate.
+                let p_ref = p_g - n_out * d_ref;
                 let (e_ref, h_ref) = self
                     .reconstruct_field_at(p_ref, omega, &e_interior, &system, &edge_id)
                     .ok_or_else(|| {
                         Error::Numerical(format!(
                             "power_modal_extract: interior modal sample at \
-                             ({:.4e}, {:.4e}, {:.4e}) located no tet",
-                            p_ref.x, p_ref.y, p_ref.z
+                             ({:.4e}, {:.4e}, {:.4e}) located no tet (d_ref={:.4e} \
+                             inward may overshoot the uniform feed)",
+                            p_ref.x, p_ref.y, p_ref.z, d_ref
                         ))
                     })?;
                 let e_m = e_ref * derot;

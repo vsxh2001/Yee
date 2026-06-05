@@ -1514,6 +1514,407 @@ fn fem_filter_s21_corrected_gaps() {
     }
 }
 
+// =====================================================================
+// FEM-EM brick B3' (ADR-0162) — filter S21 re-graded with the POWER-CORRECT
+// E+H modal extraction (the B2' fix, validated GO on the straight thru:
+// |S21| 0.778→1.0001, |S11|²+|S21|² 0.61→1.0037, ε_eff 0.66%).
+//
+// THE GOAL (ADR-0147 #1): does the power-correct extraction lift the 3-pole
+// FILTER S21 off the N3 −27.38 dB E-only floor toward the Chebyshev mask?
+//
+// The ONE change vs the N3 gate (`fem_filter_s21_vs_ladder`): S11/S21 at each
+// frequency come from `power_modal_extract` (the E+H two-field modal
+// decomposition) instead of the E-only `sweep_matrix` / `extract_s_qp`.
+// Everything else — geometry (`build_edge_coupled_geometry`), the
+// numerical-eigenmode ports recentred per off-centre feed, interior-PEC,
+// coupled-Whitney, the 17-pt 1.6–2.4 GHz band, the feed de-embed, and the
+// `ladder_s21` reference + oracle/mask grading — is IDENTICAL.
+// =====================================================================
+
+/// Modal-reference inward-sampling distance as a fraction of the feed length.
+/// `power_modal_extract` samples each port's TRUE modal `(e_m, h_m)` this far
+/// INWARD from the port face (along the propagation direction into the
+/// structure). For the filter the two feeds are at OPPOSITE ends and share no
+/// common interior `y`-plane, so an absolute plane will not do — the inward
+/// offset lands each port's reference in ITS OWN uniform feed run. Half the
+/// feed length sits comfortably inside both feeds (each is ≥ `feed_len` long;
+/// the output feed is `feed_len + stagger`) and clear of the port-face ABC and
+/// the first resonator.
+const MODAL_REF_FEED_FRAC: f64 = 0.5;
+
+/// Drive the filter two-port through the POWER-CORRECT E+H modal extraction
+/// (B2', ADR-0162) and return per-frequency `(S11, S21)`.
+///
+/// Bit-identical solver build to [`solve_filter`] (same mesh, the same
+/// `microstrip_port_numerical_at` ports recentred per off-centre feed,
+/// interior-PEC, `with_coupled_whitney(true)`); the ONLY difference is the
+/// post-solve extraction — `power_modal_extract(ω, 0, d_ref)` (drive port 0,
+/// read S11 = `s_column[0]`, S21 = `s_column[1]`) instead of `sweep_matrix`.
+///
+/// `d_ref = MODAL_REF_FEED_FRAC · feed_len` is the inward sampling distance for
+/// the modal reference; it lands inside each feed's uniform run (the crux for
+/// the off-centre feeds — see [`MODAL_REF_FEED_FRAC`]).
+fn solve_filter_power(
+    geom: &FilterGeometry,
+    omegas: &[f64],
+) -> Vec<(num_complex::Complex64, num_complex::Complex64)> {
+    let (mesh, material_db, ground_pred, trace_pred) = layered_microstrip_filter_mesh(
+        geom.box_w,
+        geom.box_len,
+        geom.box_h,
+        SUB_H,
+        geom.traces.clone(),
+        geom.nx,
+        geom.ny,
+        geom.nz,
+    )
+    .expect("filter mesh must build");
+
+    let n_exterior = exterior_face_count(&mesh);
+    let picker = OpenBoundarySolver::new(
+        &mesh,
+        vec![FaceKind::Pec; n_exterior],
+        Vec::new(),
+        MaterialDatabase::new(),
+    )
+    .expect("picker solver must build");
+    let ground_edges = picker.interior_edges_matching(&ground_pred);
+    let trace_edges = picker.interior_edges_matching(&trace_pred);
+    let mut interior_pec: Vec<usize> = ground_edges;
+    interior_pec.extend(trace_edges.iter().copied());
+    interior_pec.sort_unstable();
+    interior_pec.dedup();
+    assert!(
+        !trace_edges.is_empty(),
+        "trace_pred must select at least one interior edge on the z = sub_h trace footprint"
+    );
+    let centroids = picker.exterior_face_centroids();
+    let kinds = classify_filter_faces(&centroids, geom.box_len);
+    drop(picker);
+
+    // SAME numerical-eigenmode ports as `solve_filter` (recentred per feed).
+    let port_geom = MicrostripPortGeom {
+        trace_w: geom.line_w,
+        sub_h: SUB_H,
+        eps_r: EPS_R,
+        box_w: geom.box_w,
+        box_h: geom.box_h,
+    };
+    let port_in = microstrip_port_numerical_at(&port_geom, geom.feed_xc_in, F0)
+        .expect("numerical-eigenmode port (input feed) must build");
+    let port_out = microstrip_port_numerical_at(&port_geom, geom.feed_xc_out, F0)
+        .expect("numerical-eigenmode port (output feed) must build");
+
+    let solver = OpenBoundarySolver::new(&mesh, kinds, vec![port_in, port_out], material_db)
+        .expect("two-port filter solver must build")
+        .with_interior_pec_edges(interior_pec.iter().copied())
+        .with_coupled_whitney(true);
+
+    // Modal-reference inward distance: half the feed length lands inside both
+    // uniform feeds (the off-centre input/output feeds share no interior
+    // y-plane, so inward-from-each-face sampling is mandatory here).
+    let d_ref = MODAL_REF_FEED_FRAC * geom.feed_len;
+
+    omegas
+        .iter()
+        .map(|&omega| {
+            let pm = solver
+                .power_modal_extract(omega, 0, d_ref)
+                .expect("B3' power_modal_extract must succeed");
+            (pm.s_column[0], pm.s_column[1])
+        })
+        .collect()
+}
+
+/// FEM-EM brick B3' (ADR-0162) — 3-pole microstrip-filter S21 re-graded with the
+/// **power-correct E+H modal extraction** (the B2' fix), vs the analytic ladder
+/// reference. THE GOAL: does the power-correct extraction lift the filter S21 off
+/// the N3 −27.38 dB E-only floor toward the Chebyshev mask?
+///
+/// Mirrors [`fem_filter_s21_vs_ladder`] (N3) EXACTLY except the extraction:
+/// S11/S21 at each of the 17 band points come from
+/// [`yee_fem::OpenBoundarySolver::power_modal_extract`] (the two-field
+/// decomposition: `a_fwd = ½(proj_E+proj_H)`, `a_bwd = ½(proj_E−proj_H)`,
+/// `S_pp = a_bwd/a_fwd`, `S_qp = a_fwd(q)/a_fwd(p)`) instead of the E-only
+/// `sweep_matrix`/`extract_s_qp`. Same geometry, ports, mesh, de-embed, and
+/// `ladder_s21` + oracle/mask grading.
+///
+/// ## Per-feed modal reference (the crux for off-centre feeds)
+///
+/// The filter's two feeds are uniform 50 Ω runs at DIFFERENT `x` and OPPOSITE
+/// ends (input near `y = 0`, output near `y = box_len`), sharing no common
+/// interior `y`-plane. `power_modal_extract` samples each port's TRUE modal
+/// `(e_m, h_m = ∇×E/(−jωμ), de-rotated)` a distance `d_ref =
+/// MODAL_REF_FEED_FRAC·feed_len` INWARD from that port's face (along the
+/// propagation direction into the structure) — landing each reference in its
+/// OWN feed, on the uniform run before resonator 0 / after the last resonator,
+/// NOT inside the coupled region. Each port is normalized by its own
+/// reaction-norm κ, so the two off-centre references are consistently scaled.
+///
+/// ## What this asserts (HONEST, MEASUREMENT-DRIVEN — recorded-then-pinned)
+///
+/// The HEADLINE is research-open and the orchestrator runs the heavy filter to
+/// measure it. The gate PRINTS the full corrected |S21|(f) table, the in-band
+/// `|S11|²+|S21|²` power balance (does the filter FIELD transmit in-band, or
+/// genuinely reflect?), the in-band peak vs the N3 −27.38 dB E-only floor, and
+/// the strict Cheb-mask margin. It asserts ONLY the measurement-independent
+/// invariants:
+///
+/// 1. **Finite curve** — no NaN/Inf (the power extraction did not diverge / no
+///    port collapsed).
+/// 2. **A band-pass turnover** — the in-band peak stands above the deeper band
+///    edge (a real centre bump, not a monotonic ramp / flat line).
+/// 3. **The strict Cheb mask ONLY IF it actually clears** (the ADR-0147 #1 win)
+///    — otherwise the honest MISS margin is recorded, no weakening.
+///
+/// It does **NOT** hard-assert a lift number that has not been measured — the
+/// lift over the N3 −27.38 dB floor is PRINTED for the orchestrator to pin as a
+/// tripwire AFTER seeing the real number (exactly as N3/B2 pinned theirs). If
+/// the corrected in-band peak clears or approaches the mask, that is the
+/// headline; if it lifts but stays short (e.g. the filter genuinely reflects
+/// in-band, `|S11|` high), that is recorded honestly. No faking.
+///
+/// ## GATING — CRITICAL (heavy; run by the orchestrator, boxed, `--release`)
+///
+/// Multi-minute driven SWEEP: one per-ω sparse LU per point PLUS, per point, the
+/// per-port interior modal-field point-location + reconstruction the E+H
+/// extraction adds (a handful of cheap O(n_tets) scans — negligible vs the LU).
+/// ~17 points on the ~51 k-tet mesh; budget roughly the N3 ~80 s plus a little.
+/// `#[ignore]`'d; run only in `--release`, boxed:
+///
+/// ```text
+/// YEE_BOX_DIR=$(pwd) YEE_BOX_MEM=14g YEE_BOX_CPUS=3 scripts/yee-box.sh \
+///   cargo test -p yee-fem --release --test microstrip_filter_s21 \
+///   -- --ignored fem_filter_s21_power_extract --nocapture
+/// ```
+///
+/// MEASURED RESULT: (to be filled in by the orchestrator after the boxed run —
+/// the headline is the corrected in-band peak vs the −27.38 dB N3 floor and
+/// whether the strict mask clears).
+#[test]
+#[ignore = "B3' GOAL gate: heavy 17-pt driven SWEEP with the power-correct E+H extraction; run only in --release, boxed"]
+fn fem_filter_s21_power_extract() {
+    // Geometry — IDENTICAL to the N3 gate (analytic impedance-k gaps, same mesh).
+    let geom = build_edge_coupled_geometry(
+        2.5e-3, // x clearance each side
+        5.0e-3, // air height
+        8.0e-3, // feed length (de-embed reference + modal-reference feed run)
+        0.6e-3, // dx (trace ~3 cells, gap ~2.7 cells)
+        2.5e-3, // dy (resonator ~16 cells)
+        0.5e-3, // dz (2 substrate cells)
+        None,   // analytic impedance-k gaps (same as N3 baseline)
+    );
+    eprintln!(
+        "[B3'] filter mesh: box=({:.1},{:.1},{:.1})mm  n=({},{},{})  tets={}  w={:.3}mm  \
+         feed={:.1}mm  modal_ref d={:.2}mm inward  eps_eff(w)={:.4}",
+        geom.box_w * 1e3,
+        geom.box_len * 1e3,
+        geom.box_h * 1e3,
+        geom.nx,
+        geom.ny,
+        geom.nz,
+        geom.total_tets(),
+        geom.line_w * 1e3,
+        geom.feed_len * 1e3,
+        MODAL_REF_FEED_FRAC * geom.feed_len * 1e3,
+        eps_eff(geom.line_w, SUB_H, EPS_R),
+    );
+
+    // Band: 1.6–2.4 GHz, 17 points — IDENTICAL grid to N3/B2.
+    let (freqs_hz, omegas) = band_1p6_to_2p4_17pts();
+
+    let t0 = std::time::Instant::now();
+    let s_pairs = solve_filter_power(&geom, &omegas);
+    let wall = t0.elapsed().as_secs_f64();
+
+    // Extract + de-embed |S21|(f) and record the in-band power balance.
+    let ladder = reference_ladder();
+    let mut curve: Vec<(f64, f64)> = Vec::with_capacity(freqs_hz.len());
+    let mut worst_balance_in: f64 = f64::INFINITY; // min in-band |S11|²+|S21|²
+    let mut best_balance_in: f64 = 0.0; // max in-band |S11|²+|S21|²
+    eprintln!(
+        "\n{:>8}  {:>10}  {:>10}  {:>10}  {:>10}  {:>10}  {:>10}",
+        "f(GHz)", "|S21|raw", "|S21|deemb", "S21 dB", "|S11|", "|S|²sum", "ref dB"
+    );
+    for (k, &omega) in omegas.iter().enumerate() {
+        let (s11, s21_raw) = s_pairs[k];
+        let s21 = deembed_feed(s21_raw, omega, geom.line_w, geom.feed_len);
+        let d = db(s21.norm());
+        let f_ghz = freqs_hz[k] / 1e9;
+        let bal = s11.norm_sqr() + s21_raw.norm_sqr(); // de-embed is unit-magnitude
+        let ref_db = db(ladder_s21(&ladder, freqs_hz[k]).norm());
+        curve.push((f_ghz, d));
+        if (1.85..=2.15).contains(&f_ghz) {
+            worst_balance_in = worst_balance_in.min(bal);
+            best_balance_in = best_balance_in.max(bal);
+        }
+        eprintln!(
+            "{:>8.3}  {:>10.4}  {:>10.4}  {:>10.2}  {:>10.4}  {:>10.4}  {:>10.2}",
+            f_ghz,
+            s21_raw.norm(),
+            s21.norm(),
+            d,
+            s11.norm(),
+            bal,
+            ref_db,
+        );
+    }
+
+    // ---- Grade against the reference (mirrors oracle_grade / the N3 gate). ----
+    let mut worst_pass_db = 0.0_f64;
+    let mut worst_rej_db = 0.0_f64;
+    for &(f_ghz, d_meas) in &curve {
+        let d_ref_db = db(ladder_s21(&ladder, f_ghz * 1e9).norm());
+        let err = (d_meas - d_ref_db).abs();
+        if (1.85..=2.15).contains(&f_ghz) {
+            worst_pass_db = worst_pass_db.max(err);
+        } else {
+            worst_rej_db = worst_rej_db.max(err);
+        }
+    }
+
+    let depth_at = |f_ghz: f64| -> f64 { -interp_db(&curve, f_ghz) };
+    let depth_lo = depth_at(1.6);
+    let depth_hi = depth_at(2.4);
+    let asym_margin = depth_lo - depth_hi;
+    let asym_pass = asym_margin >= ASYMMETRY_MARGIN_DB;
+
+    let passband_peak_db = curve
+        .iter()
+        .filter(|(f, _)| (1.85..=2.15).contains(f))
+        .map(|(_, d)| *d)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let f_inband_peak = curve
+        .iter()
+        .filter(|(f, _)| (1.85..=2.15).contains(f))
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+        .map(|(f, _)| *f)
+        .unwrap_or(f64::NAN);
+    let edge_lo_db = interp_db(&curve, 1.6);
+    let edge_hi_db = interp_db(&curve, 2.4);
+    let turnover_db = passband_peak_db - edge_lo_db.min(edge_hi_db);
+
+    let strict_pass =
+        worst_pass_db <= PASSBAND_TOL_DB && worst_rej_db <= REJECTION_TOL_DB && asym_pass;
+
+    // The headline: lift over the N3 −27.38 dB E-only floor (PRINTED — the
+    // orchestrator pins it as a tripwire after seeing the real number) and the
+    // lift over the v1 analytic floor.
+    let lift_over_n3_db = passband_peak_db - N3_BASELINE_PEAK_DB;
+    let lift_over_v1_db = passband_peak_db - V1_FLOOR_PEAK_DB;
+
+    eprintln!(
+        "\n==== B3' GRADE (power-correct E+H extraction; ADR-0162) ====\n\
+         tets                : {}\n\
+         wall                : {:.1} s\n\
+         in-band peak        : {:.2} dB @ {:.2} GHz\n\
+         N3 E-only floor     : {:.2} dB  (impedance-k gaps, ADR-0154 N3)\n\
+         lift over N3 floor  : {:+.2} dB  (PRINTED — orchestrator pins as a tripwire)\n\
+         v1 analytic floor   : {:.2} dB  (flat-Ez port, B7)\n\
+         lift over v1 floor  : {:+.2} dB\n\
+         in-band |S|²sum     : min {:.4}  max {:.4}  (1 ⇒ field transmits; ≪1 ⇒ reflects)\n\
+         band edges          : {:.2} dB @1.6  {:.2} dB @2.4\n\
+         turnover            : {:+.2} dB (in-band peak above the deeper edge)\n\
+         worst passband err  : {:.2} dB vs ref (oracle tol {:.1})\n\
+         worst rejection err : {:.2} dB vs ref (oracle tol {:.1})\n\
+         strict-mask margin  : {} by {:.2} dB in-band (gap to the 0 dB Cheb passband)\n\
+         asymmetry (NAMED)   : depth(1.6)={:.2} dB  depth(2.4)={:.2} dB  margin={:+.2} dB -> {}\n\
+         strict oracle mask  : {}\n\
+         ============================================================",
+        geom.total_tets(),
+        wall,
+        passband_peak_db,
+        f_inband_peak,
+        N3_BASELINE_PEAK_DB,
+        lift_over_n3_db,
+        V1_FLOOR_PEAK_DB,
+        lift_over_v1_db,
+        worst_balance_in,
+        best_balance_in,
+        edge_lo_db,
+        edge_hi_db,
+        turnover_db,
+        worst_pass_db,
+        PASSBAND_TOL_DB,
+        worst_rej_db,
+        REJECTION_TOL_DB,
+        if strict_pass { "CLEARS" } else { "MISS" },
+        worst_pass_db,
+        depth_lo,
+        depth_hi,
+        asym_margin,
+        if asym_pass { "PASS" } else { "FLAG" },
+        if strict_pass { "PASS" } else { "MISS" },
+    );
+
+    // Machine-readable curve for the oracle_grade CLI.
+    let pairs: String = curve
+        .iter()
+        .map(|(f, d)| format!("{f:.3}:{d:.2}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    eprintln!("[B3'] oracle_grade pairs: {pairs}");
+
+    // ---- Assertions — HONEST, MEASUREMENT-DRIVEN (assert only invariants) ----
+    //
+    // B3' is the research-open GOAL: does the power-correct E+H extraction lift
+    // the filter S21 off the N3 −27.38 dB E-only floor toward the Cheb mask? The
+    // headline (the lift, the in-band power balance, mask-clearing) is MEASURED
+    // by the orchestrator's boxed run — this gate does NOT pre-judge it. It
+    // asserts only what is true regardless of the measured level, and asserts
+    // the strict mask ONLY IF it actually clears (no weakening to force green).
+
+    // (1) Finite curve — the power extraction did not diverge and no port
+    //     collapsed (a NaN/Inf S would mean the modal reconstruction or the
+    //     per-port reaction-norm normalization broke).
+    assert!(
+        curve.iter().all(|(_, d)| d.is_finite()) && passband_peak_db.is_finite(),
+        "B3' NO-GO: the power-extracted |S21| curve has a non-finite point — the driven \
+         solve or the E+H modal extraction degenerated. Full curve printed above."
+    );
+
+    // (2) A genuine band-pass turnover: the in-band peak stands above the deeper
+    //     band edge (a frequency-selective bump, not a monotonic ramp / flat
+    //     line). The >0.2 dB bar mirrors N3/B2; it certifies SHAPE without
+    //     demanding a depth the path may not deliver.
+    assert!(
+        turnover_db > 0.2,
+        "B3': no band-pass turnover — in-band peak {passband_peak_db:.2} dB is not above the \
+         deeper band edge (edges {edge_lo_db:.2}/{edge_hi_db:.2} dB; turnover {turnover_db:+.2} dB). \
+         The response is monotonic, not a recognisable band-pass. Full curve printed above."
+    );
+
+    // (3) Strict Cheb mask — assert ONLY IF the measurement actually clears it
+    //     (the ADR-0147 #1 win). If it clears, that is the headline and we assert
+    //     it loudly; if not, the honest MISS margin is recorded and we do NOT
+    //     assert the absolute-level mask (no faking). A future improvement that
+    //     lifts the curve into the mask flips `strict_pass` and asserts here
+    //     automatically.
+    if strict_pass {
+        assert!(
+            worst_pass_db <= PASSBAND_TOL_DB && worst_rej_db <= REJECTION_TOL_DB && asym_pass,
+            "internal: strict_pass set but tolerances not met (pass {worst_pass_db:.2}, \
+             rej {worst_rej_db:.2}, asym {asym_margin:+.2})"
+        );
+        eprintln!(
+            "[B3'] STRICT MASK CLEARS — the power-correct E+H extraction lifted the 3-pole \
+             filter S21 into the Chebyshev mask (worst passband err {worst_pass_db:.2} dB ≤ \
+             {PASSBAND_TOL_DB}, worst rejection err {worst_rej_db:.2} dB ≤ {REJECTION_TOL_DB}, \
+             asymmetry {asym_margin:+.2} dB). This is the ADR-0147 #1 goal — a mask-clearing \
+             full-wave filter S21."
+        );
+    } else {
+        eprintln!(
+            "[B3'] STRICT MASK: MISS by {worst_pass_db:.2} dB in-band. in-band peak \
+             {passband_peak_db:.2} dB ({lift_over_n3_db:+.2} dB vs the N3 −27.38 dB E-only floor); \
+             in-band power balance |S11|²+|S21|² ∈ [{worst_balance_in:.4}, {best_balance_in:.4}]. \
+             Recorded honestly — the orchestrator pins the measured lift as a tripwire and reads \
+             the balance to judge whether the filter FIELD transmits in-band or genuinely \
+             reflects. No fake pass, no weakened tolerance."
+        );
+    }
+}
+
 /// Linear interpolation of the `(f_ghz, dB)` curve at `f_ghz` (clamped to the
 /// endpoints). Mirrors `oracle_grade::interp_db`.
 fn interp_db(pts: &[(f64, f64)], f_ghz: f64) -> f64 {
