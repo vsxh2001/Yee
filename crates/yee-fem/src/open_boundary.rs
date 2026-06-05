@@ -955,6 +955,56 @@ fn select_driving_mode(port: &PortDefinition, port_id: PortId) -> Result<&PortMo
     })
 }
 
+/// Compute `(E × h) · ẑ` for a **complex** transverse `E` and a **real**
+/// transverse modal `h`, used by the power-wave-normalization diagnostic
+/// [`OpenBoundarySolver::extract_s_qp_power`] (ADR-0162 B1).
+///
+/// `Vector3<Complex64>` does not implement `cross`, so the complex cross
+/// product is taken component-wise (each output component is a complex
+/// combination of `E`'s complex components and `h`'s real components),
+/// then dotted with the real `ẑ`. For a real `h` the modal H is its own
+/// conjugate (`h* = h`), so this evaluates `(E × h*) · ẑ`.
+fn cross_dot_zhat_complex(
+    e: &Vector3<Complex64>,
+    h: &Vector3<f64>,
+    z_hat: &Vector3<f64>,
+) -> Complex64 {
+    let hx = Complex64::new(h.x, 0.0);
+    let hy = Complex64::new(h.y, 0.0);
+    let hz = Complex64::new(h.z, 0.0);
+    // (E × h) = (Ey hz − Ez hy, Ez hx − Ex hz, Ex hy − Ey hx).
+    let cx = e.y * hz - e.z * hy;
+    let cy = e.z * hx - e.x * hz;
+    let cz = e.x * hy - e.y * hx;
+    cx * Complex64::new(z_hat.x, 0.0)
+        + cy * Complex64::new(z_hat.y, 0.0)
+        + cz * Complex64::new(z_hat.z, 0.0)
+}
+
+/// **Diagnostic output (ADR-0162 B1 de-risk).** The two S-matrices read
+/// off the *same* driven FEM field by
+/// [`OpenBoundarySolver::sweep_matrix_power_balance`]: the production
+/// E-field-L² normalization and a power-wave normalization.
+///
+/// The decisive comparison is the matched-thru power balance
+/// `|S11|² + |S21|²` computed from each: it is ≈0.61 under the L² norm on
+/// the inhomogeneous microstrip thru (the ADR-0162 smoking gun); a
+/// power-conserving extraction should give ≈1 for a lossless 2-port.
+#[derive(Debug, Clone)]
+pub struct PowerBalanceSweep {
+    /// Angular frequencies (rad/s), matching the input slice order.
+    pub omegas: Vec<f64>,
+    /// Per-frequency `n_ports × n_ports` S-matrix under the production
+    /// E-field-L² normalization (identical to
+    /// [`OpenBoundarySolver::sweep_matrix`]). `s_l2[k][(q, p)] =
+    /// S_{q,p}(omegas[k])`.
+    pub s_l2: Vec<DMatrix<Complex64>>,
+    /// Per-frequency `n_ports × n_ports` S-matrix under the power-wave
+    /// normalization (`κ_m = Re∫(e_m×h_m*)·ẑ`, quasi-TEM modal H). Same
+    /// indexing as [`Self::s_l2`].
+    pub s_power: Vec<DMatrix<Complex64>>,
+}
+
 impl<'m> OpenBoundarySolver<'m> {
     /// Build an [`OpenBoundarySolver`] from a mesh, face-kind tagging,
     /// port descriptors, and material database.
@@ -2121,6 +2171,263 @@ impl<'m> OpenBoundarySolver<'m> {
         let m_pp = Complex64::new(mode_self_inner, 0.0);
         let b_p = inner_product / m_pp - a_inc;
         Ok(b_p / a_inc)
+    }
+
+    /// **Diagnostic (ADR-0162 B1 de-risk).** Extract `S_{q,p}(ω)` for a
+    /// receive port `q` using a **power-wave normalization** instead of the
+    /// E-field L² self-overlap that [`Self::extract_s_qp`] /
+    /// [`Self::extract_s11`] use.
+    ///
+    /// This is the decisive measurement the ADR-0162 B1 brick asks for: the
+    /// matched, lossless straight thru gives `|S11|² + |S21|² ≈ 0.61` (not
+    /// `1`) under the L² normalization. The hypothesis is that the L² norm
+    /// is not power-conserving for an **inhomogeneous** (air + dielectric)
+    /// microstrip cross-section — the modal wave impedance varies across the
+    /// face, so `∫|e_mode|²` mis-weights the modal power. The
+    /// power-conserving normalization is the modal power flux
+    ///
+    /// ```text
+    ///     κ_m  =  Re ∫_port (e_m × h_m*) · ẑ  dA,
+    ///     α    =  Re ∫_port (E_FEM × h_m*) · ẑ  dA / κ_m,
+    ///     S_qp =  α − a_inc_q,
+    /// ```
+    ///
+    /// (Jin, *FEM in Electromagnetics*, wave-port chapter; COMSOL RF
+    /// power-flow S-parameter normalization; arXiv 2407.21766
+    /// `κ_m = ∫(e_m×h_m*)·ẑ`, `α_i = ∫(E_tot×h_i*)·ẑ / κ_i`; Palace
+    /// `S_ij = ∫E·E_inc/∫E_inc·E_inc − δ`, valid only because its wave-port
+    /// mode is unit-incident-**power** normalized first).
+    ///
+    /// ## Modal H source (quasi-TEM approximation)
+    ///
+    /// The [`PortDefinition`] carries only `modal_e_t` (no modal H), and the
+    /// yee-mom cross-section eigensolver this microstrip port is built from
+    /// ([`crate::microstrip_port_numerical`]) exposes only `e_tangential_at`
+    /// — no modal H. We therefore use the **quasi-TEM transverse relation**
+    /// for the modal magnetic field:
+    ///
+    /// ```text
+    ///     h_t(x, y) = (1 / η₀) · √ε_r(x, y) · (ẑ × e_t(x, y)),
+    /// ```
+    ///
+    /// the local plane-wave admittance, with `ε_r(x, y)` the per-point
+    /// relative permittivity supplied by the caller-provided `eps_r_at`
+    /// closure (the dielectric region weights √ε_r heavier than air — this
+    /// spatial weighting is exactly why the inhomogeneous-microstrip
+    /// power-norm differs from the homogeneous E-only L² norm). The
+    /// approximation is documented; a true modal H from the eigensolver
+    /// would replace `h_t` here without changing the rest of the formula.
+    ///
+    /// The cross products are computed **generally** (real `Vector3::cross`,
+    /// then `· ẑ`), so this routine is correct as-is if `h_t` is later
+    /// sourced from a real modal H rather than the quasi-TEM relation. For
+    /// the quasi-TEM `h_t = (√ε_r/η₀)(ẑ × e_t)` with a transverse `e_t ⊥ ẑ`,
+    /// the algebra reduces to a **√ε_r-weighted** L² overlap:
+    /// `(e_t × h_t*) · ẑ = (√ε_r/η₀)|e_t|²` and
+    /// `(E_FEM × h_t*) · ẑ = (√ε_r/η₀)(E_FEM · e_t)`, so `η₀` cancels in the
+    /// ratio `α = κ_m`-normalized overlap — but it is kept explicit so a
+    /// non-quasi-TEM modal H stays correct.
+    ///
+    /// `ẑ` is the port face's outward unit normal (the propagation axis on
+    /// an end-cap face); its sign cancels in the `α = overlap/κ_m` ratio.
+    ///
+    /// This is a **diagnostic only** — the production `extract_s_qp` /
+    /// `extract_s11` are unchanged (ADR-0162 B2 productionizes this only if
+    /// B1 confirms the L² norm is the magnitude bug).
+    fn extract_s_qp_power(
+        &self,
+        port_id: PortId,
+        a_inc_q: f64,
+        omega: f64,
+        e_interior: &[Complex64],
+        system: &DrivenSystem,
+        eps_r_at: &(dyn Fn(Vector3<f64>) -> f64 + Sync),
+    ) -> Result<Complex64, Error> {
+        if port_id >= self.ports.len() {
+            return Err(Error::Invalid(format!(
+                "OpenBoundarySolver::extract_s_qp_power: port_id = {port_id} \
+                 out of range (n_ports = {})",
+                self.ports.len()
+            )));
+        }
+
+        let port = &self.ports[port_id];
+        let driving_mode = select_driving_mode(port, port_id)?;
+        // η₀ = √(μ₀/ε₀): the free-space wave impedance. Cancels in the
+        // α = overlap/κ_m ratio for the quasi-TEM h_t but kept explicit so a
+        // true modal H stays dimensionally correct.
+        let eta0 = (yee_core::units::MU0 / yee_core::units::EPS0).sqrt();
+        let _ = omega; // dispersive ε(ω) could be folded in via eps_r_at; the
+        // quasi-TEM relation uses the real ε_r the closure returns.
+
+        // κ_m = Re ∫(e_m × h_m*)·ẑ dA  (modal power flux, real scalar);
+        // overlap = ∫(E_FEM × h_m*)·ẑ dA  (complex). h_m is real
+        // (quasi-TEM), so h_m* = h_m.
+        let mut overlap = Complex64::new(0.0, 0.0);
+        let mut kappa_m = 0.0_f64;
+
+        for (i, kind) in self.face_kinds.iter().enumerate() {
+            if let FaceKind::WavePort(p) = *kind
+                && p == port_id
+            {
+                let face = &self.exterior_faces.faces[i];
+                let face_vertices = face.world_vertices(self.mesh);
+
+                let t0 = face_vertices[1] - face_vertices[0];
+                let t1 = face_vertices[2] - face_vertices[1];
+                let face_area = 0.5 * t0.cross(&t1).norm();
+
+                // ẑ = outward unit normal of this end-cap face (the
+                // propagation axis); its sign cancels in α = overlap/κ_m.
+                let n_norm = face.normal.norm();
+                let z_hat = if n_norm > 0.0 {
+                    face.normal / n_norm
+                } else {
+                    face.normal
+                };
+
+                if self.coupled_whitney {
+                    let e_fem_g =
+                        self.e_t_at_face_gauss_pts(face, e_interior, &system.interior_dof_of_edge);
+                    let w_g = face_area / 3.0;
+                    for (g, bary) in TRI_GAUSS_3PT_BARY.iter().enumerate() {
+                        let p_g = bary[0] * face_vertices[0]
+                            + bary[1] * face_vertices[1]
+                            + bary[2] * face_vertices[2];
+                        let e_mode_g = (driving_mode.modal_e_t)(p_g);
+                        // Quasi-TEM modal H: h_m = (√ε_r/η₀)(ẑ × e_m).
+                        let sqrt_eps = eps_r_at(p_g).max(0.0).sqrt();
+                        let h_mode_g = z_hat.cross(&e_mode_g) * (sqrt_eps / eta0);
+
+                        // κ_m += w_g · (e_m × h_m)·ẑ   (real modal H ⇒ h* = h).
+                        kappa_m += w_g * e_mode_g.cross(&h_mode_g).dot(&z_hat);
+
+                        // overlap += w_g · (E_FEM × h_m*)·ẑ, with E_FEM
+                        // complex and h_m real. Compute the complex
+                        // cross-product-with-ẑ component by linearity.
+                        let e_fem = e_fem_g[g];
+                        overlap += Complex64::new(w_g, 0.0)
+                            * cross_dot_zhat_complex(&e_fem, &h_mode_g, &z_hat);
+                    }
+                } else {
+                    let centroid = face.centroid(self.mesh);
+                    let e_mode = (driving_mode.modal_e_t)(centroid);
+                    let sqrt_eps = eps_r_at(centroid).max(0.0).sqrt();
+                    let h_mode = z_hat.cross(&e_mode) * (sqrt_eps / eta0);
+                    kappa_m += face_area * e_mode.cross(&h_mode).dot(&z_hat);
+
+                    let e_fem =
+                        self.e_t_at_face_centroid(face, e_interior, &system.interior_dof_of_edge);
+                    overlap += Complex64::new(face_area, 0.0)
+                        * cross_dot_zhat_complex(&e_fem, &h_mode, &z_hat);
+                }
+            }
+        }
+
+        if kappa_m.abs() <= f64::EPSILON {
+            return Err(Error::Numerical(format!(
+                "OpenBoundarySolver::extract_s_qp_power: modal power flux \
+                 κ_m = Re ∫(e_m×h_m*)·ẑ = {kappa_m} is numerically zero for \
+                 port {port_id}; cannot power-normalise extraction"
+            )));
+        }
+
+        let alpha = overlap / Complex64::new(kappa_m, 0.0);
+        Ok(alpha - Complex64::new(a_inc_q, 0.0))
+    }
+
+    /// **Diagnostic (ADR-0162 B1 de-risk).** Run the same multi-port driven
+    /// sweep as [`Self::sweep_matrix`] but extract **two** S-matrices per
+    /// frequency from the *same* solved interior field: the production
+    /// E-field-L² normalization (`s_l2`) and a power-wave normalization
+    /// (`s_power`, [`Self::extract_s_qp_power`]).
+    ///
+    /// The decisive number is the matched-thru power balance
+    /// `|S11|² + |S21|²`: if `s_power` lifts it from the L² value (≈0.61 on
+    /// the microstrip thru) toward `1`, the L² normalization is the
+    /// magnitude bug (ADR-0162 B2 GO); if it stays ≈0.61, the deficit is
+    /// real numerical loss (the K3 Q-floor — B2 NO-GO).
+    ///
+    /// The matrix assembly / LU factorization / per-port back-substitution
+    /// are **bit-identical** to [`Self::sweep_matrix`] — only the
+    /// post-solve extraction is duplicated — so the two S-matrices are read
+    /// off the exact same FEM field, isolating the normalization as the only
+    /// changed variable.
+    ///
+    /// `eps_r_at` supplies the per-point relative permittivity for the
+    /// quasi-TEM modal-H relation `h_t = (√ε_r/η₀)(ẑ × e_t)` (see
+    /// [`Self::extract_s_qp_power`]); for a microstrip end-cap face it is the
+    /// geometry-aware `|p| if p.z < sub_h { eps_r } else { 1.0 }`.
+    ///
+    /// # Errors
+    ///
+    /// Propagates assembly / LU / extraction errors from the same paths as
+    /// [`Self::sweep_matrix`], plus [`Error::Numerical`] if the power flux
+    /// `κ_m` is numerically zero on any port.
+    pub fn sweep_matrix_power_balance(
+        &self,
+        omegas: &[f64],
+        eps_r_at: &(dyn Fn(Vector3<f64>) -> f64 + Sync),
+    ) -> Result<PowerBalanceSweep, Error> {
+        if omegas.is_empty() {
+            return Err(Error::Invalid(
+                "OpenBoundarySolver::sweep_matrix_power_balance: omegas slice is empty".to_string(),
+            ));
+        }
+
+        let n_ports = self.ports.len();
+        let mut s_l2_out: Vec<DMatrix<Complex64>> = Vec::with_capacity(omegas.len());
+        let mut s_power_out: Vec<DMatrix<Complex64>> = Vec::with_capacity(omegas.len());
+
+        for &omega in omegas {
+            // Identical assembly + factorization to `sweep_matrix`.
+            let system = self.assemble_driven_system(omega)?;
+            let n_interior = system.rhs.len();
+
+            let lu: Lu<usize, Complex64> = system.matrix.sp_lu().map_err(|e| {
+                Error::Numerical(format!(
+                    "OpenBoundarySolver::sweep_matrix_power_balance: sparse LU of \
+                     driven matrix at omega = {omega} failed: {e:?}"
+                ))
+            })?;
+
+            let mut s_l2 = DMatrix::<Complex64>::zeros(n_ports, n_ports);
+            let mut s_power = DMatrix::<Complex64>::zeros(n_ports, n_ports);
+
+            for p in 0..n_ports {
+                let rhs_p = self.build_rhs_for_excited_port(
+                    omega,
+                    p,
+                    &system.interior_dof_of_edge,
+                    n_interior,
+                )?;
+
+                let mut rhs_mat = faer::Mat::<Complex64>::zeros(n_interior, 1);
+                for (i, &b_i) in rhs_p.iter().enumerate() {
+                    rhs_mat[(i, 0)] = b_i;
+                }
+                lu.solve_in_place_with_conj(faer::Conj::No, rhs_mat.as_mut());
+
+                let e_interior: Vec<Complex64> = (0..n_interior).map(|i| rhs_mat[(i, 0)]).collect();
+
+                // Extract BOTH normalizations off the SAME solved field.
+                for q in 0..n_ports {
+                    let a_inc_q = if q == p { 1.0 } else { 0.0 };
+                    s_l2[(q, p)] = self.extract_s_qp(q, a_inc_q, &e_interior, &system)?;
+                    s_power[(q, p)] =
+                        self.extract_s_qp_power(q, a_inc_q, omega, &e_interior, &system, eps_r_at)?;
+                }
+            }
+
+            s_l2_out.push(s_l2);
+            s_power_out.push(s_power);
+        }
+
+        Ok(PowerBalanceSweep {
+            omegas: omegas.to_vec(),
+            s_l2: s_l2_out,
+            s_power: s_power_out,
+        })
     }
 
     /// Reconstruct the tangential `E`-field at a port face's centroid
