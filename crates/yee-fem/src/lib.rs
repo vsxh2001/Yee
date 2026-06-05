@@ -83,9 +83,9 @@ pub use microstrip_port_numerical::{
     MicrostripPortGeom, microstrip_port_numerical, microstrip_port_numerical_at,
 };
 pub use open_boundary::{
-    AbcOrder, DrivenSystem, FaceKind, OpenBoundarySolver, PmlConfig, PmlMeshMeta, PmlRegion,
-    PortDefinition, PortId, PortMode, PowerBalanceSweep, PowerModalExtract, PoyntingAudit,
-    SParameters, SParametersMatrix,
+    AbcOrder, DrivenSystem, FaceKind, FieldSnapshot, OpenBoundarySolver, PmlConfig, PmlMeshMeta,
+    PmlRegion, PortDefinition, PortId, PortMode, PowerBalanceSweep, PowerModalExtract,
+    PoyntingAudit, SParameters, SParametersMatrix,
 };
 pub use pml_mesh::{FaceIndexMap, PmlAxis, PmlClass, extend_mesh_with_pml};
 pub use solve::{

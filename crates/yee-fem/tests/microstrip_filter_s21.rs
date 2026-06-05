@@ -84,10 +84,12 @@
 use std::f64::consts::PI;
 
 use nalgebra::Vector3;
+use num_complex::Complex64;
 use yee_fem::{
-    CoupledResonatorGeom, FaceKind, MaterialDatabase, MicrostripPortGeom, OpenBoundarySolver,
-    SParametersMatrix, TraceRect, beta_microstrip, correct_gap_fem_k,
-    layered_microstrip_filter_mesh, microstrip_port_numerical_at,
+    CoupledResonatorGeom, FaceKind, FieldSnapshot, MaterialDatabase, MicrostripPortGeom,
+    OpenBoundarySolver, SParametersMatrix, TraceRect, beta_microstrip, correct_gap_fem_k,
+    layered_microstrip_filter_mesh, layered_microstrip_mesh, microstrip_port_numerical,
+    microstrip_port_numerical_at,
 };
 use yee_filter::{
     Approximation, FilterSpec, LumpedLadder, Response, SpecMask, dimension_edge_coupled,
@@ -1515,49 +1517,60 @@ fn fem_filter_s21_corrected_gaps() {
 }
 
 // =====================================================================
-// FEM-EM brick B3' (ADR-0162) — filter S21 re-graded with the POWER-CORRECT
+// FEM-EM brick B3'' (ADR-0162) — filter S21 re-graded with the POWER-CORRECT
 // E+H modal extraction (the B2' fix, validated GO on the straight thru:
-// |S21| 0.778→1.0001, |S11|²+|S21|² 0.61→1.0037, ε_eff 0.66%).
+// |S21| 0.778→1.0001, |S11|²+|S21|² 0.61→1.0037, ε_eff 0.66%) USING A CLEAN
+// MATCHED-LINE MODAL BASIS (the B3'' standing-wave fix — B3' over-unity'd off a
+// contaminated in-situ basis).
 //
 // THE GOAL (ADR-0147 #1): does the power-correct extraction lift the 3-pole
-// FILTER S21 off the N3 −27.38 dB E-only floor toward the Chebyshev mask?
+// FILTER S21 off the N3 −27.38 dB E-only floor toward the Chebyshev mask, with
+// a PHYSICAL curve (|S21| ≤ 1, |S|²sum ≤ 1)?
 //
 // The ONE change vs the N3 gate (`fem_filter_s21_vs_ladder`): S11/S21 at each
 // frequency come from `power_modal_extract` (the E+H two-field modal
-// decomposition) instead of the E-only `sweep_matrix` / `extract_s_qp`.
-// Everything else — geometry (`build_edge_coupled_geometry`), the
-// numerical-eigenmode ports recentred per off-centre feed, interior-PEC,
-// coupled-Whitney, the 17-pt 1.6–2.4 GHz band, the feed de-embed, and the
-// `ladder_s21` reference + oracle/mask grading — is IDENTICAL.
+// decomposition, fed a CLEAN matched-reference-line modal basis) instead of the
+// E-only `sweep_matrix` / `extract_s_qp`. Everything else — geometry
+// (`build_edge_coupled_geometry`), the numerical-eigenmode ports recentred per
+// off-centre feed, interior-PEC, coupled-Whitney, the 17-pt 1.6–2.4 GHz band,
+// the feed de-embed, and the `ladder_s21` reference + oracle/mask grading — is
+// IDENTICAL.
 // =====================================================================
 
-/// Modal-reference inward-sampling distance as a fraction of the feed length.
-/// `power_modal_extract` samples each port's TRUE modal `(e_m, h_m)` this far
-/// INWARD from the port face (along the propagation direction into the
-/// structure). For the filter the two feeds are at OPPOSITE ends and share no
-/// common interior `y`-plane, so an absolute plane will not do — the inward
-/// offset lands each port's reference in ITS OWN uniform feed run. Half the
-/// feed length sits comfortably inside both feeds (each is ≥ `feed_len` long;
-/// the output feed is `feed_len + stagger`) and clear of the port-face ABC and
-/// the first resonator.
-const MODAL_REF_FEED_FRAC: f64 = 0.5;
+/// Length (m) of the MATCHED reference straight line used to build the CLEAN
+/// modal basis (B3''). 20 mm = the N2 thru length; well-matched (|S11|≈0.06)
+/// so its interior is a (near-)pure forward mode. The mesh is the same
+/// cross-section as the filter feed (`box_w × box_h`, `SUB_H`, `line_w`) with
+/// the trace box-CENTRED; the basis is x-shifted per feed at projection time.
+const REF_LINE_LEN: f64 = 20.0e-3;
+/// `ny` for the reference line (dy = 2.5 mm, matching the N2/B4 line).
+const REF_LINE_NY: usize = 8;
 
 /// Drive the filter two-port through the POWER-CORRECT E+H modal extraction
-/// (B2', ADR-0162) and return per-frequency `(S11, S21)`.
+/// with a CLEAN (matched-reference-line) modal basis (B3'', ADR-0162) and
+/// return per-frequency `(S11, S21)`.
 ///
-/// Bit-identical solver build to [`solve_filter`] (same mesh, the same
+/// Solver build is bit-identical to [`solve_filter`] (same mesh, the same
 /// `microstrip_port_numerical_at` ports recentred per off-centre feed,
-/// interior-PEC, `with_coupled_whitney(true)`); the ONLY difference is the
-/// post-solve extraction — `power_modal_extract(ω, 0, d_ref)` (drive port 0,
-/// read S11 = `s_column[0]`, S21 = `s_column[1]`) instead of `sweep_matrix`.
+/// interior-PEC, `with_coupled_whitney(true)`). The extraction is
+/// `power_modal_extract(ω, 0, &clean_basis)` (drive port 0, read
+/// S11 = `s_column[0]`, S21 = `s_column[1]`) instead of `sweep_matrix`.
 ///
-/// `d_ref = MODAL_REF_FEED_FRAC · feed_len` is the inward sampling distance for
-/// the modal reference; it lands inside each feed's uniform run (the crux for
-/// the off-centre feeds — see [`MODAL_REF_FEED_FRAC`]).
-fn solve_filter_power(
-    geom: &FilterGeometry,
-    omegas: &[f64],
-) -> Vec<(num_complex::Complex64, num_complex::Complex64)> {
+/// ## The clean modal basis (the B3'' standing-wave fix)
+///
+/// A SEPARATE matched straight reference line (same feed cross-section,
+/// box-CENTRED trace) is solved once at `F0`; its (pure-forward) interior at
+/// `y = REF_LINE_LEN/2` — de-rotated by the analytic forward phase to the real
+/// transverse profile `(e_t, h_t = ∇×E/(−jωμ))` — IS the reflection-free modal
+/// basis. Each filter port-face point `(x, z)` is mapped to the centred
+/// reference cross-section by the x-shift `x_ref = x − feed_xc[port] + box_w/2`
+/// (the feeds are off-centre; the reference trace is centred), then sampled.
+/// `power_modal_extract` projects the filter's PORT-FACE TOTAL field onto this
+/// clean basis; the fwd/bwd split via the H sign flip is exact even where the
+/// filter strongly reflects (NO standing-wave contamination — that was the B3'
+/// over-unity bug from sampling the in-situ reflective feed).
+fn solve_filter_power(geom: &FilterGeometry, omegas: &[f64]) -> Vec<(Complex64, Complex64)> {
+    // ── Filter solver (the device under test) ──
     let (mesh, material_db, ground_pred, trace_pred) = layered_microstrip_filter_mesh(
         geom.box_w,
         geom.box_len,
@@ -1610,26 +1623,105 @@ fn solve_filter_power(
         .with_interior_pec_edges(interior_pec.iter().copied())
         .with_coupled_whitney(true);
 
-    // Modal-reference inward distance: half the feed length lands inside both
-    // uniform feeds (the off-centre input/output feeds share no interior
-    // y-plane, so inward-from-each-face sampling is mandatory here).
-    let d_ref = MODAL_REF_FEED_FRAC * geom.feed_len;
+    // ── Matched reference line → CLEAN modal basis (solved once at F0) ──
+    // A box-CENTRED straight 50 Ω line with the filter feed's cross-section
+    // (box_w × box_h, SUB_H, line_w). Well-matched (|S11|≈0.06), so its
+    // interior is a (near-)pure forward mode = the reflection-free modal basis.
+    // Built ONCE; the mesh must outlive ref_solver, which the basis closure
+    // borrows — so keep ref_mesh in this scope.
+    let (ref_mesh, ref_db, rg_pred, rt_pred) = layered_microstrip_mesh(
+        geom.box_w,
+        geom.box_h,
+        REF_LINE_LEN,
+        SUB_H,
+        geom.line_w,
+        geom.nx,
+        REF_LINE_NY,
+        geom.nz,
+    )
+    .expect("matched reference-line mesh must build");
+    let ref_solver = {
+        let ref_port_geom = MicrostripPortGeom {
+            trace_w: geom.line_w,
+            sub_h: SUB_H,
+            eps_r: EPS_R,
+            box_w: geom.box_w,
+            box_h: geom.box_h,
+        };
+        let n_ext = exterior_face_count(&ref_mesh);
+        let rpicker = OpenBoundarySolver::new(
+            &ref_mesh,
+            vec![FaceKind::Pec; n_ext],
+            Vec::new(),
+            MaterialDatabase::new(),
+        )
+        .expect("ref-line picker solver must build");
+        let mut r_pec: Vec<usize> = rpicker.interior_edges_matching(&rg_pred);
+        r_pec.extend(rpicker.interior_edges_matching(&rt_pred));
+        r_pec.sort_unstable();
+        r_pec.dedup();
+        let rcent = rpicker.exterior_face_centroids();
+        let rkinds = classify_filter_faces(&rcent, REF_LINE_LEN);
+        drop(rpicker);
+        // Box-CENTRED numerical-eigenmode ports (feed_xc = box_w/2 → no shift).
+        let rp0 =
+            microstrip_port_numerical(&ref_port_geom, F0).expect("ref-line port 0 must build");
+        let rp1 =
+            microstrip_port_numerical(&ref_port_geom, F0).expect("ref-line port 1 must build");
+        OpenBoundarySolver::new(&ref_mesh, rkinds, vec![rp0, rp1], ref_db)
+            .expect("matched reference-line solver must build")
+            .with_interior_pec_edges(r_pec.iter().copied())
+            .with_coupled_whitney(true)
+    };
+    // Snapshot the matched line once at F0 (the modal SHAPE is ~frequency-
+    // independent over the band, exactly as the numerical port uses one F0
+    // eigensolve). De-rotate by the analytic forward phase at the sample plane.
+    let omega0 = 2.0 * PI * F0;
+    let ref_snap: FieldSnapshot = ref_solver
+        .solve_field_snapshot(omega0, 0)
+        .expect("matched reference-line snapshot must succeed");
+    let beta0 = beta_microstrip(geom.line_w, SUB_H, EPS_R, omega0);
+    let y_ref = REF_LINE_LEN / 2.0;
+    let derot = Complex64::from_polar(1.0, beta0 * y_ref);
+    // Per-port x-shift: map a filter port-face x to the centred reference x.
+    let feed_xc = [geom.feed_xc_in, geom.feed_xc_out];
+    let box_w = geom.box_w;
+
+    // Clean modal basis closure: filter port-face point → reference interior
+    // (x-shifted to the centred reference trace, de-rotated to the real
+    // transverse profile). The filter feeds are off-centre, so the x-shift
+    // pushes port-face points on the FAR side of the box (away from the feed)
+    // outside the reference box — there the modal field is ~0 (far from the
+    // strip), so an out-of-box sample contributes negligibly; return (0, 0)
+    // rather than panic. (The FEM port-face field is also ~0 there.)
+    let clean_basis = |port: usize, p: Vector3<f64>| {
+        let x_ref = p.x - feed_xc[port] + box_w / 2.0;
+        let p_ref = Vector3::new(x_ref, y_ref, p.z);
+        match ref_solver.modal_field_at(&ref_snap, p_ref, omega0) {
+            Some((e_ref, h_ref)) => (e_ref * derot, h_ref * derot),
+            None => (
+                Vector3::new(Complex64::ZERO, Complex64::ZERO, Complex64::ZERO),
+                Vector3::new(Complex64::ZERO, Complex64::ZERO, Complex64::ZERO),
+            ),
+        }
+    };
 
     omegas
         .iter()
         .map(|&omega| {
             let pm = solver
-                .power_modal_extract(omega, 0, d_ref)
-                .expect("B3' power_modal_extract must succeed");
+                .power_modal_extract(omega, 0, &clean_basis)
+                .expect("B3'' power_modal_extract must succeed");
             (pm.s_column[0], pm.s_column[1])
         })
         .collect()
 }
 
-/// FEM-EM brick B3' (ADR-0162) — 3-pole microstrip-filter S21 re-graded with the
-/// **power-correct E+H modal extraction** (the B2' fix), vs the analytic ladder
-/// reference. THE GOAL: does the power-correct extraction lift the filter S21 off
-/// the N3 −27.38 dB E-only floor toward the Chebyshev mask?
+/// FEM-EM brick B3'' (ADR-0162) — 3-pole microstrip-filter S21 re-graded with the
+/// **power-correct E+H modal extraction** + a **CLEAN matched-line modal basis**
+/// (the B3'' standing-wave fix), vs the analytic ladder reference. THE GOAL: does
+/// the power-correct extraction lift the filter S21 off the N3 −27.38 dB E-only
+/// floor toward the Chebyshev mask — with a PHYSICAL curve (|S21|≤1, |S|²sum≤1)?
 ///
 /// Mirrors [`fem_filter_s21_vs_ladder`] (N3) EXACTLY except the extraction:
 /// S11/S21 at each of the 17 band points come from
@@ -1639,17 +1731,31 @@ fn solve_filter_power(
 /// `sweep_matrix`/`extract_s_qp`. Same geometry, ports, mesh, de-embed, and
 /// `ladder_s21` + oracle/mask grading.
 ///
-/// ## Per-feed modal reference (the crux for off-centre feeds)
+/// ## CLEAN modal basis from a matched line (the B3'' standing-wave fix)
 ///
-/// The filter's two feeds are uniform 50 Ω runs at DIFFERENT `x` and OPPOSITE
-/// ends (input near `y = 0`, output near `y = box_len`), sharing no common
-/// interior `y`-plane. `power_modal_extract` samples each port's TRUE modal
-/// `(e_m, h_m = ∇×E/(−jωμ), de-rotated)` a distance `d_ref =
-/// MODAL_REF_FEED_FRAC·feed_len` INWARD from that port's face (along the
-/// propagation direction into the structure) — landing each reference in its
-/// OWN feed, on the uniform run before resonator 0 / after the last resonator,
-/// NOT inside the coupled region. Each port is normalized by its own
-/// reaction-norm κ, so the two off-centre references are consistently scaled.
+/// The first attempt (B3') sampled each port's modal `(e_m, h_m)` from the
+/// filter's OWN feed interior (de-rotated, assuming pure-forward). On a
+/// reflective filter the feed carries a **standing wave** (fwd+bwd), so the
+/// de-rotated reference was itself a fwd+bwd mix → corrupted projection →
+/// **|S21| > 1, |S|²sum > 1** (up to 12.7) where the filter strongly reflects.
+/// (The in-band peak DID lift −27.38 → −0.86 dB, +26.5 dB — confirming the floor
+/// was the EXTRACTION artifact and the filter DOES transmit in-band — but the
+/// curve was unphysical off-centre.)
+///
+/// B3'' decouples the modal BASIS from the in-situ field: a SEPARATE matched
+/// straight reference line (same feed cross-section, box-CENTRED trace,
+/// `REF_LINE_LEN` long, |S11|≈0.06) is solved ONCE at `F0`; its pure-forward
+/// interior at `y = REF_LINE_LEN/2` — de-rotated to the real transverse profile
+/// `(e_t, h_t = ∇×E/(−jωμ))` — IS the reflection-free modal basis. Each filter
+/// port-face point `(x, z)` is mapped to the centred reference cross-section by
+/// the x-shift `x_ref = x − feed_xc[port] + box_w/2` (the feeds are off-centre)
+/// and sampled (points far from the feed fall outside the reference box where the
+/// mode is ~0 → contribute nothing). `power_modal_extract` then projects the
+/// filter's PORT-FACE TOTAL field onto this clean basis; the fwd/bwd split via
+/// the H sign flip is **exact at any reflection level** — so the curve is
+/// PHYSICAL even where the filter strongly reflects. The matched-thru result is
+/// unchanged (its own interior is already a clean basis: |S21| → 1.0001). Each
+/// port is normalized by its own reaction-norm κ.
 ///
 /// ## What this asserts (HONEST, MEASUREMENT-DRIVEN — recorded-then-pinned)
 ///
@@ -1676,10 +1782,12 @@ fn solve_filter_power(
 ///
 /// ## GATING — CRITICAL (heavy; run by the orchestrator, boxed, `--release`)
 ///
-/// Multi-minute driven SWEEP: one per-ω sparse LU per point PLUS, per point, the
-/// per-port interior modal-field point-location + reconstruction the E+H
-/// extraction adds (a handful of cheap O(n_tets) scans — negligible vs the LU).
-/// ~17 points on the ~51 k-tet mesh; budget roughly the N3 ~80 s plus a little.
+/// Multi-minute driven SWEEP: one per-ω sparse LU per point on the ~51 k-tet
+/// filter mesh (17 points), PLUS one ONE-TIME matched reference-line solve at F0
+/// (~7 k-tet straight line — cheap, sub-second) for the clean basis, PLUS, per
+/// point, the per-port modal-basis point-location + reconstruction (a handful of
+/// cheap O(n_tets) scans on the reference line — negligible vs the filter LU).
+/// Budget roughly the N3 ~80–95 s plus the one reference solve.
 /// `#[ignore]`'d; run only in `--release`, boxed:
 ///
 /// ```text
@@ -1688,11 +1796,16 @@ fn solve_filter_power(
 ///   -- --ignored fem_filter_s21_power_extract --nocapture
 /// ```
 ///
-/// MEASURED RESULT: (to be filled in by the orchestrator after the boxed run —
-/// the headline is the corrected in-band peak vs the −27.38 dB N3 floor and
-/// whether the strict mask clears).
+/// MEASURED RESULT (to be filled in by the orchestrator after the boxed B3'' run):
+/// B3' (the buggy in-situ basis) already lifted the in-band peak −27.38 → −0.86 dB
+/// (+26.5 dB) but gave an UNPHYSICAL curve (|S21| up to 2.96, |S|²sum up to 12.7)
+/// off-centre from standing-wave contamination. B3'' (this clean-basis version)
+/// should keep the in-band lift while making the curve PHYSICAL: |S21| ≤ ~1 and
+/// in-band |S|²sum ≤ 1 at ALL points; band edges NEGATIVE dB (so the turnover
+/// assert passes); headline = the corrected in-band peak + whether the strict mask
+/// clears.
 #[test]
-#[ignore = "B3' GOAL gate: heavy 17-pt driven SWEEP with the power-correct E+H extraction; run only in --release, boxed"]
+#[ignore = "B3'' GOAL gate: heavy 17-pt driven SWEEP, power-correct E+H extraction + clean matched-line basis; run only in --release, boxed"]
 fn fem_filter_s21_power_extract() {
     // Geometry — IDENTICAL to the N3 gate (analytic impedance-k gaps, same mesh).
     let geom = build_edge_coupled_geometry(
@@ -1705,8 +1818,8 @@ fn fem_filter_s21_power_extract() {
         None,   // analytic impedance-k gaps (same as N3 baseline)
     );
     eprintln!(
-        "[B3'] filter mesh: box=({:.1},{:.1},{:.1})mm  n=({},{},{})  tets={}  w={:.3}mm  \
-         feed={:.1}mm  modal_ref d={:.2}mm inward  eps_eff(w)={:.4}",
+        "[B3''] filter mesh: box=({:.1},{:.1},{:.1})mm  n=({},{},{})  tets={}  w={:.3}mm  \
+         feed={:.1}mm  clean-basis ref-line={:.1}mm@F0  eps_eff(w)={:.4}",
         geom.box_w * 1e3,
         geom.box_len * 1e3,
         geom.box_h * 1e3,
@@ -1716,7 +1829,7 @@ fn fem_filter_s21_power_extract() {
         geom.total_tets(),
         geom.line_w * 1e3,
         geom.feed_len * 1e3,
-        MODAL_REF_FEED_FRAC * geom.feed_len * 1e3,
+        REF_LINE_LEN * 1e3,
         eps_eff(geom.line_w, SUB_H, EPS_R),
     );
 
@@ -1804,7 +1917,7 @@ fn fem_filter_s21_power_extract() {
     let lift_over_v1_db = passband_peak_db - V1_FLOOR_PEAK_DB;
 
     eprintln!(
-        "\n==== B3' GRADE (power-correct E+H extraction; ADR-0162) ====\n\
+        "\n==== B3'' GRADE (power-correct E+H + clean matched-line basis; ADR-0162) ====\n\
          tets                : {}\n\
          wall                : {:.1} s\n\
          in-band peak        : {:.2} dB @ {:.2} GHz\n\
@@ -1853,23 +1966,43 @@ fn fem_filter_s21_power_extract() {
         .map(|(f, d)| format!("{f:.3}:{d:.2}"))
         .collect::<Vec<_>>()
         .join(" ");
-    eprintln!("[B3'] oracle_grade pairs: {pairs}");
+    eprintln!("[B3''] oracle_grade pairs: {pairs}");
 
     // ---- Assertions — HONEST, MEASUREMENT-DRIVEN (assert only invariants) ----
     //
-    // B3' is the research-open GOAL: does the power-correct E+H extraction lift
-    // the filter S21 off the N3 −27.38 dB E-only floor toward the Cheb mask? The
-    // headline (the lift, the in-band power balance, mask-clearing) is MEASURED
-    // by the orchestrator's boxed run — this gate does NOT pre-judge it. It
-    // asserts only what is true regardless of the measured level, and asserts
-    // the strict mask ONLY IF it actually clears (no weakening to force green).
+    // B3'' is the research-open GOAL: does the power-correct E+H extraction (with
+    // a CLEAN matched-line basis) lift the filter S21 off the N3 −27.38 dB E-only
+    // floor toward the Cheb mask, with a PHYSICAL curve? The headline (the lift,
+    // the in-band power balance, mask-clearing) is MEASURED by the orchestrator's
+    // boxed run — this gate does NOT pre-judge it. It asserts only what is true
+    // regardless of the measured level (finite, PHYSICAL passivity, a band-pass
+    // turnover), and asserts the strict mask ONLY IF it actually clears.
+
+    // (0) PASSIVITY / PHYSICALITY — the B3'' fix's named check. A passive 2-port
+    //     cannot have |S21| > 1 or |S11|²+|S21|² > 1 beyond numerical noise. The
+    //     B3' in-situ-basis bug VIOLATED this (|S21| up to 2.96, |S|²sum up to
+    //     12.7) from standing-wave contamination; the clean basis must restore it.
+    //     A LENIENT 1.15 bound passes small numerical overshoot (the matched thru
+    //     gave |S|²sum = 1.0037) yet catches the B3' blow-up with wide margin. The
+    //     orchestrator may tighten after seeing the real numbers.
+    let worst_s21_mag = s_pairs
+        .iter()
+        .map(|(_, s21)| s21.norm())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        worst_s21_mag <= 1.15 && best_balance_in <= 1.15,
+        "B3'' PASSIVITY VIOLATION: max |S21| = {worst_s21_mag:.4}, max in-band |S|²sum = \
+         {best_balance_in:.4} (both must be ≤ ~1 for a passive 2-port; 1.15 lenient bound). \
+         Over-unity means the modal basis is still contaminated (standing wave) — the clean \
+         matched-line basis did not fully decouple. Full table printed above."
+    );
 
     // (1) Finite curve — the power extraction did not diverge and no port
     //     collapsed (a NaN/Inf S would mean the modal reconstruction or the
     //     per-port reaction-norm normalization broke).
     assert!(
         curve.iter().all(|(_, d)| d.is_finite()) && passband_peak_db.is_finite(),
-        "B3' NO-GO: the power-extracted |S21| curve has a non-finite point — the driven \
+        "B3'' NO-GO: the power-extracted |S21| curve has a non-finite point — the driven \
          solve or the E+H modal extraction degenerated. Full curve printed above."
     );
 
@@ -1879,7 +2012,7 @@ fn fem_filter_s21_power_extract() {
     //     demanding a depth the path may not deliver.
     assert!(
         turnover_db > 0.2,
-        "B3': no band-pass turnover — in-band peak {passband_peak_db:.2} dB is not above the \
+        "B3'': no band-pass turnover — in-band peak {passband_peak_db:.2} dB is not above the \
          deeper band edge (edges {edge_lo_db:.2}/{edge_hi_db:.2} dB; turnover {turnover_db:+.2} dB). \
          The response is monotonic, not a recognisable band-pass. Full curve printed above."
     );
@@ -1897,15 +2030,15 @@ fn fem_filter_s21_power_extract() {
              rej {worst_rej_db:.2}, asym {asym_margin:+.2})"
         );
         eprintln!(
-            "[B3'] STRICT MASK CLEARS — the power-correct E+H extraction lifted the 3-pole \
-             filter S21 into the Chebyshev mask (worst passband err {worst_pass_db:.2} dB ≤ \
-             {PASSBAND_TOL_DB}, worst rejection err {worst_rej_db:.2} dB ≤ {REJECTION_TOL_DB}, \
+            "[B3''] STRICT MASK CLEARS — the power-correct E+H extraction (clean basis) lifted \
+             the 3-pole filter S21 into the Chebyshev mask (worst passband err {worst_pass_db:.2} \
+             dB ≤ {PASSBAND_TOL_DB}, worst rejection err {worst_rej_db:.2} dB ≤ {REJECTION_TOL_DB}, \
              asymmetry {asym_margin:+.2} dB). This is the ADR-0147 #1 goal — a mask-clearing \
              full-wave filter S21."
         );
     } else {
         eprintln!(
-            "[B3'] STRICT MASK: MISS by {worst_pass_db:.2} dB in-band. in-band peak \
+            "[B3''] STRICT MASK: MISS by {worst_pass_db:.2} dB in-band. in-band peak \
              {passband_peak_db:.2} dB ({lift_over_n3_db:+.2} dB vs the N3 −27.38 dB E-only floor); \
              in-band power balance |S11|²+|S21|² ∈ [{worst_balance_in:.4}, {best_balance_in:.4}]. \
              Recorded honestly — the orchestrator pins the measured lift as a tripwire and reads \

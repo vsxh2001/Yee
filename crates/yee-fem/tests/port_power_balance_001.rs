@@ -96,9 +96,10 @@
 use std::f64::consts::PI;
 
 use nalgebra::Vector3;
+use num_complex::Complex64;
 use yee_fem::{
-    FaceKind, MaterialDatabase, MicrostripPortGeom, OpenBoundarySolver, layered_microstrip_mesh,
-    microstrip_port_numerical,
+    FaceKind, MaterialDatabase, MicrostripPortGeom, OpenBoundarySolver, beta_microstrip,
+    layered_microstrip_mesh, microstrip_port_numerical,
 };
 use yee_mesh::TetMesh3D;
 
@@ -356,13 +357,27 @@ fn port_power_balance_001() {
         .poynting_flux_audit(omega, 0)
         .expect("Poynting-flux audit must succeed");
 
-    // ── B2': power-correct E+H modal extraction on the SAME solver. The
-    // modal pair (e_m, h_m) is the TRUE modal field sampled from the
-    // interior cross-section at y = L/2 (de-rotated by the analytic forward
-    // phase), giving the correct spatially-varying admittance; the
-    // decomposition uses the TRUE H_FEM from B1.5. ──
+    // ── B2'/B3'': power-correct E+H modal extraction with a CLEAN modal
+    // basis. The thru is itself a matched line (|S11|≈0.06), so its own
+    // interior at y = L/2 is a ~pure forward mode — a valid clean basis.
+    // Sample it once (snapshot), de-rotate the forward phase to the real
+    // transverse profile, and project the SAME thru's port-face total field
+    // onto it. Both feeds are box-centred (feed_xc = box_w/2), so no x-shift.
+    let beta = beta_microstrip(TRACE_W, SUB_H, EPS_R, omega);
+    let derot = Complex64::from_polar(1.0, beta * (L_THRU / 2.0));
+    let snap = solver
+        .solve_field_snapshot(omega, 0)
+        .expect("thru field snapshot must succeed");
+    let basis = |_port: usize, p: Vector3<f64>| {
+        // Clean modal sample at the thru interior midplane (same x,z).
+        let p_ref = Vector3::new(p.x, L_THRU / 2.0, p.z);
+        let (e_ref, h_ref) = solver
+            .modal_field_at(&snap, p_ref, omega)
+            .expect("clean modal basis sample (thru interior) must locate a tet");
+        (e_ref * derot, h_ref * derot)
+    };
     let pm_l1 = solver
-        .power_modal_extract(omega, 0, L_THRU / 2.0)
+        .power_modal_extract(omega, 0, &basis)
         .expect("B2' power-modal extraction (L1) must succeed");
     let s11_pm = pm_l1.s_column[0];
     let s21_pm = pm_l1.s_column[1];
@@ -383,8 +398,19 @@ fn port_power_balance_001() {
         &trace_pred2,
         &geom,
     );
+    let derot2 = Complex64::from_polar(1.0, beta * (L_THRU2 / 2.0));
+    let snap2 = solver2
+        .solve_field_snapshot(omega, 0)
+        .expect("thru L2 field snapshot must succeed");
+    let basis2 = |_port: usize, p: Vector3<f64>| {
+        let p_ref = Vector3::new(p.x, L_THRU2 / 2.0, p.z);
+        let (e_ref, h_ref) = solver2
+            .modal_field_at(&snap2, p_ref, omega)
+            .expect("clean modal basis sample (thru L2 interior) must locate a tet");
+        (e_ref * derot2, h_ref * derot2)
+    };
     let pm_l2 = solver2
-        .power_modal_extract(omega, 0, L_THRU2 / 2.0)
+        .power_modal_extract(omega, 0, &basis2)
         .expect("B2' power-modal extraction (L2) must succeed");
     let s21_pm_l2 = pm_l2.s_column[1];
 

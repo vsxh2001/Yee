@@ -1123,6 +1123,29 @@ pub struct PowerModalExtract {
     pub s_column: Vec<Complex64>,
 }
 
+/// A solved driven-field snapshot (ADR-0162 B3'' helper): the interior-DoF
+/// complex solution plus the data needed to reconstruct `(E, H)` anywhere in
+/// the mesh via [`OpenBoundarySolver::modal_field_at`].
+///
+/// Produced by [`OpenBoundarySolver::solve_field_snapshot`]. Its purpose is to
+/// let a caller build a **clean, reflection-free modal basis** from a *matched*
+/// reference line: solve the matched line once, snapshot it, then sample the
+/// (pure-forward) interior cross-section field at any transverse point. That
+/// clean basis is then fed to [`OpenBoundarySolver::power_modal_extract`] to
+/// decompose a *different* (possibly strongly reflective) solver's port-face
+/// total field — the standing-wave-robust fix for the B3' over-unity on
+/// reflective filter feeds.
+#[derive(Debug, Clone)]
+pub struct FieldSnapshot {
+    /// Interior-DoF complex solution `e_interior` from the driven solve.
+    e_interior: Vec<Complex64>,
+    /// The driven system (provides `interior_dof_of_edge`).
+    system: DrivenSystem,
+    /// Canonical global-edge id map (`sorted-vertex-pair → gid`), matching
+    /// `interior_dof_of_edge`'s index space.
+    edge_id: HashMap<(usize, usize), usize>,
+}
+
 impl<'m> OpenBoundarySolver<'m> {
     /// Build an [`OpenBoundarySolver`] from a mesh, face-kind tagging,
     /// port descriptors, and material database.
@@ -2676,6 +2699,76 @@ impl<'m> OpenBoundarySolver<'m> {
         })
     }
 
+    /// Solve the driven system (exciting `driven_port`) and return a
+    /// [`FieldSnapshot`] from which `(E, H)` can be reconstructed anywhere via
+    /// [`Self::modal_field_at`] (ADR-0162 B3'').
+    ///
+    /// The assemble + LU + per-port back-substitution are **bit-identical** to
+    /// [`Self::sweep_matrix`] / [`Self::power_modal_extract`]. The intended use
+    /// is to build a **clean, reflection-free modal basis** from a *matched*
+    /// reference line (solve it once, snapshot, then sample its pure-forward
+    /// interior cross-section field) for feeding to
+    /// [`Self::power_modal_extract`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates assembly / LU errors; [`Error::Invalid`] if `driven_port` is
+    /// out of range.
+    pub fn solve_field_snapshot(
+        &self,
+        omega: f64,
+        driven_port: PortId,
+    ) -> Result<FieldSnapshot, Error> {
+        if driven_port >= self.ports.len() {
+            return Err(Error::Invalid(format!(
+                "OpenBoundarySolver::solve_field_snapshot: driven_port = {driven_port} \
+                 out of range (n_ports = {})",
+                self.ports.len()
+            )));
+        }
+        let system = self.assemble_driven_system(omega)?;
+        let n_interior = system.rhs.len();
+        let lu: Lu<usize, Complex64> = system.matrix.sp_lu().map_err(|e| {
+            Error::Numerical(format!(
+                "OpenBoundarySolver::solve_field_snapshot: sparse LU at omega = {omega} \
+                 failed: {e:?}"
+            ))
+        })?;
+        let rhs_p = self.build_rhs_for_excited_port(
+            omega,
+            driven_port,
+            &system.interior_dof_of_edge,
+            n_interior,
+        )?;
+        let mut rhs_mat = faer::Mat::<Complex64>::zeros(n_interior, 1);
+        for (i, &b_i) in rhs_p.iter().enumerate() {
+            rhs_mat[(i, 0)] = b_i;
+        }
+        lu.solve_in_place_with_conj(faer::Conj::No, rhs_mat.as_mut());
+        let e_interior: Vec<Complex64> = (0..n_interior).map(|i| rhs_mat[(i, 0)]).collect();
+        let edge_id = self.global_edge_id_map();
+        Ok(FieldSnapshot {
+            e_interior,
+            system,
+            edge_id,
+        })
+    }
+
+    /// Reconstruct the complex `(E, H)` of a snapshotted solved field at an
+    /// arbitrary world-space point (ADR-0162 B3''). `H = ∇×E/(−jωμ)`.
+    ///
+    /// Public wrapper over the Whitney-1 point-reconstruction used to sample a
+    /// clean modal basis from a matched reference line. Returns `None` if no
+    /// tet contains `p`.
+    pub fn modal_field_at(
+        &self,
+        snap: &FieldSnapshot,
+        p: Vector3<f64>,
+        omega: f64,
+    ) -> Option<(Vector3<Complex64>, Vector3<Complex64>)> {
+        self.reconstruct_field_at(p, omega, &snap.e_interior, &snap.system, &snap.edge_id)
+    }
+
     /// Reconstruct the complex `(E, H)` of a solved field at an arbitrary
     /// world-space point by point-locating the containing tet and
     /// evaluating the Whitney-1 field there (ADR-0162 B2' helper).
@@ -2837,111 +2930,88 @@ impl<'m> OpenBoundarySolver<'m> {
     /// field is in fact lossless (`P_out/P_in = 0.998`) — so the deficit is
     /// an extraction artifact, fixable here.
     ///
-    /// With the modal fields `(e_m, h_m)` normalized to **unit modal power**
-    /// `κ_m = Re ∫(e_m × h_m*)·ŷ dA = 1`, the forward / backward modal
-    /// amplitudes of the solved field at a port plane are
+    /// With a **clean, reflection-free** modal basis `(e_m, h_m)` (a real
+    /// transverse profile, supplied by `modal_basis` — see below), the
+    /// forward / backward modal amplitudes of the solved **port-face total
+    /// field** are recovered from the two-field projection
     ///
     /// ```text
-    ///   proj_E = ∫(E_FEM × h_m*)·ŷ dA ,   proj_H = ∫(e_m × H_FEM*)·ŷ dA
-    ///   a_fwd  = ½(proj_E + proj_H) ,      a_bwd  = ½(proj_E − proj_H)
+    ///   proj_E = ∫(E_face × h_m)·ŷ / κ ,   proj_H = ∫(e_m × H_face)·ŷ / κ
+    ///   a_fwd  = ½(proj_E + proj_H) ,       a_bwd  = ½(proj_E − proj_H)
     /// ```
     ///
-    /// (the E- and H-projections **add** for a +ŷ-traveling wave and
-    /// **subtract** for a −ŷ wave — that is exactly the incident/reflected
-    /// separation the E-only formula lacks). For a drive at port `p`:
+    /// with `κ = ∫(e_m × h_m)·ŷ` the (per-port) modal-power normalization and
+    /// `E_face`, `H_face = ∇×E/(−jωμ)` the **total** field reconstructed at
+    /// each port face. The total field is `a_fwd·(e_m, h_m) + a_bwd·(e_m,
+    /// −h_m)`: forward and backward share the transverse `e_m` shape and the
+    /// backward wave's **H reverses sign**, so `proj_E = a_fwd + a_bwd` and
+    /// `proj_H = a_fwd − a_bwd`. The fwd/bwd separation therefore comes from
+    /// the **H sign flip, which is EXACT at any reflection level** — matched
+    /// OR strongly reflective. For a drive at port `p`:
     /// `S_pp = a_bwd(p)/a_fwd(p)`, `S_qp = a_fwd(q)/a_fwd(p)` (`q ≠ p`).
     ///
-    /// ## The modal field source (TRUE modal `(e_m, h_m)`, B1.5-enabled)
+    /// ## The modal basis must be CLEAN (ADR-0162 B3'' — the standing-wave fix)
     ///
-    /// `h_m` is the crux. yee-mom's `NumericalCrossSection` exposes only the
-    /// transverse modal **E** (`e_tangential_at`), no modal H, and a
-    /// **uniform** modal-admittance approximation `h_m = (β/ωμ₀)(ŷ×e_m)`
-    /// mis-weights the inhomogeneous (air + dielectric) cross-section (it
-    /// leaves the thru at `|S21| ≈ 0.835`). Instead — exactly what B1.5
-    /// validated — the modal pair is sampled from the **true** solved field
-    /// a fixed distance `d_ref` **inward from each port face** (along the
-    /// propagation direction into the structure), a region of near-pure
-    /// forward travel just inside the uniform feed:
+    /// `modal_basis(port, p_face)` must return the **reflection-free** modal
+    /// `(e_m(x,z), h_m(x,z))` of the feed cross-section — sampled from a
+    /// **matched reference line** whose interior is a (near-)pure forward
+    /// mode (`H = ∇×E/(−jωμ)`, the B1.5-validated curl; reuse the same basis
+    /// at every same-width feed — the mode is a cross-section property). It
+    /// must **NOT** be sampled from the in-situ feed of a *reflective*
+    /// structure: the B3' attempt did exactly that (sampled the filter feed
+    /// interior, de-rotated assuming pure-forward), but a reflective feed
+    /// carries a **standing wave** (fwd+bwd), so the de-rotated reference was
+    /// itself a fwd+bwd mix → corrupted projection → **|S21| > 1, |S|²sum >
+    /// 1** at strongly-reflecting frequencies. Decoupling the clean basis
+    /// from the in-situ port-face total field removes that contamination
+    /// while keeping the matched-thru result (`|S21|→~1`).
     ///
-    /// ```text
-    ///   p_ref  = p_g − d_ref · n̂_out      (n̂_out = face outward normal)
-    ///   sample (E_ref, H_ref) = (E, ∇×E/(−jωμ)) at p_ref
-    ///   de-rotate the forward propagation phase the d_ref step picked up:
-    ///     e_m = E_ref · e^{+jβ d_ref} ,  h_m = H_ref · e^{+jβ d_ref}
-    /// ```
+    /// The basis being real ⇒ `κ` and the projections use the **un-
+    /// conjugated** cross products (validated in B2'): a spurious conjugate
+    /// on `H_face` would give `γ*` and corrupt the phase / over-count
+    /// reflection. Each port is normalized by its own `κ`, so different feeds
+    /// (e.g. the filter's two off-centre feeds) are consistently scaled.
     ///
-    /// **Sampling inward-from-each-face (not at one absolute `y`-plane) is
-    /// what makes this work for off-centre filter feeds**: the filter's
-    /// input feed (near `y = 0`) and output feed (near `y = box_len`) are
-    /// uniform 50 Ω runs at different `x` that share NO common interior
-    /// `y`-plane — a single absolute `y_ref` would land in the coupled-
-    /// resonator region. `p_g − d_ref·n̂_out` lands each port's reference in
-    /// its OWN feed (`d_ref < feed_len`). De-rotating by the analytic
-    /// `e^{+jβ d_ref}` (β from the port's `beta_mode`) removes the traveling
-    /// phase so `(e_m, h_m)` are the (nearly real) transverse modal
-    /// **profiles** of the true forward mode — the correct *spatially-
-    /// varying* admittance, not the uniform approximation. Both the
-    /// `(e_m, h_m)` reaction-norm `κ` and the projections then use the
-    /// **un-conjugated** cross products (the modal fields being
-    /// phase-aligned makes the complex amplitudes `α = a⁺+a⁻`, `γ = a⁺−a⁻`
-    /// come out without a spurious conjugate on the FEM field — conjugating
-    /// `H_FEM` was the first-attempt bug that broke the phase / over-counted
-    /// the reflection). Each port is normalized by its OWN reaction-norm κ,
-    /// so the two off-centre feeds' references are consistently scaled.
-    ///
-    /// This is NOT the B1 √ε_r shortcut (a guessed *local-plane-wave*
-    /// admittance with only an E-projection): here `h_m` is the **measured**
-    /// modal H (B1.5 proved `H = ∇×E/(−jωμ)` lossless, `P_out/P_in = 0.998`)
-    /// and the decomposition uses BOTH the E- and H-projections, which is
-    /// what separates incident from reflected (the E-only formula cannot).
-    ///
-    /// `ŷ_prop = +ŷ` (the geometry's propagation axis) is used as the
-    /// common Poynting axis at **both** ports (NOT the per-face outward
-    /// normal, which flips sign between the two end-caps and would corrupt
-    /// the forward/backward split).
+    /// `ŷ_prop = +ŷ` (the geometry's propagation axis) is the common Poynting
+    /// axis at **both** ports (NOT the per-face outward normal, which flips
+    /// sign between the two end-caps and would corrupt the forward/backward
+    /// split).
     ///
     /// ## Caveats
     ///
     /// * Assumes a single dominant propagating mode (quasi-TEM) and a common
     ///   `+ŷ` propagation axis (the straight line / the filter feed lines all
-    ///   propagate along `y`). The inward sample carries a *near*-pure
-    ///   forward mode; a small residual reflection leaves the de-rotated
-    ///   `(e_m, h_m)` slightly complex (the imaginary part is the
-    ///   contamination) — second-order on a matched feed.
-    /// * The de-rotation uses the analytic `β`; a β error (B4: 0.6 % vs HJ)
-    ///   leaves a small residual phase, second-order in the amplitudes.
-    /// * `d_ref` must be **inside the uniform feed run** of every port
-    ///   (`d_ref < feed_len` for the filter; for a straight thru any
-    ///   `0 < d_ref < line_len` works). Too large and the inward sample
-    ///   overshoots into the coupled-resonator region (or out of the mesh) —
-    ///   the modal reference is then not a clean single mode.
+    ///   propagate along `y`).
+    /// * The clean basis must genuinely be reflection-free; a residual
+    ///   reflection in the *reference line* (not the device under test) leaves
+    ///   the basis slightly fwd+bwd — keep the reference line well matched
+    ///   (the N2 thru: `|S11| ≈ 0.06`).
     ///
     /// This is a **diagnostic** — it does not modify `extract_s_qp` /
-    /// `extract_s11`; B2 productionizes it only if the thru validation
-    /// passes (`|S21|→~1`, `|S11|²+|S21|²→~1`, β/ε_eff unchanged).
+    /// `extract_s11`.
     ///
     /// # Arguments
     ///
     /// * `omega` — angular frequency (rad/s).
     /// * `driven_port` — the excited port `p`.
-    /// * `d_ref` — distance (m) INWARD from each port face (along
-    ///   `−n̂_out`, the propagation direction into the structure) at which to
-    ///   sample that port's modal reference. Pick a value comfortably inside
-    ///   every port's uniform feed run (`0 < d_ref < feed_len`); for a
-    ///   straight thru, e.g. `line_len/2`.
+    /// * `modal_basis` — `Fn(port, p_face) -> (e_m, h_m)` returning the CLEAN
+    ///   (reflection-free, matched-reference-line) modal field at the given
+    ///   port-face world point. Built by the caller from a matched reference
+    ///   line via [`Self::solve_field_snapshot`] + [`Self::modal_field_at`]
+    ///   (sample the line's pure-forward interior, x-shift to the port's feed
+    ///   centre, de-rotate the forward phase to the real transverse profile).
     ///
     /// # Errors
     ///
     /// Propagates assembly / LU errors; returns [`Error::Invalid`] if
     /// `driven_port` is out of range or a port face has no parent tet, and
-    /// [`Error::Numerical`] if a modal sample locates no tet (e.g. `d_ref`
-    /// overshoots the mesh), the modal power normalization `κ_m` is
-    /// numerically zero, or `a_fwd(p)` at the driven port vanishes.
+    /// [`Error::Numerical`] if the modal power normalization `κ` is
+    /// numerically zero or `a_fwd(p)` at the driven port vanishes.
     pub fn power_modal_extract(
         &self,
         omega: f64,
         driven_port: PortId,
-        d_ref: f64,
+        modal_basis: &impl Fn(PortId, Vector3<f64>) -> (Vector3<Complex64>, Vector3<Complex64>),
     ) -> Result<PowerModalExtract, Error> {
         let n_ports = self.ports.len();
         if driven_port >= n_ports {
@@ -2992,52 +3062,23 @@ impl<'m> OpenBoundarySolver<'m> {
                 continue;
             }
 
-            // TRUE modal pair, sampled a fixed distance `d_ref` INWARD from
-            // each port face (along −n̂_out, the propagation direction into
-            // the structure) and de-rotated by the analytic forward phase
-            // e^{+jβ d_ref} so (e_m, h_m) are the near-real transverse modal
-            // PROFILES (correct spatially-varying admittance — NOT the
-            // uniform-admittance approximation that floored |S21| at 0.835).
-            // Sampling INWARD-from-each-face (not at one absolute y-plane)
-            // lands each port's reference in ITS OWN uniform feed run — the
-            // filter's input/output feeds are at opposite ends and share no
-            // common interior y-plane.
-            let port = &self.ports[q];
-            let driving = select_driving_mode(port, q)?;
-            let beta = (driving.beta_mode)(omega);
-            // De-rotation factor e^{+jβ d_ref}: strips the forward traveling
-            // phase the sample picked up over the `d_ref` propagation inward.
-            // (It cancels in the S-ratios anyway, but de-rotating keeps κ ≈
-            // real for a well-conditioned un-conjugated decomposition.)
-            let derot = Complex64::from_polar(1.0, beta * d_ref);
-
+            // Project this port's PORT-FACE TOTAL field (E_face, H_face) onto
+            // the CLEAN reflection-free modal basis (e_m, h_m) supplied by
+            // `modal_basis` (sampled from a matched reference line — NOT the
+            // in-situ feed, which carries a standing wave on a reflective
+            // device; that was the B3' over-unity bug). The fwd/bwd split via
+            // the H sign flip is exact at ANY reflection level.
             let mut proj_e = Complex64::new(0.0, 0.0);
             let mut proj_h = Complex64::new(0.0, 0.0);
             let mut kappa_reac = Complex64::new(0.0, 0.0);
-            for &(p_g, w_g, n_out, e_fem, h_fem) in &port_fields {
-                // Sample the true modal (E, H) `d_ref` inward from the face
-                // (p_g − d_ref·n̂_out), same transverse (x, z), and de-rotate.
-                let p_ref = p_g - n_out * d_ref;
-                let (e_ref, h_ref) = self
-                    .reconstruct_field_at(p_ref, omega, &e_interior, &system, &edge_id)
-                    .ok_or_else(|| {
-                        Error::Numerical(format!(
-                            "power_modal_extract: interior modal sample at \
-                             ({:.4e}, {:.4e}, {:.4e}) located no tet (d_ref={:.4e} \
-                             inward may overshoot the uniform feed)",
-                            p_ref.x, p_ref.y, p_ref.z, d_ref
-                        ))
-                    })?;
-                let e_m = e_ref * derot;
-                let h_m = h_ref * derot;
-                // UN-CONJUGATED reaction products (the de-rotated modal
-                // fields are phase-aligned, so α = a⁺+a⁻, γ = a⁺−a⁻ come out
-                // without a spurious conjugate on the FEM field — conjugating
-                // H_FEM gave γ* and broke the phase / over-counted reflection
-                // in the first attempt):
-                //   κ      = ∫(e_m × h_m)·ŷ          (≈ real)
-                //   proj_E = ∫(E_FEM × h_m)·ŷ  = α κ
-                //   proj_H = ∫(e_m × H_FEM)·ŷ  = γ κ
+            for &(p_g, w_g, _n_out, e_fem, h_fem) in &port_fields {
+                // Clean modal (e_m, h_m) at this port-face point.
+                let (e_m, h_m) = modal_basis(q, p_g);
+                // UN-CONJUGATED power inner products (real clean basis ⇒ no
+                // spurious conjugate on the FEM field; B2'-validated):
+                //   κ      = ∫(e_m   × h_m)·ŷ
+                //   proj_E = ∫(E_face × h_m)·ŷ = (a_fwd + a_bwd) κ
+                //   proj_H = ∫(e_m × H_face)·ŷ = (a_fwd − a_bwd) κ
                 kappa_reac +=
                     Complex64::new(w_g, 0.0) * cross_dot_n_complex_noconj(&e_m, &h_m, &y_prop);
                 proj_e +=
@@ -3046,18 +3087,17 @@ impl<'m> OpenBoundarySolver<'m> {
                     Complex64::new(w_g, 0.0) * cross_dot_n_complex_noconj(&e_m, &h_fem, &y_prop);
             }
 
-            // Divide by the per-port reaction norm so α, γ are the true
-            // amplitudes (κ cancels in the S-ratios, but normalizing makes
-            // a_fwd/a_bwd individually meaningful and uniform across ports).
+            // Per-port modal-power normalization κ (consistent across ports;
+            // each feed's clean basis is normalized to its own κ).
             if kappa_reac.norm() <= f64::EPSILON {
                 return Err(Error::Numerical(format!(
-                    "power_modal_extract: reaction norm κ at port {q} is ~0 \
-                     (|κ| = {}); modal sample carries no forward power",
+                    "power_modal_extract: modal-power norm κ at port {q} is ~0 \
+                     (|κ| = {}); the clean modal basis carries no net forward power",
                     kappa_reac.norm()
                 )));
             }
-            let alpha = proj_e / kappa_reac;
-            let gamma = proj_h / kappa_reac;
+            let alpha = proj_e / kappa_reac; // a_fwd + a_bwd
+            let gamma = proj_h / kappa_reac; // a_fwd − a_bwd
             if q == driven_port {
                 kappa_m = Some(kappa_reac.re);
             }
