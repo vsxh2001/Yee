@@ -205,3 +205,4 @@
 - [ADR-0159: F1.2.1.1 — EM coupling design-curve gap correction (full-wave filter S21 toward the mask)](decisions/0159-f1-2-1-1-em-coupling-design-curve-gap-correct.md)
 - [ADR-0160: Finite-Q (realistic) lumped filter response + Cohn dissipation-loss gate](decisions/0160-finite-q-lumped-response.md)
 - [ADR-0161: CLI --q-unloaded — export the realistic (finite-Q) lumped response as Touchstone](decisions/0161-cli-finite-q-touchstone-export.md)
+- [ADR-0162: Higher-fidelity FEM microstrip port — power-wave normalization + multi-mode](decisions/0162-fem-microstrip-port-fidelity.md)
