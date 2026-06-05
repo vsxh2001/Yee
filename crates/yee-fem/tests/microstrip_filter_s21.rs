@@ -1796,14 +1796,21 @@ fn solve_filter_power(geom: &FilterGeometry, omegas: &[f64]) -> Vec<(Complex64, 
 ///   -- --ignored fem_filter_s21_power_extract --nocapture
 /// ```
 ///
-/// MEASURED RESULT (to be filled in by the orchestrator after the boxed B3'' run):
-/// B3' (the buggy in-situ basis) already lifted the in-band peak −27.38 → −0.86 dB
-/// (+26.5 dB) but gave an UNPHYSICAL curve (|S21| up to 2.96, |S|²sum up to 12.7)
-/// off-centre from standing-wave contamination. B3'' (this clean-basis version)
-/// should keep the in-band lift while making the curve PHYSICAL: |S21| ≤ ~1 and
-/// in-band |S|²sum ≤ 1 at ALL points; band edges NEGATIVE dB (so the turnover
-/// assert passes); headline = the corrected in-band peak + whether the strict mask
-/// clears.
+/// MEASURED RESULT (boxed `--release`, 51 336 tets, 77.1 s):
+/// in-band peak −26.14 dB @ 2.00 GHz (**+1.24 dB** vs the N3 −27.38 dB E-only floor).
+/// The curve is now PHYSICAL — `|S21| ≤ 0.05` and in-band `|S11|²+|S21|² ∈ [0.79, 0.93]`
+/// at ALL points (the B3' over-unity, `|S21|→2.96` / `|S|²sum→12.7`, is GONE). BUT the
+/// in-band `|S11| ≈ 0.85–0.91`: the filter GENUINELY REFLECTS in-band (transmits ~0.2 %),
+/// so the strict Cheb mask MISSES by ~33.7 dB (asymmetry PASSES, +2.17 dB).
+///
+/// HEADLINE / HONEST DIAGNOSIS: the B3' `+26 dB` was an UNPHYSICAL contamination
+/// false-positive; the correct clean-basis power-conserving extraction lifts the filter
+/// only **+1.24 dB**. ⇒ the −27 dB filter floor is **REAL coupling-bound reflection**
+/// (`|S11|~0.9` in-band), NOT an extraction artifact. The extraction fix is real but
+/// matters for a TRANSMITTING port (the thru: `|S21|` 0.778→1.0001, energy-conserving);
+/// the FILTER floor is COUPLING — the resonators do not realize the Chebyshev in-band
+/// match (ADR-0159 territory; dimensioning gave only +5.8 dB). Corroborated independently
+/// by N3's own E-only extraction (also −27 dB) and the physical in-band `|S|²sum`.
 #[test]
 #[ignore = "B3'' GOAL gate: heavy 17-pt driven SWEEP, power-correct E+H extraction + clean matched-line basis; run only in --release, boxed"]
 fn fem_filter_s21_power_extract() {
@@ -1995,6 +2002,26 @@ fn fem_filter_s21_power_extract() {
          {best_balance_in:.4} (both must be ≤ ~1 for a passive 2-port; 1.15 lenient bound). \
          Over-unity means the modal basis is still contaminated (standing wave) — the clean \
          matched-line basis did not fully decouple. Full table printed above."
+    );
+
+    // (0) PINNED lift over the N3 E-only floor (measured-then-pinned, ADR-0162 B3'').
+    //     The clean-basis power-correct extraction lifts the in-band peak +1.24 dB over
+    //     the N3 −27.38 dB floor; pinned ≥ +0.5 dB as a regression tripwire. This is
+    //     DELIBERATELY MODEST: the headline is NOT a big lift (the B3' +26 dB was an
+    //     UNPHYSICAL contamination false-positive) — it is that the filter floor is REAL
+    //     coupling-bound reflection (in-band |S11|~0.9, mask MISS recorded below), NOT an
+    //     extraction artifact. The extraction fix is real but matters for a TRANSMITTING
+    //     port (the thru, |S21|→1); on this reflective filter it is a +1.24 dB correction.
+    //     (The per-feed x-shift of the centered clean basis is symmetric (mirror feeds),
+    //     so any residual basis misalignment cancels in S21=a_fwd(1)/a_fwd(0); the
+    //     reflective |S11| is governed by the FEM field's H sign-flip, basis-alignment-
+    //     independent — and corroborated by N3's own −27 dB. So the reflection is real.)
+    assert!(
+        lift_over_n3_db >= 0.5,
+        "B3'' regression: in-band peak {passband_peak_db:.2} dB lifted only {lift_over_n3_db:+.2} \
+         dB over the N3 −27.38 dB floor (pinned ≥ +0.5 dB; measured +1.24). The clean-basis \
+         power-correct extraction should recover at least its modest real lift; below means the \
+         extraction or the clean-basis sourcing regressed. Full table above."
     );
 
     // (1) Finite curve — the power extraction did not diverge and no port
