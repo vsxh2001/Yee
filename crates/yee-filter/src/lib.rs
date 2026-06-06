@@ -125,6 +125,16 @@ pub use jlcpcb_export::{
 pub mod recommend;
 pub use recommend::{RealizationTechnique, TechniqueRecommendation, recommend_technique};
 
+/// Orderable board-topology auto-selector (JLCPCB production track, ADR-0167
+/// brick T3): for a [`FilterProject`], pick the lumped board topology that
+/// yields a fully-orderable JLCPCB board (alternating ladder for wideband,
+/// top-C-coupled for the sub-GHz / moderate-band corner), or honestly report
+/// that neither lumped topology can (the distributed/planar track). The board-
+/// realization [`BoardTopology`] is distinct from the synthesis-realization
+/// [`Topology`] enum — see the module docs.
+pub mod topology;
+pub use topology::{BoardTopology, OrderableBoard, synthesize_orderable};
+
 pub use yee_synth::Approximation;
 use yee_synth::{Prototype, coupling_design, lowpass_to_bandpass, min_order, prototype};
 
