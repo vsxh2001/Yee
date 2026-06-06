@@ -209,3 +209,4 @@
 - [ADR-0163: App — surface the finite-Q (realistic) response in the Dioxus studio](decisions/0163-app-studio-finite-q-response.md)
 - [ADR-0164: JLCPCB production-ready output track — LCSC part autopick + BOM + CPL](decisions/0164-jlcpcb-production-track.md)
 - [ADR-0165: Top-C-coupled (capacitively-coupled) lumped BPF topology — de-risk first](decisions/0165-top-c-coupled-lumped-bpf.md)
+- [ADR-0166: Top-C-coupled BPF → board + JLCPCB orderable upload set (T2)](decisions/0166-top-c-board-jlcpcb.md)
