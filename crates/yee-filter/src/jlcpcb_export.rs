@@ -66,8 +66,8 @@
 //! formatter) if a real upload rejects them.
 
 use crate::{
-    BomLine, CompKind, ESeries, Footprint, LcResonator, LumpedLadder, Placement, autopick,
-    board::BranchKind,
+    BomLine, CompKind, ESeries, Footprint, LcResonator, LumpedLadder, Placement, TopCNetwork,
+    autopick, board::BranchKind,
 };
 
 /// One placed component joined to its value + autopicked LCSC part.
@@ -188,6 +188,146 @@ fn parse_ref_des(ref_des: &str) -> Option<(CompKind, usize)> {
         return None;
     }
     Some((kind, k))
+}
+
+/// The arm a top-C ref-des belongs to: a shunt-resonator element or a coupling
+/// cap.
+///
+/// A [`TopCNetwork`] board ([`crate::top_c_board`]) has three ref-des families,
+/// which [`parse_ref_des`] (used for the alternating ladder) cannot tell apart —
+/// it would mis-read `Cc1` as a capacitor `C` with a non-digit body. So the
+/// top-C join uses its own parser ([`parse_top_c_ref_des`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TopCRef {
+    /// Shunt-resonator inductor `L{k}` → `shunt[k-1].l_henry` (1-based `k`).
+    ShuntL(usize),
+    /// Shunt-resonator capacitor `C{k}` → `shunt[k-1].c_farad` (1-based `k`).
+    ShuntC(usize),
+    /// Series coupling capacitor `Cc{j}` → `coupling_caps_farad[j-1]` (1-based `j`).
+    CouplingCap(usize),
+}
+
+/// Parse a top-C board ref-des into its arm + 1-based index.
+///
+/// Recognizes `L{k}` / `C{k}` (shunt resonator `k`) and `Cc{j}` (coupling cap
+/// `j`); the `Cc` arm must be checked **before** the bare `C` arm (`Cc1` starts
+/// with `C`). Returns `None` for any other shape (e.g. `0`-index or junk).
+fn parse_top_c_ref_des(ref_des: &str) -> Option<TopCRef> {
+    // Coupling cap `Cc{digits}` — check first (it starts with 'C' like a shunt C).
+    if let Some(rest) = ref_des.strip_prefix("Cc") {
+        let j = parse_positive_index(rest)?;
+        return Some(TopCRef::CouplingCap(j));
+    }
+    // Shunt resonator inductor / capacitor.
+    let mut chars = ref_des.chars();
+    let arm = match chars.next()? {
+        'L' => TopCRef::ShuntL,
+        'C' => TopCRef::ShuntC,
+        _ => return None,
+    };
+    let k = parse_positive_index(chars.as_str())?;
+    Some(arm(k))
+}
+
+/// Parse a string of ASCII digits into a strictly-positive (1-based) index, or
+/// `None` if empty / non-digit / zero.
+fn parse_positive_index(digits: &str) -> Option<usize> {
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let k: usize = digits.parse().ok()?;
+    if k == 0 { None } else { Some(k) }
+}
+
+/// Join each top-C board [`Placement`] to its [`TopCNetwork`] value + autopicked
+/// LCSC part (top-C-coupled board, ADR-0166 brick **T2**).
+///
+/// The top-C analogue of [`join_placed_parts`]: top-C has a different topology
+/// (`N` shunt LC resonators + `N+1` series coupling caps, [`crate::top_c`]) and
+/// three ref-des families, so it parses with [`parse_top_c_ref_des`] (NOT the
+/// alternating-ladder [`parse_ref_des`], which cannot distinguish a coupling
+/// cap `Cc{j}` from a shunt cap `C{k}`) and indexes the [`TopCNetwork`]:
+///
+/// - `L{k}` → `net.shunt[k-1].l_henry`  ([`CompKind::Inductor`])
+/// - `C{k}` → `net.shunt[k-1].c_farad`  ([`CompKind::Capacitor`])
+/// - `Cc{j}` → `net.coupling_caps_farad[j-1]` ([`CompKind::Capacitor`])
+///
+/// Each value is snapped to `series` ([`ESeries::nearest`]) and [`autopick`]ed
+/// exactly as [`join_placed_parts`] does (capacitors via [`CompKind::Capacitor`],
+/// inductors via [`CompKind::Inductor`]), building a [`PlacedPart`] reusing
+/// [`value_comment`]. Unmatched values keep their `lcsc = None` so the BOM emits
+/// the same honest blank-LCSC `(NO BASIC PART)` row as [`join_placed_parts`] —
+/// never dropped or faked. The resulting `Vec<PlacedPart>` feeds the **same**
+/// [`jlcpcb_bom_csv`] / [`jlcpcb_cpl_csv`] emitters unchanged.
+///
+/// Placements whose ref-des does not parse to a valid in-range index are skipped
+/// (they cannot be value-joined); for a board produced by [`crate::top_c_board`]
+/// every placement joins, so the output length equals `placements.len()`.
+pub fn join_top_c_parts(placements: &[Placement], net: &TopCNetwork) -> Vec<PlacedPart> {
+    // The top-C board places one footprint family (0402/0603/…); take it from the
+    // placements (every placement carries the footprint top_c_board was called
+    // with). Use E24 — the same E-series the lumped autopick path snaps to before
+    // matching against the coarser stocked LCSC grid.
+    let series = ESeries::E24;
+    let tolerance_pct = series.tolerance_pct();
+    let mut out = Vec::with_capacity(placements.len());
+
+    for p in placements {
+        let Some(parsed) = parse_top_c_ref_des(&p.ref_des) else {
+            continue; // unparseable ref-des — cannot value-join; skip honestly.
+        };
+        // Resolve (kind, ideal SI value) by arm, with an in-range index check.
+        let (kind, ideal_value) = match parsed {
+            TopCRef::ShuntL(k) => {
+                let Some(res) = net.shunt.get(k - 1) else {
+                    continue; // index out of range for this network; skip.
+                };
+                (CompKind::Inductor, res.l_henry)
+            }
+            TopCRef::ShuntC(k) => {
+                let Some(res) = net.shunt.get(k - 1) else {
+                    continue;
+                };
+                (CompKind::Capacitor, res.c_farad)
+            }
+            TopCRef::CouplingCap(j) => {
+                let Some(cc) = net.coupling_caps_farad.get(j - 1) else {
+                    continue;
+                };
+                (CompKind::Capacitor, *cc)
+            }
+        };
+        // Snap with the SAME selector as join_placed_parts so the chosen value
+        // (and the autopick + grouping) is identical to the grouped Bom.
+        let chosen_value = series.nearest(ideal_value);
+        let deviation_pct = if ideal_value != 0.0 {
+            (chosen_value - ideal_value) / ideal_value * 100.0
+        } else {
+            0.0
+        };
+        let line = BomLine {
+            kind,
+            ideal_value,
+            chosen_value,
+            deviation_pct,
+            series,
+            tolerance_pct,
+            qty: 1,
+            esr_ohm: None,
+            srf_hz: None,
+        };
+        let lcsc = autopick(&line, p.footprint);
+        out.push(PlacedPart {
+            ref_des: p.ref_des.clone(),
+            kind,
+            branch: p.kind,
+            chosen_value,
+            footprint: p.footprint,
+            center_m: p.center_m,
+            lcsc,
+        });
+    }
+    out
 }
 
 /// Human value label for a BOM `Comment` cell, e.g. `"22pF"` / `"47nH"`.

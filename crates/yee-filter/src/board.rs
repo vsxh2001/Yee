@@ -38,7 +38,7 @@
 use serde::{Deserialize, Serialize};
 use yee_layout::{BBox, Layout, Point2, Polygon, PortRef, Substrate, microstrip_width};
 
-use crate::{LcBranch, LumpedLadder};
+use crate::{LcBranch, LumpedLadder, TopCNetwork};
 
 /// Standard SMD chip footprint (imperial code), selecting an IPC-7351 land
 /// pattern via [`Footprint::pad`].
@@ -317,6 +317,169 @@ pub fn lumped_board(
             at: Point2::new(board_w, y_sig),
             width_m: w_line,
             ref_impedance_ohm: ladder.z0_ohm,
+        },
+    ];
+
+    let layout = Layout {
+        substrate: *substrate,
+        traces,
+        ports,
+        bbox,
+    };
+
+    LumpedBoard { layout, placements }
+}
+
+/// Place a synthesized [`TopCNetwork`] as SMD footprints on a board
+/// (top-C-coupled BPF → board, ADR-0166 brick **T2**).
+///
+/// The top-C-coupled topology is the *manufacturable narrow-band* analogue of
+/// [`lumped_board`]'s alternating ladder (see [`crate::top_c`]): `N` identical
+/// **shunt** parallel-LC resonators to ground, coupled by `N+1` **series**
+/// coupling capacitors in the through-arm. So the placement differs from
+/// [`lumped_board`] only in *topology*, not in pad/`Layout`/`Placement`
+/// construction — those mirror `lumped_board` exactly.
+///
+/// Lays a `Z0`-width signal microstrip along `x` with a ground rail along the
+/// bottom, then walks the network left→right, alternating **series coupling
+/// cap** then **shunt resonator**:
+///
+/// `Cc1 · (L1‖C1) · Cc2 · (L2‖C2) · … · Cc{N} · (L{N}‖C{N}) · Cc{N+1}`
+///
+/// - **Coupling caps** `Cc1..Cc{N+1}` ([`net.coupling_caps_farad`]) sit **in-line
+///   on the signal line** ([`BranchKind::Series`]), their two pads strung along
+///   `x` bridging a gap in the through path — exactly like a `lumped_board`
+///   series footprint.
+/// - **Shunt resonators** `L{k}` + `C{k}` ([`net.shunt`], `k` 1-based) sit on a
+///   short **stub** dropping from the signal line to the ground rail
+///   ([`BranchKind::Shunt`]), side by side in `x`, each with its pads stacked
+///   along `y` so the component bridges line→rail — exactly like a `lumped_board`
+///   shunt footprint.
+///
+/// Returns a [`LumpedBoard`] whose [`Layout`] holds the signal-line segments, the
+/// ground rail, and every component pad as copper [`Polygon`]s, with ports at the
+/// two ends of the signal line and a bounding box over all of it; and a
+/// [`Placement`] per footprint, in through-arm order
+/// (`Cc1, L1, C1, Cc2, L2, C2, …, Cc{N+1}`). Component **values** are not encoded
+/// in the geometry — they come from the [`TopCNetwork`] keyed by ref-des
+/// ([`crate::join_top_c_parts`]).
+///
+/// Pure-geometry and deterministic; the x-slot pitch is derived from the
+/// footprint's pad span plus a [`CLEARANCE_FRAC`] clearance so no two pads
+/// overlap.
+///
+/// [`net.coupling_caps_farad`]: TopCNetwork::coupling_caps_farad
+/// [`net.shunt`]: TopCNetwork::shunt
+pub fn top_c_board(net: &TopCNetwork, substrate: &Substrate, footprint: Footprint) -> LumpedBoard {
+    let pad = footprint.pad();
+    let n = net.shunt.len();
+
+    // Signal microstrip width from the network Z0 (Hammerstad-Jensen).
+    let w_line = microstrip_width(net.z0_ohm, substrate.eps_r, substrate.height_m);
+
+    // --- Vertical layout (y) — identical to lumped_board ---------------------
+    let clearance = CLEARANCE_FRAC * (pad.pitch_m + pad.pad_w_m).max(w_line);
+    let rail_h = w_line.max(pad.pad_len_m); // ground rail thickness
+    let shunt_span_y = pad.pitch_m + pad.pad_w_m; // y-extent of a stacked footprint
+    // Signal-line centreline: the shunt stub spans the rail top up to the line
+    // bottom (see lumped_board for the derivation).
+    let y_sig = rail_h + shunt_span_y + w_line / 2.0;
+
+    // --- Horizontal layout (x) — identical slot sizing to lumped_board -------
+    let footprint_span = pad.pitch_m + pad.pad_w_m; // series: pad-axis span
+    let shunt_pair_w = 2.0 * pad.pad_len_m + clearance; // shunt: two lands side by side in x
+    let slot_w = (2.0 * footprint_span + clearance).max(shunt_pair_w + clearance) + clearance;
+
+    // The through-arm has N+1 coupling-cap slots interleaved with N resonator
+    // slots: 2N+1 slots total. Each coupling cap is a single in-line footprint,
+    // each resonator is an L+C pair on a stub.
+    let n_slots = 2 * n + 1;
+    let margin = slot_w; // leading/trailing signal-line lead-in
+    let board_w = margin + (n_slots as f64) * slot_w + margin;
+
+    let mut traces: Vec<Polygon> = Vec::new();
+    let mut placements: Vec<Placement> = Vec::with_capacity(3 * n + 1);
+
+    // Ground rail: full-width copper rect along the bottom.
+    traces.push(Polygon::rect(0.0, 0.0, board_w, rail_h));
+
+    // Series coupling caps break the signal line over their x-span; shunt
+    // resonators keep it continuous (the stub drops off it). Record the series
+    // gaps, then lay the line as the complementary copper segments.
+    let mut series_gaps: Vec<(f64, f64)> = Vec::new();
+
+    // Walk the through-arm: slot 2j holds coupling cap Cc{j+1} (j = 0..=n), slot
+    // 2k+1 holds resonator k+1 (k = 0..n).
+    for slot in 0..n_slots {
+        let slot_x0 = margin + (slot as f64) * slot_w;
+        let slot_cx = slot_x0 + slot_w / 2.0;
+
+        if slot % 2 == 0 {
+            // ---- Series coupling capacitor Cc{j+1} (in-line on the line) ----
+            let cc_num = slot / 2 + 1; // 1-based: Cc1..Cc{N+1}
+            let half = footprint_span / 2.0;
+            // Two pads along x, separated by pitch, centred at (slot_cx, y_sig).
+            for s in [-1.0, 1.0] {
+                let pad_cx = slot_cx + s * pad.pitch_m / 2.0;
+                traces.push(pad_rect_centered(pad_cx, y_sig, pad.pad_w_m, pad.pad_len_m));
+            }
+            placements.push(Placement {
+                ref_des: format!("Cc{cc_num}"),
+                footprint,
+                kind: BranchKind::Series,
+                center_m: (slot_cx, y_sig),
+            });
+            // The in-line footprint breaks the signal line over its x-span.
+            series_gaps.push((slot_cx - half, slot_cx + half));
+        } else {
+            // ---- Shunt resonator k+1: L{k+1} + C{k+1} on a stub to ground ---
+            let resnum = slot / 2 + 1; // 1-based: 1..=N
+            let stub_cy = rail_h + shunt_span_y / 2.0;
+            let l_cx = slot_cx - (pad.pad_len_m / 2.0 + clearance / 2.0);
+            let c_cx = slot_cx + (pad.pad_len_m / 2.0 + clearance / 2.0);
+            for (cx, ref_des) in [(l_cx, format!("L{resnum}")), (c_cx, format!("C{resnum}"))] {
+                // Two pads stacked along y, separated by pitch.
+                for s in [-1.0, 1.0] {
+                    let pad_cy = stub_cy + s * pad.pitch_m / 2.0;
+                    traces.push(pad_rect_centered(cx, pad_cy, pad.pad_len_m, pad.pad_w_m));
+                }
+                placements.push(Placement {
+                    ref_des,
+                    footprint,
+                    kind: BranchKind::Shunt,
+                    center_m: (cx, stub_cy),
+                });
+            }
+        }
+    }
+
+    // Lay the signal line as copper segments skipping the series gaps (same as
+    // lumped_board): sort the gaps, walk left→right, emit the complement.
+    series_gaps.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let line_y0 = y_sig - w_line / 2.0;
+    let mut cursor = 0.0;
+    for (g0, g1) in &series_gaps {
+        if *g0 > cursor {
+            traces.push(Polygon::rect(cursor, line_y0, g0 - cursor, w_line));
+        }
+        cursor = cursor.max(*g1);
+    }
+    if cursor < board_w {
+        traces.push(Polygon::rect(cursor, line_y0, board_w - cursor, w_line));
+    }
+
+    let bbox = BBox::from_polygons(&traces);
+
+    let ports = vec![
+        PortRef {
+            at: Point2::new(0.0, y_sig),
+            width_m: w_line,
+            ref_impedance_ohm: net.z0_ohm,
+        },
+        PortRef {
+            at: Point2::new(board_w, y_sig),
+            width_m: w_line,
+            ref_impedance_ohm: net.z0_ohm,
         },
     ];
 

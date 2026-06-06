@@ -97,7 +97,9 @@ pub use parts::{Bom, BomLine, CompKind, ESeries, select_components};
 /// Lumped-LC PCB board generator (Filter Phase F2.2): place an LC ladder's
 /// resonators as SMD footprints + pads + traces on a [`yee_layout::Layout`].
 pub mod board;
-pub use board::{BranchKind, Footprint, LumpedBoard, PadSpec, Placement, lumped_board};
+pub use board::{
+    BranchKind, Footprint, LumpedBoard, PadSpec, Placement, lumped_board, top_c_board,
+};
 
 /// LCSC part autopick + bundled real-parts table (JLCPCB production track,
 /// ADR-0164 brick J1): map an E-series [`BomLine`] to a real, orderable JLCPCB
@@ -114,7 +116,7 @@ pub use jlcpcb::{
 pub mod jlcpcb_export;
 pub use jlcpcb_export::{
     BOM_HEADER, CPL_HEADER, JlcpcbFiles, PlacedPart, jlcpcb_bom_csv, jlcpcb_cpl_csv, jlcpcb_files,
-    jlcpcb_footprint_name, join_placed_parts, value_comment,
+    jlcpcb_footprint_name, join_placed_parts, join_top_c_parts, value_comment,
 };
 
 /// Guided technique-recommender (App.2.0, ADR-0136): a deterministic decision
