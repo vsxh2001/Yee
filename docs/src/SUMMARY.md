@@ -215,3 +215,4 @@
 - [ADR-0169: Studio Export — auto-routed orderable JLCPCB assembly set (T5)](decisions/0169-studio-orderable-jlcpcb-export.md)
 - [ADR-0170: Top-C finite-Q response + route the studio lumped response (T6/T7)](decisions/0170-top-c-finite-q-response.md)
 - [ADR-0171: Studio `.s2p` Touchstone export — S-parameter portability (T8)](decisions/0171-studio-s2p-export.md)
+- [ADR-0172: Complex coupling-matrix S-parameters — real phase for the distributed `.s2p` (T9)](decisions/0172-coupling-matrix-complex-s.md)
