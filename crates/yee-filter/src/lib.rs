@@ -88,6 +88,14 @@ pub use parts::{Bom, BomLine, CompKind, ESeries, select_components};
 pub mod board;
 pub use board::{BranchKind, Footprint, LumpedBoard, PadSpec, Placement, lumped_board};
 
+/// LCSC part autopick + bundled real-parts table (JLCPCB production track,
+/// ADR-0164 brick J1): map an E-series [`BomLine`] to a real, orderable JLCPCB
+/// **Basic** LCSC part by kind + [`Footprint`] + value, preferring Basic.
+pub mod jlcpcb;
+pub use jlcpcb::{
+    DEFAULT_TOLERANCE_PCT, LCSC_PARTS, LcscPart, autopick, autopick_bom, autopick_within,
+};
+
 /// Guided technique-recommender (App.2.0, ADR-0136): a deterministic decision
 /// tree mapping a [`FilterSpec`] to a recommended physical realization
 /// technique with a plain-language rationale + ranked alternatives.
