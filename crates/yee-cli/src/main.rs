@@ -224,7 +224,8 @@ enum Command {
     /// Filter Phase F0 walking skeleton. The `synth` subcommand parses a
     /// [`yee_filter::FilterSpec`] TOML, synthesizes the lowpass prototype and
     /// all-pole coupling matrix ([`yee_filter::synthesize`]), sweeps the
-    /// closed-form ideal response ([`yee_filter::ideal_response`]), writes the
+    /// complex coupling-matrix response ([`yee_filter::coupling_matrix_s_params`],
+    /// ADR-0174 T11 — real phase, lossless/passive), writes the
     /// S-parameters as a Touchstone `.s2p` via `yee-io`, and grades the
     /// response against the spec mask ([`yee_filter::check_mask`]). Exit 0 on a
     /// PASS verdict, 1 on a mask FAIL.

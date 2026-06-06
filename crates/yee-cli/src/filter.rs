@@ -14,8 +14,8 @@ use num_complex::Complex64;
 use std::process::ExitCode;
 
 use yee_filter::{
-    BoardTopology, FilterProject, FilterSpec, Footprint, check_mask, dimension_edge_coupled,
-    dimension_edge_coupled_layout, ideal_response, jlcpcb_bom_csv, jlcpcb_cpl_csv,
+    BoardTopology, FilterProject, FilterSpec, Footprint, check_mask, coupling_matrix_s_params,
+    dimension_edge_coupled, dimension_edge_coupled_layout, jlcpcb_bom_csv, jlcpcb_cpl_csv,
     ladder_s_params_lossy, lumped_board, synthesize, synthesize_lumped, synthesize_orderable_on,
 };
 use yee_io::touchstone::{File, Format, FreqUnit};
@@ -59,9 +59,10 @@ const SPAN_MULT: f64 = 6.0;
 /// rows are emitted with a blank LCSC #, never dropped).
 ///
 /// `q_unloaded` (F2-Q, ADR-0161) selects the **`(S11, S21)` response** written
-/// to the `.s2p` (and the optional `--plot`'s `|S21|`): `None` (default) keeps
-/// the lossless closed-form `ideal_response`, with `S11` the true lossless
-/// reflection in quadrature (`j·√(1−|S21|²)`); `Some(q)` with finite `q > 0`
+/// to the `.s2p` (and the optional `--plot`'s `|S21|`): `None` (default) emits
+/// the complex coupling-matrix response (`coupling_matrix_s_params`, ADR-0174
+/// T11 — real phase, lossless/passive `|S11|²+|S21|² = 1`), giving CLI↔studio
+/// parity; `Some(q)` with finite `q > 0`
 /// sweeps the realistic **finite-Q lumped-LC TRUE lossy 2-port**
 /// (`synthesize_lumped` → `ladder_s_params_lossy(&ladder, f, q)`), so the
 /// exported Touchstone carries the midband insertion loss / rounded corners a
@@ -121,11 +122,12 @@ pub fn run_synth(
         println!("    [ {} ]", cells.join("  "));
     }
 
-    // ---- response sweep (ideal lossless OR finite-Q lumped) --------------
+    // ---- response sweep (ideal coupling-matrix OR finite-Q lumped) -------
     // `--q-unloaded` (ADR-0161) routes the `(S11, S21)` response written to the
-    // .s2p (and the optional --plot's |S21|): unset → the lossless closed-form
-    // `ideal_response`, with S11 the true lossless reflection placed in
-    // quadrature (`S11 = j·√(1−|S21|²)`, see `write_s2p`); set → the realistic
+    // .s2p (and the optional --plot's |S21|): unset → the complex
+    // coupling-matrix response (`coupling_matrix_s_params`, ADR-0174 T11 — real
+    // phase, lossless/passive `|S11|²+|S21|² = 1`, the same complex S the studio
+    // emits → CLI↔studio parity); set → the realistic
     // finite-Q lumped-LC realization, with S11 the **true absorptive**
     // reflection from the same ABCD as S21 (`ladder_s_params_lossy`), so the
     // exported Touchstone is a true lossy 2-port (`|S11|²+|S21|² < 1`), not a
@@ -133,10 +135,7 @@ pub fn run_synth(
     // grades the ideal `proj` via `check_mask`.
     let freqs = sweep_freqs(spec.f0_hz, spec.fbw);
     let s_params: Vec<(Complex64, Complex64)> = match q_unloaded {
-        None => ideal_response(&proj, &freqs)
-            .into_iter()
-            .map(lossless_s_pair)
-            .collect(),
+        None => coupling_matrix_s_params(&proj.coupling, &freqs, spec.f0_hz, spec.fbw),
         Some(q) => {
             // Reject a non-finite / non-positive Q: the user asked for a
             // finite-Q response, so silently falling back to lossless would be
@@ -201,10 +200,12 @@ pub fn run_synth(
         .map(PathBuf::from)
         .unwrap_or_else(|| spec_path.with_extension("s2p"));
     // The comment self-describes which response the .s2p carries. The default
-    // (ideal) string is kept byte-for-byte so an unset `--q-unloaded` run is
-    // byte-identical to the pre-ADR-0161 behavior.
+    // is the complex coupling-matrix response (ADR-0174 T11 — real phase,
+    // lossless/passive), matching the studio's distributed `.s2p`.
     let s2p_comment = match q_unloaded {
-        None => " yee filter synth — ideal closed-form response".to_string(),
+        None => {
+            " yee filter synth — ideal coupling-matrix response (complex, lossless)".to_string()
+        }
         Some(q) => format!(" yee filter synth — finite-Q lumped response (Q_unloaded = {q})"),
     };
     write_s2p(&out_path, spec.z0_ohm, &freqs, &s_params, &s2p_comment)
@@ -472,18 +473,6 @@ fn nearest_freq_index(freqs: &[f64], f0: f64) -> usize {
         .unwrap_or(0)
 }
 
-/// Map a lossless transfer `S21` to the `(S11, S21)` pair written for the ideal
-/// (no `--q-unloaded`) path. The transmission is taken real with `|S21| ≤ 1`,
-/// and S11 is the **true lossless reflection** placed in quadrature
-/// (`S11 = j·√(1−|S21|²)`): for a lossless reciprocal symmetric 2-port this is
-/// the exact reflection (it makes `|S11|²+|S21|² = 1` *and* the S-matrix
-/// unitary/passive). This reproduces the prior ideal-path bytes exactly.
-fn lossless_s_pair(s21: Complex64) -> (Complex64, Complex64) {
-    let s21_mag = s21.norm().min(1.0);
-    let s11_mag = (1.0 - s21_mag * s21_mag).max(0.0).sqrt();
-    (Complex64::new(0.0, s11_mag), Complex64::new(s21_mag, 0.0))
-}
-
 /// Linear sweep of `SWEEP_POINTS` frequencies centred on `f0`, spanning
 /// `f0·(1 ± SPAN_MULT·fbw/2)` (clamped to be strictly positive).
 fn sweep_freqs(f0: f64, fbw: f64) -> Vec<f64> {
@@ -501,8 +490,9 @@ fn sweep_freqs(f0: f64, fbw: f64) -> Vec<f64> {
 /// the **caller** owns the physics, so `write_s2p` writes the given complex
 /// values verbatim and never re-derives S11.
 ///
-/// - Ideal path: S11 is the true lossless reflection in quadrature
-///   (`S11 = j·√(1−|S21|²)`, [`lossless_s_pair`]) → `|S11|²+|S21|² = 1`, unitary.
+/// - Ideal path: S11 and S21 are the complex coupling-matrix response
+///   ([`yee_filter::coupling_matrix_s_params`], ADR-0174 T11) → lossless/passive
+///   `|S11|²+|S21|² = 1`, unitary, with physical (non-flat) phase.
 /// - Finite-Q path: S11 and S21 are the **true** lossy 2-port from one ABCD
 ///   ([`ladder_s_params_lossy`]) → `|S11|²+|S21|² < 1` (absorption), still
 ///   passive (`σ_max = √(|S11|²+|S21|²) < 1`), so `yee_io::touchstone` accepts
