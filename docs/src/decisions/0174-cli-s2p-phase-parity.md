@@ -41,6 +41,32 @@ emitted file's properties).
 - **Not in scope:** the `--plot` magnitude (unchanged visually — `|S21|` agrees with `ideal_response` per the
   ADR-0172 gate); the lumped finite-Q path (already complex); changing `ideal_response` (kept for the mask).
 
+## Outcome (T11 — SHIPPED, merge `c681a76`)
+
+Done as specified (+1/−1 import, default branch one-liner, doc/comment updates, `lossless_s_pair` removed as
+dead, +179 gate). `run_synth`'s default (`q_unloaded == None`) `.s2p`/`--plot` branch now calls
+`coupling_matrix_s_params(&proj.coupling, &freqs, spec.f0_hz, spec.fbw)` (complex `(S11,S21)`, real phase,
+lossless/passive by construction) instead of `ideal_response().map(lossless_s_pair)`. The `--q-unloaded`
+finite-Q lumped path (`ladder_s_params_lossy`) is byte-for-byte UNCHANGED. The now-dead `lossless_s_pair`
+helper was removed; the `run_synth` + `write_s2p` + `main.rs` `Filter`-subcommand doc comments were corrected to
+describe the new default.
+
+**Gate `cli-s2p-phase` (`crates/yee-cli/tests/cli_s2p_phase.rs`, non-`#[ignore]`'d, NON-circular):** runs the
+default `yee filter synth` (3-pole 0.5 dB Cheb, f0 = 2 GHz, FBW = 0.10) with **no `--q-unloaded`**, reads the
+written `.s2p` back through `yee_io::touchstone::read`, and asserts on the EMITTED file — (1) round-trips as a
+2-port with a frequency grid; (2) **non-flat S21 phase** (`arg(S21)` span > 0.5 rad — the old flat-phase
+default had `arg(S21) ≡ 0`, so this strictly discriminates T11's complex response); (3) **passive** everywhere
+(`|S11|²+|S21|² ≤ 1+ε`) and **lossless** (`≈ 1`) at midband. Non-circular: the phase comes from the
+coupling-matrix linear solve; the test only inspects the read-back artifact.
+
+`cargo test -p yee-cli` green (incl. the new gate + the existing `cli_finite_q_s2p` / `cli_plot_touchstone`);
+`cargo clippy -p yee-cli --all-targets -- -D warnings` clean; `cargo fmt -p yee-cli --check` clean. Reviewer
+APPROVE after one P1 fix (a stale `main.rs:227` doc comment that still described `ideal_response` as the default —
+corrected in-lane); reviewer confirmed argument order/types, the unchanged `--q-unloaded` arm, full removal of
+`lossless_s_pair`, the gate's non-circularity + correct Touchstone row indexing (S11 = `row[0]`, S21 = `row[2]`).
+**CLI↔studio parity achieved** — both surfaces now emit the same complex coupling-matrix S; the ADR-0172 T9
+follow-on is closed.
+
 ## References
-- `yee_filter::coupling_matrix_s_params` (ADR-0172); `yee_cli::filter::{run_synth, write_s2p, lossless_s_pair}`;
-  `yee_io::touchstone` (round-trip).
+- `yee_filter::coupling_matrix_s_params` (ADR-0172); `yee_cli::filter::{run_synth, write_s2p}` (`lossless_s_pair`
+  removed in T11); `yee_io::touchstone` (round-trip).
