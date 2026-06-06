@@ -79,6 +79,31 @@ orderable realization** — search topology AND footprint — and surface it hon
   `top_c_s21` finite-Q variant — a documented follow-on); a user-facing footprint picker (the search auto-
   picks); J5 Gerber-completeness (ADR-0164).
 
+## Outcome (T5 — SHIPPED, merge `8167798`)
+
+`yee-studio-web::{OrderableExport, orderable_upload}` shipped (+357/−43, 2 studio src files). `orderable_upload`
+searches `[0402, 0603, 0805]` (0402-first) via `synthesize_orderable_on`, returns the first `fully_orderable`
+result else the fewest-blanks one (0402 on tie); Err-skips a footprint; honest empty export if all error.
+Carried on `LumpedDesigned.orderable`, computed in `design_lumped_from`. The Export stage's hardcoded-ladder/
+0603 JLCPCB buttons are replaced by a **self-consistent "JLCPCB orderable assembly set"** — BOM + CPL + both
+Gerbers ALL from the one auto-routed `orderable.board` (reviewer-confirmed: no display/export board mismatch)
++ a badge reflecting `fully_orderable` **exactly** (✓ N/N orderable, or ⚠ M-of-N blank → distributed-only;
+no fabricated orderability). The displayed ladder board + finite-Q response stay ladder-based (documented
+limit — routing the whole lumped flow is blocked on a top-C lossy response).
+
+**Engine gate (non-circular, mirrors `cli-jlcpcb-autoroute`):** wideband 1 GHz/70 % → alternating ladder/
+0402/orderable/0-blank; **0.5 GHz/20 % → top-C/0402/orderable/0-blank** (the rescue the old fixed-0603-ladder
+path could NOT make orderable); 2 GHz/5 % → fewest-blanks/NOT-orderable/4-blank. 17 tests green; no new dep;
+`cargo check --target wasm32-unknown-unknown` exit 0 (the `wasm-build` CI gate stays green). Reviewer APPROVE,
+no P0/P1/P2 (two cosmetic P3s).
+
+**⇒ The top-C arc is COMPLETE end-to-end (T1→T5): spec → orderable JLCPCB upload set now reaches the user via
+BOTH the CLI (`yee filter synth --jlcpcb`) AND the deployed studio app** — auto-routing ladder↔top-C across
+wideband + sub-GHz/moderate-band, honestly bounding GHz-narrow as distributed-only. **NEXT candidates:**
+ADR-0164 **J5 Gerber-completeness** (F.Mask/F.Silk soldermask+silkscreen layers — the last real-fab-upload
+artifact; lumped SMD has no vias → no drill needed); routing the whole lumped flow to top-C (needs a top-C
+lossy/finite-Q response first); a `--topology` manual override.
+
 ## References
 - Selector: `yee_filter::{synthesize_orderable_on, OrderableBoard, BoardTopology}` (ADR-0167/0168).
 - CSVs/board: `yee_filter::{jlcpcb_bom_csv, jlcpcb_cpl_csv, lumped_board, top_c_board, LumpedBoard, Footprint}`.
