@@ -58,6 +58,28 @@ CLI's `.s2p` contract at the studio-engine layer.
   response (the T7 coherence arc — the `.s2p` matches the *displayed* response, which is the right contract);
   CLI `write_s2p` dedup onto the shared renderer (it already calls `write` = `render` + fs; an optional later tidy).
 
+## Outcome (T8 — SHIPPED, merge `33627c3`)
+
+`yee_io::touchstone::to_string(&File) -> Result<String>` exposed (wraps the unchanged private `render`;
+`write` delegates — one format source, bytes identical, the 14+13 yee-io round-trip tests stay green).
+`yee-studio-web` gained `s2p_string` (mirrors the CLI `write_s2p` File build) + `lossless_s_pair` + `.s2p`
+download buttons in `export_lumped` (`filter-lumped.s2p` — the finite-Q realistic response via
+`ladder_s_params_lossy`) and `export_distributed` (`filter.s2p` — `ideal_response` magnitude + lossless-
+quadrature S11). Added `yee-io` + `num-complex` deps (workspace, pure-Rust; `opencascade` stays gated off) —
+`cargo check --target wasm32-unknown-unknown` exit 0, the `wasm-build` job stays green.
+
+Both emitted matrices are passive by construction (lumped true-lossy `|S|²<1`; distributed quadrature `=1`),
+so a `yee_io::read` re-import (which runs `check_passivity` on parse) accepts them. Gate (non-circular):
+renders a real `(S11,S21)` sweep via `s2p_string`, hand-parses the RENDERED text, recovers S11+S21 (re+im) to
+`1e-9` + the header + one row per freq, and ties the `.s2p` `|S21|@f0` to the displayed `sweep_finite_q`. The
+`.s2p` carries the DISPLAYED response (coherent with the plot). Reviewer APPROVE, no P0/P1/P2. **Honest caveat
+(P3):** the distributed ideal export is magnitude-only (flat phase — `ideal_response` is a closed-form
+magnitude model); an EM-verified / complex-phase `.s2p` is a follow-on. (P3: the `s2p_string`/`lossless_s_pair`
+build is duplicated between the CLI and the studio — an optional shared-helper tidy.)
+
+**⇒ The studio Export is now feature-complete: Gerber (F.Cu + Edge.Cuts) + KiCad + JLCPCB BOM/CPL (auto-routed
+orderable) + parameter sheet + `.s2p` (S-parameter portability, CLI parity).**
+
 ## References
 - Renderer: `yee_io::touchstone::{render (→ pub to_string), write, File, Format, FreqUnit}`.
 - Models: `yee_filter::{ladder_s_params_lossy, ideal_response}`; the lossless `S11` quadrature
