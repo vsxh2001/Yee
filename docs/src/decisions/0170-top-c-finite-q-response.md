@@ -52,6 +52,29 @@ the coherence gap. T7 is its own brick (separate lane/ADR-update once T6 lands).
   ladder); a lossy `(S11,S21)` pair (T6 provides `top_c_s21_lossy → S21`, matching `top_c_s21`'s shape — a
   full pair is a trivial later add if needed).
 
+## Outcome (T6 — SHIPPED, merge `46fbfb6`)
+
+`yee_filter::top_c_s21_lossy` shipped (+263/−6, yee-filter only). `top_c_s21` now delegates
+(`top_c_s21_lossy(.., f64::INFINITY)`) — single source of truth, bit-identical lossless limit. **A non-obvious
+physics correction landed (reviewer-validated by an independent Python re-derivation):** the loss conductance
+keys to the **bare** resonating cap `G = ω₀·C_bare/Q_u` (`C_bare = 1/(Zr·ω₀)`, the cap that tunes with `L` to
+ω₀ by construction), NOT the synthesis-reduced node cap `C_node` — the top-C node resonates with `C_bare`
+(the series coupling caps add back what the negative-leg absorption subtracts off the node), so the resonant
+stored energy lives in `C_bare`. The reactive shunt term keeps the physical `C_node`. Keying loss to `C_node`
+undershoots Cohn by **28 %**; keying to `C_bare` matches **2.20 %**. `C_bare` is computed from the resonance
+condition (`1/(z0·ω₀)`), NOT from Cohn — **non-circular** (assumes the canonical `Zr = Z0` synthesis, documented;
+P3: a future per-resonator `Zr` would want a stored field).
+
+**Gate `top-c-q-001` (non-circular):** (1) lossless limit bit-identical to `top_c_s21` over a sweep + at
+`Q_u = 0`/`< 0`; (2) Cohn IL at `Q_u = 100` = 1.8219 dB vs `4.343·Σg/(Q_u·FBW)` = 1.8629 dB → **2.20 %** (≤ 15 %
+tol, NOT weakened — the agent diagnosed the `C_node→C_bare` fix per the escape hatch rather than loosening);
+1/Q scaling 0.5052. yee-filter only; WASM-safe; no regression; reviewer APPROVE no-P0/P1/P2 (one P3:
+implicit `Zr=Z0`). **T7 is now unblocked.**
+
+**T7 (the follow-on, next):** route the studio's lumped response (ideal `top_c_s21` + finite-Q overlay
+`top_c_s21_lossy`) to the auto-chosen `BoardTopology` so the displayed response matches the manufactured top-C
+board — closing the ADR-0169 coherence gap.
+
 ## References
 - Pattern: `yee_filter::lumped::{ladder_s_params_lossy, ladder_s21_lossy}` (ADR-0160), gate `lumped-q-001`
   (Cohn `4.343·Σg/(Q_u·FBW)`).
