@@ -567,6 +567,116 @@ fn solve_complex(mut a: Vec<Vec<Complex64>>, mut b: Vec<Complex64>) -> Option<Ve
     Some(x)
 }
 
+/// Group delay `τ_g = −dφ/dω` of a complex `S21` response (ADR-0173, T10).
+///
+/// Group delay — the negative derivative of the transmission phase with respect
+/// to angular frequency — is a core filter performance metric: a flat group
+/// delay means linear phase and low signal distortion (a real comms-filter
+/// spec). It is computed straight from the **complex** `S21` carrying physical
+/// phase ([`coupling_matrix_s_params`] for the distributed flow, ADR-0172;
+/// [`ladder_s_params_lossy`] for the lumped finite-Q flow), so it requires no
+/// model beyond the response itself.
+///
+/// The computation is the standard numerical group delay:
+///
+/// 1. **Unwrap the phase.** `φ_k = arg(s21_k)`, accumulated so adjacent samples
+///    stay continuous: whenever the *raw* step `arg(s21_{k}) − arg(s21_{k−1})`
+///    exceeds `π` in magnitude, `2π` is added/subtracted to undo the `atan2`
+///    branch cut. (On a dense enough sweep the true phase moves < π per step, so
+///    any larger raw step is a wrap, not physical.)
+/// 2. **Differentiate.** `τ_k = −dφ/dω` by a **central** difference on the
+///    (possibly non-uniform) frequency grid,
+///    `−(φ_{k+1} − φ_{k−1}) / (ω_{k+1} − ω_{k−1})` with `ω = 2π·f`, and a
+///    **one-sided** difference at the two endpoints.
+///
+/// Returns one delay per input sample, in **seconds** (`+` = signal delay; a
+/// well-behaved passband has `τ_g > 0`). The `s21` and `freqs_hz` slices must be
+/// the same length and `freqs_hz` should be sorted ascending (the sweep grids in
+/// this crate are). Pure [`num_complex`] / `std` — WASM-safe.
+///
+/// # Closed-form midband anchor
+///
+/// For a synchronous band-pass synthesized from a lowpass prototype, the
+/// midband group delay obeys the prototype **sum rule** (Pozar, *Microwave
+/// Engineering* §8; Hong & Lancaster §3): the lowpass prototype group delay at
+/// band centre is `τ_LP(Ω=0) = (Σ_{k=1}^{N} g_k)/2` (normalized, `ωc = 1`
+/// rad/s), and the band-pass transformation `Ω = (1/FBW)(ω/ω0 − ω0/ω)` has
+/// Jacobian `dΩ/dω|_{ω0} = 2/(FBW·ω0)`. The `2` and the `½` cancel, so
+///
+/// ```text
+/// τ_g(ω0) = τ_LP(0) · (dΩ/dω)|_{ω0} = (Σ_{k=1}^{N} g_k) / (FBW·ω0),
+/// ```
+///
+/// with `ω0 = 2π·f0` (equivalently `Σg_k / Δω` via the absolute bandwidth
+/// `Δω = FBW·ω0`). Note the lowpass DC group delay is `Σg/2`, **not** `Σg` (a
+/// common textbook short-hand off by 2×): the `group-delay-001` gate confirms
+/// `τ_LP(0)=Σg/2` from an independent LC-ladder ABCD model and pins the band-pass
+/// midband τ to `Σg/(FBW·ω0)` non-circularly (the `g_k` come from the prototype,
+/// never from the phase path).
+///
+/// # Degenerate inputs
+///
+/// A length mismatch, or fewer than two samples, returns a zero-filled vector of
+/// `s21.len()` (a derivative is undefined with < 2 points) rather than panicking.
+/// A zero `ω` spacing at some pair (duplicate frequencies) yields `0.0` for that
+/// sample.
+pub fn group_delay(s21: &[Complex64], freqs_hz: &[f64]) -> Vec<f64> {
+    let n = s21.len();
+    if n != freqs_hz.len() || n < 2 {
+        // Undefined derivative (or mismatched inputs): zero-filled, no panic.
+        return vec![0.0; n];
+    }
+
+    // --- 1) unwrap the S21 phase so adjacent samples are continuous ----------
+    let two_pi = 2.0 * std::f64::consts::PI;
+    let mut phase = Vec::with_capacity(n);
+    let mut prev_raw = s21[0].arg();
+    let mut acc = prev_raw;
+    phase.push(acc);
+    for s in &s21[1..] {
+        let raw = s.arg();
+        let mut step = raw - prev_raw;
+        // Undo the atan2 branch cut: fold the raw step into (−π, π].
+        while step > std::f64::consts::PI {
+            step -= two_pi;
+        }
+        while step <= -std::f64::consts::PI {
+            step += two_pi;
+        }
+        acc += step;
+        phase.push(acc);
+        prev_raw = raw;
+    }
+
+    // --- 2) τ = −dφ/dω (ω = 2πf): central difference, one-sided at the ends --
+    let omega: Vec<f64> = freqs_hz.iter().map(|&f| two_pi * f).collect();
+    let mut tau = vec![0.0; n];
+    // Forward difference at the low end.
+    let dw0 = omega[1] - omega[0];
+    tau[0] = if dw0 != 0.0 {
+        -(phase[1] - phase[0]) / dw0
+    } else {
+        0.0
+    };
+    // Central difference for the interior samples.
+    for k in 1..n - 1 {
+        let dw = omega[k + 1] - omega[k - 1];
+        tau[k] = if dw != 0.0 {
+            -(phase[k + 1] - phase[k - 1]) / dw
+        } else {
+            0.0
+        };
+    }
+    // Backward difference at the high end.
+    let dwn = omega[n - 1] - omega[n - 2];
+    tau[n - 1] = if dwn != 0.0 {
+        -(phase[n - 1] - phase[n - 2]) / dwn
+    } else {
+        0.0
+    };
+    tau
+}
+
 /// Per-point detail of a mask check.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MaskPoint {
