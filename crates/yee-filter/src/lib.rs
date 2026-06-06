@@ -377,6 +377,196 @@ fn chebyshev_t(n: usize, x: f64) -> f64 {
     }
 }
 
+/// Complex `(S11, S21)` over `freqs_hz` from an `N × N` coupling matrix (ADR-0172).
+///
+/// The textbook coupling-matrix → S-parameter synthesis (Hong & Lancaster,
+/// *Microstrip Filters for RF/Microwave Applications* 2nd ed., §8.1, the general
+/// formulation eq (8.30)–(8.31); equivalently Cameron, *Microwave Filters for
+/// Communication Systems*). Unlike [`ideal_response`] (a real, zero-phase
+/// magnitude model), this returns the **complex** S-parameters carrying physical
+/// phase / group delay, while `|S21|` agrees with [`ideal_response`] (validated
+/// by the `coupling-matrix-s-001` gate).
+///
+/// For each frequency, with the normalized lowpass variable
+/// `Ω = (1/FBW)·(ω/ω0 − ω0/ω)` (the *same* [`yee_synth::lowpass_to_bandpass`]
+/// map [`ideal_response`] uses), build the `N × N` complex matrix
+///
+/// ```text
+/// [A] = [q] + jΩ·[U] − j·[m]
+/// ```
+///
+/// where `[U]` is the identity, `[m]` the (real, symmetric, zero-diagonal for a
+/// synchronous filter) **normalized** coupling matrix, and `[q]` is diagonal with
+/// `q₁₁ = 1/qe_in`, `q_NN = 1/qe_out`, all other entries `0`. Then
+///
+/// ```text
+/// S21 = (2 / √(qe_in·qe_out)) · [A]⁻¹_{N1}
+/// S11 = 1 − (2 / qe_in) · [A]⁻¹_{11}
+/// ```
+///
+/// **Normalization (load-bearing — pins `|S21|` to [`ideal_response`]).** The
+/// general formulation is written in the *normalized* domain: `[m]` is the
+/// normalized coupling matrix (`m_{i,i+1} = 1/√(g_i g_{i+1})`, the value
+/// [`yee_synth::coupling_design`] stores in `CouplingMatrix::m`), and the `qe`
+/// appearing in `[A]`/the normalization factors is the **scaled** external Q
+/// `qe = Qe · FBW = g₀g₁` — *not* the unscaled `Qe = g₀g₁/FBW` stored in
+/// `CouplingMatrix::{qe_in,qe_out}`. So this routine forms `qe_in = qe_in·FBW`
+/// and `qe_out = qe_out·FBW` internally (the `1/FBW` of the `Ω` map is what
+/// requires the matching `·FBW` on `qe`). With this normalization the complex
+/// `|S21|` agrees with the independent characteristic-function [`ideal_response`]
+/// to ~1e-5 across the band (the `coupling-matrix-s-001` gate); using the
+/// unscaled `Qe` (or an `m·FBW`) breaks that agreement by ~0.8–1.0 in `|S21|`.
+///
+/// **Sign / normalization convention.** The literature writes S11 as
+/// `±(1 − (2/qe_in)[A]⁻¹_{11})`; we take the `+` branch (Hong-Lancaster /
+/// ADR-0172). The overall S11 sign and the `−j[m]` (vs `+j[m]`) choice are
+/// immaterial to `|S11|`, `|S21|`, and losslessness — and the
+/// `coupling-matrix-s-001` magnitude-agreement gate against the independent
+/// characteristic-function route [`ideal_response`] is the arbiter that pins the
+/// convention. (Cross-checked against the public reference implementation
+/// `sfpeik/py-microwave`'s coupling-matrix response.)
+///
+/// The inverse columns `[A]⁻¹_{·1}` (we need only column 1: `[A]⁻¹_{11}` and
+/// `[A]⁻¹_{N1}`) come from solving `[A]·x = e₁` via a hand-rolled dense complex
+/// Gaussian elimination with partial pivoting ([`solve_complex`]). `N` is small
+/// (≤ ~10) so the `O(N³)` solve is negligible; the routine is pure
+/// [`num_complex`] (no LAPACK / faer) and therefore WASM-safe.
+///
+/// # Degenerate inputs
+///
+/// `N = 0` (empty matrix) returns one `(0, 0)` pair per frequency. `f ≤ 0`
+/// returns `(1, 0)` (full reflection, no transmission — `Ω` is undefined at
+/// `f = 0`), matching [`ideal_response`]'s `f ≤ 0 → |S21| = 0` floor. A singular
+/// `[A]` (vanishing pivot) likewise yields `(1, 0)` for that point rather than
+/// panicking.
+pub fn coupling_matrix_s_params(
+    coupling: &CouplingMatrix,
+    freqs_hz: &[f64],
+    f0_hz: f64,
+    fbw: f64,
+) -> Vec<(Complex64, Complex64)> {
+    let n = coupling.m.len();
+    if n == 0 {
+        return vec![(Complex64::new(0.0, 0.0), Complex64::new(0.0, 0.0)); freqs_hz.len()];
+    }
+    // The general formulation uses the *scaled* external Q (qe·FBW); the stored
+    // CouplingMatrix::{qe_in,qe_out} is the unscaled Qe = g₀g₁/FBW. Re-scale so
+    // |S21| matches `ideal_response` (see the doc comment / the
+    // `coupling-matrix-s-001` gate).
+    let qe_in = coupling.qe_in * fbw;
+    let qe_out = coupling.qe_out * fbw;
+    // S21 normalization 2/√(qe_in·qe_out); S11 normalization 2/qe_in.
+    let s21_norm = 2.0 / (qe_in * qe_out).sqrt();
+    let s11_norm = 2.0 / qe_in;
+
+    freqs_hz
+        .iter()
+        .map(|&f| {
+            if f <= 0.0 {
+                // Ω undefined at f = 0; report full reflection, no transmission
+                // (consistent with `ideal_response`'s f ≤ 0 → |S21| = 0).
+                return (Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0));
+            }
+            let omega = lowpass_to_bandpass(f, f0_hz, fbw);
+            // [A] = [q] + jΩ·[U] − j·[m].
+            let mut a = vec![vec![Complex64::new(0.0, 0.0); n]; n];
+            for (i, row) in a.iter_mut().enumerate() {
+                for (j, aij) in row.iter_mut().enumerate() {
+                    // − j·m[i][j].
+                    *aij = Complex64::new(0.0, -coupling.m[i][j]);
+                    if i == j {
+                        // + jΩ on the diagonal.
+                        *aij += Complex64::new(0.0, omega);
+                    }
+                }
+            }
+            // + [q]: q₁₁ = 1/qe_in at index 0, q_NN = 1/qe_out at index N−1.
+            // (For N = 1 both land on the same diagonal element, summing to
+            // 1/qe_in + 1/qe_out — the correct singly-loaded total.)
+            a[0][0] += Complex64::new(1.0 / qe_in, 0.0);
+            a[n - 1][n - 1] += Complex64::new(1.0 / qe_out, 0.0);
+
+            // Solve [A]·x = e₁ → x = column 1 of [A]⁻¹.
+            let mut rhs = vec![Complex64::new(0.0, 0.0); n];
+            rhs[0] = Complex64::new(1.0, 0.0);
+            match solve_complex(a, rhs) {
+                Some(x) => {
+                    let a_inv_11 = x[0];
+                    let a_inv_n1 = x[n - 1];
+                    let s21 = a_inv_n1 * s21_norm;
+                    let s11 = Complex64::new(1.0, 0.0) - a_inv_11 * s11_norm;
+                    (s11, s21)
+                }
+                // Singular [A] (degenerate inputs): report full reflection.
+                None => (Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)),
+            }
+        })
+        .collect()
+}
+
+/// Solve the dense complex system `A·x = b` by Gaussian elimination with partial
+/// pivoting (ADR-0172 — pure [`num_complex`], no LAPACK / faer, WASM-safe).
+///
+/// `a` is consumed (overwritten with the elimination in place); `b` is the
+/// right-hand side. Returns `Some(x)` on success, or `None` if `A` is singular
+/// (the largest available pivot is ~0 — caller decides the fallback). Intended
+/// for the small (`N ≤ ~10`) coupling matrices of [`coupling_matrix_s_params`],
+/// where the `O(N³)` cost is negligible.
+fn solve_complex(mut a: Vec<Vec<Complex64>>, mut b: Vec<Complex64>) -> Option<Vec<Complex64>> {
+    let n = a.len();
+    debug_assert!(a.iter().all(|r| r.len() == n) && b.len() == n);
+    for col in 0..n {
+        // Partial pivot: pick the row (≥ col) with the largest |a[row][col]|.
+        let mut pivot = col;
+        let mut best = a[col][col].norm();
+        for (row, arow) in a.iter().enumerate().skip(col + 1) {
+            let mag = arow[col].norm();
+            if mag > best {
+                best = mag;
+                pivot = row;
+            }
+        }
+        if best == 0.0 {
+            return None; // singular column — no usable pivot.
+        }
+        if pivot != col {
+            a.swap(pivot, col);
+            b.swap(pivot, col);
+        }
+        // Eliminate below the pivot. `split_at_mut(col + 1)` hands out the pivot
+        // row (last of `head`) and every row below (`tail`) as disjoint borrows,
+        // so the elimination zips over slices rather than re-indexing `a`.
+        let (head, tail) = a.split_at_mut(col + 1);
+        let pivot_row = &head[col];
+        let pivot_val = pivot_row[col];
+        let b_col = b[col];
+        for (i, row) in tail.iter_mut().enumerate() {
+            let factor = row[col] / pivot_val;
+            if factor == Complex64::new(0.0, 0.0) {
+                continue;
+            }
+            for (rk, &pk) in row.iter_mut().zip(pivot_row.iter()).skip(col) {
+                *rk -= factor * pk;
+            }
+            // `tail[i]` is global row `col + 1 + i`.
+            b[col + 1 + i] -= factor * b_col;
+        }
+    }
+    // Back-substitution.
+    let mut x = vec![Complex64::new(0.0, 0.0); n];
+    for row in (0..n).rev() {
+        let acc = b[row]
+            - a[row]
+                .iter()
+                .zip(x.iter())
+                .skip(row + 1)
+                .map(|(&aij, &xj)| aij * xj)
+                .sum::<Complex64>();
+        x[row] = acc / a[row][row];
+    }
+    Some(x)
+}
+
 /// Per-point detail of a mask check.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MaskPoint {
