@@ -207,3 +207,4 @@
 - [ADR-0161: CLI --q-unloaded — export the realistic (finite-Q) lumped response as Touchstone](decisions/0161-cli-finite-q-touchstone-export.md)
 - [ADR-0162: Higher-fidelity FEM microstrip port — power-wave normalization + multi-mode](decisions/0162-fem-microstrip-port-fidelity.md)
 - [ADR-0163: App — surface the finite-Q (realistic) response in the Dioxus studio](decisions/0163-app-studio-finite-q-response.md)
+- [ADR-0164: JLCPCB production-ready output track — LCSC part autopick + BOM + CPL](decisions/0164-jlcpcb-production-track.md)
