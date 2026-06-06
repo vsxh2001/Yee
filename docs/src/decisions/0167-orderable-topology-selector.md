@@ -83,6 +83,31 @@ topology/flag and the actual orderability.
 - **Not in scope:** the CLI/studio wiring (T4); a cost/size tie-breaker beyond fewer-blanks (future); the
   distributed/planar topology as a third selector arm (a separate track).
 
+## Outcome (T3 — SHIPPED, merge `9da25b3`)
+
+`yee_filter::{BoardTopology, OrderableBoard, synthesize_orderable}` shipped (+693, yee-filter only;
+`topology.rs`). Policy as designed: ladder-first → top-C fallback (same resolved order
+`project.prototype.order()`) → fewer-blanks (ladder on tie) with `fully_orderable=false`. Reviewer-confirmed
+**honest — no path returns `fully_orderable=true` with a blank part** (both true-arms guarded by `blanks==0`
+on the real `autopick`/`lcsc.is_some()` predicate); `BoardTopology` named to avoid the existing synthesis
+`Topology{CoupledResonator}` enum.
+
+**Gate `topology-select-001` (non-circular — independently recomputes each topology's orderability from the
+lower-level synth/board/join paths, not the selector's own return):**
+- wideband 1 GHz/70 %/0402 → `AlternatingLadder` + orderable (ladder 0/6).
+- **The discriminating proof, 0.5 GHz/20 %/0402:** ladder blanks **4/6** (L 2.0 nH < floor, 91 nH > ceiling,
+  C 1.2 pF < floor) but top-C resolves **0/10** → routes to `TopCCoupled` + orderable — the fallback
+  genuinely rescues a spec the ladder can't make.
+- GHz-narrow 2 GHz/5 %/0402 → ladder 4/6 & top-C 4/10 both blank → `fully_orderable=false`, real non-empty
+  blank set (honest distributed pointer).
+
+Reviewer APPROVE, no P0/P1/P2 (two P3s non-blocking: a pre-existing top-C `debug_assert` unreachable via the
+public path; an intentional FR-4 substrate dup in the gate for test independence).
+
+**T4 (the follow-on):** wire `synthesize_orderable` into `yee filter synth --jlcpcb` (auto-route the topology
++ report which topology was chosen and whether fully orderable in the output / no-match note), then the studio
+export stage — so the user runs one command/click and gets an orderable board across the broadest spec range.
+
 ## References
 - Topologies: `yee_filter::{synthesize_lumped, lumped_board, join_placed_parts}` (ADR-0164),
   `yee_filter::{synthesize_top_c_coupled, top_c_board, join_top_c_parts}` (ADR-0165/0166).
