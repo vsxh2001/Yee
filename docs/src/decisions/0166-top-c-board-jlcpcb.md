@@ -63,6 +63,30 @@ recorded discrepancy, not a weakened gate). This is the top-C analogue of `jlcpc
 - **Not in scope:** the CLI/studio topology flag (T3); GHz-narrow top-C (T1 proved it still blanks on sub-pF
   coupling caps — distributed-only); J5 Gerber-completeness (ADR-0164, separate); distinct Q.
 
+## Outcome (T2 — SHIPPED, merge `b764fc0`)
+
+`yee_filter::top_c_board` + `join_top_c_parts` shipped (+725, yee-filter only). `top_c_board` realizes the
+top-C schematic — `N+1` series coupling caps in-line on the through-arm interleaved with `N` shunt L‖C
+resonators tapping to ground between them (`port1—Cc1—node1(L1‖C1)—Cc2—…—Cc{N+1}—port2`, reviewer-confirmed
+electrically correct vs the `top_c_s21` ABCD cascade + the copper geometry) → renderable `Layout` +
+`Placement` list. `join_top_c_parts` joins each ref-des (`Cc{j}` stripped before bare `C{k}`, panic-safe) →
+value → `autopick`, reusing `jlcpcb_bom_csv`/`jlcpcb_cpl_csv` + the honest blank path.
+
+**Gate `top-c-board-001` (non-circular, honest, non-vacuous):** a Cheb 0.5 dB/N=3/0.5 GHz/20 %/50 Ω/**0402**
+top-C BPF → a **FULLY-ORDERABLE upload set, ZERO blank LCSC #s across all three arms** — coupling caps
+0.96 pF→C1550 & 2.4 pF→C1559, shunt C 3.3 pF→C1565 & 4.3 pF→C1569, shunt L 16 nH→C27143 (every one a real
+bundled Basic part within the 20 % band); CPL designators == BOM; placements within outline. **Closes the
+narrow-band manufacturability gap** the ADR-0164 capstone flagged: top-C makes the sub-GHz/moderate-band
+regime orderable where the alternating ladder blanks. Honest regime bound: **0402 required** (the 0603
+RF-inductor grid jumps 12→22 nH, blanking the 16 nH shunt L — documented, not weakened). Reviewer APPROVE,
+no P0/P1/P2 (two P3s non-blocking: E24 hardcoded — autopick re-snaps; bbox-outline check loose — ok for a
+walking-skeleton board).
+
+**T3 (the follow-on):** CLI/studio topology selection — ideally a `yee_filter` orderable-topology selector
+(try the alternating ladder; if its BOM blanks, try top-C; return whichever is fully orderable + which
+topology, honest "neither → distributed" otherwise) consumed by `yee filter synth` + the studio, so the
+pipeline auto-emits an orderable board for the broadest spec range.
+
 ## References
 - T1 synthesis: `yee_filter::top_c` (`synthesize_top_c_coupled`, `TopCNetwork`, `top_c_s21`) — ADR-0165.
 - Reuse: `yee_filter::board` (`lumped_board`, `Layout`, `Placement`, `Footprint`, `BranchKind`, `PadSpec`),
