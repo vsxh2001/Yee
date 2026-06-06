@@ -1529,6 +1529,12 @@ pub fn verify_stage(
         Some(rej) => format!("{rej:.2} dB"),
         None => "—".to_string(),
     };
+    // Midband group delay (ADR-0173, T10): a readout, not a plot. "—" when the
+    // active flow has no complex S21 path (stepped low-pass / unrealizable lumped).
+    let gd_disp = match view.group_delay_ns {
+        Some(ns) => format!("{ns:.2} ns"),
+        None => "—".to_string(),
+    };
 
     rsx! {
         div { class: "canvas-head",
@@ -1554,6 +1560,13 @@ pub fn verify_stage(
                 div { class: "stat", div { class: "v", "{ripple_disp}" } div { class: "l", "worst passband ripple" } }
                 div { class: "stat", div { class: "v", "{rl_disp}" } div { class: "l", "worst in-band return loss" } }
                 div { class: "stat", div { class: "v", "{rej_disp}" } div { class: "l", "worst stopband rejection" } }
+            }
+            // ---- midband group delay (ADR-0173) — a readout, not a plot ------
+            div { class: "stats", style: "margin-top:12px",
+                div { class: "stat",
+                    div { class: "v", "{gd_disp}" }
+                    div { class: "l", "group delay (midband, τ@f0)" }
+                }
             }
             div { class: "note honest",
                 "These are circuit / synthesis-level metrics: the lumped flow grades its "

@@ -16,7 +16,7 @@ use yee_filter::{
     check_mask, coupling_matrix_s_params, dimension_combline, dimension_combline_layout,
     dimension_edge_coupled, dimension_edge_coupled_layout, dimension_hairpin,
     dimension_hairpin_layout, dimension_interdigital, dimension_interdigital_layout,
-    dimension_stepped_impedance, dimension_stepped_impedance_layout, ideal_response,
+    dimension_stepped_impedance, dimension_stepped_impedance_layout, group_delay, ideal_response,
     ideal_response_lowpass, jlcpcb_bom_csv, jlcpcb_cpl_csv, ladder_s_params_lossy, ladder_s21,
     ladder_s21_lossy, lumped_board, mask_verdict, monte_carlo_yield, select_components, synthesize,
     synthesize_lumped, synthesize_orderable_on,
@@ -159,6 +159,14 @@ pub struct Designed {
     /// [`Topology::Combline`] with a realizable geometry; `None` for every other
     /// topology and when the combline geometry is not realizable.
     pub combline_loading_cap_f: Option<f64>,
+    /// Midband group delay `τ_g(f0) = −dφ/dω|_{f0}` of the **complex**
+    /// coupling-matrix `S21` ([`coupling_matrix_s_params`], ADR-0172), in
+    /// **nanoseconds** (ADR-0173). The negative phase slope at band centre — a
+    /// core filter performance metric (flat group delay = linear phase = low
+    /// signal distortion). Read from the in-band sweep at the sample nearest f0;
+    /// matches the prototype sum rule `Σg/(FBW·ω0)` (validated by
+    /// `group-delay-001`).
+    pub group_delay_ns: f64,
 }
 
 impl Designed {
@@ -257,6 +265,13 @@ pub fn design_demo_from(spec: FilterSpec, topology: Topology) -> Designed {
     let mask_bands = mask_bands(&spec);
     let report = check_mask(&project, &freqs);
 
+    // ---- midband group delay (ADR-0173) -----------------------------------
+    // From the COMPLEX coupling-matrix S21 (real phase), not the magnitude-only
+    // `ideal_response` used for the plotted sweep above. Same grid.
+    let cms = coupling_matrix_s_params(&project.coupling, &freqs, spec.f0_hz, spec.fbw);
+    let s21_complex: Vec<Complex64> = cms.iter().map(|&(_s11, s21)| s21).collect();
+    let group_delay_ns = midband_group_delay_ns(&s21_complex, &freqs, spec.f0_hz);
+
     // ---- physical dimensioning (FR-4 substrate, per topology) -------------
     // Fallible: an unrealizable coupling (e.g. a wide FBW at a low order from
     // the Spec form) returns a `DimError`. We keep the synthesized prototype /
@@ -279,6 +294,7 @@ pub fn design_demo_from(spec: FilterSpec, topology: Topology) -> Designed {
         board_size_mm: geom.board_size_mm,
         dim_error: geom.dim_error,
         combline_loading_cap_f: geom.combline_loading_cap_f,
+        group_delay_ns,
     }
 }
 
@@ -502,6 +518,31 @@ fn derive_geometry(project: &FilterProject, topology: Topology) -> Geometry {
 /// Board size in mm from a layout bounding box.
 fn board_size_mm(b: &BBox) -> (f64, f64) {
     (b.width() * 1e3, b.height() * 1e3)
+}
+
+/// Midband group delay in **nanoseconds** from a complex `S21` sweep on grid
+/// `freqs` (ADR-0173): run [`group_delay`] over the sweep, then read the delay
+/// at the sample **nearest `f0`** and scale to ns. Returns `0.0` for a degenerate
+/// (sub-2-point or mismatched) sweep — [`group_delay`] zero-fills those, so the
+/// nearest-sample read is `0.0`. Shared by the distributed + lumped flows.
+fn midband_group_delay_ns(s21: &[Complex64], freqs: &[f64], f0: f64) -> f64 {
+    let tau = group_delay(s21, freqs);
+    if tau.is_empty() {
+        return 0.0;
+    }
+    // Index of the sweep sample closest to f0.
+    let mid = freqs
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| {
+            (*a - f0)
+                .abs()
+                .partial_cmp(&(*b - f0).abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    tau[mid] * 1e9
 }
 
 /// Linear sweep of `SWEEP_POINTS` frequencies (mirrors the CLI).
@@ -763,6 +804,12 @@ pub struct LumpedDesigned {
     /// dB — the headline number a VNA measures (`≈ 0` in the lossless limit;
     /// matches Cohn's `4.343·Σg/(Q_u·FBW)` near band-centre, validated below).
     pub midband_il_db: f64,
+    /// Midband group delay `τ_g(f0)` of the **finite-Q** lumped `S21`
+    /// ([`ladder_s_params_lossy`]) on the design sweep grid, in **nanoseconds**
+    /// (ADR-0173). Core filter metric (flat group delay = linear phase); read at
+    /// the sample nearest f0. The lossy 2-port carries physical phase, so this is
+    /// the realized group delay (the lossless limit shares the same midband τ).
+    pub group_delay_ns: f64,
     /// Forbidden mask regions for the response plot (shared with the
     /// distributed flow).
     pub mask_bands: Vec<MaskBand>,
@@ -1115,6 +1162,15 @@ pub fn design_lumped_from(spec: FilterSpec, q_unloaded: f64) -> Result<LumpedDes
         .min(1.0);
     let midband_il_db = -20.0 * s21_f0.max(1e-12).log10();
 
+    // ---- midband group delay (ADR-0173) -----------------------------------
+    // From the COMPLEX finite-Q lumped S21 (`ladder_s_params_lossy`.1) on the
+    // same grid — physical phase, so τ is the realized group delay.
+    let s21_complex: Vec<Complex64> = freqs
+        .iter()
+        .map(|&f| ladder_s_params_lossy(&ladder, f, q_unloaded).1)
+        .collect();
+    let group_delay_ns = midband_group_delay_ns(&s21_complex, &freqs, spec.f0_hz);
+
     let mask_bands = mask_bands(&spec);
     let verdict = mask_verdict(&ladder, &spec.mask, spec.f0_hz, spec.fbw, &freqs, 0.0);
 
@@ -1158,6 +1214,7 @@ pub fn design_lumped_from(spec: FilterSpec, q_unloaded: f64) -> Result<LumpedDes
         sweep_finite_q,
         q_unloaded,
         midband_il_db,
+        group_delay_ns,
         mask_bands,
         verdict,
         bom_e24,
@@ -1590,6 +1647,14 @@ pub struct VerifyView {
     /// points, dB. `None` when the mask has no stopband points (nothing to
     /// report — rendered as "—", not a fabricated number).
     pub worst_stopband_rej_db: Option<f64>,
+    /// Midband group delay `τ_g(f0)`, in **nanoseconds** (ADR-0173). The negative
+    /// `S21` phase slope at band centre — a core filter metric. `Some` for the
+    /// distributed band-pass flow ([`Designed::group_delay_ns`], from the complex
+    /// coupling-matrix response) and the lumped flow
+    /// ([`LumpedDesigned::group_delay_ns`], from the finite-Q response); `None`
+    /// for the stepped low-pass flow (no complex S21 path) and the unrealizable
+    /// lumped case — rendered as "—", never a fabricated number.
+    pub group_delay_ns: Option<f64>,
 }
 
 /// The verification metrics + level for the **active flow**.
@@ -1641,6 +1706,7 @@ pub fn verify_view(
                     .worst_stopband_rej_db
                     .is_finite()
                     .then_some(l.verdict.worst_stopband_rej_db),
+                group_delay_ns: Some(l.group_delay_ns),
             },
             None => VerifyView {
                 level: VerifyLevel::RealizedLadder,
@@ -1648,6 +1714,7 @@ pub fn verify_view(
                 worst_passband_ripple_db: 0.0,
                 worst_return_loss_db: 0.0,
                 worst_stopband_rej_db: None,
+                group_delay_ns: None,
             },
         },
         Topology::SteppedImpedance => VerifyView {
@@ -1656,6 +1723,9 @@ pub fn verify_view(
             worst_passband_ripple_db: stepped.worst_passband_ripple_db,
             worst_return_loss_db: stepped.worst_return_loss_db,
             worst_stopband_rej_db: min_achieved(&stepped.stopband),
+            // The stepped low-pass flow has no complex S21 path here; no group
+            // delay is computed for it (rendered as "—").
+            group_delay_ns: None,
         },
         Topology::EdgeCoupled | Topology::Hairpin | Topology::Combline | Topology::Interdigital => {
             VerifyView {
@@ -1664,6 +1734,7 @@ pub fn verify_view(
                 worst_passband_ripple_db: designed.report.worst_passband_ripple_db,
                 worst_return_loss_db: designed.report.worst_return_loss_db,
                 worst_stopband_rej_db: min_achieved(&designed.report.stopband),
+                group_delay_ns: Some(designed.group_delay_ns),
             }
         }
     }
@@ -2832,6 +2903,37 @@ mod tests {
         assert_eq!(lc_none.worst_passband_ripple_db, 0.0);
         assert_eq!(lc_none.worst_return_loss_db, 0.0);
         assert_eq!(lc_none.worst_stopband_rej_db, None);
+
+        // (d) Group delay (ADR-0173): Some(positive) for the distributed +
+        // realized-lumped flows (both carry complex S21), `None` for the stepped
+        // low-pass flow (no complex S21 path here) and the unrealizable lumped.
+        assert_eq!(
+            ec.group_delay_ns,
+            Some(designed.group_delay_ns),
+            "edge-coupled group delay is the distributed design's midband τ"
+        );
+        assert!(
+            ec.group_delay_ns.is_some_and(|ns| ns > 0.0),
+            "a causal band-pass has positive midband group delay (got {:?} ns)",
+            ec.group_delay_ns
+        );
+        assert_eq!(
+            lc.group_delay_ns,
+            Some(lumped.group_delay_ns),
+            "lumped group delay is the realized ladder's midband τ"
+        );
+        assert!(
+            lc.group_delay_ns.is_some_and(|ns| ns > 0.0),
+            "the finite-Q lumped filter has positive midband group delay"
+        );
+        assert_eq!(
+            sp.group_delay_ns, None,
+            "stepped low-pass surfaces no group delay (no complex S21 path) → \"—\""
+        );
+        assert_eq!(
+            lc_none.group_delay_ns, None,
+            "unrealizable lumped surfaces no group delay → \"—\""
+        );
     }
 
     #[test]
