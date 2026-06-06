@@ -26,6 +26,14 @@ yee-layout = { workspace = true }
 # text, depends only on `yee-layout` — WASM-safe, so the Export stage can emit
 # the real files client-side (ADR-0089).
 yee-export = { workspace = true }
+# Touchstone renderer for the .s2p export (ADR-0171). Only the pure-string
+# `yee_io::touchstone::to_string` emitter is used (std + num-complex, no fs in
+# that path), so the Export stage can render a client-side .s2p on wasm32.
+yee-io = { workspace = true }
+
+# `num_complex::Complex64` for the (S11, S21) sweep the .s2p builder hands to the
+# Touchstone renderer (the WASM-safe `yee_filter` response models return it).
+num-complex = { workspace = true }
 
 # Used to hand the (multi-line) export-file payload to the `dioxus::document::eval`
 # download shim as structured JSON rather than escaping it into the script

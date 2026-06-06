@@ -144,9 +144,34 @@ pub fn read(path: &Path) -> Result<File> {
 
 /// Write `file` to `path`. Output is deterministic: preserved comments, then
 /// the option line, then one row per frequency.
+///
+/// Delegates to [`to_string`] for the text body so the on-disk and in-memory
+/// renderings share a single format source.
 pub fn write(path: &Path, file: &File) -> Result<()> {
-    let text = render(file)?;
+    let text = to_string(file)?;
     std::fs::write(path, text).map_err(|e| Error::Io(format!("{}: {e}", path.display())))
+}
+
+/// Render `file` to its Touchstone v1.1 text representation, returning the
+/// string instead of writing it to disk.
+///
+/// This is the **WASM-safe** Touchstone renderer: pure string formatting with
+/// no filesystem or `Path` use (`std` + `num-complex` only), so it can be
+/// called from a `wasm32` target to produce a `.s2p`/`.sNp` body for a
+/// client-side download. [`write`] delegates to it, so the on-disk and
+/// in-memory renderings are byte-identical — there is one format source of
+/// truth.
+///
+/// The output is deterministic: preserved comments, then the option line
+/// (`# <freq_unit> S <format> R <z0>`), then one row per frequency. The same
+/// validity / finiteness checks [`write`] performed apply (an `n_ports` outside
+/// `1..=4`, a `freq_hz`/`data` length mismatch, a non-finite `z0`/frequency, or
+/// a value that is non-finite under the chosen [`Format`] — e.g. a zero
+/// magnitude under `DB` — is rejected with [`Error::InvalidFile`]). It does
+/// **not** check passivity; callers that need that invariant should construct a
+/// passive matrix (a non-passive matrix is rejected on [`read`]).
+pub fn to_string(file: &File) -> Result<String> {
+    render(file)
 }
 
 // ----------------------------------------------------------------------------

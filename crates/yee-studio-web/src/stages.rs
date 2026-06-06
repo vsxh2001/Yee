@@ -20,7 +20,8 @@ use yee_filter::{
 
 use crate::engine::{
     BomView, Designed, LumpedDesigned, SteppedLowpassDesigned, TechniqueComparison, VerifyLevel,
-    YieldView, compare_techniques, overlay_curves, overlay_mask_bands, verify_view,
+    YieldView, compare_techniques, distributed_s2p, lumped_s2p, overlay_curves, overlay_mask_bands,
+    verify_view,
 };
 use crate::svg::{OVERLAY_PALETTE, board_svg, lumped_board_svg, response_overlay, response_plot};
 
@@ -1708,6 +1709,17 @@ fn export_distributed(designed: ReadOnlySignal<Designed>) -> Element {
                         },
                     }
                     download_btn {
+                        label: "Touchstone .s2p",
+                        make: move |_| {
+                            // The ideal closed-form response (the displayed |S21|
+                            // curve), S11 in lossless quadrature (ADR-0171). On a
+                            // renderer Err, do nothing — never a broken download.
+                            if let Ok(s2p) = distributed_s2p(&designed.read()) {
+                                download_file("filter.s2p", "application/x-touchstone", &s2p);
+                            }
+                        },
+                    }
+                    download_btn {
                         label: "Parameter sheet",
                         make: move |_| {
                             let sheet = distributed_param_sheet(&designed.read());
@@ -1717,8 +1729,10 @@ fn export_distributed(designed: ReadOnlySignal<Designed>) -> Element {
                 }
                 div { class: "note honest",
                     "Gerber + KiCad are written by the shipped `yee-export` emitters from the same "
-                    "`Layout` the board view draws — single copper layer + Edge.Cuts outline. "
-                    "Drill / soldermask / silkscreen and a Touchstone .s2p (post EM-verify) are "
+                    "`Layout` the board view draws — single copper layer + Edge.Cuts outline. The "
+                    "Touchstone .s2p carries the " b { "ideal closed-form" } " response (the displayed "
+                    "|S21| curve, S11 in lossless quadrature) — importable into scikit-rf / ADS / a "
+                    "VNA comparison. Drill / soldermask / silkscreen and an EM-verified .s2p are "
                     "documented follow-ons."
                 }
             } else {
@@ -1856,6 +1870,19 @@ fn export_lumped(lumped: ReadOnlySignal<Option<LumpedDesigned>>) -> Element {
                     },
                 }
                 download_btn {
+                    label: "Touchstone .s2p",
+                    make: move |_| {
+                        // The finite-Q realistic response (the displayed
+                        // finite-Q |S21| curve), the true lossy 2-port
+                        // (ADR-0171). On a renderer Err, do nothing.
+                        if let Some(d) = lumped.read().as_ref()
+                            && let Ok(s2p) = lumped_s2p(d)
+                        {
+                            download_file("filter-lumped.s2p", "application/x-touchstone", &s2p);
+                        }
+                    },
+                }
+                download_btn {
                     label: "Parameter sheet",
                     make: move |_| {
                         if let Some(d) = lumped.read().as_ref() {
@@ -1869,7 +1896,10 @@ fn export_lumped(lumped: ReadOnlySignal<Option<LumpedDesigned>>) -> Element {
                 "The BOM CSV is the grouped E-series selection (the Components stage); the Gerber "
                 "(F.Cu + Edge.Cuts) + KiCad come from the placed SMD `Layout` (the Layout stage) via "
                 "the shipped `yee-export` emitters — this is the " b { "displayed ladder board" }
-                ". Footprint pad geometry + a parasitic-aware land library are documented follow-ons (F2.2b)."
+                ". The Touchstone .s2p carries the " b { "finite-Q realistic" } " response (the "
+                "displayed finite-Q |S21| curve, the true lossy 2-port) for import into scikit-rf / "
+                "ADS / a VNA comparison. Footprint pad geometry + a parasitic-aware land library are "
+                "documented follow-ons (F2.2b)."
             }
         }
 

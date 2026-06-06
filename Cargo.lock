@@ -7610,9 +7610,11 @@ name = "yee-studio-web"
 version = "0.0.0"
 dependencies = [
  "dioxus",
+ "num-complex",
  "serde_json",
  "yee-export",
  "yee-filter",
+ "yee-io",
  "yee-layout",
  "yee-synth",
 ]
