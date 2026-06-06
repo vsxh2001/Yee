@@ -150,7 +150,9 @@ fn blanks(parts: &[PlacedPart]) -> usize {
 ///
 /// Both topologies are placed on the FR-4 [`reference_substrate`] and snapped to
 /// the same [`SELECTOR_SERIES`] E-series, so the orderability comparison is
-/// like-for-like. Pure-compute / WASM-safe.
+/// like-for-like. Pure-compute / WASM-safe. Use [`synthesize_orderable_on`] to
+/// place the chosen board on a caller-supplied substrate (the topology decision
+/// is identical — see that function's docs).
 ///
 /// # Errors
 ///
@@ -166,13 +168,52 @@ pub fn synthesize_orderable(
     project: &FilterProject,
     footprint: Footprint,
 ) -> Result<OrderableBoard, LumpedError> {
-    let substrate = reference_substrate();
+    synthesize_orderable_on(project, &reference_substrate(), footprint)
+}
 
+/// Select the orderable lumped board topology for `project`, placing the chosen
+/// board on the **caller-supplied** `substrate`.
+///
+/// Identical routing policy to [`synthesize_orderable`] (try the alternating
+/// ladder, fall back to top-C, else the honest fewer-blanks board) — see that
+/// function for the full policy and the `# Errors` contract. The only difference
+/// is that both candidate boards are laid out on the given `substrate` rather
+/// than the FR-4 [`reference_substrate`].
+///
+/// # Why the substrate does not change the topology decision
+///
+/// The topology **decision** and the BOM **orderability** turn only on the
+/// component *values*, which come from the LC synthesis
+/// ([`synthesize_lumped`](crate::synthesize_lumped) /
+/// [`synthesize_top_c_coupled`](crate::synthesize_top_c_coupled)) and the E-series
+/// snap ([`SELECTOR_SERIES`]) — neither depends on the substrate. The substrate
+/// only affects the board **geometry** (the `Z0`-width signal-line trace from
+/// [`microstrip_width`](crate::board) and therefore the pad/placement coordinates
+/// the CPL reports). So `synthesize_orderable_on(p, &reference_substrate(), f)`
+/// chooses the **same** [`BoardTopology`] and the **same** `fully_orderable` as
+/// `synthesize_orderable(p, f)`; only `board.layout` / `board.placements` (the
+/// geometry/CPL coords) differ. This is what lets the CLI honor the user's
+/// `--eps-r`/`--h-mm` without changing which topology is orderable.
+///
+/// Pure-compute, deterministic, **WASM-safe** (no I/O, network, threads, time,
+/// RNG, or `unsafe`).
+///
+/// # Errors
+///
+/// Same as [`synthesize_orderable`] — bubbles up the
+/// [`LumpedError`](crate::LumpedError) from
+/// [`synthesize_lumped`](crate::synthesize_lumped) when the spec is not a
+/// realizable band-pass of order `N >= 1`.
+pub fn synthesize_orderable_on(
+    project: &FilterProject,
+    substrate: &Substrate,
+    footprint: Footprint,
+) -> Result<OrderableBoard, LumpedError> {
     // ---- (1) alternating ladder -------------------------------------------
     // synthesize_lumped enforces the band-pass + order>=1 preconditions; bubble
     // its error up so a bad spec fails the same way the rest of the track does.
     let ladder = synthesize_lumped(project)?;
-    let ladder_board = lumped_board(&ladder, &substrate, footprint);
+    let ladder_board = lumped_board(&ladder, substrate, footprint);
     let ladder_parts = join_placed_parts(
         &ladder_board.placements,
         &ladder,
@@ -200,7 +241,7 @@ pub fn synthesize_orderable(
         project.spec.fbw,
         project.spec.z0_ohm,
     );
-    let top_c_brd = top_c_board(&net, &substrate, footprint);
+    let top_c_brd = top_c_board(&net, substrate, footprint);
     let top_c_parts = join_top_c_parts(&top_c_brd.placements, &net);
     let top_c_blanks = blanks(&top_c_parts);
     if top_c_blanks == 0 {

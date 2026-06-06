@@ -14,9 +14,9 @@ use num_complex::Complex64;
 use std::process::ExitCode;
 
 use yee_filter::{
-    ESeries, FilterProject, FilterSpec, Footprint, check_mask, dimension_edge_coupled,
-    dimension_edge_coupled_layout, ideal_response, jlcpcb_bom_csv, join_placed_parts,
-    ladder_s_params_lossy, lumped_board, synthesize, synthesize_lumped,
+    BoardTopology, FilterProject, FilterSpec, Footprint, check_mask, dimension_edge_coupled,
+    dimension_edge_coupled_layout, ideal_response, jlcpcb_bom_csv, jlcpcb_cpl_csv,
+    ladder_s_params_lossy, lumped_board, synthesize, synthesize_lumped, synthesize_orderable_on,
 };
 use yee_io::touchstone::{File, Format, FreqUnit};
 use yee_layout::Substrate;
@@ -351,25 +351,28 @@ pub fn run_synth(
     }
 }
 
-/// The E-series the `--jlcpcb` BOM autopick snaps to (J4, ADR-0164).
+/// Write the JLCPCB assembly upload set for the **auto-routed orderable** lumped
+/// realization into `dir` (T4, ADR-0168): the chosen board's copper + outline
+/// Gerbers, `bom.csv` (autopicked LCSC parts), and `cpl.csv` (placement
+/// centroids).
 ///
-/// E24 (±5 %) matches the world of JLCPCB **Basic** chip parts (the common
-/// ±5 % 0402/0603/0805 C/R/L values) and the studio's primary BOM, so the
-/// autopick band is widest where real Basic parts actually exist. (A future
-/// `--jlcpcb-series` flag could expose E96; E24 is the right default.)
-const JLCPCB_SERIES: ESeries = ESeries::E24;
-
-/// Write the JLCPCB assembly upload set for the lumped realization into `dir`
-/// (J4, ADR-0164): the lumped board's copper + outline Gerbers, `bom.csv`
-/// (autopicked LCSC parts), and `cpl.csv` (placement centroids).
+/// The topology is **auto-selected** by
+/// [`synthesize_orderable_on`](yee_filter::synthesize_orderable_on) on the
+/// caller's `substrate`: it picks whichever lumped topology (the alternating
+/// series/shunt ladder or the top-C-coupled network) yields a fully-orderable
+/// JLCPCB board for `proj`, or the honest fewer-blanks board when neither does.
+/// The user honors their own `--eps-r`/`--h-mm` (the topology decision is
+/// substrate-independent — it turns on the synthesized component *values* — so
+/// only the board geometry / CPL coordinates follow the substrate; see
+/// [`synthesize_orderable_on`](yee_filter::synthesize_orderable_on)).
 ///
-/// The lumped board is synthesized from `proj` on `substrate` with `footprint`
-/// — the **same** path the `--lumped`/`--gerber` exporters use, so the copper
-/// Gerber here is byte-identical to the lumped `--gerber` output. The honest
-/// no-Basic-match count (BOM lines whose `autopick` returned `None`) is printed
-/// so the user sees the unfillable lines (they are emitted with a blank LCSC #,
-/// not dropped). `dir` is created if missing; the copper Gerber is named for the
-/// spec stem (`<stem>.gbr`) with the outline as `<stem>-Edge_Cuts.gbr`.
+/// The chosen topology is reported, and the honest no-Basic-match count (parts
+/// whose `autopick` returned `None`) is printed so the user sees the unfillable
+/// lines (they are emitted with a blank LCSC #, not dropped). When **neither**
+/// lumped topology is fully orderable, an extra line points at the
+/// distributed/planar track. `dir` is created if missing; the copper Gerber is
+/// named for the spec stem (`<stem>.gbr`) with the outline as
+/// `<stem>-Edge_Cuts.gbr`.
 fn write_jlcpcb_set(
     dir: &Path,
     proj: &FilterProject,
@@ -380,11 +383,19 @@ fn write_jlcpcb_set(
     std::fs::create_dir_all(dir)
         .with_context(|| format!("failed to create JLCPCB output dir {}", dir.display()))?;
 
-    // Build the lumped board (== the `--lumped` exporter path) so the Gerber
-    // copper and the BOM/CPL all describe the same realization.
-    let ladder = synthesize_lumped(proj)
-        .map_err(|e| anyhow::anyhow!("failed to synthesize lumped LC ladder: {e}"))?;
-    let board = lumped_board(&ladder, substrate, footprint);
+    // Auto-route the orderable topology on the user's substrate (honors
+    // --eps-r/--h-mm). The board geometry/CPL coords follow `substrate`; the
+    // topology DECISION + BOM orderability turn only on the synthesized values,
+    // so this picks the same topology a reference-substrate call would.
+    let ob = synthesize_orderable_on(proj, substrate, footprint)
+        .map_err(|e| anyhow::anyhow!("failed to synthesize an orderable lumped board: {e}"))?;
+    println!(
+        "  topology: {} (auto-selected)",
+        match ob.topology {
+            BoardTopology::AlternatingLadder => "alternating series/shunt ladder",
+            BoardTopology::TopCCoupled => "top-C-coupled (capacitively-coupled)",
+        }
+    );
 
     // The spec stem names the copper Gerber (`<stem>.gbr`).
     let stem = spec_path
@@ -393,44 +404,53 @@ fn write_jlcpcb_set(
         .unwrap_or("filter");
 
     // Copper (F.Cu) — the SAME `layout_to_gerber` copper the `--gerber` lumped
-    // path emits — plus the board-outline (Edge.Cuts) Gerber JLCPCB fab wants.
+    // path emits — plus the board-outline (Edge.Cuts) Gerber JLCPCB fab wants,
+    // both from the auto-routed board's layout.
     let copper_path = dir.join(format!("{stem}.gbr"));
-    let copper = yee_export::layout_to_gerber(&board.layout, &yee_export::GerberOptions::default());
+    let copper =
+        yee_export::layout_to_gerber(&ob.board.layout, &yee_export::GerberOptions::default());
     std::fs::write(&copper_path, copper)
         .with_context(|| format!("failed to write copper Gerber {}", copper_path.display()))?;
     println!("  wrote JLCPCB copper Gerber: {}", copper_path.display());
 
     let outline_path = dir.join(format!("{stem}-Edge_Cuts.gbr"));
-    let outline =
-        yee_export::layout_to_gerber_outline(&board.layout, &yee_export::OutlineOptions::default());
+    let outline = yee_export::layout_to_gerber_outline(
+        &ob.board.layout,
+        &yee_export::OutlineOptions::default(),
+    );
     std::fs::write(&outline_path, outline)
         .with_context(|| format!("failed to write outline Gerber {}", outline_path.display()))?;
     println!("  wrote JLCPCB outline Gerber: {}", outline_path.display());
 
-    // BOM + CPL (the JLCPCB assembly upload pair). Join once so the honest
-    // no-Basic-match count below and the BOM CSV are derived from the same
-    // placement→LCSC join (the CPL lists every placement regardless).
-    let parts = join_placed_parts(&board.placements, &ladder, footprint, JLCPCB_SERIES);
+    // BOM (autopicked parts) + CPL (every placement centroid). Both come from the
+    // single auto-routed `ob`, so the BOM rows and CPL placements describe the
+    // same chosen board.
     let bom_path = dir.join("bom.csv");
     let cpl_path = dir.join("cpl.csv");
-    std::fs::write(&bom_path, jlcpcb_bom_csv(&parts))
+    std::fs::write(&bom_path, jlcpcb_bom_csv(&ob.parts))
         .with_context(|| format!("failed to write JLCPCB BOM {}", bom_path.display()))?;
-    std::fs::write(&cpl_path, yee_filter::jlcpcb_cpl_csv(&board.placements))
+    std::fs::write(&cpl_path, jlcpcb_cpl_csv(&ob.board.placements))
         .with_context(|| format!("failed to write JLCPCB CPL {}", cpl_path.display()))?;
     println!("  wrote JLCPCB BOM: {}", bom_path.display());
     println!("  wrote JLCPCB CPL: {}", cpl_path.display());
 
-    // Honest unrealizable-value flag: count the placements whose autopick found
-    // no JLCPCB Basic part (emitted with a blank LCSC #, not dropped).
-    let total = parts.len();
-    let no_match = parts.iter().filter(|p| p.lcsc.is_none()).count();
-    if no_match > 0 {
+    // Honest orderability report: count the parts whose autopick found no JLCPCB
+    // Basic part (emitted with a blank LCSC #, not dropped). When the board is
+    // fully orderable, `ob.fully_orderable` is true and the count is zero.
+    let total = ob.parts.len();
+    let no_match = ob.parts.iter().filter(|p| p.lcsc.is_none()).count();
+    if ob.fully_orderable {
+        println!("  all {total} parts matched a JLCPCB Basic part");
+    } else {
         println!(
             "  NOTE: {no_match} of {total} parts have no JLCPCB Basic match \
              (blank LCSC # in bom.csv); see bom.csv"
         );
-    } else {
-        println!("  all {total} parts matched a JLCPCB Basic part");
+        // Both lumped topologies were tried and neither was fully orderable.
+        println!(
+            "  (neither lumped topology is fully orderable for this spec; \
+             consider the distributed/planar track)"
+        );
     }
 
     Ok(())

@@ -1,8 +1,8 @@
 //! Gate for `yee filter synth --jlcpcb <dir>` (JLCPCB production track, ADR-0164
-//! brick **J4**).
+//! brick **J4**; auto-routing added in ADR-0168 brick **T4**).
 //!
-//! Runs the CLI against the committed satisfiable Chebyshev N=5 bandpass fixture
-//! with `--jlcpcb <tmpdir>` and asserts the directory holds the JLCPCB
+//! Runs the CLI against the committed Chebyshev N=5 bandpass fixture (2 GHz /
+//! 10 %) with `--jlcpcb <tmpdir>` and asserts the directory holds the JLCPCB
 //! SMT-assembly upload set:
 //!
 //! - `bom.csv` — exact JLCPCB header `Comment,Designator,Footprint,LCSC Part #`,
@@ -13,6 +13,19 @@
 //!   one row per placed component, with the CPL designator set consistent with
 //!   the BOM designator union (both derive from the same placement list).
 //! - a structurally-valid RS-274X copper Gerber (`%FS` / `G36` / `G37` / `M02`).
+//!
+//! # Auto-routing (ADR-0168 T4)
+//!
+//! `--jlcpcb` no longer hardcodes the alternating ladder; it auto-routes the
+//! orderable topology via [`yee_filter::synthesize_orderable_on`] and reports the
+//! chosen one. This **GHz-narrow** fixture (2 GHz / 10 %) is not fully orderable
+//! in *either* lumped topology, so the selector returns the fewer-blanks board —
+//! here the **top-C-coupled** network (its part count beats the ladder's blank
+//! count) — with the honest blank rows preserved. The structural assertions below
+//! are topology-agnostic (a realizable row + a flagged blank row + CPL≡BOM
+//! designators), so they hold for whichever board is routed; the run additionally
+//! reports the chosen topology and fires the "neither lumped topology is fully
+//! orderable" note, which this gate now checks on stdout.
 //!
 //! Pure closed-form geometry (no EM/FDTD), so NOT `#[ignore]`'d — mirrors
 //! `cli_lumped_export` / `cli_finite_q_s2p`.
@@ -85,6 +98,21 @@ fn cli_jlcpcb_writes_upload_set() {
         output.status.success(),
         "yee filter synth --jlcpcb exited non-zero; stderr: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+
+    // ---- auto-route report (ADR-0168 T4) ---------------------------------
+    // The run must name the auto-selected topology, and — because this
+    // GHz-narrow fixture is not fully orderable in either lumped topology — it
+    // must fire the honest "neither lumped topology is fully orderable" note.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("topology:") && stdout.contains("(auto-selected)"),
+        "run must report the auto-selected topology; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("neither lumped topology is fully orderable"),
+        "this GHz-narrow fixture is not fully orderable in either topology, so the \
+         distributed/planar-track note must fire; stdout:\n{stdout}"
     );
 
     let bom_path = dir.join("bom.csv");
