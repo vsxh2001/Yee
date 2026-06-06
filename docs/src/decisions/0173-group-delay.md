@@ -24,10 +24,12 @@ clean, valuable addition.
 2. **Gate `group-delay-001`** (`crates/yee-filter/tests/`, pure-compute, non-`#[ignore]`'d, NON-circular):
    feed a synthesized filter's `coupling_matrix_s_params` `S21` (a dense sweep) to `group_delay` and assert:
    - **Closed-form midband anchor (the load-bearing non-circular check):** `τ_g(f0)` matches the
-     prototype sum-rule `τ_g(ω0) = 2·(Σ_{k=1}^{N} g_k)/(FBW·ω0)` (`ω0 = 2π·f0`) within tolerance. RESEARCH/
-     confirm the constant (Pozar §8 / Hong-Lancaster: lowpass `τ_LP(Ω=0)=Σg_k` scaled by the bandpass map's
-     `dΩ/dω|_{ω0}=2/(FBW·ω0)`). The `g_k` come from `proj.prototype` — independent of the phase path, so
-     agreement validates the group-delay computation non-circularly.
+     prototype sum-rule `τ_g(ω0) = (Σ_{k=1}^{N} g_k)/(FBW·ω0)` (`ω0 = 2π·f0`) within tolerance. **[T10
+     correction — see Outcome:** the **doubly-terminated** lowpass prototype DC group delay is
+     `τ_LP(Ω=0) = Σg_k/2` (NOT `Σg_k`); with the bandpass map's `dΩ/dω|_{ω0} = 2/(FBW·ω0)` the `2` and the
+     `½` cancel, so the correct anchor is `Σg_k/(FBW·ω0)`. This ADR's original `2·Σg/(FBW·ω0)` was off by
+     2×, caught + corrected by the gate.**] The `g_k` come from `proj.prototype` — independent of the phase
+     path, so agreement validates the group-delay computation non-circularly.
    - **Causality:** in-band `τ_g > 0` at every sample.
    - **Symmetry:** `τ_g(ω)` is symmetric about `f0` (within tol) for the symmetric synchronous BPF.
 3. **Studio Verify readout** (`yee-studio-web`): compute `group_delay` over the in-band sweep (distributed via
@@ -42,6 +44,27 @@ clean, valuable addition.
   yee-studio-web/src/{engine.rs, stages.rs}` (the readout). Pure-math, WASM-safe; keep `wasm-build` green.
 - **Not in scope:** a group-delay PLOT (a readout suffices for T10; a plot is a later add); group-delay
   EQUALIZATION/optimization; the CLI group-delay readout (the studio is the deliverable surface).
+
+## Outcome (T10 — SHIPPED, merge `e82e1c1`)
+
+`yee_filter::group_delay(s21, freqs) -> Vec<f64>` shipped (+110 lib, +319 gate; studio `group_delay_ns` on
+`Designed`/`LumpedDesigned` + a Verify-stage "group delay (midband, τ@f0): X ns" readout, `None`→"—" for the
+no-complex-S21 flows — no fabrication). τ = −dφ/dω via unwrapped-phase central difference (reviewer-verified
+vs numpy to 4.4e-23 on a many-times-wrapping pure-delay signal).
+
+**Physics correction (the gate caught this ADR's 2× error; the agent resolved it from first principles, NOT by
+weakening the tol; reviewer independently re-derived it):** the **doubly-terminated** lowpass prototype DC group
+delay is `τ_LP(0) = Σg/2`, not `Σg` (N=1: a shunt `C=g₁` between 1 Ω terminations → `S21 = 2/(2+jΩC)`,
+`τ = C/2 = g₁/2`; confirmed N=1/3/5 via an independent ABCD ladder). So the correct midband anchor is
+`τ_g(ω0) = (Σg/2)·(2/(FBW·ω0)) = Σg/(FBW·ω0)` — the `2` (Jacobian) and `½` (prototype) cancel.
+
+**Gate `group-delay-001` (non-circular — the `Σg` anchor reads `proj.prototype.g`, distinct from the
+coupling-matrix `m` the phase comes from):** midband τ(f0) matches `Σg/(FBW·ω0)` to **0.00 % rel_err** (N=3:
+3.4133 vs 3.4134 ns; N=5: 6.6937 vs 6.6939 ns; ratio 1.0000 across FBW {0.10, 0.02, 0.005}; tol 5 % NOT
+weakened — the wrong 2× form is 50–100 % off); causality (in-band τ>0); symmetry about f0 (1.9 % vs 2.5 %, the
+real f↔Ω-map asymmetry that shrinks with the window). yee-filter + studio 18/18 green; wasm32 exit 0; no new
+dep. Reviewer APPROVE, no P0/P1/P2 (anchor independently re-derived; gate non-circular + un-weakened;
+unwrap/sign correct; readout honest). One P3 nit (while-vs-if in the unwrap, harmless).
 
 ## References
 - Sum rule: Pozar, *Microwave Engineering* §8 (group delay / prototype); Hong & Lancaster §3 (the lowpass
