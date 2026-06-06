@@ -14,7 +14,8 @@
 use dioxus::prelude::*;
 
 use yee_filter::{
-    Approximation, FilterSpec, RealizationTechnique, Response, SpecMask, TechniqueRecommendation,
+    Approximation, ESeries, FilterSpec, Footprint, RealizationTechnique, Response, SpecMask,
+    TechniqueRecommendation, jlcpcb_bom_csv, jlcpcb_cpl_csv, join_placed_parts,
     recommend_technique,
 };
 
@@ -1855,6 +1856,35 @@ fn export_lumped(lumped: ReadOnlySignal<Option<LumpedDesigned>>) -> Element {
                         }
                     },
                 }
+                // JLCPCB assembly upload set (J4, ADR-0164): the BOM + CPL CSVs
+                // JLCPCB's SMT-assembly order consumes, built from the placed
+                // board's placements + the realized ladder (autopicked LCSC
+                // parts; E24 ±5 % to match the Basic-parts world). Pair these
+                // with the Gerber buttons above for a full upload.
+                download_btn {
+                    label: "JLCPCB BOM (.csv)",
+                    make: move |_| {
+                        if let Some(d) = lumped.read().as_ref() {
+                            let parts = join_placed_parts(
+                                &d.board.placements,
+                                &d.ladder,
+                                Footprint::Smd0603,
+                                ESeries::E24,
+                            );
+                            let csv = jlcpcb_bom_csv(&parts);
+                            download_file("filter-jlcpcb-bom.csv", "text/csv", &csv);
+                        }
+                    },
+                }
+                download_btn {
+                    label: "JLCPCB CPL (.csv)",
+                    make: move |_| {
+                        if let Some(d) = lumped.read().as_ref() {
+                            let csv = jlcpcb_cpl_csv(&d.board.placements);
+                            download_file("filter-jlcpcb-cpl.csv", "text/csv", &csv);
+                        }
+                    },
+                }
                 download_btn {
                     label: "Parameter sheet",
                     make: move |_| {
@@ -1868,8 +1898,10 @@ fn export_lumped(lumped: ReadOnlySignal<Option<LumpedDesigned>>) -> Element {
             div { class: "note honest",
                 "The BOM CSV is the grouped E-series selection (the Components stage); the Gerber "
                 "(F.Cu + Edge.Cuts) + KiCad come from the placed SMD `Layout` (the Layout stage) via "
-                "the shipped `yee-export` emitters. Footprint pad geometry + a parasitic-aware land "
-                "library are documented follow-ons (F2.2b)."
+                "the shipped `yee-export` emitters. The JLCPCB BOM/CPL pair (with the Gerbers) is the "
+                "SMT-assembly upload set — LCSC parts are autopicked from a curated Basic-parts table "
+                "(E24 ±5 %); values with no Basic match get a blank LCSC # (flagged, never dropped). "
+                "Footprint pad geometry + a parasitic-aware land library are documented follow-ons (F2.2b)."
             }
         }
     }

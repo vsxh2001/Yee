@@ -330,6 +330,16 @@ enum FilterCommand {
         /// lossless one. Independent of `--lumped`. Must be finite and `> 0`.
         #[arg(long)]
         q_unloaded: Option<f64>,
+        /// Write the JLCPCB SMT-assembly upload set for the **lumped**
+        /// realization into this directory (J4, ADR-0164): the lumped board's
+        /// copper + outline Gerbers, `bom.csv` (autopicked LCSC parts,
+        /// `Comment,Designator,Footprint,LCSC Part #`), and `cpl.csv`
+        /// (`Designator,Mid X,Mid Y,Layer,Rotation`). Always uses the lumped LC
+        /// board (the BOM/CPL describe the lumped parts), independent of
+        /// `--lumped`; the directory is created if missing. Unrealizable values
+        /// get a blank LCSC # (flagged, never dropped) and a one-line note.
+        #[arg(long)]
+        jlcpcb: Option<PathBuf>,
     },
 }
 
@@ -526,6 +536,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 lumped,
                 footprint,
                 q_unloaded,
+                jlcpcb,
             } => filter::run_synth(
                 &spec,
                 output.as_deref(),
@@ -538,6 +549,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 lumped,
                 footprint.to_footprint(),
                 q_unloaded,
+                jlcpcb.as_deref(),
             ),
         },
         Command::Design {
