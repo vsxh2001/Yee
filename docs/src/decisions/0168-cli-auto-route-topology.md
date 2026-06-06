@@ -61,8 +61,32 @@ selector return.
 - **Not in scope:** the studio wiring (T5); a `--topology` override flag (the auto-route is the default; a
   manual override is a trivial later add); J5 Gerber-completeness (ADR-0164).
 
+## Outcome (T4 — SHIPPED, merge `c3a04d9`)
+
+`yee_filter::synthesize_orderable_on(project, &Substrate, footprint)` added (the policy with the substrate
+parameterized); `synthesize_orderable` is now a thin FR-4 delegate — the `topology-select-001` gate is
+unchanged + green. `yee-cli::write_jlcpcb_set` calls `_on(proj, substrate, footprint)` (honoring
+`--eps-r`/`--h-mm`), emits the copper+outline Gerber from `ob.board.layout`, CPL from `ob.board.placements`,
+BOM from `ob.parts`, and reports the chosen topology + orderability **truthfully** (reviewer-confirmed: the
+"all N matched" branch only when `fully_orderable`; else the honest `M-of-N blank` NOTE + a "neither lumped
+topology is fully orderable → distributed/planar" pointer; no fabricated orderability).
+
+**Gate `cli-jlcpcb-autoroute` (non-circular — reads the WRITTEN `bom.csv`/`cpl.csv` + stdout, with two
+independent topology checks that must agree: the stdout `topology:` line AND the `Cc*` coupling-cap
+designators only top-C emits):** 0.5 GHz/20 %/0402 → **top-C, ZERO blank** (Cc 1 pF→C1550 & 2.4 pF→C1559,
+shunt 16 nH→C27143…); 1 GHz/70 %/0402 → **alternating ladder, zero blank** (no `Cc*`); 2 GHz/5 %/0402 →
+**not fully orderable**, real 4/6 blank rows + both honest note lines fire. The existing `cli_jlcpcb` was
+reconciled **honestly** (its 2 GHz/10 %/N=5/0603 fixture now routes ladder→top-C — strictly ADDITIVE: every
+original assertion preserved + two stdout assertions added; nothing removed/loosened). yee-filter 84 +
+yee-cli 60 green; WASM-safe; clippy/fmt clean. Reviewer APPROVE, no P0/P1/P2 (two P3s cosmetic).
+
+**The deliverable's headline path is end-to-end:** `yee filter synth <spec> --jlcpcb <dir>` returns an
+orderable JLCPCB upload set across the broadest spec range either lumped topology covers, naming the
+topology — one command, no topology knowledge required. **T5 (the follow-on):** wire the auto-route + the
+chosen-topology/orderability surface into the Dioxus studio Export stage (the WASM/UI lane).
+
 ## References
-- Selector: `yee_filter::{synthesize_orderable, OrderableBoard, BoardTopology}` (ADR-0167).
+- Selector: `yee_filter::{synthesize_orderable, synthesize_orderable_on, OrderableBoard, BoardTopology}` (ADR-0167/0168).
 - CLI: `yee_cli::filter::{run_synth, write_jlcpcb_set, JLCPCB_SERIES}` (ADR-0164 J4).
 - Boards/CSVs: `yee_filter::{lumped_board, top_c_board, jlcpcb_bom_csv, jlcpcb_cpl_csv}`,
   `yee_export::{layout_to_gerber, layout_to_gerber_outline}`.
