@@ -58,6 +58,27 @@ ladder model / board / BOM wiring yet.
 - **Not in scope (T1):** the ladder-model/board/BOM/CPL wiring (T2, only if T1 GO); distinct Q;
   the distributed/planar narrow-band path (a different track).
 
+## Outcome (T1 — SHIPPED, merge `f12be0f`; de-risk GO, scoped)
+
+`yee_filter::top_c` (`synthesize_top_c_coupled` + `top_c_s21`) implements the J-inverter synthesis (Pozar
+§8.8 Table 8.6 / Hong-Lancaster §3.4 / Naaman-Aumentado arXiv:2109.11628). **Synthesis validated
+non-circularly:** the independent-ABCD S21 meets the Chebyshev mask for 1 GHz/10%/N=3 (ripple 0.85 dB —
+documented capacitive-J-inverter dispersion, ~20 % FBW validity, ripple-only slack 0.6 dB; rejection
+44/50 dB, no slack; peak centered). The synthesis reproduces the published worked example's
+impedance-**independent J-inverter values exactly** (J01=0.0056, J12=0.0022); the pF/nH differ legitimately
+(this code uses Zr=Z0; the paper used per-resonator Zj) — code + test honest about this.
+
+**Realizability-envelope finding (the de-risk):** top-C-coupled **extends** the JLCPCB-orderable envelope
+to the **lower-frequency / wider-band** narrow-band corner — (0.2 GHz, 20 %, 0603) and (0.5 GHz, 20 %,
+0402) synthesize to **fully-orderable** BOMs (the shunt L/C that top-C fixes vs the series-resonator
+topology are realizable). But **GHz-narrow STILL blanks on sub-pF coupling caps** (`Cij = J/ω0 ∝ FBW/f0`)
+→ confirms GHz-narrow lumped is **distributed-only** (the ADR-0165 hypothesis). Reviewer APPROVE-WITH-FIXES,
+no P0/P1 (formulas adversarially-probed; S21 non-circular; envelope real + non-vacuous).
+
+**Verdict: GO for T2** — wire the top-C topology into the ladder model + `lumped_board` + the JLCPCB
+export, **scoped to the sub-GHz / wider-band regime** the probe identified (do NOT promise GHz-narrow lumped
+boards). T2 is the follow-on brick.
+
 ## References
 - Synthesis: Hong & Lancaster, *Microstrip Filters for RF/Microwave Applications* §8 (capacitively-coupled
   / J-inverter); Zverev, *Handbook of Filter Synthesis*; Matthaei-Young-Jones. (Cite the exact formulas in
