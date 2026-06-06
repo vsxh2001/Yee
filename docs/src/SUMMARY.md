@@ -208,3 +208,4 @@
 - [ADR-0162: Higher-fidelity FEM microstrip port — power-wave normalization + multi-mode](decisions/0162-fem-microstrip-port-fidelity.md)
 - [ADR-0163: App — surface the finite-Q (realistic) response in the Dioxus studio](decisions/0163-app-studio-finite-q-response.md)
 - [ADR-0164: JLCPCB production-ready output track — LCSC part autopick + BOM + CPL](decisions/0164-jlcpcb-production-track.md)
+- [ADR-0165: Top-C-coupled (capacitively-coupled) lumped BPF topology — de-risk first](decisions/0165-top-c-coupled-lumped-bpf.md)
