@@ -96,6 +96,16 @@ pub use jlcpcb::{
     DEFAULT_TOLERANCE_PCT, LCSC_PARTS, LcscPart, autopick, autopick_bom, autopick_within,
 };
 
+/// JLCPCB assembly upload CSV export (JLCPCB production track, ADR-0164 bricks
+/// J2 + J3): a placed [`LumpedBoard`]'s [`Placement`]s + its [`LumpedLadder`]
+/// values → the JLCPCB BOM CSV (`Comment,Designator,Footprint,LCSC Part #`) and
+/// CPL/centroid CSV (`Designator,Mid X,Mid Y,Layer,Rotation`).
+pub mod jlcpcb_export;
+pub use jlcpcb_export::{
+    BOM_HEADER, CPL_HEADER, JlcpcbFiles, PlacedPart, jlcpcb_bom_csv, jlcpcb_cpl_csv, jlcpcb_files,
+    jlcpcb_footprint_name, join_placed_parts, value_comment,
+};
+
 /// Guided technique-recommender (App.2.0, ADR-0136): a deterministic decision
 /// tree mapping a [`FilterSpec`] to a recommended physical realization
 /// technique with a plain-language rationale + ranked alternatives.
