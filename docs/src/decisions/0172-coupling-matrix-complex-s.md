@@ -62,6 +62,30 @@ sites; the new complex `|S21|` is validated to agree with it).
   coupling-matrix (finite-Q resonator loss in `[A]` — the lumped path already has finite-Q; a coupling-matrix
   finite-Q is a later add); the CLI `.s2p` distributed phase (a noted follow-on if it shares the gap).
 
+## Outcome (T9 — SHIPPED, merge `2b11e13`)
+
+`yee_filter::coupling_matrix_s_params` shipped (+190 lib, +237 gate; studio `distributed_s2p_sweep` re-wired,
+−45). The complex `(S11,S21)` come from the Hong-Lancaster §8.1 `[A]=[q]+jΩ[U]−j[m]` form, solved per-frequency
+by a hand-rolled complex Gaussian elimination (partial pivoting; pure `num_complex`, WASM-safe, no LAPACK).
+`ideal_response` (magnitude, used by mask/plot) UNCHANGED — additive.
+
+**Key normalization (reviewer-validated as a domain LAW, not a curve-fit):** the stored normalized `m`
+(`1/√(g_i·g_{i+1})`) pairs with the **FBW-scaled** external Q (`qe·FBW`), not the stored physical `Qe` — the
+`Ω`-map's `1/FBW` forces the diagonal loading into the same normalized domain. The reviewer independently
+solved for the optimal continuous `qe` scale across 24 fixtures (N×FBW×ripple) → `opt_s/FBW = 1.000000`
+universally (fixture-invariant ⇒ principled), and matched the solve vs numpy to 2.3e-13 over 1000 systems.
+
+**Gate `coupling-matrix-s-001` (non-circular — `[A]⁻¹` matrix-solve `|S21|` vs the INDEPENDENT characteristic-
+function `ideal_response`):** max `|S21|` dev **2.09e-5** (N=3/5, tol 2e-3, NOT weakened, ~400× below the
+wrong-convention gap); losslessness `|S11|²+|S21|²−1` = **6.66e-16**; phase span ~6.2 rad (non-flat vs
+`ideal_response`'s 0), continuous. Studio distributed `.s2p` now carries real phase; matrix passive →
+re-importable; 18/18 studio tests green. wasm32 check exit 0; no new dep. Reviewer APPROVE, no P0/P1/P2
+(independently re-derived the normalization law + the solve + gate non-circularity).
+
+**Honest follow-on:** the CLI's distributed/coupling-matrix `.s2p` (`yee_cli::filter`) is still magnitude-only
+(`ideal_response` + the CLI's own `lossless_s_pair`) — wiring it to `coupling_matrix_s_params` for CLI↔studio
+parity is a small clean follow-on.
+
 ## References
 - Synthesis: Hong & Lancaster, *Microstrip Filters for RF/Microwave Applications* 2nd ed §8.1 eq (8.30)–(8.31);
   R. J. Cameron, *Microwave Filters for Communication Systems* (coupling-matrix → S).
