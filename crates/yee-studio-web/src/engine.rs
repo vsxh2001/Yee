@@ -15,8 +15,8 @@ use yee_filter::{
     dimension_edge_coupled, dimension_edge_coupled_layout, dimension_hairpin,
     dimension_hairpin_layout, dimension_interdigital, dimension_interdigital_layout,
     dimension_stepped_impedance, dimension_stepped_impedance_layout, ideal_response,
-    ideal_response_lowpass, ladder_s21, lumped_board, mask_verdict, monte_carlo_yield,
-    select_components, synthesize, synthesize_lumped,
+    ideal_response_lowpass, ladder_s21, ladder_s21_lossy, lumped_board, mask_verdict,
+    monte_carlo_yield, select_components, synthesize, synthesize_lumped,
 };
 use yee_layout::{BBox, CoupledMicrostrip, Layout, Substrate, coupled_microstrip, eps_eff};
 
@@ -544,6 +544,12 @@ const YIELD_TRIALS: usize = 500;
 /// SMD footprint family used by the lumped board (the F2.2 default).
 const LUMPED_FOOTPRINT: Footprint = Footprint::Smd0603;
 
+/// Default per-resonator unloaded quality factor for the finite-Q realistic
+/// response (ADR-0163). `Q_u = 100` is a representative surface-mount chip
+/// component value (chip inductors `Q ≈ 30–100`); it produces a few-dB midband
+/// insertion loss and rounded passband corners on the demo 3/5-pole filters.
+pub const DEFAULT_Q_UNLOADED: f64 = 100.0;
+
 /// One rendered resonator row of the lumped LC ladder (Synthesis stage).
 #[derive(Clone, Copy)]
 pub struct LumpedResonatorRow {
@@ -626,8 +632,21 @@ pub struct LumpedDesigned {
     pub ladder: LumpedLadder,
     /// Display-ready resonator rows.
     pub resonators: Vec<LumpedResonatorRow>,
-    /// The swept ideal `ladder_s21` response (reuses [`SweepPoint`]).
+    /// The swept ideal (lossless) `ladder_s21` response (reuses [`SweepPoint`]).
     pub sweep: Vec<SweepPoint>,
+    /// The swept **realistic finite-Q** `ladder_s21_lossy` response on the same
+    /// grid as [`sweep`](Self::sweep) (ADR-0163). Each resonator carries an
+    /// unloaded Q of [`q_unloaded`](Self::q_unloaded); the curve shows the
+    /// midband insertion loss + rounded corners a built filter actually exhibits.
+    pub sweep_finite_q: Vec<SweepPoint>,
+    /// The per-resonator unloaded quality factor the finite-Q sweep was computed
+    /// at (the [`DEFAULT_Q_UNLOADED`] on boot; edited by the studio's `Q_u`
+    /// control).
+    pub q_unloaded: f64,
+    /// The realized **midband insertion loss** `IL = −20·log10(|S21_lossy(f0)|)`,
+    /// dB — the headline number a VNA measures (`≈ 0` in the lossless limit;
+    /// matches Cohn's `4.343·Σg/(Q_u·FBW)` near band-centre, validated below).
+    pub midband_il_db: f64,
     /// Forbidden mask regions for the response plot (shared with the
     /// distributed flow).
     pub mask_bands: Vec<MaskBand>,
@@ -743,23 +762,35 @@ fn yield_view(ladder: &LumpedLadder, series: ESeries, mask: &SpecMask) -> YieldV
     }
 }
 
-/// Run the full live lumped-LC pipeline on the hard-coded demo spec.
+/// Run the full live lumped-LC pipeline on the hard-coded demo spec at the
+/// [`DEFAULT_Q_UNLOADED`].
 ///
 /// Convenience wrapper around [`design_lumped_from`] for the initial boot
-/// state (the Spec stage edits a live spec that re-drives the pipeline).
+/// state (the Spec stage edits a live spec, and the `Q_u` control edits the
+/// unloaded Q, both re-driving the pipeline).
 pub fn design_lumped() -> LumpedDesigned {
-    design_lumped_from(demo_spec()).expect("demo spec is a realizable band-pass ladder")
+    design_lumped_from(demo_spec(), DEFAULT_Q_UNLOADED)
+        .expect("demo spec is a realizable band-pass ladder")
 }
 
 /// Run the full live lumped-LC pipeline on an arbitrary
-/// [`yee_filter::FilterSpec`]: synthesize → LC ladder → swept realized response
-/// → spec-mask verdict → E24/E96 component selection + BOM → Monte-Carlo yield
-/// → SMD board placement. Every value is real F2.x engine output.
+/// [`yee_filter::FilterSpec`] at per-resonator unloaded quality factor
+/// `q_unloaded`: synthesize → LC ladder → swept ideal + **finite-Q realized**
+/// response → spec-mask verdict → E24/E96 component selection + BOM →
+/// Monte-Carlo yield → SMD board placement. Every value is real F2.x engine
+/// output.
+///
+/// `q_unloaded` (ADR-0163) is the single lumped unloaded Q modelling each
+/// resonator's dissipation; it drives the [`sweep_finite_q`](LumpedDesigned::sweep_finite_q)
+/// curve + the realized [`midband_il_db`](LumpedDesigned::midband_il_db) via
+/// [`ladder_s21_lossy`]. The ideal lossless [`sweep`](LumpedDesigned::sweep) and
+/// the spec-mask [`verdict`](LumpedDesigned::verdict) are independent of it.
+/// Pass [`DEFAULT_Q_UNLOADED`] for the boot default.
 ///
 /// Returns the `LumpedError` display string when the prototype cannot be
 /// mapped to a realizable band-pass ladder (e.g. a degenerate FBW); the Spec
 /// form surfaces that rather than panicking.
-pub fn design_lumped_from(spec: FilterSpec) -> Result<LumpedDesigned, String> {
+pub fn design_lumped_from(spec: FilterSpec, q_unloaded: f64) -> Result<LumpedDesigned, String> {
     let project = synthesize(&spec);
     let ladder = synthesize_lumped(&project).map_err(|e| e.to_string())?;
 
@@ -776,7 +807,7 @@ pub fn design_lumped_from(spec: FilterSpec) -> Result<LumpedDesigned, String> {
         })
         .collect();
 
-    // ---- swept realized (ABCD) response + mask verdict --------------------
+    // ---- swept ideal (lossless ABCD) response + mask verdict --------------
     let freqs = sweep_freqs(spec.f0_hz, spec.fbw);
     let sweep: Vec<SweepPoint> = freqs
         .iter()
@@ -790,6 +821,32 @@ pub fn design_lumped_from(spec: FilterSpec) -> Result<LumpedDesigned, String> {
             }
         })
         .collect();
+
+    // ---- swept realistic finite-Q response (ADR-0163) ---------------------
+    // The same ABCD cascade with per-resonator unloaded-Q loss, on the same
+    // grid as `sweep`. This is dissipative (|S11|² + |S21|² < 1), so |S11| is
+    // the TRUE absorptive reflection, not a lossless √(1−|S21|²) placeholder.
+    let sweep_finite_q: Vec<SweepPoint> = freqs
+        .iter()
+        .map(|&f| {
+            let s21_mag = ladder_s21_lossy(&ladder, f, q_unloaded).norm().min(1.0);
+            SweepPoint {
+                f_hz: f,
+                s21_db: 20.0 * s21_mag.max(1e-12).log10(),
+                // |S11| is not plotted for the finite-Q curve (the overlay draws
+                // |S21| only); record the lossy |S21| dB as the carried value.
+                s11_db: 20.0 * s21_mag.max(1e-12).log10(),
+            }
+        })
+        .collect();
+    // Realized midband insertion loss: IL = −20·log10(|S21_lossy(f0)|) at the
+    // band-centre f0 (the headline VNA number). Read straight from the lossy
+    // response so it is consistent with the plotted curve.
+    let s21_f0 = ladder_s21_lossy(&ladder, spec.f0_hz, q_unloaded)
+        .norm()
+        .min(1.0);
+    let midband_il_db = -20.0 * s21_f0.max(1e-12).log10();
+
     let mask_bands = mask_bands(&spec);
     let verdict = mask_verdict(&ladder, &spec.mask, spec.f0_hz, spec.fbw, &freqs, 0.0);
 
@@ -823,6 +880,9 @@ pub fn design_lumped_from(spec: FilterSpec) -> Result<LumpedDesigned, String> {
         ladder,
         resonators,
         sweep,
+        sweep_finite_q,
+        q_unloaded,
+        midband_il_db,
         mask_bands,
         verdict,
         bom_e24,
@@ -1449,7 +1509,7 @@ pub fn compare_techniques(spec: &FilterSpec) -> Vec<TechniqueComparison> {
             // The lumped flow has its own fallible ladder synthesis; an
             // unrealizable ladder degrades to a not-realizable row (zeroed
             // metrics, no verdict) rather than panicking.
-            let lumped_row = match design_lumped_from(spec.clone()) {
+            let lumped_row = match design_lumped_from(spec.clone(), DEFAULT_Q_UNLOADED) {
                 Ok(l) => {
                     let (bw, bh) = l.board_size_mm;
                     TechniqueComparison {
@@ -1572,7 +1632,7 @@ pub fn overlay_curves(spec: &FilterSpec) -> Vec<OverlayCurve> {
             // The lumped realized ladder is a genuinely distinct response
             // (`ladder_s21`); an unrealizable ladder degrades to an empty,
             // not-realizable curve (no polyline, but still named in the legend).
-            let lumped_curve = match design_lumped_from(spec.clone()) {
+            let lumped_curve = match design_lumped_from(spec.clone(), DEFAULT_Q_UNLOADED) {
                 Ok(l) => OverlayCurve {
                     label: "Lumped LC — realized ladder".to_string(),
                     sweep: l.sweep,
@@ -1667,6 +1727,72 @@ mod tests {
         // Board placed every component (2 per resonator).
         assert_eq!(d.placements.len(), 10);
         assert!(d.board_size_mm.0 > 0.0 && d.board_size_mm.1 > 0.0);
+    }
+
+    #[test]
+    fn finite_q_midband_il_matches_cohn() {
+        // ADR-0163, mirroring `lumped-q-001` at the studio-engine layer: the
+        // engine's realized finite-Q MIDBAND INSERTION LOSS (from
+        // `ladder_s21_lossy` via `design_lumped_from`) must match Cohn's narrow-
+        // band dissipation formula `IL ≈ 4.343·Σg/(Q_u·FBW)` (Cohn 1959; Hong &
+        // Lancaster §3.2), and the IDEAL (lossless) midband IL must stay ≈ 0 dB.
+        //
+        // Standard 3-pole 0.5 dB Chebyshev band-pass, FBW = 10 %, Q_u = 100.
+        let q_u = DEFAULT_Q_UNLOADED;
+        let fbw = 0.10;
+        let approx = Approximation::Chebyshev { ripple_db: 0.5 };
+        let mut spec = demo_spec();
+        spec.approximation = approx;
+        spec.order = Some(3);
+        spec.fbw = fbw;
+
+        let l = design_lumped_from(spec, q_u).expect("3-pole 0.5 dB Cheb BPF is realizable");
+        assert_eq!(l.order(), 3, "3-pole ladder");
+        assert_eq!(l.q_unloaded, q_u, "engine carries the requested Q_u");
+        // The finite-Q sweep shares the ideal sweep's grid.
+        assert_eq!(l.sweep_finite_q.len(), l.sweep.len());
+        assert_eq!(l.sweep_finite_q.len(), SWEEP_POINTS);
+
+        // Cohn reference: Σg over the reactive elements g[1..=N], computed
+        // INDEPENDENTLY from the prototype (non-circular — not from the sweep).
+        let proto = yee_synth::prototype(approx, 3);
+        let sum_g: f64 = proto.g[1..=3].iter().sum();
+        let il_cohn = 4.343 * sum_g / (q_u * fbw);
+
+        // The engine's realized midband IL (from the lossy ABCD response).
+        let il_q = l.midband_il_db;
+
+        // The ideal lossless midband IL: the |S21| dB at the sweep point closest
+        // to f0 (a passband Cheb minimum is ≈ 0 dB; allow the ripple + grid slack).
+        let il_ideal = -l
+            .sweep
+            .iter()
+            .min_by(|a, b| {
+                (a.f_hz - 2.0e9)
+                    .abs()
+                    .partial_cmp(&(b.f_hz - 2.0e9).abs())
+                    .unwrap()
+            })
+            .map(|p| p.s21_db)
+            .unwrap();
+
+        println!(
+            "finite-Q engine IL: IL_q = {il_q:.4} dB, IL_cohn = {il_cohn:.4} dB, \
+             IL_ideal = {il_ideal:.4} dB (Σg = {sum_g:.4}, Q_u = {q_u}, FBW = {fbw})"
+        );
+
+        let rel_err = (il_q - il_cohn).abs() / il_cohn;
+        assert!(
+            rel_err <= 0.15,
+            "finite-Q midband IL {il_q:.4} dB vs Cohn {il_cohn:.4} dB \
+             (rel err {:.1} % > 15 %)",
+            rel_err * 100.0
+        );
+        // The lossless midband IL is essentially zero (passband floor).
+        assert!(
+            il_ideal.abs() <= 0.2,
+            "ideal midband IL {il_ideal:.4} dB should be ≈ 0 dB"
+        );
     }
 
     /// Flatten a layout's copper geometry into a comparable signature: the
@@ -1946,7 +2072,7 @@ mod tests {
         assert_eq!(d.order(), 3, "edited order flows through synthesize");
         assert_eq!(d.coupling.m.len(), 3);
 
-        let l = design_lumped_from(spec).expect("order-3 BPF is realizable");
+        let l = design_lumped_from(spec, DEFAULT_Q_UNLOADED).expect("order-3 BPF is realizable");
         assert_eq!(l.order(), 3, "edited order flows through synthesize_lumped");
         assert_eq!(l.resonators.len(), 3);
     }
@@ -2295,7 +2421,8 @@ mod tests {
         let hairpin = design_demo_from(demo_spec(), Topology::Hairpin);
         let combline = design_demo_from(demo_spec(), Topology::Combline);
         let interdigital = design_demo_from(demo_spec(), Topology::Interdigital);
-        let lumped = design_lumped_from(demo_spec()).expect("demo ladder is realizable");
+        let lumped =
+            design_lumped_from(demo_spec(), DEFAULT_Q_UNLOADED).expect("demo ladder is realizable");
 
         let ec = &rows[0];
         assert_eq!(ec.realizable, edge.layout.is_some());
@@ -2497,7 +2624,8 @@ mod tests {
         // Each curve's sweep is the corresponding design's REAL sweep (equality,
         // not a synthetic copy).
         let coupled_design = design_demo_from(demo_spec(), Topology::EdgeCoupled);
-        let lumped_design = design_lumped_from(demo_spec()).expect("demo ladder is realizable");
+        let lumped_design =
+            design_lumped_from(demo_spec(), DEFAULT_Q_UNLOADED).expect("demo ladder is realizable");
         let s21s = |sw: &[SweepPoint]| sw.iter().map(|p| p.s21_db).collect::<Vec<_>>();
         let fhzs = |sw: &[SweepPoint]| sw.iter().map(|p| p.f_hz).collect::<Vec<_>>();
         assert_eq!(

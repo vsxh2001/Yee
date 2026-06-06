@@ -2064,14 +2064,33 @@ fn lumped_unrealizable(title: &str) -> Element {
 }
 
 /// Lumped Synthesis stage: the LC ladder resonator table (index, series/shunt,
-/// L in nH, C in pF) + the **ideal** `ladder_s21` |S21| vs the spec mask (inline
-/// SVG, reusing the response plot) + a PASS/FAIL chip from the realized verdict.
-pub fn lumped_synthesis_stage(designed: ReadOnlySignal<Option<LumpedDesigned>>) -> Element {
+/// L in nH, C in pF) + the **ideal** `ladder_s21` |S21| overlaid with the
+/// **realistic finite-Q** `ladder_s21_lossy` |S21| vs the spec mask (inline SVG,
+/// reusing the App.2.6 [`response_overlay`]), a `Q_u` control feeding the
+/// finite-Q curve, the realized midband insertion loss, and a PASS/FAIL chip
+/// from the realized (lossless) verdict.
+pub fn lumped_synthesis_stage(
+    designed: ReadOnlySignal<Option<LumpedDesigned>>,
+    mut q_unloaded: Signal<f64>,
+) -> Element {
     let guard = designed.read();
     let Some(d) = guard.as_ref() else {
         return lumped_unrealizable("Synthesis · Lumped LC");
     };
-    let plot = response_plot(&d.sweep, &d.mask_bands);
+    let q_u = d.q_unloaded;
+    // Ideal (lossless) reference + the realistic finite-Q companion, overlaid on
+    // one chart (App.2.6 overlay infra). The overlay plots |S21| per curve.
+    let finite_label = format!("finite-Q realized (Q_u={q_u:.0})");
+    let curves: Vec<(&str, &[crate::engine::SweepPoint], &str)> = vec![
+        ("ideal (lossless)", d.sweep.as_slice(), OVERLAY_PALETTE[0]),
+        (
+            finite_label.as_str(),
+            d.sweep_finite_q.as_slice(),
+            OVERLAY_PALETTE[1],
+        ),
+    ];
+    let plot = response_overlay(&curves, &d.mask_bands);
+    let il_db = d.midband_il_db;
     let v = &d.verdict;
     rsx! {
         div { class: "canvas-head",
@@ -2079,17 +2098,30 @@ pub fn lumped_synthesis_stage(designed: ReadOnlySignal<Option<LumpedDesigned>>) 
             p { class: "sub", "The lowpass prototype mapped to a band-pass LC ladder (shunt-first, alternating). Every resonator is tuned to f0 (L·C·ω0² = 1). All values are live engine output." }
         }
 
-        // ---- ideal ladder response vs mask --------------------------------
+        // ---- ideal vs realistic finite-Q response vs mask -----------------
         div { class: "card hero-stage", style: "margin-bottom:16px",
             h2 { class: "card-title",
-                "Ideal ladder response vs spec mask"
-                span { class: "k", "ABCD cascade · |S21|, |S11|" }
+                "Ideal vs realistic (finite-Q) response"
+                span { class: "k", "ABCD cascade · |S21|" }
             }
             div { class: "plot hero", dangerous_inner_html: "{plot}" }
             div { class: "legend",
-                span { span { class: "swatch", style: "background:#2dd4bf" } "|S21| (transmission)" }
-                span { span { class: "swatch", style: "background:#6b7480" } "|S11| (reflection)" }
+                span { span { class: "swatch", style: "background:#2dd4bf" } "ideal |S21| (lossless)" }
+                span { span { class: "swatch", style: "background:#e6b24d" } "finite-Q |S21| (Q_u={q_u:.0})" }
                 span { span { class: "swatch", style: "background:#e35d6a" } "forbidden (mask)" }
+            }
+            // ---- Q_u control + realized midband insertion loss ------------
+            div { class: "row", style: "margin-top:14px; align-items:flex-end",
+                div { style: "flex:1",
+                    {num_field(
+                        "unloaded Q (Q_u)", q_u, 5.0, 20.0, 300.0,
+                        move |val| q_unloaded.set(val),
+                    )}
+                }
+                div { class: "stat", style: "flex:1",
+                    div { class: "v", "{il_db:.2} dB" }
+                    div { class: "l", "midband IL @ Q_u={q_u:.0}" }
+                }
             }
         }
 
@@ -2158,9 +2190,12 @@ pub fn lumped_synthesis_stage(designed: ReadOnlySignal<Option<LumpedDesigned>>) 
         }
 
         div { class: "note honest",
-            "Honest note: this is the IDEAL LC prototype response (lossless components, "
-            "exact values). Realized E-series parts, tolerance spread, and parasitics "
-            "follow in Components / Tolerance; full-wave EM-verify is a later stage."
+            "Honest note: the teal curve is the IDEAL lossless prototype response; the "
+            "copper curve adds a realistic per-resonator unloaded Q (Q_u), modelling chip-"
+            "component dissipation — hence the few-dB midband insertion loss and rounded "
+            "corners a built filter shows. The PASS/FAIL verdict still grades the lossless "
+            "response; E-series tolerance and parasitics follow in Components / Tolerance, "
+            "and full-wave EM-verify is a later stage."
         }
     }
 }

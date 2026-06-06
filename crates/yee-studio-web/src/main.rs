@@ -41,8 +41,9 @@ mod svg;
 use dioxus::prelude::*;
 
 use engine::{
-    Designed, LumpedDesigned, SteppedLowpassDesigned, demo_spec, design_demo, design_demo_from,
-    design_lumped, design_lumped_from, design_stepped, design_stepped_from, topbar_view,
+    DEFAULT_Q_UNLOADED, Designed, LumpedDesigned, SteppedLowpassDesigned, demo_spec, design_demo,
+    design_demo_from, design_lumped, design_lumped_from, design_stepped, design_stepped_from,
+    topbar_view,
 };
 use stages::{Stage, Topology};
 use yee_filter::FilterSpec;
@@ -112,11 +113,17 @@ fn App() -> Element {
     // edit, mirroring `lumped`. It always succeeds (the dimensioner degrades to
     // a `dim_error` rather than failing), so it is a plain value, not an Option.
     let mut stepped = use_signal(design_stepped);
+    // The per-resonator unloaded Q (ADR-0163) driving the lumped flow's realistic
+    // finite-Q response curve + midband insertion loss. Edited by the `Q_u`
+    // control on the lumped Synthesis stage; folded into the re-derivation effect
+    // below so editing it recomputes `lumped`'s finite-Q sweep + IL live.
+    let q_unloaded = use_signal(|| DEFAULT_Q_UNLOADED);
     use_effect(move || {
         let s: FilterSpec = spec();
         let t: Topology = topology();
+        let q: f64 = q_unloaded();
         designed.set(design_demo_from(s.clone(), t));
-        lumped.set(design_lumped_from(s.clone()).ok());
+        lumped.set(design_lumped_from(s.clone(), q).ok());
         stepped.set(design_stepped_from(s));
     });
 
@@ -150,6 +157,7 @@ fn App() -> Element {
                             lumped,
                             stepped,
                             series_e96,
+                            q_unloaded,
                         }
                     }
                 }
@@ -249,6 +257,7 @@ fn StageCanvas(
     lumped: ReadOnlySignal<Option<LumpedDesigned>>,
     stepped: ReadOnlySignal<SteppedLowpassDesigned>,
     series_e96: Signal<bool>,
+    q_unloaded: Signal<f64>,
 ) -> Element {
     let lumped_flow = topology() == Topology::LumpedLc;
     let stepped_flow = topology() == Topology::SteppedImpedance;
@@ -256,7 +265,7 @@ fn StageCanvas(
         Stage::Spec => stages::spec_stage(spec, topology.into(), designed, lumped, stepped),
         Stage::Technique => stages::technique_stage(topology, active, spec),
         Stage::Synthesis if stepped_flow => stages::stepped_synthesis_stage(stepped),
-        Stage::Synthesis if lumped_flow => stages::lumped_synthesis_stage(lumped),
+        Stage::Synthesis if lumped_flow => stages::lumped_synthesis_stage(lumped, q_unloaded),
         Stage::Synthesis => stages::synthesis_stage(designed),
         Stage::Components => stages::lumped_components_stage(lumped, series_e96),
         Stage::Tolerance => stages::lumped_tolerance_stage(lumped),
