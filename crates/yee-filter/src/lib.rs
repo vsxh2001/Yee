@@ -72,6 +72,17 @@ pub use lumped::{
 #[doc(hidden)]
 pub use lumped::{ladder_s_params_lossy, ladder_s21, ladder_s21_lossy};
 
+/// Top-C-coupled (capacitively-coupled) band-pass synthesis (JLCPCB narrow-band
+/// track, ADR-0165 brick T1): low-pass prototype → `N` shunt LC resonators +
+/// `N+1` series coupling capacitors (admittance-inverter coupled resonators).
+pub mod top_c;
+pub use top_c::{ShuntResonator, TopCNetwork, synthesize_top_c_coupled};
+// `top_c_s21` is `#[doc(hidden)] pub`: the realized-response ABCD helper, kept
+// out of the documented API surface but reachable by the `top_c_coupled_001`
+// gate (a separate crate) for the non-circular S21-mask validation.
+#[doc(hidden)]
+pub use top_c::top_c_s21;
+
 /// Monte-Carlo tolerance / yield analysis (Filter Phase F2.4): snap each L/C to
 /// an E-series value, perturb within tolerance over many seeded trials, and
 /// report the fraction of realized ladders that meet the spec mask.
