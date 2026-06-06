@@ -14,8 +14,7 @@
 use dioxus::prelude::*;
 
 use yee_filter::{
-    Approximation, ESeries, FilterSpec, Footprint, RealizationTechnique, Response, SpecMask,
-    TechniqueRecommendation, jlcpcb_bom_csv, jlcpcb_cpl_csv, join_placed_parts,
+    Approximation, FilterSpec, RealizationTechnique, Response, SpecMask, TechniqueRecommendation,
     recommend_technique,
 };
 
@@ -1856,35 +1855,6 @@ fn export_lumped(lumped: ReadOnlySignal<Option<LumpedDesigned>>) -> Element {
                         }
                     },
                 }
-                // JLCPCB assembly upload set (J4, ADR-0164): the BOM + CPL CSVs
-                // JLCPCB's SMT-assembly order consumes, built from the placed
-                // board's placements + the realized ladder (autopicked LCSC
-                // parts; E24 ±5 % to match the Basic-parts world). Pair these
-                // with the Gerber buttons above for a full upload.
-                download_btn {
-                    label: "JLCPCB BOM (.csv)",
-                    make: move |_| {
-                        if let Some(d) = lumped.read().as_ref() {
-                            let parts = join_placed_parts(
-                                &d.board.placements,
-                                &d.ladder,
-                                Footprint::Smd0603,
-                                ESeries::E24,
-                            );
-                            let csv = jlcpcb_bom_csv(&parts);
-                            download_file("filter-jlcpcb-bom.csv", "text/csv", &csv);
-                        }
-                    },
-                }
-                download_btn {
-                    label: "JLCPCB CPL (.csv)",
-                    make: move |_| {
-                        if let Some(d) = lumped.read().as_ref() {
-                            let csv = jlcpcb_cpl_csv(&d.board.placements);
-                            download_file("filter-jlcpcb-cpl.csv", "text/csv", &csv);
-                        }
-                    },
-                }
                 download_btn {
                     label: "Parameter sheet",
                     make: move |_| {
@@ -1898,10 +1868,91 @@ fn export_lumped(lumped: ReadOnlySignal<Option<LumpedDesigned>>) -> Element {
             div { class: "note honest",
                 "The BOM CSV is the grouped E-series selection (the Components stage); the Gerber "
                 "(F.Cu + Edge.Cuts) + KiCad come from the placed SMD `Layout` (the Layout stage) via "
-                "the shipped `yee-export` emitters. The JLCPCB BOM/CPL pair (with the Gerbers) is the "
-                "SMT-assembly upload set — LCSC parts are autopicked from a curated Basic-parts table "
-                "(E24 ±5 %); values with no Basic match get a blank LCSC # (flagged, never dropped). "
-                "Footprint pad geometry + a parasitic-aware land library are documented follow-ons (F2.2b)."
+                "the shipped `yee-export` emitters — this is the " b { "displayed ladder board" }
+                ". Footprint pad geometry + a parasitic-aware land library are documented follow-ons (F2.2b)."
+            }
+        }
+
+        // JLCPCB orderable assembly set (T5, ADR-0169): a self-consistent upload
+        // set — BOM, CPL, and both Gerbers — all from ONE auto-routed orderable
+        // board. `orderable_upload` searches (topology × footprint) for a
+        // realization every part of which maps to a JLCPCB Basic LCSC part; it
+        // may differ from the displayed ladder above when the ladder is not
+        // orderable for this spec (then the top-C-coupled board is routed).
+        {
+            let o = &d.orderable;
+            rsx! {
+                div { class: "card",
+                    h2 { class: "card-title",
+                        "JLCPCB orderable assembly set"
+                        span { class: "k", "auto-routed · {o.footprint_label} SMD" }
+                    }
+                    div { class: "fields",
+                        div { class: "field",
+                            span { class: "name", "Orderable realization" }
+                            span { class: "val", "{o.topology_label} · {o.footprint_label}" }
+                        }
+                        div { class: "field",
+                            span { class: "name", "JLCPCB Basic catalog" }
+                            if o.fully_orderable {
+                                span { class: "val", style: "color:#2dd4bf",
+                                    "✓ {o.n_parts}/{o.n_parts} parts on the JLCPCB Basic catalog"
+                                }
+                            } else {
+                                span { class: "val", style: "color:#e35d6a",
+                                    "⚠ {o.n_blank} of {o.n_parts} parts have no Basic match — narrow-band lumped is distributed-only"
+                                }
+                            }
+                        }
+                    }
+                    div { class: "export-row",
+                        download_btn {
+                            label: "JLCPCB BOM (.csv)",
+                            make: move |_| {
+                                if let Some(d) = lumped.read().as_ref() {
+                                    download_file("filter-jlcpcb-bom.csv", "text/csv", &d.orderable.bom_csv);
+                                }
+                            },
+                        }
+                        download_btn {
+                            label: "JLCPCB CPL (.csv)",
+                            make: move |_| {
+                                if let Some(d) = lumped.read().as_ref() {
+                                    download_file("filter-jlcpcb-cpl.csv", "text/csv", &d.orderable.cpl_csv);
+                                }
+                            },
+                        }
+                        download_btn {
+                            label: "Gerber F.Cu",
+                            make: move |_| {
+                                if let Some(d) = lumped.read().as_ref() {
+                                    let g = yee_export::layout_to_gerber(&d.orderable.board.layout, &Default::default());
+                                    download_file("filter-jlcpcb-F_Cu.gbr", "application/vnd.gerber", &g);
+                                }
+                            },
+                        }
+                        download_btn {
+                            label: "Gerber Edge.Cuts",
+                            make: move |_| {
+                                if let Some(d) = lumped.read().as_ref() {
+                                    let g = yee_export::layout_to_gerber_outline(&d.orderable.board.layout, &Default::default());
+                                    download_file("filter-jlcpcb-Edge_Cuts.gbr", "application/vnd.gerber", &g);
+                                }
+                            },
+                        }
+                    }
+                    div { class: "note honest",
+                        "This is the " b { "auto-routed orderable" } " JLCPCB upload set — all four files "
+                        "(BOM, CPL, both Gerbers) come from the SAME board the (topology × footprint) search "
+                        "found, so they are self-consistent. The search tries 0402 → 0603 → 0805 and the "
+                        "alternating-ladder vs top-C-coupled topology, picking the first fully-orderable "
+                        "realization (else the fewest-blanks one). It MAY differ from the displayed ladder "
+                        "board above when that ladder is not orderable for this spec. LCSC parts are "
+                        "autopicked from a curated JLCPCB Basic-parts table (E24 ±5 %); values with no Basic "
+                        "match get a blank LCSC # (flagged, never dropped). Routing the whole lumped flow "
+                        "(incl. the finite-Q response) to the orderable topology is a documented follow-on."
+                    }
+                }
             }
         }
     }

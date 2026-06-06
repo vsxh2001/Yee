@@ -9,14 +9,15 @@
 //! [`Designed`] / [`LumpedDesigned`].
 
 use yee_filter::{
-    Approximation, Bom, BranchKind, CompKind, CouplingMatrix, ESeries, FilterProject, FilterSpec,
-    Footprint, LcBranch, LumpedBoard, LumpedLadder, MaskReport, MaskVerdict, RealizationTechnique,
-    Response, SpecMask, SteppedSection, check_mask, dimension_combline, dimension_combline_layout,
-    dimension_edge_coupled, dimension_edge_coupled_layout, dimension_hairpin,
-    dimension_hairpin_layout, dimension_interdigital, dimension_interdigital_layout,
-    dimension_stepped_impedance, dimension_stepped_impedance_layout, ideal_response,
-    ideal_response_lowpass, ladder_s21, ladder_s21_lossy, lumped_board, mask_verdict,
-    monte_carlo_yield, select_components, synthesize, synthesize_lumped,
+    Approximation, BoardTopology, Bom, BranchKind, CompKind, CouplingMatrix, ESeries,
+    FilterProject, FilterSpec, Footprint, LcBranch, LumpedBoard, LumpedLadder, MaskReport,
+    MaskVerdict, OrderableBoard, RealizationTechnique, Response, SpecMask, SteppedSection,
+    check_mask, dimension_combline, dimension_combline_layout, dimension_edge_coupled,
+    dimension_edge_coupled_layout, dimension_hairpin, dimension_hairpin_layout,
+    dimension_interdigital, dimension_interdigital_layout, dimension_stepped_impedance,
+    dimension_stepped_impedance_layout, ideal_response, ideal_response_lowpass, jlcpcb_bom_csv,
+    jlcpcb_cpl_csv, ladder_s21, ladder_s21_lossy, lumped_board, mask_verdict, monte_carlo_yield,
+    select_components, synthesize, synthesize_lumped, synthesize_orderable_on,
 };
 use yee_layout::{BBox, CoupledMicrostrip, Layout, Substrate, coupled_microstrip, eps_eff};
 
@@ -668,12 +669,164 @@ pub struct LumpedDesigned {
     pub board_size_mm: (f64, f64),
     /// Number of trials the yield was run over.
     pub yield_trials: usize,
+    /// The auto-routed orderable JLCPCB assembly set (ADR-0169 T5).
+    ///
+    /// This is the **JLCPCB upload set** the Export stage offers: a
+    /// `(topology × footprint)` search ([`orderable_upload`]) for an orderable
+    /// realization, which may differ from the displayed [`board`](Self::board) /
+    /// [`ladder`](Self::ladder) when the alternating ladder is not orderable for
+    /// this spec (then the top-C-coupled board is auto-routed). The design view
+    /// and finite-Q response above stay ladder-based — a documented
+    /// walking-skeleton limit (routing the whole lumped flow incl. the finite-Q
+    /// response to top-C is a follow-on); only the JLCPCB export auto-routes.
+    pub orderable: OrderableExport,
 }
 
 impl LumpedDesigned {
     /// The ladder order `N` (number of resonators).
     pub fn order(&self) -> usize {
         self.ladder.resonators.len()
+    }
+}
+
+/// The auto-routed **orderable JLCPCB assembly set** for the lumped design
+/// (ADR-0169 T5).
+///
+/// Pure data (WASM-safe): the chosen [`BoardTopology`] + footprint, the
+/// orderability verdict, the placed board (for Gerber/CPL geometry), and the
+/// precomputed JLCPCB BOM/CPL CSV strings — everything the Export stage needs to
+/// offer a self-consistent, honestly-bounded JLCPCB upload set, all from the
+/// **same** auto-routed board.
+///
+/// Produced by [`orderable_upload`]. `fully_orderable` is reported exactly — when
+/// `false`, `n_blank` of `n_parts` parts had no JLCPCB Basic match (the honest
+/// "narrow-band lumped is distributed-only" case); the BOM/CPL still carry the
+/// real blank rows, never a fabricated orderable board.
+#[derive(Clone)]
+pub struct OrderableExport {
+    /// Human-readable chosen board topology (`"alternating ladder"` /
+    /// `"top-C-coupled"`).
+    pub topology_label: &'static str,
+    /// Human-readable chosen SMD footprint family (`"0402"` / `"0603"` /
+    /// `"0805"`).
+    pub footprint_label: &'static str,
+    /// `true` iff **every** part resolved to a real LCSC Basic part (zero blanks).
+    pub fully_orderable: bool,
+    /// Total number of placed parts on the auto-routed board.
+    pub n_parts: usize,
+    /// Number of parts with no JLCPCB Basic match (the honest coverage holes).
+    pub n_blank: usize,
+    /// The auto-routed placed board (renderable [`yee_layout::Layout`] +
+    /// placements) the Gerber + CPL files are emitted from.
+    pub board: LumpedBoard,
+    /// The precomputed JLCPCB assembly-BOM CSV (`jlcpcb_bom_csv`).
+    pub bom_csv: String,
+    /// The precomputed JLCPCB component-placement (CPL) CSV (`jlcpcb_cpl_csv`).
+    pub cpl_csv: String,
+}
+
+/// Footprints the auto-router searches, in preference order: **0402 first** (the
+/// finest RF L/C value grid + smallest board — the RF-lumped norm), then 0603,
+/// then 0805. Mirrors the ADR-0169 / ADR-0168 search order.
+const ORDERABLE_FOOTPRINTS: [Footprint; 3] =
+    [Footprint::Smd0402, Footprint::Smd0603, Footprint::Smd0805];
+
+/// Search `(topology × footprint)` for an orderable JLCPCB realization of
+/// `project` on `substrate`, and surface it honestly (ADR-0169 T5).
+///
+/// For each footprint in [`ORDERABLE_FOOTPRINTS`] (0402 → 0603 → 0805) this calls
+/// [`synthesize_orderable_on`], which itself picks the orderable board *topology*
+/// (alternating ladder vs top-C-coupled) for that footprint. The first footprint
+/// whose result is `fully_orderable` wins; if none is fully orderable, the
+/// footprint with the **fewest total blanks** is returned (the first/0402 on a
+/// tie, since the search keeps the earliest minimum). The returned
+/// [`OrderableExport`] reflects `fully_orderable` exactly — no fabricated
+/// orderability.
+///
+/// The chosen board's parts feed [`jlcpcb_bom_csv`] and its placements feed
+/// [`jlcpcb_cpl_csv`], so the BOM, CPL, and (in the Export stage) the Gerbers all
+/// come from one self-consistent board.
+///
+/// # Robustness
+///
+/// [`synthesize_orderable_on`] only errors when the spec is not a realizable
+/// band-pass of order `N ≥ 1`; a footprint that errors is skipped. If *every*
+/// footprint errors (a spec the lumped track cannot realize at all), this falls
+/// back to a single, honest **empty** export (`n_parts == 0`,
+/// `fully_orderable == false`, empty CSVs) rather than panicking — the lumped
+/// engine path that calls this has already turned a non-realizable spec into a
+/// user-facing error before reaching here, so this branch is defensive only.
+/// Pure-compute / WASM-safe (no I/O, network, threads, time, RNG, or `unsafe`).
+pub fn orderable_upload(project: &FilterProject, substrate: &Substrate) -> OrderableExport {
+    // Track the fewest-blanks candidate across footprints (kept for the
+    // not-fully-orderable case). `<` (strict) keeps the EARLIEST minimum, so a
+    // tie resolves to the first footprint tried (0402).
+    let mut best: Option<(Footprint, OrderableBoard)> = None;
+    for &fp in &ORDERABLE_FOOTPRINTS {
+        let Ok(ob) = synthesize_orderable_on(project, substrate, fp) else {
+            // A footprint that fails to synthesize is skipped; see `# Robustness`.
+            continue;
+        };
+        if ob.fully_orderable {
+            // First fully-orderable footprint wins outright.
+            return build_export(fp, ob);
+        }
+        let n_blank = ob.parts.iter().filter(|p| p.lcsc.is_none()).count();
+        let take = match &best {
+            Some((_, prev)) => n_blank < prev.parts.iter().filter(|p| p.lcsc.is_none()).count(),
+            None => true,
+        };
+        if take {
+            best = Some((fp, ob));
+        }
+    }
+    match best {
+        Some((fp, ob)) => build_export(fp, ob),
+        // Defensive: no footprint synthesized (a non-realizable spec — which the
+        // lumped engine path rejects before reaching here). Return an honest
+        // empty export (zero parts, not orderable, empty CSVs) rather than
+        // panicking. The board is an empty placement on the spec's own f0/fbw/Z0.
+        None => {
+            let empty = LumpedLadder {
+                f0_hz: project.spec.f0_hz,
+                fbw: project.spec.fbw,
+                z0_ohm: project.spec.z0_ohm,
+                resonators: Vec::new(),
+            };
+            OrderableExport {
+                topology_label: "alternating ladder",
+                footprint_label: footprint_name(ORDERABLE_FOOTPRINTS[0]),
+                fully_orderable: false,
+                n_parts: 0,
+                n_blank: 0,
+                board: lumped_board(&empty, substrate, ORDERABLE_FOOTPRINTS[0]),
+                bom_csv: String::new(),
+                cpl_csv: String::new(),
+            }
+        }
+    }
+}
+
+/// Build an [`OrderableExport`] from a chosen footprint + [`OrderableBoard`]:
+/// derive the labels, count blanks, and precompute the JLCPCB BOM/CPL CSVs.
+fn build_export(fp: Footprint, ob: OrderableBoard) -> OrderableExport {
+    let topology_label = match ob.topology {
+        BoardTopology::AlternatingLadder => "alternating ladder",
+        BoardTopology::TopCCoupled => "top-C-coupled",
+    };
+    let n_parts = ob.parts.len();
+    let n_blank = ob.parts.iter().filter(|p| p.lcsc.is_none()).count();
+    let bom_csv = jlcpcb_bom_csv(&ob.parts);
+    let cpl_csv = jlcpcb_cpl_csv(&ob.board.placements);
+    OrderableExport {
+        topology_label,
+        footprint_label: footprint_name(fp),
+        fully_orderable: ob.fully_orderable,
+        n_parts,
+        n_blank,
+        board: ob.board,
+        bom_csv,
+        cpl_csv,
     }
 }
 
@@ -876,6 +1029,13 @@ pub fn design_lumped_from(spec: FilterSpec, q_unloaded: f64) -> Result<LumpedDes
         .collect();
     let board_size_mm = board_size_mm(&board.layout.bbox);
 
+    // ---- auto-routed orderable JLCPCB assembly set (ADR-0169 T5) ----------
+    // Search (topology × footprint) for an orderable JLCPCB realization on the
+    // same FR-4 SUBSTRATE the design board uses. This is the JLCPCB upload set
+    // the Export stage offers; it may differ from the displayed ladder `board`
+    // when the alternating ladder is not orderable for this spec.
+    let orderable = orderable_upload(&project, &SUBSTRATE);
+
     Ok(LumpedDesigned {
         ladder,
         resonators,
@@ -893,6 +1053,7 @@ pub fn design_lumped_from(spec: FilterSpec, q_unloaded: f64) -> Result<LumpedDes
         placements,
         board_size_mm,
         yield_trials: YIELD_TRIALS,
+        orderable,
     })
 }
 
@@ -2686,5 +2847,107 @@ mod tests {
             overlay_curves(&hpf).is_empty(),
             "no live technique realizes a high-pass response yet"
         );
+    }
+
+    /// A Chebyshev 0.5 dB / N = 3 / Z0 = 50 Ω band-pass spec at the given centre
+    /// and fractional bandwidth — the schema the `cli-jlcpcb-autoroute` gate
+    /// drives, here at the studio-engine layer. A single stopband row at 1.5·f0
+    /// keeps the spec well-formed (the mask verdict does not gate this test).
+    fn autoroute_spec(f0_hz: f64, fbw: f64) -> FilterSpec {
+        FilterSpec {
+            response: Response::Bandpass,
+            approximation: Approximation::Chebyshev { ripple_db: 0.5 },
+            f0_hz,
+            fbw,
+            order: Some(3),
+            z0_ohm: 50.0,
+            mask: SpecMask {
+                passband_ripple_db: 0.5,
+                return_loss_db: 9.0,
+                stopband: vec![(f0_hz * 1.5, 30.0)],
+            },
+        }
+    }
+
+    #[test]
+    fn orderable_upload_auto_routes_topology_and_footprint() {
+        // ADR-0169 T5, mirroring `cli-jlcpcb-autoroute` at the studio-engine
+        // layer (NON-circular: it asserts the engine's auto-routed
+        // `orderable_upload` result — topology, footprint, orderability, blank
+        // count — for three specs that route THREE different ways, not a
+        // relabelled single outcome). `orderable_upload` searches
+        // (topology × footprint) for an orderable JLCPCB realization.
+
+        // ---- wideband 1 GHz / 70 % → alternating ladder, fully orderable -----
+        // The conventional ladder is orderable for a wideband spec, so the
+        // search returns it (arm 1) without falling back to top-C.
+        let wide = synthesize(&autoroute_spec(1.0e9, 0.70));
+        let o_wide = orderable_upload(&wide, &SUBSTRATE);
+        assert_eq!(
+            o_wide.topology_label, "alternating ladder",
+            "1 GHz/70% must route to the alternating ladder"
+        );
+        assert!(
+            o_wide.fully_orderable,
+            "1 GHz/70% ladder must be fully orderable (zero blanks)"
+        );
+        assert_eq!(o_wide.n_blank, 0, "fully orderable ⇒ zero blanks");
+
+        // ---- 0.5 GHz / 20 % → top-C-coupled, 0402, fully orderable, 0 blank --
+        // THE SHOWCASE (the T3 discriminating cell reached via the studio
+        // engine): the alternating ladder blanks here, but top-C is fully
+        // orderable on the finest 0402 grid — so the search rescues it.
+        let sub = synthesize(&autoroute_spec(0.5e9, 0.20));
+        let o_sub = orderable_upload(&sub, &SUBSTRATE);
+        assert_eq!(
+            o_sub.topology_label, "top-C-coupled",
+            "0.5 GHz/20% must route to the top-C-coupled topology"
+        );
+        assert_eq!(
+            o_sub.footprint_label, "0402",
+            "0.5 GHz/20% top-C must be orderable on the 0402 footprint"
+        );
+        assert!(
+            o_sub.fully_orderable,
+            "0.5 GHz/20% top-C@0402 must be fully orderable"
+        );
+        assert_eq!(
+            o_sub.n_blank, 0,
+            "0.5 GHz/20% top-C@0402 must have ZERO blanks (the headline rescue)"
+        );
+
+        // ---- 2 GHz / 5 % → NEITHER fully orderable: honest blanks ------------
+        // GHz-narrow: neither lumped topology fully orders on any footprint, so
+        // the search returns the honest fewest-blanks board with real blanks.
+        let narrow = synthesize(&autoroute_spec(2.0e9, 0.05));
+        let o_narrow = orderable_upload(&narrow, &SUBSTRATE);
+        assert!(
+            !o_narrow.fully_orderable,
+            "2 GHz/5% must NOT be fully orderable (honest coverage hole)"
+        );
+        assert!(
+            o_narrow.n_blank > 0,
+            "2 GHz/5% must carry ≥1 real blank LCSC part (flagged, not dropped)"
+        );
+
+        // ---- all three emit non-empty, multi-line BOM + CPL CSVs -------------
+        for (tag, o) in [
+            ("wideband", &o_wide),
+            ("subghz", &o_sub),
+            ("ghznarrow", &o_narrow),
+        ] {
+            assert!(
+                o.n_parts > 0,
+                "[{tag}] auto-routed board must place ≥1 part"
+            );
+            assert!(
+                !o.bom_csv.is_empty() && o.bom_csv.lines().count() > 1,
+                "[{tag}] JLCPCB BOM CSV must have a header + ≥1 data row"
+            );
+            assert!(
+                !o.cpl_csv.is_empty() && o.cpl_csv.lines().count() > 1,
+                "[{tag}] JLCPCB CPL CSV must have a header + ≥1 data row"
+            );
+        }
     }
 }
