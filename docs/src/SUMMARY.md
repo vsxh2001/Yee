@@ -211,3 +211,4 @@
 - [ADR-0165: Top-C-coupled (capacitively-coupled) lumped BPF topology — de-risk first](decisions/0165-top-c-coupled-lumped-bpf.md)
 - [ADR-0166: Top-C-coupled BPF → board + JLCPCB orderable upload set (T2)](decisions/0166-top-c-board-jlcpcb.md)
 - [ADR-0167: Orderable-topology auto-selector (T3)](decisions/0167-orderable-topology-selector.md)
+- [ADR-0168: `yee filter synth --jlcpcb` auto-routes the orderable topology (T4)](decisions/0168-cli-auto-route-topology.md)
