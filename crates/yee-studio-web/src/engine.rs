@@ -8,6 +8,7 @@
 //! here. Nothing is faked: every number the stages render comes out of
 //! [`Designed`] / [`LumpedDesigned`].
 
+use num_complex::Complex64;
 use yee_filter::{
     Approximation, BoardTopology, Bom, BranchKind, CompKind, CouplingMatrix, ESeries,
     FilterProject, FilterSpec, Footprint, LcBranch, LumpedBoard, LumpedLadder, MaskReport,
@@ -16,9 +17,11 @@ use yee_filter::{
     dimension_edge_coupled_layout, dimension_hairpin, dimension_hairpin_layout,
     dimension_interdigital, dimension_interdigital_layout, dimension_stepped_impedance,
     dimension_stepped_impedance_layout, ideal_response, ideal_response_lowpass, jlcpcb_bom_csv,
-    jlcpcb_cpl_csv, ladder_s21, ladder_s21_lossy, lumped_board, mask_verdict, monte_carlo_yield,
-    select_components, synthesize, synthesize_lumped, synthesize_orderable_on,
+    jlcpcb_cpl_csv, ladder_s_params_lossy, ladder_s21, ladder_s21_lossy, lumped_board,
+    mask_verdict, monte_carlo_yield, select_components, synthesize, synthesize_lumped,
+    synthesize_orderable_on,
 };
+use yee_io::touchstone::{File, Format, FreqUnit};
 use yee_layout::{BBox, CoupledMicrostrip, Layout, Substrate, coupled_microstrip, eps_eff};
 
 use crate::stages::Topology;
@@ -532,6 +535,127 @@ fn mask_bands(spec: &FilterSpec) -> Vec<MaskBand> {
         });
     }
     bands
+}
+
+// ===========================================================================
+// Touchstone .s2p export (ADR-0171, T8)
+// ===========================================================================
+
+/// Render a 2-port reciprocal, symmetric filter's `(S11, S21)` sweep to a
+/// Touchstone `.s2p` string (Real/Imag, Hz), for a client-side download.
+///
+/// Mirrors `yee_cli::filter::write_s2p`'s [`File`] construction exactly — the
+/// same studio↔CLI `.s2p` contract — but renders to a **string** via the
+/// WASM-safe [`yee_io::touchstone::to_string`] instead of writing to disk
+/// (there is no filesystem in the browser). The 2-port matrix is
+/// `[[S11, S21], [S21, S11]]` (reciprocal `S12 = S21`, symmetric `S22 = S11`),
+/// stored row-major as `[S11, S21, S21, S11]`.
+///
+/// The **caller owns the physics**: the supplied `(S11, S21)` pairs are written
+/// verbatim and S11 is never re-derived. The pair must be passive
+/// (`|S11|² + |S21|² ≤ 1`) for the file to re-parse via [`yee_io::touchstone`] —
+/// the finite-Q lumped pair ([`ladder_s_params_lossy`]) is the true lossy
+/// 2-port, and the ideal pair uses the lossless quadrature
+/// (`S11 = j·√(1−|S21|²)`, [`lossless_s_pair`]); both are passive.
+///
+/// Returns the renderer's [`yee_io::Error`] display string on failure (a
+/// length mismatch, a non-finite value, etc.); the Export buttons treat an
+/// `Err` as a no-op (no broken download).
+fn s2p_string(
+    z0: f64,
+    freqs: &[f64],
+    s_params: &[(Complex64, Complex64)],
+    comment: &str,
+) -> Result<String, String> {
+    let mut data = Vec::with_capacity(freqs.len());
+    for &(s11, s21) in s_params {
+        // Row-major n×n: [S11, S12, S21, S22]; reciprocal + symmetric.
+        data.push(vec![s11, s21, s21, s11]);
+    }
+    let file = File {
+        n_ports: 2,
+        z0,
+        freq_unit: FreqUnit::Hz,
+        format: Format::RealImag,
+        freq_hz: freqs.to_vec(),
+        data,
+        comments: vec![comment.to_string()],
+    };
+    yee_io::touchstone::to_string(&file).map_err(|e| e.to_string())
+}
+
+/// Map a lossless transfer `S21` to the `(S11, S21)` pair written for the
+/// distributed / ideal `.s2p` path. The transmission is taken with `|S21| ≤ 1`
+/// and S11 is the **true lossless reflection** placed in quadrature
+/// (`S11 = j·√(1−|S21|²)`): for a lossless reciprocal symmetric 2-port this is
+/// the exact reflection — it makes `|S11|² + |S21|² = 1` and the S-matrix
+/// passive, so the rendered file re-parses. Mirrors
+/// `yee_cli::filter::lossless_s_pair`.
+fn lossless_s_pair(s21: Complex64) -> (Complex64, Complex64) {
+    let s21_mag = s21.norm().min(1.0);
+    let s11_mag = (1.0 - s21_mag * s21_mag).max(0.0).sqrt();
+    (Complex64::new(0.0, s11_mag), Complex64::new(s21_mag, 0.0))
+}
+
+/// Build the **lumped finite-Q** `(S11, S21)` sweep written to the lumped
+/// `.s2p`: the realistic [`ladder_s_params_lossy`] response over the design
+/// sweep grid (`sweep_freqs(ladder.f0_hz, ladder.fbw)`), at per-resonator
+/// unloaded Q `q_unloaded`. This is the **same model + grid** as the displayed
+/// [`LumpedDesigned::sweep_finite_q`] (`ladder_s21_lossy` is just this pair's
+/// `.1`), so the exported `.s2p` matches the plotted finite-Q curve. The pair is
+/// the true lossy 2-port (`|S11|² + |S21|² < 1`), hence passive.
+fn lumped_s2p_sweep(
+    ladder: &LumpedLadder,
+    q_unloaded: f64,
+) -> (Vec<f64>, Vec<(Complex64, Complex64)>) {
+    let freqs = sweep_freqs(ladder.f0_hz, ladder.fbw);
+    let s_params: Vec<(Complex64, Complex64)> = freqs
+        .iter()
+        .map(|&f| ladder_s_params_lossy(ladder, f, q_unloaded))
+        .collect();
+    (freqs, s_params)
+}
+
+/// Build the **distributed / ideal** `(S11, S21)` sweep written to the
+/// distributed `.s2p`: the closed-form [`ideal_response`] `S21` over the design
+/// sweep grid, with S11 placed in lossless quadrature via [`lossless_s_pair`].
+/// This is the **same model + grid** as the displayed [`Designed::sweep`], so
+/// the exported `.s2p` matches the plotted ideal curve, and the pair is passive
+/// (`|S11|² + |S21|² = 1`).
+fn distributed_s2p_sweep(
+    project: &FilterProject,
+    spec: &FilterSpec,
+) -> (Vec<f64>, Vec<(Complex64, Complex64)>) {
+    let freqs = sweep_freqs(spec.f0_hz, spec.fbw);
+    let s_params: Vec<(Complex64, Complex64)> = ideal_response(project, &freqs)
+        .into_iter()
+        .map(lossless_s_pair)
+        .collect();
+    (freqs, s_params)
+}
+
+/// Render the lumped finite-Q `.s2p` string for `d` (ADR-0171). The Export
+/// stage's lumped `.s2p` button calls this; an `Err` (a renderer failure) is a
+/// no-op there (no broken download). The comment self-describes the response.
+pub fn lumped_s2p(d: &LumpedDesigned) -> Result<String, String> {
+    let (freqs, s_params) = lumped_s2p_sweep(&d.ladder, d.q_unloaded);
+    let comment = format!(
+        " yee studio — finite-Q lumped response (Q_unloaded = {})",
+        d.q_unloaded
+    );
+    s2p_string(d.ladder.z0_ohm, &freqs, &s_params, &comment)
+}
+
+/// Render the distributed / ideal `.s2p` string for `d` (ADR-0171). The Export
+/// stage's distributed `.s2p` button calls this; an `Err` is a no-op there.
+pub fn distributed_s2p(d: &Designed) -> Result<String, String> {
+    let (freqs, s_params) = distributed_s2p_sweep(&d.project, &d.spec);
+    s2p_string(
+        d.spec.z0_ohm,
+        &freqs,
+        &s_params,
+        " yee studio — ideal closed-form response",
+    )
 }
 
 // ===========================================================================
@@ -1954,6 +2078,153 @@ mod tests {
             il_ideal.abs() <= 0.2,
             "ideal midband IL {il_ideal:.4} dB should be ≈ 0 dB"
         );
+    }
+
+    /// Parse a rendered Touchstone string back into its `(option_line, rows)`
+    /// where each row is `(f_hz, S11, S21)` decoded from the on-disk RI columns.
+    /// Splits the lines by hand (no fs), so a successful decode reproducing the
+    /// input is a NON-circular round-trip check. Assumes a 2-port RI Hz file
+    /// (the only thing [`s2p_string`] emits): the on-disk row layout for n=2 is
+    /// `f  S11.re S11.im  S21.re S21.im  S12.re S12.im  S22.re S22.im`
+    /// (the Touchstone v1 swapped-off-diagonal order — S21 before S12).
+    fn parse_s2p_ri(s: &str) -> (String, Vec<(f64, Complex64, Complex64)>) {
+        let mut option_line = String::new();
+        let mut rows = Vec::new();
+        for line in s.lines() {
+            let t = line.trim();
+            if t.is_empty() || t.starts_with('!') {
+                continue;
+            }
+            if let Some(opt) = t.strip_prefix('#') {
+                option_line = opt.trim().to_string();
+                continue;
+            }
+            let nums: Vec<f64> = t
+                .split_whitespace()
+                .map(|tok| tok.parse::<f64>().expect("data token is a float"))
+                .collect();
+            assert_eq!(
+                nums.len(),
+                9,
+                "2-port RI data row has 1 freq + 2·n² = 9 floats, got {}: {t}",
+                nums.len()
+            );
+            let f = nums[0];
+            let s11 = Complex64::new(nums[1], nums[2]);
+            let s21 = Complex64::new(nums[3], nums[4]); // on-disk: S21 is slot 2
+            rows.push((f, s11, s21));
+        }
+        (option_line, rows)
+    }
+
+    #[test]
+    fn s2p_export_roundtrips_lumped_and_renders_distributed() {
+        // ADR-0171 (T8), the studio-engine `.s2p` gate. Build the lumped
+        // finite-Q `(S11, S21)` sweep for the demo fixture, render it via the
+        // real `s2p_string` (→ `yee_io::touchstone::to_string`), and assert the
+        // rendered TEXT reproduces the input S-parameters — a non-circular
+        // round-trip mirroring the CLI's `.s2p` contract at the studio layer.
+        let d = design_lumped();
+        let z0 = d.ladder.z0_ohm;
+        let (freqs, s_params) = lumped_s2p_sweep(&d.ladder, d.q_unloaded);
+        assert_eq!(freqs.len(), SWEEP_POINTS);
+        assert_eq!(freqs.len(), s_params.len());
+
+        let text = lumped_s2p(&d).expect("lumped .s2p renders for the demo fixture");
+
+        // Diagnostic sample: the comment, option line, and first data row.
+        for line in text.lines().take(3) {
+            println!("s2p | {line}");
+        }
+
+        // (a) The option line is the expected Touchstone 2-port RI / Hz header.
+        let expected_opt = format!("Hz S RI R {z0}");
+        let (opt, rows) = parse_s2p_ri(&text);
+        assert_eq!(
+            opt, expected_opt,
+            "option line should be `# Hz S RI R {z0}` (got `# {opt}`)"
+        );
+        // The raw header substring is present too (so a downstream tool reading
+        // the literal line, not our re-tokenization, also sees it).
+        assert!(
+            text.contains(&format!("# {expected_opt}\n")),
+            "rendered text carries the literal `# {expected_opt}` option line"
+        );
+
+        // (b) One data row per swept frequency.
+        assert_eq!(
+            rows.len(),
+            freqs.len(),
+            "data-row count equals the frequency count"
+        );
+
+        // (c) Re-parsing the RI columns of every row recovers the input sweep:
+        // the frequency (Hz) and BOTH S11 and S21 within a tight float tol. This
+        // is the non-circular core — the rendered string reproduces the inputs.
+        for (i, ((f_in, (s11_in, s21_in)), (f_out, s11_out, s21_out))) in freqs
+            .iter()
+            .zip(s_params.iter())
+            .zip(rows.iter())
+            .enumerate()
+        {
+            assert!(
+                (f_in - f_out).abs() <= 1.0,
+                "row {i}: freq {f_out} Hz != input {f_in} Hz"
+            );
+            assert!(
+                (s11_in - s11_out).norm() <= 1e-9,
+                "row {i}: S11 {s11_out} != input {s11_in}"
+            );
+            assert!(
+                (s21_in - s21_out).norm() <= 1e-9,
+                "row {i}: S21 {s21_out} != input {s21_in}"
+            );
+        }
+
+        // The finite-Q lumped pair is the TRUE lossy 2-port → strictly passive
+        // (|S11|² + |S21|² < 1) at every sample, so the file re-parses (and is a
+        // physically-meaningful absorptive network, not a lossless placeholder).
+        for (s11, s21) in &s_params {
+            assert!(
+                s11.norm_sqr() + s21.norm_sqr() <= 1.0 + 1e-9,
+                "finite-Q sample is passive"
+            );
+        }
+        // And the displayed finite-Q |S21| curve uses the SAME model → the .s2p
+        // matches the plot: |S21| dB from the rendered pair equals the carried
+        // sweep value at band-centre.
+        let idx_f0 = freqs
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| {
+                (**a - d.ladder.f0_hz)
+                    .abs()
+                    .partial_cmp(&(**b - d.ladder.f0_hz).abs())
+                    .unwrap()
+            })
+            .map(|(i, _)| i)
+            .unwrap();
+        let s21_db_rendered = 20.0 * rows[idx_f0].2.norm().max(1e-12).log10();
+        assert!(
+            (s21_db_rendered - d.sweep_finite_q[idx_f0].s21_db).abs() <= 1e-9,
+            ".s2p S21 matches the displayed finite-Q sweep at f0"
+        );
+
+        // The DISTRIBUTED / ideal matrix also renders without error (it uses the
+        // lossless quadrature S11, so it is passive: |S11|² + |S21|² = 1).
+        let dd = design_demo();
+        let dist_text =
+            distributed_s2p(&dd).expect("distributed .s2p renders for the demo fixture");
+        let (dist_opt, dist_rows) = parse_s2p_ri(&dist_text);
+        assert_eq!(dist_opt, format!("Hz S RI R {}", dd.spec.z0_ohm));
+        assert_eq!(dist_rows.len(), SWEEP_POINTS);
+        // Quadrature pair is exactly passive at every sample.
+        for (_f, s11, s21) in &dist_rows {
+            assert!(
+                (s11.norm_sqr() + s21.norm_sqr() - 1.0).abs() <= 1e-6,
+                "ideal quadrature sample is unitary-passive"
+            );
+        }
     }
 
     /// Flatten a layout's copper geometry into a comparable signature: the
