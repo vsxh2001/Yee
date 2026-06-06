@@ -214,3 +214,4 @@
 - [ADR-0168: `yee filter synth --jlcpcb` auto-routes the orderable topology (T4)](decisions/0168-cli-auto-route-topology.md)
 - [ADR-0169: Studio Export — auto-routed orderable JLCPCB assembly set (T5)](decisions/0169-studio-orderable-jlcpcb-export.md)
 - [ADR-0170: Top-C finite-Q response + route the studio lumped response (T6/T7)](decisions/0170-top-c-finite-q-response.md)
+- [ADR-0171: Studio `.s2p` Touchstone export — S-parameter portability (T8)](decisions/0171-studio-s2p-export.md)
