@@ -265,12 +265,85 @@ pub fn synthesize_top_c_coupled(
 /// public API — it is `#[doc(hidden)] pub` solely so the
 /// [`top_c_coupled_001`](../../tests/top_c_coupled_001.rs) gate (a separate
 /// crate) can verify the synthesized network reproduces the target response.
+///
+/// This is the **lossless** (`Q_u = ∞`) special case of
+/// [`top_c_s21_lossy`]: it delegates to it with `q_unloaded = f64::INFINITY`, so
+/// there is a single ABCD cascade (one source of truth) and the lossless result
+/// is, by construction, **bit-identical** to the finite-Q one at infinite `Q`.
 #[doc(hidden)]
 pub fn top_c_s21(net: &TopCNetwork, f_hz: f64, z0_ohm: f64) -> Complex64 {
+    top_c_s21_lossy(net, f_hz, z0_ohm, f64::INFINITY)
+}
+
+/// Forward transmission `S21` of the [`TopCNetwork`] with each **shunt
+/// resonator** carrying its **unloaded quality factor** `q_unloaded` as a
+/// dissipative loss (ADR-0170 brick **T6**).
+///
+/// Identical ABCD cascade to [`top_c_s21`] — source → series `C01` →
+/// (shunt `L1‖C1`) → series `C12` → … → series `C_{N,N+1}` → load — except each
+/// **shunt parallel-LC resonator** gains a loss conductance sized so its
+/// unloaded Q at band-centre `ω₀ = 2π·f0` (`net.f0_hz`) is `q_unloaded`
+/// (Cohn 1959; Hong & Lancaster §3.2), exactly mirroring
+/// [`ladder_s_params_lossy`](crate::lumped::ladder_s_params_lossy)'s shunt
+/// branch `Y = G + jωC + 1/(jωL)`:
+///
+/// ```text
+/// shunt resonator:  Y = G + jωC_node + 1/(jωL),   G = ω₀·C_bare / q_unloaded
+/// ```
+///
+/// **Loss is sized from the *bare resonating* capacitance** `C_bare =
+/// 1/(Zr·ω₀)` (`Zr = z0_ohm`), **not** the reduced physical node cap
+/// `C_node = net.shunt[k].c_farad`. This is the faithful physical mirror of the
+/// ladder's resonator loss: in the lumped ladder `res.c_farad` *is* the full
+/// resonating cap, so `ω₀·res.c_farad/Q` gives a true unloaded resonator-Q of
+/// `Q`. In top-C the node *resonates* at `ω₀` with the **bare** cap `C_bare`
+/// (the negative-leg absorption subtracts the coupling caps off `C_node`, and
+/// the network adds them back so the node nets to `C_bare` — see
+/// [`synthesize_top_c_coupled`] step 4); the resonator's *stored energy* lives
+/// in `C_bare`, so the unloaded resonator-Q is `ω₀·C_bare/G`. Sizing `G` from
+/// the synthesis-reduced `C_node` would instead give an effective Q of
+/// `Q·(C_bare/C_node) > Q` (too little loss, ~28 % below Cohn at FBW = 10 %);
+/// sizing from `C_bare` matches Cohn's `4.343·Σg/(Q·FBW)` to ≈ 2 % there. (The
+/// reactive `jωC_node` term keeps the full reduced node cap — that is the real
+/// physical capacitance the absorbed coupling caps add back to; only the *loss*
+/// conductance is keyed to the bare resonating cap.)
+///
+/// The branch unloaded Q is thus `ω₀·C_bare/G = q_unloaded`. The `N+1` **series
+/// coupling capacitors stay lossless** (`Z = 1/(jωC)`, unchanged) — this models
+/// a resonator-only Q, like the lumped ladder; a separate coupling-cap `Q_c` is
+/// a documented follow-on (ADR-0170 §Consequences).
+///
+/// `q_unloaded = f64::INFINITY` (or any non-positive value) gives `inv_q = 0`,
+/// hence `G = 0`, i.e. the lossless response **bit-identical** to the lossless
+/// cascade [`top_c_s21`] delegates to — no special-casing needed, and the
+/// guard avoids any divide-by-zero / NaN. With equal real `Z0` terminations
+/// `S21 = 2 / (A + B/Z0 + C·Z0 + D)` (Pozar eq. 4.74).
+///
+/// Like [`top_c_s21`], this is an internal realized-response helper kept off the
+/// documented API surface (`#[doc(hidden)] pub`) and reachable by the
+/// [`top_c_q_001`](../../tests/top_c_q_001.rs) gate.
+#[doc(hidden)]
+pub fn top_c_s21_lossy(net: &TopCNetwork, f_hz: f64, z0_ohm: f64, q_unloaded: f64) -> Complex64 {
     let z0 = Complex64::new(z0_ohm, 0.0);
     let omega = std::f64::consts::TAU * f_hz;
+    let omega0 = std::f64::consts::TAU * net.f0_hz;
     let jw = Complex64::new(0.0, omega);
     let n = net.shunt.len();
+    // Guard q_unloaded <= 0 (and +∞): a non-positive or infinite Q means "no
+    // loss", i.e. inv_q = 0, so G = 0 and the result is bit-identical to the
+    // lossless cascade. This avoids any divide-by-zero / NaN.
+    let inv_q = if q_unloaded.is_finite() && q_unloaded > 0.0 {
+        1.0 / q_unloaded
+    } else {
+        0.0
+    };
+    // Bare resonating capacitance C_bare = 1/(Zr·ω₀), Zr = net.z0_ohm (the
+    // resonator impedance the synthesis chose, `Zr = Z0`). Each shunt node
+    // resonates at ω₀ with C_bare (the coupling caps add back to net to it), so
+    // the loss conductance for a true unloaded resonator-Q of q_unloaded is
+    // G = ω₀·C_bare/Q — NOT keyed to the synthesis-reduced node cap. See the
+    // doc comment. A closed-form spec constant (no dependence on c_farad).
+    let c_bare = 1.0 / (net.z0_ohm * omega0);
 
     // Start from the identity ABCD and right-multiply each element's matrix.
     let mut a = Complex64::new(1.0, 0.0);
@@ -293,7 +366,7 @@ pub fn top_c_s21(net: &TopCNetwork, f_hz: f64, z0_ohm: f64) -> Complex64 {
     let one = Complex64::new(1.0, 0.0);
     let zero = Complex64::new(0.0, 0.0);
     for k in 0..=n {
-        // Series coupling capacitor k: Z = 1/(jωC).
+        // Series coupling capacitor k: Z = 1/(jωC). Lossless (no Q term).
         let cap = Complex64::new(net.coupling_caps_farad[k], 0.0);
         let z_series = one / (jw * cap);
         apply(one, z_series, zero, one);
@@ -302,7 +375,13 @@ pub fn top_c_s21(net: &TopCNetwork, f_hz: f64, z0_ohm: f64) -> Complex64 {
             let res = &net.shunt[k];
             let cc = Complex64::new(res.c_farad, 0.0);
             let ll = Complex64::new(res.l_henry, 0.0);
-            let y = jw * cc + one / (jw * ll);
+            // Shunt admittance Y = G + jωC_node + 1/(jωL), with the loss keyed to
+            // the BARE resonating cap: G = ω₀·C_bare/Q_u (the node's stored
+            // energy lives in C_bare, so its unloaded Q is ω₀·C_bare/G = Q_u).
+            // The reactive term keeps the full reduced node cap `cc`. At inv_q=0
+            // (Q_u = ∞ or ≤ 0) G = (0, 0), so Y is the lossless jωC_node+1/(jωL).
+            let g = Complex64::new(omega0 * c_bare * inv_q, 0.0);
+            let y = g + jw * cc + one / (jw * ll);
             apply(one, zero, y, one);
         }
     }

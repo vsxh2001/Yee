@@ -77,11 +77,12 @@ pub use lumped::{ladder_s_params_lossy, ladder_s21, ladder_s21_lossy};
 /// `N+1` series coupling capacitors (admittance-inverter coupled resonators).
 pub mod top_c;
 pub use top_c::{ShuntResonator, TopCNetwork, synthesize_top_c_coupled};
-// `top_c_s21` is `#[doc(hidden)] pub`: the realized-response ABCD helper, kept
-// out of the documented API surface but reachable by the `top_c_coupled_001`
-// gate (a separate crate) for the non-circular S21-mask validation.
+// `top_c_s21` / `top_c_s21_lossy` are `#[doc(hidden)] pub`: the realized-response
+// ABCD helpers (lossless and finite-Q S21), kept out of the documented API
+// surface but reachable by the `top_c_coupled_001` / `top_c_q_001` gates (a
+// separate crate) for the non-circular S21-mask + finite-Q validation.
 #[doc(hidden)]
-pub use top_c::top_c_s21;
+pub use top_c::{top_c_s21, top_c_s21_lossy};
 
 /// Monte-Carlo tolerance / yield analysis (Filter Phase F2.4): snap each L/C to
 /// an E-series value, perturb within tolerance over many seeded trials, and
