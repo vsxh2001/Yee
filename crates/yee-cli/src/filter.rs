@@ -14,8 +14,9 @@ use num_complex::Complex64;
 use std::process::ExitCode;
 
 use yee_filter::{
-    FilterSpec, Footprint, check_mask, dimension_edge_coupled, dimension_edge_coupled_layout,
-    ideal_response, ladder_s_params_lossy, lumped_board, synthesize, synthesize_lumped,
+    ESeries, FilterProject, FilterSpec, Footprint, check_mask, dimension_edge_coupled,
+    dimension_edge_coupled_layout, ideal_response, jlcpcb_bom_csv, join_placed_parts,
+    ladder_s_params_lossy, lumped_board, synthesize, synthesize_lumped,
 };
 use yee_io::touchstone::{File, Format, FreqUnit};
 use yee_layout::Substrate;
@@ -46,6 +47,17 @@ const SPAN_MULT: f64 = 6.0;
 /// substrate, using the supplied SMD `footprint`. The synthesis printout and the
 /// Touchstone `.s2p` are unaffected by `--lumped`.
 ///
+/// `jlcpcb` (J4, ADR-0164) is an output **directory**: when set, the **lumped**
+/// realization is built (`synthesize_lumped` → `lumped_board`, regardless of
+/// `--lumped`, since the JLCPCB BOM/CPL describe the lumped board) and the
+/// JLCPCB assembly upload set is written into it — `bom.csv`
+/// (`Comment,Designator,Footprint,LCSC Part #`), `cpl.csv`
+/// (`Designator,Mid X,Mid Y,Layer,Rotation`), and the lumped board's copper +
+/// outline Gerbers (the SAME `layout_to_gerber` copper the `--gerber` lumped
+/// path emits). The directory is created if missing. A one-line honest note is
+/// printed when any BOM line has no JLCPCB Basic-part match (the unrealizable
+/// rows are emitted with a blank LCSC #, never dropped).
+///
 /// `q_unloaded` (F2-Q, ADR-0161) selects the **`(S11, S21)` response** written
 /// to the `.s2p` (and the optional `--plot`'s `|S21|`): `None` (default) keeps
 /// the lossless closed-form `ideal_response`, with `S11` the true lossless
@@ -75,6 +87,7 @@ pub fn run_synth(
     lumped: bool,
     footprint: Footprint,
     q_unloaded: Option<f64>,
+    jlcpcb: Option<&Path>,
 ) -> Result<ExitCode> {
     let text = std::fs::read_to_string(spec_path)
         .with_context(|| format!("failed to read filter spec {}", spec_path.display()))?;
@@ -318,6 +331,17 @@ pub fn run_synth(
         }
     }
 
+    // ---- J4: JLCPCB assembly upload set (--jlcpcb <dir>) -----------------
+    // `--jlcpcb` writes the JLCPCB SMT-assembly upload set for the LUMPED
+    // realization into a directory: the copper + outline Gerbers (the same
+    // `layout_to_gerber` copper the `--gerber` lumped path emits), `bom.csv`
+    // (autopicked LCSC parts, ADR-0164 J1/J2), and `cpl.csv` (the placement
+    // centroids, J3). It always uses the lumped board — the BOM/CPL describe
+    // the lumped LC parts — independent of the `--lumped` layout flag.
+    if let Some(dir) = jlcpcb {
+        write_jlcpcb_set(dir, &proj, &substrate, footprint, spec_path)?;
+    }
+
     if report.pass {
         println!("VERDICT: PASS");
         Ok(ExitCode::SUCCESS)
@@ -325,6 +349,91 @@ pub fn run_synth(
         println!("VERDICT: FAIL");
         Ok(ExitCode::FAILURE)
     }
+}
+
+/// The E-series the `--jlcpcb` BOM autopick snaps to (J4, ADR-0164).
+///
+/// E24 (±5 %) matches the world of JLCPCB **Basic** chip parts (the common
+/// ±5 % 0402/0603/0805 C/R/L values) and the studio's primary BOM, so the
+/// autopick band is widest where real Basic parts actually exist. (A future
+/// `--jlcpcb-series` flag could expose E96; E24 is the right default.)
+const JLCPCB_SERIES: ESeries = ESeries::E24;
+
+/// Write the JLCPCB assembly upload set for the lumped realization into `dir`
+/// (J4, ADR-0164): the lumped board's copper + outline Gerbers, `bom.csv`
+/// (autopicked LCSC parts), and `cpl.csv` (placement centroids).
+///
+/// The lumped board is synthesized from `proj` on `substrate` with `footprint`
+/// — the **same** path the `--lumped`/`--gerber` exporters use, so the copper
+/// Gerber here is byte-identical to the lumped `--gerber` output. The honest
+/// no-Basic-match count (BOM lines whose `autopick` returned `None`) is printed
+/// so the user sees the unfillable lines (they are emitted with a blank LCSC #,
+/// not dropped). `dir` is created if missing; the copper Gerber is named for the
+/// spec stem (`<stem>.gbr`) with the outline as `<stem>-Edge_Cuts.gbr`.
+fn write_jlcpcb_set(
+    dir: &Path,
+    proj: &FilterProject,
+    substrate: &Substrate,
+    footprint: Footprint,
+    spec_path: &Path,
+) -> Result<()> {
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("failed to create JLCPCB output dir {}", dir.display()))?;
+
+    // Build the lumped board (== the `--lumped` exporter path) so the Gerber
+    // copper and the BOM/CPL all describe the same realization.
+    let ladder = synthesize_lumped(proj)
+        .map_err(|e| anyhow::anyhow!("failed to synthesize lumped LC ladder: {e}"))?;
+    let board = lumped_board(&ladder, substrate, footprint);
+
+    // The spec stem names the copper Gerber (`<stem>.gbr`).
+    let stem = spec_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("filter");
+
+    // Copper (F.Cu) — the SAME `layout_to_gerber` copper the `--gerber` lumped
+    // path emits — plus the board-outline (Edge.Cuts) Gerber JLCPCB fab wants.
+    let copper_path = dir.join(format!("{stem}.gbr"));
+    let copper = yee_export::layout_to_gerber(&board.layout, &yee_export::GerberOptions::default());
+    std::fs::write(&copper_path, copper)
+        .with_context(|| format!("failed to write copper Gerber {}", copper_path.display()))?;
+    println!("  wrote JLCPCB copper Gerber: {}", copper_path.display());
+
+    let outline_path = dir.join(format!("{stem}-Edge_Cuts.gbr"));
+    let outline =
+        yee_export::layout_to_gerber_outline(&board.layout, &yee_export::OutlineOptions::default());
+    std::fs::write(&outline_path, outline)
+        .with_context(|| format!("failed to write outline Gerber {}", outline_path.display()))?;
+    println!("  wrote JLCPCB outline Gerber: {}", outline_path.display());
+
+    // BOM + CPL (the JLCPCB assembly upload pair). Join once so the honest
+    // no-Basic-match count below and the BOM CSV are derived from the same
+    // placement→LCSC join (the CPL lists every placement regardless).
+    let parts = join_placed_parts(&board.placements, &ladder, footprint, JLCPCB_SERIES);
+    let bom_path = dir.join("bom.csv");
+    let cpl_path = dir.join("cpl.csv");
+    std::fs::write(&bom_path, jlcpcb_bom_csv(&parts))
+        .with_context(|| format!("failed to write JLCPCB BOM {}", bom_path.display()))?;
+    std::fs::write(&cpl_path, yee_filter::jlcpcb_cpl_csv(&board.placements))
+        .with_context(|| format!("failed to write JLCPCB CPL {}", cpl_path.display()))?;
+    println!("  wrote JLCPCB BOM: {}", bom_path.display());
+    println!("  wrote JLCPCB CPL: {}", cpl_path.display());
+
+    // Honest unrealizable-value flag: count the placements whose autopick found
+    // no JLCPCB Basic part (emitted with a blank LCSC #, not dropped).
+    let total = parts.len();
+    let no_match = parts.iter().filter(|p| p.lcsc.is_none()).count();
+    if no_match > 0 {
+        println!(
+            "  NOTE: {no_match} of {total} parts have no JLCPCB Basic match \
+             (blank LCSC # in bom.csv); see bom.csv"
+        );
+    } else {
+        println!("  all {total} parts matched a JLCPCB Basic part");
+    }
+
+    Ok(())
 }
 
 /// Index of the swept frequency nearest `f0` (used to report the midband
