@@ -13,13 +13,13 @@ use yee_filter::{
     Approximation, BoardTopology, Bom, BranchKind, CompKind, CouplingMatrix, ESeries,
     FilterProject, FilterSpec, Footprint, LcBranch, LumpedBoard, LumpedLadder, MaskReport,
     MaskVerdict, OrderableBoard, RealizationTechnique, Response, SpecMask, SteppedSection,
-    check_mask, dimension_combline, dimension_combline_layout, dimension_edge_coupled,
-    dimension_edge_coupled_layout, dimension_hairpin, dimension_hairpin_layout,
-    dimension_interdigital, dimension_interdigital_layout, dimension_stepped_impedance,
-    dimension_stepped_impedance_layout, ideal_response, ideal_response_lowpass, jlcpcb_bom_csv,
-    jlcpcb_cpl_csv, ladder_s_params_lossy, ladder_s21, ladder_s21_lossy, lumped_board,
-    mask_verdict, monte_carlo_yield, select_components, synthesize, synthesize_lumped,
-    synthesize_orderable_on,
+    check_mask, coupling_matrix_s_params, dimension_combline, dimension_combline_layout,
+    dimension_edge_coupled, dimension_edge_coupled_layout, dimension_hairpin,
+    dimension_hairpin_layout, dimension_interdigital, dimension_interdigital_layout,
+    dimension_stepped_impedance, dimension_stepped_impedance_layout, ideal_response,
+    ideal_response_lowpass, jlcpcb_bom_csv, jlcpcb_cpl_csv, ladder_s_params_lossy, ladder_s21,
+    ladder_s21_lossy, lumped_board, mask_verdict, monte_carlo_yield, select_components, synthesize,
+    synthesize_lumped, synthesize_orderable_on,
 };
 use yee_io::touchstone::{File, Format, FreqUnit};
 use yee_layout::{BBox, CoupledMicrostrip, Layout, Substrate, coupled_microstrip, eps_eff};
@@ -555,8 +555,8 @@ fn mask_bands(spec: &FilterSpec) -> Vec<MaskBand> {
 /// verbatim and S11 is never re-derived. The pair must be passive
 /// (`|S11|² + |S21|² ≤ 1`) for the file to re-parse via [`yee_io::touchstone`] —
 /// the finite-Q lumped pair ([`ladder_s_params_lossy`]) is the true lossy
-/// 2-port, and the ideal pair uses the lossless quadrature
-/// (`S11 = j·√(1−|S21|²)`, [`lossless_s_pair`]); both are passive.
+/// 2-port, and the distributed pair is the lossless complex coupling-matrix
+/// response ([`coupling_matrix_s_params`], ADR-0172); both are passive.
 ///
 /// Returns the renderer's [`yee_io::Error`] display string on failure (a
 /// length mismatch, a non-finite value, etc.); the Export buttons treat an
@@ -584,19 +584,6 @@ fn s2p_string(
     yee_io::touchstone::to_string(&file).map_err(|e| e.to_string())
 }
 
-/// Map a lossless transfer `S21` to the `(S11, S21)` pair written for the
-/// distributed / ideal `.s2p` path. The transmission is taken with `|S21| ≤ 1`
-/// and S11 is the **true lossless reflection** placed in quadrature
-/// (`S11 = j·√(1−|S21|²)`): for a lossless reciprocal symmetric 2-port this is
-/// the exact reflection — it makes `|S11|² + |S21|² = 1` and the S-matrix
-/// passive, so the rendered file re-parses. Mirrors
-/// `yee_cli::filter::lossless_s_pair`.
-fn lossless_s_pair(s21: Complex64) -> (Complex64, Complex64) {
-    let s21_mag = s21.norm().min(1.0);
-    let s11_mag = (1.0 - s21_mag * s21_mag).max(0.0).sqrt();
-    (Complex64::new(0.0, s11_mag), Complex64::new(s21_mag, 0.0))
-}
-
 /// Build the **lumped finite-Q** `(S11, S21)` sweep written to the lumped
 /// `.s2p`: the realistic [`ladder_s_params_lossy`] response over the design
 /// sweep grid (`sweep_freqs(ladder.f0_hz, ladder.fbw)`), at per-resonator
@@ -616,21 +603,23 @@ fn lumped_s2p_sweep(
     (freqs, s_params)
 }
 
-/// Build the **distributed / ideal** `(S11, S21)` sweep written to the
-/// distributed `.s2p`: the closed-form [`ideal_response`] `S21` over the design
-/// sweep grid, with S11 placed in lossless quadrature via [`lossless_s_pair`].
-/// This is the **same model + grid** as the displayed [`Designed::sweep`], so
-/// the exported `.s2p` matches the plotted ideal curve, and the pair is passive
-/// (`|S11|² + |S21|² = 1`).
+/// Build the **distributed** `(S11, S21)` sweep written to the distributed
+/// `.s2p`: the complex coupling-matrix S-parameters
+/// ([`coupling_matrix_s_params`], ADR-0172) over the design sweep grid. Unlike
+/// the prior path (`ideal_response` magnitude + lossless-quadrature S11), these
+/// carry **physical phase** (group delay) from the Hong-Lancaster general
+/// formulation — a complete, VNA/time-domain-comparable export. The synthesized
+/// coupling matrix is lossless, so the pair is passive (`|S11|² + |S21|² = 1`)
+/// and re-imports through [`yee_io::touchstone`]. The displayed
+/// [`Designed::sweep`] / response PLOT keeps the [`ideal_response`] magnitude;
+/// the complex `|S21|` agrees with it (the `coupling-matrix-s-001` gate), so the
+/// exported magnitude still matches the plotted ideal curve.
 fn distributed_s2p_sweep(
     project: &FilterProject,
     spec: &FilterSpec,
 ) -> (Vec<f64>, Vec<(Complex64, Complex64)>) {
     let freqs = sweep_freqs(spec.f0_hz, spec.fbw);
-    let s_params: Vec<(Complex64, Complex64)> = ideal_response(project, &freqs)
-        .into_iter()
-        .map(lossless_s_pair)
-        .collect();
+    let s_params = coupling_matrix_s_params(&project.coupling, &freqs, spec.f0_hz, spec.fbw);
     (freqs, s_params)
 }
 
@@ -646,15 +635,17 @@ pub fn lumped_s2p(d: &LumpedDesigned) -> Result<String, String> {
     s2p_string(d.ladder.z0_ohm, &freqs, &s_params, &comment)
 }
 
-/// Render the distributed / ideal `.s2p` string for `d` (ADR-0171). The Export
-/// stage's distributed `.s2p` button calls this; an `Err` is a no-op there.
+/// Render the distributed `.s2p` string for `d` (ADR-0171 + ADR-0172). The
+/// Export stage's distributed `.s2p` button calls this; an `Err` is a no-op
+/// there. Carries the complex coupling-matrix response (real phase), not a
+/// flat-phase magnitude.
 pub fn distributed_s2p(d: &Designed) -> Result<String, String> {
     let (freqs, s_params) = distributed_s2p_sweep(&d.project, &d.spec);
     s2p_string(
         d.spec.z0_ohm,
         &freqs,
         &s_params,
-        " yee studio — ideal closed-form response",
+        " yee studio — coupling-matrix response (complex, real phase)",
     )
 }
 
@@ -2210,21 +2201,37 @@ mod tests {
             ".s2p S21 matches the displayed finite-Q sweep at f0"
         );
 
-        // The DISTRIBUTED / ideal matrix also renders without error (it uses the
-        // lossless quadrature S11, so it is passive: |S11|² + |S21|² = 1).
+        // The DISTRIBUTED matrix also renders without error. It is the complex
+        // coupling-matrix response (ADR-0172, real phase); the synthesized
+        // coupling matrix is lossless, so the pair is passive: |S11|²+|S21|² = 1.
         let dd = design_demo();
         let dist_text =
             distributed_s2p(&dd).expect("distributed .s2p renders for the demo fixture");
         let (dist_opt, dist_rows) = parse_s2p_ri(&dist_text);
         assert_eq!(dist_opt, format!("Hz S RI R {}", dd.spec.z0_ohm));
         assert_eq!(dist_rows.len(), SWEEP_POINTS);
-        // Quadrature pair is exactly passive at every sample.
+        // The lossless coupling-matrix pair is exactly passive at every sample.
         for (_f, s11, s21) in &dist_rows {
             assert!(
                 (s11.norm_sqr() + s21.norm_sqr() - 1.0).abs() <= 1e-6,
-                "ideal quadrature sample is unitary-passive"
+                "coupling-matrix sample is unitary-passive (lossless)"
             );
         }
+        // The complex response carries REAL phase (ADR-0172) — not flat/quadrature.
+        // S21 phase must vary across the band (distinguishing it from the old
+        // flat-phase magnitude export).
+        let mut s21_arg_min = f64::INFINITY;
+        let mut s21_arg_max = f64::NEG_INFINITY;
+        for (_f, _s11, s21) in &dist_rows {
+            let a = s21.arg();
+            s21_arg_min = s21_arg_min.min(a);
+            s21_arg_max = s21_arg_max.max(a);
+        }
+        assert!(
+            s21_arg_max - s21_arg_min > 1.0,
+            "distributed .s2p S21 must carry non-trivial phase (span {:.3} rad), not flat phase",
+            s21_arg_max - s21_arg_min
+        );
     }
 
     /// Flatten a layout's copper geometry into a comparable signature: the

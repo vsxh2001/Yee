@@ -1711,8 +1711,8 @@ fn export_distributed(designed: ReadOnlySignal<Designed>) -> Element {
                     download_btn {
                         label: "Touchstone .s2p",
                         make: move |_| {
-                            // The ideal closed-form response (the displayed |S21|
-                            // curve), S11 in lossless quadrature (ADR-0171). On a
+                            // The complex coupling-matrix response (real phase,
+                            // ADR-0172); its |S21| matches the displayed curve. On a
                             // renderer Err, do nothing — never a broken download.
                             if let Ok(s2p) = distributed_s2p(&designed.read()) {
                                 download_file("filter.s2p", "application/x-touchstone", &s2p);
@@ -1730,10 +1730,10 @@ fn export_distributed(designed: ReadOnlySignal<Designed>) -> Element {
                 div { class: "note honest",
                     "Gerber + KiCad are written by the shipped `yee-export` emitters from the same "
                     "`Layout` the board view draws — single copper layer + Edge.Cuts outline. The "
-                    "Touchstone .s2p carries the " b { "ideal closed-form" } " response (the displayed "
-                    "|S21| curve, S11 in lossless quadrature) — importable into scikit-rf / ADS / a "
-                    "VNA comparison. Drill / soldermask / silkscreen and an EM-verified .s2p are "
-                    "documented follow-ons."
+                    "Touchstone .s2p carries the " b { "complex coupling-matrix" } " response — real "
+                    "phase / group delay (its |S21| matches the displayed curve) — importable into "
+                    "scikit-rf / ADS / a VNA comparison. Drill / soldermask / silkscreen and an "
+                    "EM-verified .s2p are documented follow-ons."
                 }
             } else {
                 div { class: "note honest",
