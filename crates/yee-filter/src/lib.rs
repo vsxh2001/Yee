@@ -133,7 +133,7 @@ pub use recommend::{RealizationTechnique, TechniqueRecommendation, recommend_tec
 /// realization [`BoardTopology`] is distinct from the synthesis-realization
 /// [`Topology`] enum — see the module docs.
 pub mod topology;
-pub use topology::{BoardTopology, OrderableBoard, synthesize_orderable};
+pub use topology::{BoardTopology, OrderableBoard, synthesize_orderable, synthesize_orderable_on};
 
 pub use yee_synth::Approximation;
 use yee_synth::{Prototype, coupling_design, lowpass_to_bandpass, min_order, prototype};
