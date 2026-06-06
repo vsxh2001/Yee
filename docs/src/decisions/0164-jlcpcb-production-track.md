@@ -56,6 +56,22 @@ seed covering the common RF L/C decades), and gate that picks are real + value/f
 - **Not in scope:** a live LCSC/JLCPCB API (offline constraint), exotic footprints, the planar-filter
   JLCPCB path (lumped first), J5 Gerber layers until fab needs them.
 
+## Outcome (SHIPPED)
+
+J1 (`1972886`) + J2/J3 (`18fa1dc`) + J4 (`1875cb4`) shipped the end-to-end lumped spec→JLCPCB pipeline
+(autopick over 72 real Basic LCSC parts → BOM/CPL CSV → `yee filter synth --jlcpcb` + studio downloads).
+**Orderability CAPSTONE (`4ee64d3`, gate `jlcpcb-orderable-001`):** a wideband lumped BPF (Cheb 0.5 dB,
+N=3, f0=1 GHz, FBW=70%, 50 Ω, 0402) yields a **fully-orderable upload set — ZERO blank LCSC #s** (every
+part a real Basic part within tolerance) — proving spec→production-ready end-to-end for lumped-appropriate
+specs. Realizable regime honestly bounded: narrow-band 2 GHz/10% → 2 blank (sub-discrete-floor) lines;
+wideband 70% → 0; binding constraint = the shunt-inductor floor (0402 stock catches it). All gates
+non-circular + reviewer-APPROVED (no invented parts; honest blanks where unrealizable).
+
+**Remaining (future, non-blocking):** a top-C-coupled / capacitively-coupled topology to make *narrow-band*
+lumped BPFs orderable (the series-resonator extremes); and **J5 Gerber completeness** (mask/silk/drill
+layers) — the original brick-table J5 — deferred until a real fab upload needs it. (The orderability
+capstone above is a separate, additional deliverable, not the brick-table J5.)
+
 ## References
 - BOM: `yee_filter::parts` (`select_components`, `Bom`, `BomLine`, `ESeries`).
 - Board/placements: `yee_filter::board` (`lumped_board`, `Layout`, `Placement`, `Footprint`).
