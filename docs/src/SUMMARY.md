@@ -216,3 +216,4 @@
 - [ADR-0170: Top-C finite-Q response + route the studio lumped response (T6/T7)](decisions/0170-top-c-finite-q-response.md)
 - [ADR-0171: Studio `.s2p` Touchstone export — S-parameter portability (T8)](decisions/0171-studio-s2p-export.md)
 - [ADR-0172: Complex coupling-matrix S-parameters — real phase for the distributed `.s2p` (T9)](decisions/0172-coupling-matrix-complex-s.md)
+- [ADR-0173: Group delay — a core filter metric from the complex S21 phase (T10)](decisions/0173-group-delay.md)
