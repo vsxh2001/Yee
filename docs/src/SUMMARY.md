@@ -212,3 +212,4 @@
 - [ADR-0166: Top-C-coupled BPF → board + JLCPCB orderable upload set (T2)](decisions/0166-top-c-board-jlcpcb.md)
 - [ADR-0167: Orderable-topology auto-selector (T3)](decisions/0167-orderable-topology-selector.md)
 - [ADR-0168: `yee filter synth --jlcpcb` auto-routes the orderable topology (T4)](decisions/0168-cli-auto-route-topology.md)
+- [ADR-0169: Studio Export — auto-routed orderable JLCPCB assembly set (T5)](decisions/0169-studio-orderable-jlcpcb-export.md)
