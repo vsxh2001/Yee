@@ -29,8 +29,11 @@
 //! prefix) or `c_farad` (for a `C` prefix). The raw reactance is then snapped to
 //! the requested [`ESeries`] with the **same** [`ESeries::nearest`] call
 //! [`select_components`](crate::select_components) makes, so the per-placement
-//! chosen value — and hence the [`autopick`] result and the BOM grouping —
-//! matches the grouped [`Bom`] exactly. [`PlacedPart`] is the joined record.
+//! chosen value and the [`autopick`] result match the grouped [`Bom`] exactly.
+//! (The final BOM CSV then groups by **orderable LCSC part #** — one row per
+//! distinct part, the right key for an assembly BOM — which can be coarser than
+//! the [`Bom`]'s `(kind, chosen_value)` key when two nearby E-series values map to
+//! the same in-table part within the autopick band.) [`PlacedPart`] is the join.
 //!
 //! # JLCPCB format conventions (documented; confirm against a real upload)
 //!
