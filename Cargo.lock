@@ -7416,6 +7416,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "yee-compute"
+version = "0.0.0"
+dependencies = [
+ "bytemuck",
+ "ndarray",
+ "pollster",
+ "rayon",
+ "thiserror 1.0.69",
+ "wgpu",
+ "yee-core",
+ "yee-fdtd",
+]
+
+[[package]]
 name = "yee-core"
 version = "0.0.0"
 dependencies = [

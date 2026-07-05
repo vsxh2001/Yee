@@ -1,0 +1,34 @@
+[package]
+name         = "yee-compute"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "Portable GPU/CPU execution layer for Yee grid solvers (rayon CPU + wgpu/WGSL compute)."
+
+[features]
+# The `gpu` (wgpu) backend needs no external toolchain — unlike `cuda`/`gmsh`
+# it is default-ON (ADR-0175). `--no-default-features` yields the CPU-only
+# crate: the future WASM/browser-compute seam.
+default = ["gpu"]
+gpu     = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+
+[dependencies]
+yee-core  = { workspace = true }
+rayon     = { workspace = true }
+thiserror = { workspace = true }
+
+wgpu     = { workspace = true, optional = true }
+pollster = { workspace = true, optional = true }
+bytemuck = { workspace = true, optional = true }
+
+[dev-dependencies]
+# compute-001 gates the CPU backend bit-for-bit against yee-fdtd's scalar
+# reference kernels; ndarray is needed only to drive that reference grid.
+yee-fdtd = { workspace = true }
+ndarray  = { workspace = true }
+
+[lints.rust]
+unsafe_code  = "forbid"
+missing_docs = "warn"
