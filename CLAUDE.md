@@ -11,7 +11,7 @@ This file is loaded by Claude Code instances starting work in the Yee repo. It c
 **When starting work on this repo:**
 
 1. Read this file end to end.
-2. Skim `ROADMAP.md` for the phase your task lives in.
+2. Skim `ROADMAP.md` for the phase your task lives in (core solvers). Application phases live in `FILTER-DESIGN-ROADMAP.md`; the GPU/CPU engine + web-studio track (ADR-0175) lives in `ENGINE-STUDIO-ROADMAP.md`.
 3. Skim `TECH_STACK.md` if your task touches a new dependency.
 4. Look for a matching spec under `docs/superpowers/specs/` and plan under `docs/superpowers/plans/`. If none exists and the task is non-trivial, write the spec before any code.
 5. Decide your lane (§6) before opening any file.
@@ -27,6 +27,7 @@ crates/
   yee-mesh/       — Gmsh FFI (gmsh feature)
   yee-mom/        — planar Method of Moments solver
   yee-fdtd/       — FDTD walking skeleton + CPML + NTFF + dispersive ADE materials
+  yee-compute/    — GPU/CPU execution layer: rayon CPU + wgpu/WGSL compute (ADR-0175)
   yee-io/         — Touchstone v1.1 I/O
   yee-cli/        — yee CLI (validate / mesh / run / export / plot)
   yee-py/         — PyO3 0.28 Python bindings (abi3-py310)
@@ -37,7 +38,7 @@ docs/             — mdBook (theory + tutorials) + superpowers/specs + superpow
 .github/workflows/ — CI + GPU nightly + wheels + docs deploy
 ```
 
-Other root files worth knowing: `ROADMAP.md`, `TECH_STACK.md`, `CONTRIBUTING.md`, `THIRD_PARTY_LICENSES.md`, `rust-toolchain.toml` (pins 1.92), `rustfmt.toml`, `Cargo.toml` (workspace).
+Other root files worth knowing: `ROADMAP.md`, `FILTER-DESIGN-ROADMAP.md`, `ENGINE-STUDIO-ROADMAP.md`, `TECH_STACK.md`, `CONTRIBUTING.md`, `THIRD_PARTY_LICENSES.md`, `rust-toolchain.toml` (pins 1.92), `rustfmt.toml`, `Cargo.toml` (workspace).
 
 `crates/yee-surrogate/` has landed (Phase 3.gp.0/1 + 3.bo.0/1 + 3.al.0 shipped per `ROADMAP.md`). It is wired into the workspace `Cargo.toml` and exposed via `yee-py`'s `yee.surrogate` Python module.
 

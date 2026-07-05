@@ -218,3 +218,4 @@
 - [ADR-0172: Complex coupling-matrix S-parameters — real phase for the distributed `.s2p` (T9)](decisions/0172-coupling-matrix-complex-s.md)
 - [ADR-0173: Group delay — a core filter metric from the complex S21 phase (T10)](decisions/0173-group-delay.md)
 - [ADR-0174: CLI default `.s2p` phase parity — complex coupling-matrix S (T11)](decisions/0174-cli-s2p-phase-parity.md)
+- [ADR-0175: GPU/CPU compute engine (`yee-compute`) + engine-service → web studio direction](decisions/0175-gpu-engine-web-studio.md)
