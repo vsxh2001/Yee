@@ -8,6 +8,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { SliceHeatmap, SpectrumPlot, type Slice } from "./views";
 
 type Backend = "cpu" | "gpu" | "auto";
 
@@ -15,6 +16,7 @@ interface JobResult {
   backend: string;
   dt_s: number;
   probes: number[][];
+  slice: Slice | null;
   steps_done: number;
 }
 
@@ -94,7 +96,8 @@ export default function App() {
             },
           ],
           ports: [],
-          probes: [{ component: "ez", cell: [c + size / 4, c, c] }],
+          probes: [{ component: "ez", cell: [c + Math.floor(size / 4), c, c] }],
+          slice: { component: "ez", k: c },
           backend,
         },
       });
@@ -175,6 +178,8 @@ export default function App() {
             ran on <strong>{result.backend}</strong> · {result.steps_done} steps
           </p>
           <ProbePlot series={result.probes[0] ?? []} dt={result.dt_s} />
+          <SpectrumPlot series={result.probes[0] ?? []} dt={result.dt_s} />
+          {result.slice && <SliceHeatmap slice={result.slice} />}
         </section>
       )}
     </main>

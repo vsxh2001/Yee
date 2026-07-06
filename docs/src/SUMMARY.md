@@ -223,3 +223,4 @@
 - [ADR-0177: E.2–E.5a — engine drive layer + strong-reference validation sweep](decisions/0177-e2-e5a-engine-drive-validation.md)
 - [ADR-0178: `yee.compute` — Python bindings for the GPU/CPU engine](decisions/0178-python-compute-bindings.md)
 - [ADR-0179: engine tickets closed (E.4/E.5b/E.5c) + S.0 job API + Tauri/React studio skeleton](decisions/0179-engine-close-s0-tauri-studio.md)
+- [ADR-0180: S.1 `yee-server` (WebSocket job API) + S.3 visualization walking skeleton](decisions/0180-s1-yee-server-s3-visualization.md)

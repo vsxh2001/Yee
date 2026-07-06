@@ -29,6 +29,7 @@ crates/
   yee-fdtd/       — FDTD walking skeleton + CPML + NTFF + dispersive ADE materials
   yee-compute/    — GPU/CPU execution layer: rayon CPU + wgpu/WGSL compute (ADR-0175)
   yee-engine/     — transport-agnostic simulation job API over yee-compute (S.0, ADR-0179)
+  yee-server/     — axum WebSocket exposure of the job API + `yee serve` (S.1, ADR-0180)
   yee-io/         — Touchstone v1.1 I/O
   yee-cli/        — yee CLI (validate / mesh / run / export / plot)
   yee-py/         — PyO3 0.28 Python bindings (abi3-py310)
