@@ -50,18 +50,24 @@ wgpu (revisit after E.4 with data).
 | **S.7** | |S11| via incident/reflected separation: `sparams::reflection_db` — the reference run's port-1 probe is the incident wave, `dut − ref` isolates the device reflection; zero extra solve cost (one more probe on the same two jobs) | `engine-sparams-001` extended: at the stub notch **\|S11\| = −0.93 dB** (≥ −4 dB gate — a λ/4 open stub reflects ~everything at resonance) and **\|S11\|²+\|S21\|² = 0.807** (physical band [0.5, 1.3]; the deficit is the documented second-order re-reflection + ripple); fast gate: synthetic 0.25 reflection → −12.04 dB | **SHIPPED** (ADR-0184) |
 | **S.8** | = **F1.3.0**: the first filter **synthesized by the pipeline and verified by the engine** — N=5 Butterworth stepped-impedance LPF (f_c = 2 GHz, FR-4) from `yee_synth::prototype` → `dimension_stepped_impedance_layout` → voxelize → two engine jobs → measured response vs the `ideal_response_lowpass` design targets; gate lives in `yee-filter/tests` (dev-deps on the engine keep the lib WASM-safe) | `engine-filter-verify-001` (`#[ignore]`, own release CI step): cutoff **1.900 GHz vs designed 2.0 GHz — 5.0 %** (±20 % gate, sustained-crossing scan); **rejection 30.6 dB** (ideal 30.1; ≥ 20 dB gate); passband-mean ripple bound ±6 dB (measured +3.4 dB; PEC-box single-probe ripple documented up to +17.8 dB at the band edge). Boundary finding recorded: all-face CPML collapsed the passband — root-caused in S.9 | **SHIPPED** (ADR-0185) |
 | **S.9** | Per-axis CPML on the protocol: `BoundarySpec::Cpml` gains serde-defaulted `axes: [x, y, z]` (pre-S.9 JSON still parses) → `CpmlConfig::with_axes`. **ADR-0185 collapse root-caused**: the ~5-cell substrate sat *inside* the 10-layer z-min absorber — a scenario error, not a CPML defect. Board-level open boundary = `[true, true, false]` (absorbing side walls, PEC ground/lid), adopted by the LPF gate | Re-measured `engine-filter-verify-001` under CPML-xy: passband mean **+1.32 dB** (was +3.42 PEC-box), stopband **−32.9 dB**, rejection **34.2 dB**, cutoff unchanged 1.900 GHz — better on every aggregate; residual ripple attributed to the lumped-port mismatch (the next fidelity lever). Fast gates: legacy-JSON default + axes round-trip | **SHIPPED** (ADR-0186) |
+| **S.10** | Aperture ports on the engine: the validated `LumpedRlcPort::aperture` modal formulation (one aggregate branch vs `V = ∫E_z·dz`, sheet-current back-action over the physical face `A = w·h`) **ported verbatim into `yee-compute`** (`Drive::aperture_ports`, pure-R) + `JobSpec.aperture_ports` (serde-defaulted; CPU-only — `gpu` errors via the new `ComputeError::Unsupported`, `auto` falls back). A naive series stack of single-cell ports was measured worse and **rejected** | **compute-014** `cpu_aperture_parity`: **bit-exact** vs `yee_fdtd::correct_e_aperture` (full field state, max \|Δ\| = 0.0). LPF gate re-measured: passband mean **−0.49 dB** (was +1.32), band edge **+2.4 dB** (was +12.4), transition/stopband now tracks the ideal Butterworth (−13.2/−21.2 vs −10.1/−17.7), **S11 −9.2 dB** (was non-physical +7). Asserts tightened: passband ±3 dB absolute + return loss ≤ −6 dB. Residual 15 % cutoff shift = design-side (staircased high-Z) → F1.2.1 | **SHIPPED** (ADR-0187) |
 
 Standing decision during S.*: **`yee-studio-web` (Dioxus) is feature-frozen but stays deployed**
 until S.4 concludes (ADR-0175). `yee-gui` (egui EM-analysis shell) is unaffected by this track.
 
 ---
 
-*Last updated: 2026-07-06 (latest) — S.9 SHIPPED (ADR-0186): per-axis CPML on the protocol
-(`BoundarySpec::Cpml.axes`, serde-defaulted) and the ADR-0185 collapse root-caused — the
-~5-cell substrate sat inside the 10-layer z-min absorber. Board-level open boundary =
-CPML x/y + PEC ground/lid; the LPF gate re-measured better on every aggregate (passband
-mean +1.32 dB, rejection 34.2 dB, cutoff unchanged); residual ripple = lumped-port
-mismatch, the next fidelity lever. Before that, S.8/F1.3.0 SHIPPED (ADR-0185): the
+*Last updated: 2026-07-06 (latest) — S.10 SHIPPED (ADR-0187): aperture ports on the engine.
+The validated modal-face lumped port (ADR-0125) is now in `yee-compute` (bit-exact gate
+compute-014) and on the job protocol; the LPF verify measurement transformed — passband
+mean −0.49 dB, band-edge ripple +2.4 dB (was +12.4), stopband tracks the ideal Butterworth,
+S11 physical at −9.2 dB. Asserts tightened to absolute bounds. A naive series-stack port
+was measured worse and rejected (recorded). The residual 15 % cutoff shift is design-side
+(staircased high-Z sections) — F1.2.1 EM-in-the-loop refinement is next in line, with
+GPU aperture support queued for the nightly track. Before that, S.9 SHIPPED (ADR-0186):
+per-axis CPML on the protocol (`BoundarySpec::Cpml.axes`, serde-defaulted) and the ADR-0185
+collapse root-caused — the ~5-cell substrate sat inside the 10-layer z-min absorber.
+Board-level open boundary = CPML x/y + PEC ground/lid. Before that, S.8/F1.3.0 SHIPPED (ADR-0185): the
 design→verify loop closed for the first time — an N=5 Butterworth stepped-impedance LPF
 synthesized by the pipeline, run through the engine, measured cutoff 1.900 GHz vs designed
 2.0 GHz (5.0 %) with 30.6 dB passband/stopband rejection (ideal 30.1 dB). Follow-ons:

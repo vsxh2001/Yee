@@ -169,6 +169,7 @@ fn stub_job(with_stub: bool) -> (JobSpec, f64) {
                 t0_steps,
             },
         ],
+        aperture_ports: vec![],
         probes: vec![
             ProbeSpec {
                 component: "ez".into(),

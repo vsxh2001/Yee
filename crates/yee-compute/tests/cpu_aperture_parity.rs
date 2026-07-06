@@ -1,43 +1,58 @@
-//! Gate `compute-007`: the E.2 driven CPU step — soft sources + resistive
-//! port + probes — is **bit-exact** against the reference orchestration
-//! (`WalkingSkeletonSolver` sub-step helpers + `LumpedRlcPort::pure_resistor`
-//! with a `GaussianPulse` EMF), including the probe series.
+//! Gate `compute-014` (S.10, ADR-0187): the engine's multi-cell **aperture
+//! port** — modal `V = ∫E_z·dz`, aggregate branch current, sheet-current
+//! back-action over the physical area — is **bit-exact** against the
+//! validated reference `yee_fdtd::LumpedRlcPort::aperture` /
+//! `correct_e_aperture` (Phase 2.fdtd.6.9, ADR-0125), pure-R arm, driven
+//! by a `GaussianPulse` EMF, including the full final field state.
 
 use yee_compute::{
-    Boundary, CpuFdtd, Drive, EComponent, FdtdSpec, Fields, Materials, Probe, ResistivePort,
-    SoftSource, Waveform,
+    AperturePort, Boundary, CpuFdtd, Drive, EComponent, FdtdSpec, Fields, Materials, Probe,
+    Waveform,
 };
-use yee_fdtd::{FdtdSolver, LumpedRlcPort, SourceWaveform, WalkingSkeletonSolver, YeeGrid};
+use yee_fdtd::{ApertureSpec, LumpedRlcPort, SourceWaveform, WalkingSkeletonSolver, YeeGrid};
 
-const NX: usize = 16;
-const NY: usize = 12;
-const NZ: usize = 14;
+const NX: usize = 18;
+const NY: usize = 14;
+const NZ: usize = 12;
 const DX: f64 = 1e-3;
-const STEPS: usize = 25;
+const STEPS: usize = 30;
 
-const SOFT_CELL: (usize, usize, usize) = (4, 6, 7); // E_y
-const PORT_CELL: (usize, usize, usize) = (10, 6, 7); // E_z
-const PROBE_CELL: (usize, usize, usize) = (12, 6, 7); // E_z
+const PORT_I: usize = 6;
+const J_LO: usize = 5; // width band [5, 8) → 3 columns
+const J_HI: usize = 8;
+const K_TOP: usize = 4; // substrate column k = 0..4
+const PROBE_CELL: (usize, usize, usize) = (12, 6, 2);
 
 #[test]
-fn driven_step_is_bit_exact_against_reference() {
+fn aperture_port_is_bit_exact_against_reference() {
     let grid = YeeGrid::vacuum(NX, NY, NZ, DX);
     let dt = grid.dt;
     let mut spec = FdtdSpec::vacuum(NX, NY, NZ, DX);
     spec.dt = dt;
 
-    let t0 = 8.0 * dt;
-    let sigma = 3.0 * dt;
+    let cells: Vec<(usize, usize, usize)> = (J_LO..J_HI)
+        .flat_map(|j| (0..K_TOP).map(move |k| (PORT_I, j, k)))
+        .collect();
+    let n_columns = J_HI - J_LO;
+    let height = K_TOP as f64 * DX;
+    let area = n_columns as f64 * DX * height;
     let (v0, f0) = (1.0, 5.0e9);
     let bw = 0.8 * f0;
     let t0_steps = 6usize;
     let resistance = 50.0;
 
-    // ---- reference: manual step body (the cavity / line-eeff pattern) ----
+    // ---- reference: WalkingSkeletonSolver + LumpedRlcPort::aperture ----
     let mut solver = WalkingSkeletonSolver::new(grid);
-    let mut port = LumpedRlcPort::pure_resistor(
-        PORT_CELL,
+    let mut port = LumpedRlcPort::aperture(
+        ApertureSpec {
+            cells: cells.clone(),
+            n_columns,
+            area,
+            height,
+        },
         resistance,
+        0.0,           // L = 0 (pure R)
+        f64::INFINITY, // C = ∞ (no DC block)
         SourceWaveform::GaussianPulse {
             v0,
             f0,
@@ -47,29 +62,24 @@ fn driven_step_is_bit_exact_against_reference() {
     );
     let mut ref_probe = Vec::with_capacity(STEPS);
     for n in 0..STEPS {
-        let t = solver.current_time();
         solver.update_h_only();
         solver.apply_cpml_h();
-        {
-            let arg = (t - t0) / sigma;
-            solver.grid_mut().ey[SOFT_CELL] += (-arg * arg).exp();
-        }
         solver.update_e_only();
         solver.apply_cpml_e();
-        port.correct_e(solver.grid_mut(), n, dt);
+        port.correct_e_aperture(solver.grid_mut(), n, dt);
         solver.advance_clock();
         ref_probe.push(solver.grid().ez[PROBE_CELL]);
     }
 
-    // ---- candidate: CpuFdtd::with_drive ----
+    // ---- candidate: CpuFdtd with Drive::aperture_ports ----
     let drive = Drive {
-        soft_sources: vec![SoftSource {
-            component: EComponent::Ey,
-            cell: SOFT_CELL,
-            waveform: Waveform::Gaussian { t0, sigma },
-        }],
-        ports: vec![ResistivePort {
-            cell: PORT_CELL,
+        soft_sources: vec![],
+        ports: vec![],
+        aperture_ports: vec![AperturePort {
+            cells,
+            n_columns,
+            area,
+            height,
             resistance,
             waveform: Waveform::GaussianPulse {
                 v0,
@@ -78,7 +88,6 @@ fn driven_step_is_bit_exact_against_reference() {
                 t0_steps,
             },
         }],
-        aperture_ports: vec![],
         probes: vec![Probe {
             component: EComponent::Ez,
             cell: PROBE_CELL,
@@ -99,7 +108,7 @@ fn driven_step_is_bit_exact_against_reference() {
     for (n, (r, c)) in ref_probe.iter().zip(cand_probe).enumerate() {
         assert_eq!(
             r, c,
-            "compute-007: probe diverged at step {n} ({r:e} vs {c:e})"
+            "compute-014: probe diverged at step {n} ({r:e} vs {c:e})"
         );
     }
 
@@ -122,11 +131,11 @@ fn driven_step_is_bit_exact_against_reference() {
             .fold(0.0_f64, f64::max);
         assert_eq!(
             diff, 0.0,
-            "compute-007: {name} diverged from the reference (max |Δ| = {diff:e})"
+            "compute-014: {name} diverged from the reference (max |Δ| = {diff:e})"
         );
     }
     assert!(
         ref_probe.iter().any(|v| *v != 0.0),
-        "compute-007: probe never saw the drive — scenario broken"
+        "compute-014: probe never saw the drive — scenario broken"
     );
 }

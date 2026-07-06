@@ -141,6 +141,7 @@ fn line_eeff_on_engine_matches_hammerstad_jensen() {
                 t0_steps,
             },
         }],
+        aperture_ports: vec![],
         probes: vec![
             Probe {
                 component: EComponent::Ez,

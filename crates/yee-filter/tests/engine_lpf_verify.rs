@@ -12,17 +12,16 @@
 //! `ideal_response_lowpass` design targets:
 //!
 //! 1. measured −3 dB cutoff within ±20 % of the designed 2 GHz;
-//! 2. passband(1 GHz) − stopband(4 GHz) rejection ≥ 20 dB (ideal 30.1 dB;
-//!    relative, so the PEC-box standing-wave ripple cancels);
-//! 3. the passband mean stays within ±6 dB of the physical 0 dB (an
-//!    explicit ripple bound, not a hidden one).
+//! 2. passband(1 GHz) − stopband(4 GHz) rejection ≥ 20 dB (ideal 30.1 dB);
+//! 3. passband mean within ±3 dB of 0 dB and return loss ≤ −6 dB — the
+//!    absolute bounds the S.9 CPML-xy walls + S.10 aperture ports earn
+//!    (measured −0.49 dB / −9.2 dB).
 //!
 //! Known measurement limits (documented, accepted at walking-skeleton
 //! tolerance): dx = 0.3 mm staircases the ~0.55 mm high-Z sections to
-//! ~2 cells (impedance error → cutoff shift); feeds/junctions are not
-//! de-embedded; single-probe band-edge ripple up to ~12 dB from the
-//! lumped-port mismatch (ADR-0186 measured all three boundary options —
-//! see the comment in `job_for`; side-wall CPML with PEC ground/lid won).
+//! ~2 cells (impedance error → the measured 15 % cutoff shift — a
+//! design-side error for F1.2.1's EM-in-the-loop refinement to close);
+//! feeds/junctions are not de-embedded.
 //!
 //! `#[ignore]`'d (two multi-minute release FDTD runs):
 //!
@@ -37,7 +36,8 @@ use yee_layout::{Layout, Polygon, Substrate};
 use yee_synth::prototype;
 
 use yee_engine::{
-    BackendChoice, BoundarySpec, JobEvent, JobSpec, MaterialsSpec, PortSpec, ProbeSpec, sparams,
+    AperturePortSpec, BackendChoice, BoundarySpec, JobEvent, JobSpec, MaterialsSpec, ProbeSpec,
+    sparams,
 };
 use yee_voxel::{MicrostripModel, VoxelOptions, voxelize_microstrip};
 
@@ -110,6 +110,15 @@ fn job_for(layout: &Layout) -> (JobSpec, f64) {
     let i_p2 = i_for(layout.ports[1].at.x - 3.0e-3);
     let i_p1 = i_for(layout.ports[0].at.x + 12.0e-3);
 
+    // Aperture j band: the feed-trace width, rasterized with the same
+    // cell-centre convention as the voxelizer (feed centred on y = 0).
+    let w_feed = layout.ports[0].width_m;
+    let y0 = layout.bbox.min.y - MARGIN_CELLS as f64 * dx;
+    let in_band = |j: usize| -> bool { (y0 + (j as f64 + 0.5) * dx).abs() < w_feed / 2.0 };
+    let j_lo = (0..ny).find(|&j| in_band(j)).expect("feed band empty");
+    let j_hi = (j_lo..ny).find(|&j| !in_band(j)).unwrap_or(ny);
+    assert!(j_hi > j_lo, "aperture band empty");
+
     let materials = MaterialsSpec {
         eps_r_cells: model
             .grid
@@ -154,18 +163,30 @@ fn job_for(layout: &Layout) -> (JobSpec, f64) {
             axes: [true, true, false],
         },
         sources: vec![],
-        ports: vec![
-            PortSpec {
-                cell: model.port_cells[0],
+        ports: vec![],
+        // Aperture ports (S.10, ADR-0187): the validated
+        // LumpedRlcPort::aperture scheme — one aggregate 50 Ω branch over
+        // the modal (y, z) port face (trace width × substrate height) —
+        // the ADR-0186 residual-ripple fix. The j band is the feed-trace
+        // width rasterized with the voxelizer's cell-centre convention.
+        aperture_ports: vec![
+            AperturePortSpec {
+                i: model.port_cells[0].0,
+                j_lo,
+                j_hi,
+                k_top,
                 resistance_ohm: Z0_OHM,
                 v0: DRIVE_V0,
                 f0_hz: F_DRIVE_HZ,
                 bw_hz: BW_HZ,
                 t0_steps,
             },
-            // Passive matched load (v0 = 0 → pure resistor).
-            PortSpec {
-                cell: load_cell,
+            // Passive matched load (v0 = 0 → pure resistor branch).
+            AperturePortSpec {
+                i: load_cell.0,
+                j_lo,
+                j_hi,
+                k_top,
                 resistance_ohm: Z0_OHM,
                 v0: 0.0,
                 f0_hz: F_DRIVE_HZ,
@@ -307,12 +328,22 @@ fn synthesized_lpf_verifies_against_its_design_on_the_engine() {
         "engine-filter-verify-001 FAILED: passband−stopband rejection only \
          {rejection_db:.1} dB (need ≥ 20 dB)"
     );
-    // Ripple bound: the passband mean must still sit near the physical
-    // 0 dB for a lossless through path — |mean| ≤ 6 dB keeps the known
-    // PEC-box standing-wave ripple honest instead of unbounded.
+    // Absolute passband level: with CPML-xy walls (S.9) + aperture ports
+    // (S.10) the measurement is clean enough to bound absolutely — the
+    // lossless through path must sit within ±3 dB of 0 dB (measured
+    // −0.49 dB; the pre-S.10 single-cell ports read +3.4 dB and the
+    // PEC-box +17.8 dB band-edge ripple is gone entirely).
     assert!(
-        passband_db.abs() <= 6.0,
+        passband_db.abs() <= 3.0,
         "engine-filter-verify-001 FAILED: passband |S21| mean {passband_db:.2} dB @1 GHz — \
-         standing-wave ripple beyond the documented ±6 dB budget"
+         beyond the ±3 dB aperture-port budget (S.10 regression?)"
+    );
+    // Passband return loss must be physical and reasonably matched
+    // (measured −9.2 dB with aperture ports; the single-cell ports read a
+    // non-physical +7 dB).
+    assert!(
+        s11_passband_db <= -6.0,
+        "engine-filter-verify-001 FAILED: passband |S11| = {s11_passband_db:.1} dB @1 GHz \
+         (need ≤ −6 dB return loss)"
     );
 }

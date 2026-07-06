@@ -22,4 +22,9 @@ pub enum ComputeError {
     /// The crate was built without the `gpu` feature.
     #[error("yee-compute was built without the `gpu` feature")]
     GpuNotEnabled,
+
+    /// The drive requests a feature this backend does not implement
+    /// (e.g. aperture ports on the GPU backend, S.10).
+    #[error("unsupported on this backend: {0}")]
+    Unsupported(&'static str),
 }

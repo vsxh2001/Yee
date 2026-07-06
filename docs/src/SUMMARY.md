@@ -230,3 +230,4 @@
 - [ADR-0184: S.7 S11 on the engine — incident/reflected separation](decisions/0184-s7-engine-s11.md)
 - [ADR-0185: S.8/F1.3.0 — first engine-verified synthesized filter (stepped-impedance LPF)](decisions/0185-s8-engine-filter-verify-lpf.md)
 - [ADR-0186: S.9 per-axis CPML on the job protocol — the ADR-0185 collapse root-caused](decisions/0186-s9-per-axis-cpml.md)
+- [ADR-0187: S.10 aperture ports on the engine — the port-mismatch ripple solved](decisions/0187-s10-aperture-ports.md)

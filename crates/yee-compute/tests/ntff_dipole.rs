@@ -64,6 +64,7 @@ fn ntff_on_engine_recovers_dipole_pattern() {
                 waveform: Waveform::Gaussian { t0, sigma },
             }],
             ports: vec![],
+            aperture_ports: vec![],
             probes: vec![],
         },
     );

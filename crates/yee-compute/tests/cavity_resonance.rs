@@ -79,6 +79,7 @@ fn cavity_drive(dt: f64) -> Drive {
             },
         }],
         ports: vec![],
+        aperture_ports: vec![],
         probes: vec![Probe {
             component: EComponent::Ey,
             cell: PRB,

@@ -18,7 +18,7 @@
 //!     nx: 12, ny: 12, nz: 12, dx_m: 1e-3, n_steps: 40,
 //!     boundary: BoundarySpec::Pec,
 //!     sources: vec![SourceSpec::GaussianEz { cell: (6, 6, 6), t0_steps: 8.0, sigma_steps: 3.0 }],
-//!     ports: vec![],
+//!     ports: vec![], aperture_ports: vec![],
 //!     probes: vec![ProbeSpec { component: "ez".into(), cell: (8, 6, 6) }],
 //!     slice: None, materials: None, dt_s: None,
 //!     backend: BackendChoice::Cpu,
@@ -44,8 +44,8 @@ use std::thread;
 use serde::{Deserialize, Serialize};
 
 use yee_compute::{
-    Boundary, CpmlConfig, CpuFdtd, Drive, EComponent, FdtdSpec, Fields, Materials, Probe,
-    ResistivePort, SoftSource, Waveform,
+    AperturePort, Boundary, CpmlConfig, CpuFdtd, Drive, EComponent, FdtdSpec, Fields, Materials,
+    Probe, ResistivePort, SoftSource, Waveform,
 };
 
 /// Which backend executes the job.
@@ -211,6 +211,40 @@ impl MaterialsSpec {
     }
 }
 
+/// Multi-cell **aperture port** description (S.10, ADR-0187): one
+/// aggregate resistive branch bridging the modal port face — the `(y, z)`
+/// band `j in [j_lo, j_hi)` x substrate column `k in [0, k_top)` at plane
+/// `i`. The engine derives the modal geometry from the grid
+/// (`h = k_top*dx`, `A = (j_hi - j_lo)*dx*h`) and runs the validated
+/// `yee_fdtd::LumpedRlcPort::aperture` scheme (ported bit-exact, gate
+/// compute-014). This is the dx-stable port a single-cell [`PortSpec`]
+/// cannot approximate on a multi-cell substrate; a naive series stack of
+/// single-cell ports was measured worse and rejected (ADR-0187).
+/// **CPU-only**: an explicit `backend: "gpu"` job with aperture ports
+/// fails with an error event; `auto` falls back to CPU.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AperturePortSpec {
+    /// Port-plane x-index shared by every aperture cell.
+    pub i: usize,
+    /// Width band start (inclusive), `E_z` y-index.
+    pub j_lo: usize,
+    /// Width band end (exclusive).
+    pub j_hi: usize,
+    /// Substrate column height in cells: `E_z` edges `k = 0 .. k_top`
+    /// (ground at `k = 0`, trace at `k_top`).
+    pub k_top: usize,
+    /// Aggregate branch resistance (Ohm).
+    pub resistance_ohm: f64,
+    /// Peak EMF (V); `0.0` = passive matched load.
+    pub v0: f64,
+    /// Carrier (Hz).
+    pub f0_hz: f64,
+    /// FWHM bandwidth (Hz).
+    pub bw_hz: f64,
+    /// Pulse centre, in steps.
+    pub t0_steps: usize,
+}
+
 /// Field-slice request: one z-plane of a component, returned with the
 /// result for visualization (S.3).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -260,6 +294,10 @@ pub struct JobSpec {
     pub sources: Vec<SourceSpec>,
     /// Resistive ports.
     pub ports: Vec<PortSpec>,
+    /// Multi-cell aperture ports (S.10; CPU-only — `gpu` errors, `auto`
+    /// falls back to CPU).
+    #[serde(default)]
+    pub aperture_ports: Vec<AperturePortSpec>,
     /// Probes (recorded every step).
     pub probes: Vec<ProbeSpec>,
     /// Optional final-field slice to return for visualization.
@@ -368,7 +406,7 @@ pub fn submit(spec: JobSpec) -> JobHandle {
     JobHandle { events: rx, cancel }
 }
 
-fn build_drive(spec: &JobSpec, dt: f64) -> Result<Drive, String> {
+fn build_drive(spec: &JobSpec, fdtd_spec: &FdtdSpec, dt: f64) -> Result<Drive, String> {
     let mut drive = Drive::default();
     for s in &spec.sources {
         match *s {
@@ -395,6 +433,45 @@ fn build_drive(spec: &JobSpec, dt: f64) -> Result<Drive, String> {
                 f0: p.f0_hz,
                 bw: p.bw_hz,
                 t0_steps: p.t0_steps,
+            },
+        });
+    }
+    let ez_dims = fdtd_spec.ez_dims();
+    for (n, a) in spec.aperture_ports.iter().enumerate() {
+        if a.j_hi <= a.j_lo || a.k_top == 0 {
+            return Err(format!(
+                "aperture_ports[{n}]: empty aperture (j band [{}, {}), k_top {})",
+                a.j_lo, a.j_hi, a.k_top
+            ));
+        }
+        if a.i >= ez_dims.0 || a.j_hi > ez_dims.1 || a.k_top > ez_dims.2 {
+            return Err(format!(
+                "aperture_ports[{n}]: outside the E_z grid {ez_dims:?}"
+            ));
+        }
+        if !(a.resistance_ohm > 0.0 && a.resistance_ohm.is_finite()) {
+            return Err(format!(
+                "aperture_ports[{n}]: resistance must be positive and finite (got {})",
+                a.resistance_ohm
+            ));
+        }
+        let cells: Vec<(usize, usize, usize)> = (a.j_lo..a.j_hi)
+            .flat_map(|j| (0..a.k_top).map(move |k| (a.i, j, k)))
+            .collect();
+        let n_columns = a.j_hi - a.j_lo;
+        let height = a.k_top as f64 * fdtd_spec.dz;
+        let area = n_columns as f64 * fdtd_spec.dy * height;
+        drive.aperture_ports.push(AperturePort {
+            cells,
+            n_columns,
+            area,
+            height,
+            resistance: a.resistance_ohm,
+            waveform: Waveform::GaussianPulse {
+                v0: a.v0,
+                f0: a.f0_hz,
+                bw: a.bw_hz,
+                t0_steps: a.t0_steps,
             },
         });
     }
@@ -486,7 +563,7 @@ fn run_job(mut spec: JobSpec, tx: &Sender<JobEvent>, cancel: &AtomicBool) {
             Boundary::Cpml(CpmlConfig::for_spec(&fdtd_spec, npml).with_axes(axes))
         }
     };
-    let drive = match build_drive(&spec, fdtd_spec.dt) {
+    let drive = match build_drive(&spec, &fdtd_spec, fdtd_spec.dt) {
         Ok(d) => d,
         Err(message) => {
             let _ = tx.send(JobEvent::Error { message });
@@ -553,8 +630,9 @@ fn run_job(mut spec: JobSpec, tx: &Sender<JobEvent>, cancel: &AtomicBool) {
                 }
                 return;
             }
-            Err(yee_compute::ComputeError::NoAdapter)
-                if matches!(spec.backend, BackendChoice::Auto) => {} // fall through to CPU
+            Err(
+                yee_compute::ComputeError::NoAdapter | yee_compute::ComputeError::Unsupported(_),
+            ) if matches!(spec.backend, BackendChoice::Auto) => {} // fall through to CPU
             Err(e) => {
                 let _ = tx.send(JobEvent::Error {
                     message: e.to_string(),
@@ -622,6 +700,7 @@ mod tests {
                 sigma_steps: 3.0,
             }],
             ports: vec![],
+            aperture_ports: vec![],
             probes: vec![ProbeSpec {
                 component: "ez".into(),
                 cell: (8, 6, 6),
@@ -754,7 +833,7 @@ mod tests {
             .unwrap()
             .into_materials(&fdtd_spec)
             .unwrap();
-        let drive = build_drive(&spec, fdtd_spec.dt).unwrap();
+        let drive = build_drive(&spec, &fdtd_spec, fdtd_spec.dt).unwrap();
         let mut direct = CpuFdtd::with_drive(
             fdtd_spec,
             Fields::zero(&fdtd_spec),

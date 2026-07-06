@@ -53,6 +53,9 @@ pub struct CpuFdtd {
     drive: Drive,
     /// `e_z_prev` per resistive port (`LumpedRlcPort::e_z_prev` equivalent).
     port_state: Vec<f64>,
+    /// Cached modal terminal voltage `V_T^n` per aperture port
+    /// (`LumpedRlcPort::e_z_prev` in the aperture sense).
+    aperture_state: Vec<f64>,
     /// Recorded probe series, one inner `Vec` per [`Drive::probes`] entry.
     probe_series: Vec<Vec<f64>>,
 }
@@ -113,6 +116,7 @@ impl CpuFdtd {
             Boundary::Cpml(config) => (Some(CpuCpmlState::new(&spec, config)), false),
         };
         let port_state = vec![0.0; drive.ports.len()];
+        let aperture_state = vec![0.0; drive.aperture_ports.len()];
         let probe_series = vec![Vec::new(); drive.probes.len()];
         Self {
             spec,
@@ -124,6 +128,7 @@ impl CpuFdtd {
             dispersive: None,
             drive,
             port_state,
+            aperture_state,
             probe_series,
         }
     }
@@ -200,6 +205,44 @@ impl CpuFdtd {
                     let e1 = (e1_star - alpha * e0 + gamma * v_src) / (1.0 + alpha);
                     self.fields.ez[flat] = e1;
                     *e_z_prev = e1;
+                }
+            }
+            if !self.drive.aperture_ports.is_empty() {
+                // Verbatim `LumpedRlcPort::correct_e_aperture` (pure-R arm):
+                // modal V = ∫E_z·dz averaged over the width columns, aggregate
+                // branch current with β = dt·h/(2·ε₀·A), sheet-current
+                // back-action referenced to the physical area A.
+                let s = self.spec;
+                let dz = s.dz;
+                for (port, v_prev) in self
+                    .drive
+                    .aperture_ports
+                    .iter()
+                    .zip(&mut self.aperture_state)
+                {
+                    let v_src = port.waveform.value(n_step, dt);
+                    let n_col = port.n_columns as f64;
+                    let mut v_sum = 0.0;
+                    for &cell in &port.cells {
+                        v_sum += self.fields.ez[EComponent::Ez.flat(&s, cell)] * dz;
+                    }
+                    let v_term_star = v_sum / n_col;
+                    let v_term_mid = 0.5 * (v_term_star + *v_prev);
+                    let beta = dt * port.height / (2.0 * EPS0 * port.area);
+                    let i_branch = if port.resistance.is_infinite() {
+                        0.0
+                    } else {
+                        (v_term_mid - v_src) / (port.resistance + beta)
+                    };
+                    let back = (dt / (EPS0 * port.area)) * i_branch;
+                    for &cell in &port.cells {
+                        self.fields.ez[EComponent::Ez.flat(&s, cell)] -= back;
+                    }
+                    let mut v_sum_post = 0.0;
+                    for &cell in &port.cells {
+                        v_sum_post += self.fields.ez[EComponent::Ez.flat(&s, cell)] * dz;
+                    }
+                    *v_prev = v_sum_post / n_col;
                 }
             }
             self.step += 1;

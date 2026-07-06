@@ -74,6 +74,7 @@ fn gpu_accumulated_ntff_recovers_dipole_pattern() {
             },
         }],
         ports: vec![],
+        aperture_ports: vec![],
         probes: vec![],
     };
     let boundary = Boundary::Cpml(CpmlConfig::for_spec(&spec, NPML));

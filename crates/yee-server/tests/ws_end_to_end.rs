@@ -23,6 +23,7 @@ fn cavity_spec() -> JobSpec {
             sigma_steps: 3.0,
         }],
         ports: vec![],
+        aperture_ports: vec![],
         probes: vec![ProbeSpec {
             component: "ez".into(),
             cell: (8, 6, 6),

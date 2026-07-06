@@ -50,7 +50,7 @@ mod gpu;
 
 pub use cpu::CpuFdtd;
 pub use dispersive::{DispersiveMap, DispersiveMaterial};
-pub use drive::{Drive, EComponent, Probe, ResistivePort, SoftSource, Waveform};
+pub use drive::{AperturePort, Drive, EComponent, Probe, ResistivePort, SoftSource, Waveform};
 pub use engine::FdtdEngine;
 pub use error::ComputeError;
 pub use fields::Fields;

@@ -246,6 +246,14 @@ impl GpuFdtd {
         assert_eq!(fields.hz.len(), field_lens[5], "hz length mismatch");
         materials.validate(&spec);
         drive.validate(&spec);
+        if !drive.aperture_ports.is_empty() {
+            // The aperture-port modal solve (S.10) is CPU-only for now: it
+            // needs a per-port column reduction each step, which does not
+            // fit the current per-cell apply_ports kernel.
+            return Err(ComputeError::Unsupported(
+                "aperture ports are CPU-only (S.10, ADR-0187)",
+            ));
+        }
         assert!(
             drive.is_empty() || max_steps > 0,
             "GpuFdtd::with_drive: a non-empty drive needs max_steps > 0"

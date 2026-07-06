@@ -143,6 +143,34 @@ pub struct ResistivePort {
     pub waveform: Waveform,
 }
 
+/// Multi-cell **aperture** resistive port (S.10, ADR-0187) — a verbatim
+/// port of the pure-R arm of `yee_fdtd::LumpedRlcPort::aperture` /
+/// `correct_e_aperture` (Phase 2.fdtd.6.9, ADR-0125): one aggregate R
+/// branch bridging the modal port face. The branch voltage is the modal
+/// `V = ∫E_z·dz` over the full substrate height averaged across the width
+/// columns, the semi-implicit two-way solve uses the aperture back-action
+/// impedance `β = dt·h/(2·ε₀·A)`, and the branch current is distributed
+/// back onto every aperture cell as a sheet current referenced to the
+/// **physical** area `A` — the dx-stable lumped port a single-cell
+/// [`ResistivePort`] cannot approximate on a multi-cell substrate.
+#[derive(Debug, Clone)]
+pub struct AperturePort {
+    /// The `E_z` cells `(i, j, k)` spanning the `(y, z)` aperture face
+    /// (trace width × substrate height), all sharing the port-plane `i`.
+    pub cells: Vec<(usize, usize, usize)>,
+    /// Number of width-direction (`y`) columns; the modal voltage averages
+    /// the per-column height integral over these.
+    pub n_columns: usize,
+    /// Physical aperture area `A = w·h` (m²).
+    pub area: f64,
+    /// Physical substrate height `h` (m) the modal voltage integrates over.
+    pub height: f64,
+    /// Aggregate branch resistance (Ω); `f64::INFINITY` = open.
+    pub resistance: f64,
+    /// Series EMF waveform (`v0 = 0` for a passive matched load).
+    pub waveform: Waveform,
+}
+
 /// Per-step field sample recorded after each full step.
 #[derive(Debug, Clone, Copy)]
 pub struct Probe {
@@ -159,6 +187,10 @@ pub struct Drive {
     pub soft_sources: Vec<SoftSource>,
     /// Resistive drive ports (applied after the E boundary phase).
     pub ports: Vec<ResistivePort>,
+    /// Multi-cell aperture ports (applied after the single-cell ports;
+    /// CPU backend only — the GPU backend rejects a drive that carries
+    /// any, see `ComputeError::Unsupported`).
+    pub aperture_ports: Vec<AperturePort>,
     /// Probes recorded once per step, in order, after the ports.
     pub probes: Vec<Probe>,
 }
@@ -177,6 +209,28 @@ impl Drive {
             );
             let _ = EComponent::Ez.flat(spec, p.cell);
         }
+        for p in &self.aperture_ports {
+            assert!(
+                (p.resistance > 0.0 && p.resistance.is_finite()) || p.resistance.is_infinite(),
+                "AperturePort: resistance must be positive (got {}); use f64::INFINITY for open",
+                p.resistance
+            );
+            assert!(!p.cells.is_empty(), "AperturePort: no cells");
+            assert!(p.n_columns >= 1, "AperturePort: n_columns must be >= 1");
+            assert!(
+                p.area.is_finite() && p.area > 0.0,
+                "AperturePort: area must be finite and positive (got {})",
+                p.area
+            );
+            assert!(
+                p.height.is_finite() && p.height > 0.0,
+                "AperturePort: height must be finite and positive (got {})",
+                p.height
+            );
+            for &cell in &p.cells {
+                let _ = EComponent::Ez.flat(spec, cell);
+            }
+        }
         for p in &self.probes {
             let _ = p.component.flat(spec, p.cell);
         }
@@ -184,6 +238,9 @@ impl Drive {
 
     /// True when there is nothing to inject, correct, or record.
     pub(crate) fn is_empty(&self) -> bool {
-        self.soft_sources.is_empty() && self.ports.is_empty() && self.probes.is_empty()
+        self.soft_sources.is_empty()
+            && self.ports.is_empty()
+            && self.aperture_ports.is_empty()
+            && self.probes.is_empty()
     }
 }
