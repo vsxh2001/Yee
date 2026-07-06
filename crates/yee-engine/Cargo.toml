@@ -21,6 +21,13 @@ serde       = { workspace = true }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }
 
+[dev-dependencies]
+# engine-verify-001 (S.5) voxelizes the fdtd-line-eeff-001 microstrip
+# layout and reuses its analytic Hammerstad-Jensen eps_eff reference —
+# the same pairing as yee-compute's compute-008 gate.
+yee-voxel  = { path = "../yee-voxel", version = "0.0.0" }
+yee-layout = { workspace = true }
+
 [lints.rust]
 unsafe_code  = "forbid"
 missing_docs = "warn"

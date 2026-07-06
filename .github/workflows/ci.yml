@@ -207,7 +207,7 @@ jobs:
         run: cargo check
 
   compute-engine-gates:
-    name: Compute engine gates (yee-compute, release)
+    name: Compute engine gates (yee-compute + yee-engine, release)
     runs-on: ubuntu-latest
     # No `needs: lint-test` — same rationale as fdtd-coupling-gate. Runs the
     # `#[ignore]`'d yee-compute gates (ADR-0175..0177): compute-006 cavity
@@ -216,7 +216,9 @@ jobs:
     # NTFF dipole vs the analytic sin θ pattern. GPU-dependent gates
     # self-skip on the GPU-less runner and bite on the GPU nightly instead;
     # the fast non-ignored gates (compute-001..005, 007) already run in the
-    # workspace lint-test job.
+    # workspace lint-test job. Also runs the yee-engine S.5 gate
+    # engine-verify-001 (ADR-0182): the same line-eeff scenario expressed as
+    # a JobSpec and run through the submit()/JobEvent job protocol.
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -231,6 +233,9 @@ jobs:
 
       - name: yee-compute gates (release, include-ignored)
         run: cargo test -p yee-compute --release -- --include-ignored --nocapture
+
+      - name: yee-engine gates incl. engine-verify-001 (release, include-ignored)
+        run: cargo test -p yee-engine --release -- --include-ignored --nocapture
 
   fdtd-coupling-gate:
     name: FDTD propagation ε_eff gate (fdtd-line-eeff, release)

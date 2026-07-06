@@ -7771,6 +7771,8 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "yee-compute",
+ "yee-layout",
+ "yee-voxel",
 ]
 
 [[package]]

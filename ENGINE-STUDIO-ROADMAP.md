@@ -45,13 +45,23 @@ wgpu (revisit after E.4 with data).
 | **S.3** | Visualization walking skeleton: engine `slice` option (final E-plane in `JobResult`) → canvas heatmap + single-bin-DFT spectrum plot in the studio; `studio-build` CI job (typecheck + vite + vitest + Tauri cargo check) | vitest gates: DFT recovers a **known sinusoid** to one bin; color-map extremes; DOM smoke renders of both views (7 tests) | **SKELETON SHIPPED** (ADR-0180) |
 | **S.3b** | three.js 3-D field surface: height-mapped vertex-colored mesh + orbit controls, lazy-chunked (initial bundle stays 49.4 kB gz; three rides a 133 kB on-demand chunk); WebGL fallback | geometry is a pure function gated against hand-computable values; the fallback path DOM-renders under jsdom (11 vitest tests total) | **SHIPPED** (ADR-0181) |
 | **S.4** | Parity audit done (ADR-0181 capability table): the studios serve disjoint roles — Dioxus = shipped filter designer, Tauri = engine studio. Freeze stands; retirement re-decided when the filter flow consumes engine jobs (the defined convergence path via `yee-server`) | audit table + decision recorded | **AUDITED** (ADR-0181; retirement deferred) |
+| **S.5** | Engine-powered verify, walking skeleton: `JobSpec` gains per-cell materials + interior PEC masks (`MaterialsSpec`) and an explicit `dt_s` (both `#[serde(default)]` — the protocol stays backward-compatible), validated at submission (`Error` events, no worker panics); voxelized layouts now run over the S.0/S.1 protocol on both backends | `engine-verify-001` (`#[ignore]`, release CI): the fdtd-line-eeff-001 FR-4 microstrip expressed **as a `JobSpec`** through `submit()`/events → ε_eff vs **Hammerstad–Jensen** ≤ 15 %; fast gates: serde round-trip + legacy specs, heterogeneous job **bit-exact** vs direct `CpuFdtd`, 4 malformed-spec error paths | **SHIPPED** (ADR-0182) |
 
 Standing decision during S.*: **`yee-studio-web` (Dioxus) is feature-frozen but stays deployed**
 until S.4 concludes (ADR-0175). `yee-gui` (egui EM-analysis shell) is unaffected by this track.
 
 ---
 
-*Last updated: 2026-07-06 (later) — engine track COMPLETE through E.5 (ADR-0179): E.4 closed
+*Last updated: 2026-07-06 (latest) — S.5 SHIPPED (ADR-0182): per-cell materials + PEC masks
++ explicit dt on the job protocol (`MaterialsSpec`/`dt_s`, serde-defaulted, validated at
+submission with Error events instead of worker panics); gate `engine-verify-001` runs the
+fdtd-line-eeff-001 FR-4 microstrip **as a JobSpec** through `submit()`/events and recovers
+ε_eff to **0.132 %** of Hammerstad–Jensen (identical to compute-008 — the protocol adds no
+physics), plus a bit-exact heterogeneous-job parity gate vs direct `CpuFdtd`. Voxelized
+layouts now run over the S.0/S.1 protocol from any client; the F1.3 filter verify gate can
+be built directly on it. Remaining candidates: S-parameter extraction on the engine,
+live-streamed visualization over WS, real-GPU perf numbers from the nightly.
+Earlier same day — engine track COMPLETE through E.5 (ADR-0179): E.4 closed
 (row-sliced kernels), E.5b shipped (on-GPU NTFF accumulation, 315.4 dB / 2.9e-7 cross-backend),
 E.5c shipped (dispersive ADE, bit-exact CPU + differential GPU gate). Python bindings
 `yee.compute` shipped (ADR-0178). Studio track underway: S.0 `yee-engine` job API SHIPPED,

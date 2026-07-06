@@ -225,3 +225,4 @@
 - [ADR-0179: engine tickets closed (E.4/E.5b/E.5c) + S.0 job API + Tauri/React studio skeleton](decisions/0179-engine-close-s0-tauri-studio.md)
 - [ADR-0180: S.1 `yee-server` (WebSocket job API) + S.3 visualization walking skeleton](decisions/0180-s1-yee-server-s3-visualization.md)
 - [ADR-0181: S.3b 3-D field surface + S.4 Dioxus parity audit (retirement deferred)](decisions/0181-s3b-surface3d-s4-parity-audit.md)
+- [ADR-0182: S.5 engine-powered verify — materials on the job protocol](decisions/0182-s5-engine-filter-verify.md)
