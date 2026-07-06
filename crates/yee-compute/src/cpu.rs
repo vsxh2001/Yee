@@ -18,6 +18,7 @@ use rayon::prelude::*;
 use yee_core::units::{EPS0, MU0};
 
 use crate::cpml::CpuCpmlState;
+use crate::dispersive::{CpuDispersiveState, DispersiveMap};
 use crate::drive::{Drive, EComponent};
 use crate::fields::Fields;
 use crate::materials::{Boundary, Materials};
@@ -33,6 +34,12 @@ fn ca_cb(eps_r: f64, sigma: f64, dt: f64) -> (f64, f64) {
     (ca, cb)
 }
 
+/// Fixed-length row view into a flat field buffer (E.4 row-sliced kernels).
+#[inline]
+fn row(buf: &[f64], lo: usize, len: usize) -> &[f64] {
+    &buf[lo..lo + len]
+}
+
 /// Multi-threaded FP64 FDTD stepper.
 #[derive(Debug, Clone)]
 pub struct CpuFdtd {
@@ -42,6 +49,7 @@ pub struct CpuFdtd {
     cpml: Option<CpuCpmlState>,
     pec_box: bool,
     step: u64,
+    dispersive: Option<(DispersiveMap, CpuDispersiveState)>,
     drive: Drive,
     /// `e_z_prev` per resistive port (`LumpedRlcPort::e_z_prev` equivalent).
     port_state: Vec<f64>,
@@ -113,10 +121,30 @@ impl CpuFdtd {
             cpml,
             pec_box,
             step: 0,
+            dispersive: None,
             drive,
             port_state,
             probe_series,
         }
+    }
+
+    /// Attach an ADE dispersive-material map (E.5c). Replaces the standard
+    /// E half-step with the fused ADE update (`yee_fdtd::dispersive`
+    /// semantics: the non-dispersive per-cell ε/σ arms do not apply — the
+    /// vacuum ADE arm assumes ε_r = 1 like the reference).
+    ///
+    /// # Panics
+    ///
+    /// Panics if per-cell ε/σ maps are also attached, or on a length
+    /// mismatch.
+    pub fn set_dispersive(&mut self, map: DispersiveMap) {
+        assert!(
+            self.materials.eps_r_cells.is_none() && self.materials.sigma_cells.is_none(),
+            "dispersive map is exclusive with per-cell eps/sigma (reference semantics)"
+        );
+        map.validate(&self.spec);
+        let state = CpuDispersiveState::new(&self.spec);
+        self.dispersive = Some((map, state));
     }
 
     /// The problem description this stepper was built from.
@@ -150,7 +178,13 @@ impl CpuFdtd {
                     field[flat] += src.waveform.value(n_step, dt);
                 }
             }
-            self.update_e();
+            match self.dispersive.take() {
+                None => self.update_e(),
+                Some((map, mut state)) => {
+                    state.update_e(&self.spec, &mut self.fields, &map);
+                    self.dispersive = Some((map, state));
+                }
+            }
             self.boundary_e();
             if !self.drive.ports.is_empty() {
                 // Verbatim `LumpedRlcPort::{correct_e, update_pure_resistor}`.
@@ -286,19 +320,37 @@ impl CpuFdtd {
             hz,
         } = &mut self.fields;
 
+        // Row-sliced inner loops (E.4): fixed-length row slices let LLVM
+        // elide bounds checks and vectorize; the material branch is hoisted
+        // to row level. Per-cell arithmetic is unchanged — bit-exactness is
+        // enforced by compute-001/003/007.
+
         // ---- H_x: shape [nx+1, ny, nz], full extent ----
         hx.par_chunks_mut(hxd.1 * hxd.2)
             .enumerate()
             .for_each(|(i, slab)| {
                 for j in 0..s.ny {
-                    for k in 0..s.nz {
-                        let dey_dz = (ey[idx3(eyd, i, j, k + 1)] - ey[idx3(eyd, i, j, k)]) / s.dz;
-                        let dez_dy = (ez[idx3(ezd, i, j + 1, k)] - ez[idx3(ezd, i, j, k)]) / s.dy;
-                        let coeff = match mu_r_cells {
-                            None => coeff_scalar,
-                            Some(m) => s.dt / (MU0 * m[idx3(celld, i, j, k)]),
-                        };
-                        slab[j * hxd.2 + k] += coeff * (dey_dz - dez_dy);
+                    let hx_row = &mut slab[j * hxd.2..(j + 1) * hxd.2];
+                    let ey_row = row(ey, idx3(eyd, i, j, 0), s.nz + 1);
+                    let ez_row0 = row(ez, idx3(ezd, i, j, 0), s.nz);
+                    let ez_row1 = row(ez, idx3(ezd, i, j + 1, 0), s.nz);
+                    match mu_r_cells {
+                        None => {
+                            for k in 0..s.nz {
+                                let dey_dz = (ey_row[k + 1] - ey_row[k]) / s.dz;
+                                let dez_dy = (ez_row1[k] - ez_row0[k]) / s.dy;
+                                hx_row[k] += coeff_scalar * (dey_dz - dez_dy);
+                            }
+                        }
+                        Some(m) => {
+                            let m_row = row(m, idx3(celld, i, j, 0), s.nz);
+                            for k in 0..s.nz {
+                                let dey_dz = (ey_row[k + 1] - ey_row[k]) / s.dz;
+                                let dez_dy = (ez_row1[k] - ez_row0[k]) / s.dy;
+                                let coeff = s.dt / (MU0 * m_row[k]);
+                                hx_row[k] += coeff * (dey_dz - dez_dy);
+                            }
+                        }
                     }
                 }
             });
@@ -308,14 +360,27 @@ impl CpuFdtd {
             .enumerate()
             .for_each(|(i, slab)| {
                 for j in 0..=s.ny {
-                    for k in 0..s.nz {
-                        let dez_dx = (ez[idx3(ezd, i + 1, j, k)] - ez[idx3(ezd, i, j, k)]) / s.dx;
-                        let dex_dz = (ex[idx3(exd, i, j, k + 1)] - ex[idx3(exd, i, j, k)]) / s.dz;
-                        let coeff = match mu_r_cells {
-                            None => coeff_scalar,
-                            Some(m) => s.dt / (MU0 * m[idx3(celld, i, j, k)]),
-                        };
-                        slab[j * hyd.2 + k] += coeff * (dez_dx - dex_dz);
+                    let hy_row = &mut slab[j * hyd.2..(j + 1) * hyd.2];
+                    let ez_row0 = row(ez, idx3(ezd, i, j, 0), s.nz);
+                    let ez_row1 = row(ez, idx3(ezd, i + 1, j, 0), s.nz);
+                    let ex_row = row(ex, idx3(exd, i, j, 0), s.nz + 1);
+                    match mu_r_cells {
+                        None => {
+                            for k in 0..s.nz {
+                                let dez_dx = (ez_row1[k] - ez_row0[k]) / s.dx;
+                                let dex_dz = (ex_row[k + 1] - ex_row[k]) / s.dz;
+                                hy_row[k] += coeff_scalar * (dez_dx - dex_dz);
+                            }
+                        }
+                        Some(m) => {
+                            let m_row = row(m, idx3(celld, i, j, 0), s.nz);
+                            for k in 0..s.nz {
+                                let dez_dx = (ez_row1[k] - ez_row0[k]) / s.dx;
+                                let dex_dz = (ex_row[k + 1] - ex_row[k]) / s.dz;
+                                let coeff = s.dt / (MU0 * m_row[k]);
+                                hy_row[k] += coeff * (dez_dx - dex_dz);
+                            }
+                        }
                     }
                 }
             });
@@ -325,14 +390,28 @@ impl CpuFdtd {
             .enumerate()
             .for_each(|(i, slab)| {
                 for j in 0..s.ny {
-                    for k in 0..=s.nz {
-                        let dex_dy = (ex[idx3(exd, i, j + 1, k)] - ex[idx3(exd, i, j, k)]) / s.dy;
-                        let dey_dx = (ey[idx3(eyd, i + 1, j, k)] - ey[idx3(eyd, i, j, k)]) / s.dx;
-                        let coeff = match mu_r_cells {
-                            None => coeff_scalar,
-                            Some(m) => s.dt / (MU0 * m[idx3(celld, i, j, k)]),
-                        };
-                        slab[j * hzd.2 + k] += coeff * (dex_dy - dey_dx);
+                    let hz_row = &mut slab[j * hzd.2..(j + 1) * hzd.2];
+                    let ex_row0 = row(ex, idx3(exd, i, j, 0), s.nz + 1);
+                    let ex_row1 = row(ex, idx3(exd, i, j + 1, 0), s.nz + 1);
+                    let ey_row0 = row(ey, idx3(eyd, i, j, 0), s.nz + 1);
+                    let ey_row1 = row(ey, idx3(eyd, i + 1, j, 0), s.nz + 1);
+                    match mu_r_cells {
+                        None => {
+                            for k in 0..=s.nz {
+                                let dex_dy = (ex_row1[k] - ex_row0[k]) / s.dy;
+                                let dey_dx = (ey_row1[k] - ey_row0[k]) / s.dx;
+                                hz_row[k] += coeff_scalar * (dex_dy - dey_dx);
+                            }
+                        }
+                        Some(m) => {
+                            let m_row = row(m, idx3(celld, i, j, 0), s.nz + 1);
+                            for k in 0..=s.nz {
+                                let dex_dy = (ex_row1[k] - ex_row0[k]) / s.dy;
+                                let dey_dx = (ey_row1[k] - ey_row0[k]) / s.dx;
+                                let coeff = s.dt / (MU0 * m_row[k]);
+                                hz_row[k] += coeff * (dex_dy - dey_dx);
+                            }
+                        }
                     }
                 }
             });
@@ -359,26 +438,43 @@ impl CpuFdtd {
             hz,
         } = &mut self.fields;
 
-        // Per-cell E update body, shared by the three components. `e` is the
-        // target cell, `curl_h` its curl term — the match structure and
-        // operation order are the reference's, verbatim.
-        let update_cell = |e: &mut f64, curl_h: f64, cell: usize| match sigma_cells {
-            None => {
-                let coeff = match eps_r_cells {
-                    None => coeff_scalar,
-                    Some(eps) => s.dt / (EPS0 * eps[cell]),
-                };
-                *e += coeff * curl_h;
-            }
-            Some(sig) => {
-                let eps_r = match eps_r_cells {
-                    None => s.eps_r,
-                    Some(eps) => eps[cell],
-                };
-                let (ca, cb) = ca_cb(eps_r, sig[cell], s.dt);
-                *e = ca * *e + cb * curl_h;
-            }
-        };
+        // Row-sliced inner loops with the (σ, ε) material match hoisted to
+        // row level (E.4). Per-cell arithmetic and operation order are the
+        // reference's, verbatim — the four arms below are the flattening of
+        // the reference's nested per-cell match.
+        macro_rules! e_rows {
+            ($e_row:ident, $curl:ident, $cell_lo:expr, $range:expr) => {{
+                match (sigma_cells, eps_r_cells) {
+                    (None, None) => {
+                        for k in $range {
+                            $e_row[k] += coeff_scalar * $curl(k);
+                        }
+                    }
+                    (None, Some(eps)) => {
+                        let eps_row = row(eps, $cell_lo, celld.2);
+                        for k in $range {
+                            let coeff = s.dt / (EPS0 * eps_row[k]);
+                            $e_row[k] += coeff * $curl(k);
+                        }
+                    }
+                    (Some(sig), None) => {
+                        let sig_row = row(sig, $cell_lo, celld.2);
+                        for k in $range {
+                            let (ca, cb) = ca_cb(s.eps_r, sig_row[k], s.dt);
+                            $e_row[k] = ca * $e_row[k] + cb * $curl(k);
+                        }
+                    }
+                    (Some(sig), Some(eps)) => {
+                        let sig_row = row(sig, $cell_lo, celld.2);
+                        let eps_row = row(eps, $cell_lo, celld.2);
+                        for k in $range {
+                            let (ca, cb) = ca_cb(eps_row[k], sig_row[k], s.dt);
+                            $e_row[k] = ca * $e_row[k] + cb * $curl(k);
+                        }
+                    }
+                }
+            }};
+        }
 
         // ---- E_x: shape [nx, ny+1, nz+1]; interior j ∈ [1, ny), k ∈ [1, nz) ----
         // Outer tangential faces are managed by the boundary phase.
@@ -386,15 +482,16 @@ impl CpuFdtd {
             .enumerate()
             .for_each(|(i, slab)| {
                 for j in 1..s.ny {
-                    for k in 1..s.nz {
-                        let dhz_dy = (hz[idx3(hzd, i, j, k)] - hz[idx3(hzd, i, j - 1, k)]) / s.dy;
-                        let dhy_dz = (hy[idx3(hyd, i, j, k)] - hy[idx3(hyd, i, j, k - 1)]) / s.dz;
-                        update_cell(
-                            &mut slab[j * exd.2 + k],
-                            dhz_dy - dhy_dz,
-                            idx3(celld, i, j, k),
-                        );
-                    }
+                    let ex_row = &mut slab[j * exd.2..(j + 1) * exd.2];
+                    let hz_row0 = row(hz, idx3(hzd, i, j - 1, 0), s.nz + 1);
+                    let hz_row1 = row(hz, idx3(hzd, i, j, 0), s.nz + 1);
+                    let hy_row = row(hy, idx3(hyd, i, j, 0), s.nz);
+                    let curl = |k: usize| {
+                        let dhz_dy = (hz_row1[k] - hz_row0[k]) / s.dy;
+                        let dhy_dz = (hy_row[k] - hy_row[k - 1]) / s.dz;
+                        dhz_dy - dhy_dz
+                    };
+                    e_rows!(ex_row, curl, idx3(celld, i, j, 0), 1..s.nz);
                 }
             });
 
@@ -406,15 +503,16 @@ impl CpuFdtd {
                     return;
                 }
                 for j in 0..s.ny {
-                    for k in 1..s.nz {
-                        let dhx_dz = (hx[idx3(hxd, i, j, k)] - hx[idx3(hxd, i, j, k - 1)]) / s.dz;
-                        let dhz_dx = (hz[idx3(hzd, i, j, k)] - hz[idx3(hzd, i - 1, j, k)]) / s.dx;
-                        update_cell(
-                            &mut slab[j * eyd.2 + k],
-                            dhx_dz - dhz_dx,
-                            idx3(celld, i, j, k),
-                        );
-                    }
+                    let ey_row = &mut slab[j * eyd.2..(j + 1) * eyd.2];
+                    let hx_row = row(hx, idx3(hxd, i, j, 0), s.nz);
+                    let hz_row0 = row(hz, idx3(hzd, i - 1, j, 0), s.nz + 1);
+                    let hz_row1 = row(hz, idx3(hzd, i, j, 0), s.nz + 1);
+                    let curl = |k: usize| {
+                        let dhx_dz = (hx_row[k] - hx_row[k - 1]) / s.dz;
+                        let dhz_dx = (hz_row1[k] - hz_row0[k]) / s.dx;
+                        dhx_dz - dhz_dx
+                    };
+                    e_rows!(ey_row, curl, idx3(celld, i, j, 0), 1..s.nz);
                 }
             });
 
@@ -426,15 +524,17 @@ impl CpuFdtd {
                     return;
                 }
                 for j in 1..s.ny {
-                    for k in 0..s.nz {
-                        let dhy_dx = (hy[idx3(hyd, i, j, k)] - hy[idx3(hyd, i - 1, j, k)]) / s.dx;
-                        let dhx_dy = (hx[idx3(hxd, i, j, k)] - hx[idx3(hxd, i, j - 1, k)]) / s.dy;
-                        update_cell(
-                            &mut slab[j * ezd.2 + k],
-                            dhy_dx - dhx_dy,
-                            idx3(celld, i, j, k),
-                        );
-                    }
+                    let ez_row = &mut slab[j * ezd.2..(j + 1) * ezd.2];
+                    let hy_row0 = row(hy, idx3(hyd, i - 1, j, 0), s.nz);
+                    let hy_row1 = row(hy, idx3(hyd, i, j, 0), s.nz);
+                    let hx_row0 = row(hx, idx3(hxd, i, j - 1, 0), s.nz);
+                    let hx_row1 = row(hx, idx3(hxd, i, j, 0), s.nz);
+                    let curl = |k: usize| {
+                        let dhy_dx = (hy_row1[k] - hy_row0[k]) / s.dx;
+                        let dhx_dy = (hx_row1[k] - hx_row0[k]) / s.dy;
+                        dhy_dx - dhx_dy
+                    };
+                    e_rows!(ez_row, curl, idx3(celld, i, j, 0), 0..s.nz);
                 }
             });
     }

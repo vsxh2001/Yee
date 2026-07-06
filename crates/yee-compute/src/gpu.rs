@@ -30,6 +30,7 @@ use yee_core::units::{EPS0, MU0};
 
 use crate::cpml::make_profiles;
 use crate::cpu::apply_pec_box;
+use crate::dispersive::{DispersiveMap, ade_coeffs};
 use crate::drive::{Drive, EComponent};
 use crate::error::ComputeError;
 use crate::fields::Fields;
@@ -53,7 +54,7 @@ struct Params {
     axes_mask: u32,
     has_cpml: u32,
     has_mask: u32,
-    _pad0: u32,
+    has_dispersion: u32,
     inv_dx: f32,
     inv_dy: f32,
     inv_dz: f32,
@@ -123,11 +124,62 @@ impl GpuFdtd {
     /// drive with `max_steps == 0`.
     pub fn with_drive(
         spec: FdtdSpec,
+        fields: Fields,
+        materials: Materials,
+        boundary: Boundary,
+        drive: Drive,
+        max_steps: usize,
+    ) -> Result<Self, ComputeError> {
+        Self::build(spec, fields, materials, boundary, drive, max_steps, None)
+    }
+
+    /// Build a dispersive stepper (E.5c): the E half-step runs the unified
+    /// ADE update (coefficients precomputed host-side in f64 into the coeff
+    /// arena; aux state appended to the psi arena). Exclusive with per-cell
+    /// eps/sigma maps and with CPML (the reference dispersive path carries
+    /// neither).
+    ///
+    /// # Panics
+    ///
+    /// Panics on the exclusivity violations above or any shape mismatch.
+    pub fn with_dispersive(
+        spec: FdtdSpec,
+        fields: Fields,
+        materials: Materials,
+        boundary: Boundary,
+        drive: Drive,
+        max_steps: usize,
+        map: &DispersiveMap,
+    ) -> Result<Self, ComputeError> {
+        assert!(
+            materials.eps_r_cells.is_none() && materials.sigma_cells.is_none(),
+            "dispersive map is exclusive with per-cell eps/sigma (reference semantics)"
+        );
+        assert!(
+            !matches!(boundary, Boundary::Cpml(_)),
+            "GPU dispersion is exclusive with CPML in E.5c (use PecBox/None)"
+        );
+        map.validate(&spec);
+        Self::build(
+            spec,
+            fields,
+            materials,
+            boundary,
+            drive,
+            max_steps,
+            Some(map),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        spec: FdtdSpec,
         mut fields: Fields,
         materials: Materials,
         boundary: Boundary,
         drive: Drive,
         max_steps: usize,
+        dispersive: Option<&DispersiveMap>,
     ) -> Result<Self, ComputeError> {
         let field_lens = [
             len3(spec.ex_dims()),
@@ -301,10 +353,25 @@ impl GpuFdtd {
             ce_arr[cell] = (spec.dt / (EPS0 * eps_r)) as f32;
             ch_arr[cell] = (spec.dt / (MU0 * mu_r)) as f32;
         }
+        if let Some(map) = dispersive {
+            // Append the six unified-ADE maps: ce | c0 | c1 | c2 | d_new | d_old.
+            coeffs.reserve(6 * n_cells);
+            let mut push_map = |f: &dyn Fn(crate::dispersive::AdeCoeffs) -> f64| {
+                for cell in 0..n_cells {
+                    coeffs.push(f(ade_coeffs(map.cells[cell], spec.dt)) as f32);
+                }
+            };
+            push_map(&|c| c.ce);
+            push_map(&|c| c.c0);
+            push_map(&|c| c.c1);
+            push_map(&|c| c.c2);
+            push_map(&|c| c.q);
+            push_map(&|c| c.s);
+        }
         let coeff_arena = make_storage_buffer("yee-compute coeffs", &coeffs, false);
 
         // --- ψ arena + profile buffer (dummies when CPML is off) ---
-        let (psi_data, profile_data, npml, axes_mask) = match cpml_config {
+        let (mut psi_data, profile_data, npml, axes_mask) = match cpml_config {
             None => (vec![0.0f32; 1], vec![0.0f32; 1], 0u32, 0u32),
             Some(config) => {
                 let psi_len = 2 * (field_lens[0] + field_lens[1] + field_lens[2])
@@ -328,6 +395,10 @@ impl GpuFdtd {
                 )
             }
         };
+        if dispersive.is_some() {
+            // Six aux1/aux2 maps appended after the CPML block (or dummy).
+            psi_data.extend(std::iter::repeat_n(0.0f32, 6 * n_cells));
+        }
         let psi_arena = make_storage_buffer("yee-compute psi", &psi_data, false);
         let profile_buffer = make_storage_buffer("yee-compute profiles", &profile_data, false);
 
@@ -439,7 +510,7 @@ impl GpuFdtd {
             axes_mask,
             has_cpml: u32::from(cpml_config.is_some()),
             has_mask: u32::from(has_mask),
-            _pad0: 0,
+            has_dispersion: u32::from(dispersive.is_some()),
             inv_dx: (1.0 / spec.dx) as f32,
             inv_dy: (1.0 / spec.dy) as f32,
             inv_dz: (1.0 / spec.dz) as f32,

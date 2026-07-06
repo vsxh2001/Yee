@@ -32,7 +32,7 @@ struct Params {
     axes_mask: u32,
     has_cpml: u32,
     has_mask: u32,
-    _pad0: u32,
+    has_dispersion: u32,
     inv_dx: f32,
     inv_dy: f32,
     inv_dz: f32,
@@ -109,6 +109,43 @@ fn off_psi_hyx() -> u32 { return off_psi_hxz() + len_hx(); }
 fn off_psi_hyz() -> u32 { return off_psi_hyx() + len_hy(); }
 fn off_psi_hzx() -> u32 { return off_psi_hyz() + len_hy(); }
 fn off_psi_hzy() -> u32 { return off_psi_hzx() + len_hz(); }
+
+// ---- ADE dispersion extension (E.5c) ----
+// Coeff arena gains six per-cell maps after ca|cb|ce_cpml|ch:
+//   ce | c0 | c1 | c2 | q | s   (unified ADE form; see dispersive.rs —
+//   E' = E + ce*curl + q*(aux1' + s*aux1); the grouping preserves the
+//   Lorentz/Debye near-cancellation in f32)
+// Psi arena gains six aux maps after the CPML block (or after the 1-element
+// dummy when CPML is off): aux1_x|aux1_y|aux1_z|aux2_x|aux2_y|aux2_z.
+fn ade_ce(c: u32) -> f32 { return coeffs[4u * len_cell() + c]; }
+fn ade_c0(c: u32) -> f32 { return coeffs[5u * len_cell() + c]; }
+fn ade_c1(c: u32) -> f32 { return coeffs[6u * len_cell() + c]; }
+fn ade_c2(c: u32) -> f32 { return coeffs[7u * len_cell() + c]; }
+fn ade_q(c: u32) -> f32 { return coeffs[8u * len_cell() + c]; }
+fn ade_s(c: u32) -> f32 { return coeffs[9u * len_cell() + c]; }
+
+fn psi_cpml_len() -> u32 {
+    return 2u * (len_ex() + len_ey() + len_ez()) + 2u * (len_hx() + len_hy() + len_hz());
+}
+fn disp_aux_base() -> u32 {
+    if (p.has_cpml != 0u) {
+        return psi_cpml_len();
+    }
+    return 1u;
+}
+// comp: 0 = x, 1 = y, 2 = z.
+fn aux1_off(comp: u32) -> u32 { return disp_aux_base() + comp * len_cell(); }
+fn aux2_off(comp: u32) -> u32 { return disp_aux_base() + (3u + comp) * len_cell(); }
+
+// Unified ADE E update: returns the new E and rolls the aux state.
+fn ade_update(comp: u32, cc: u32, e_old: f32, curl: f32) -> f32 {
+    let a1 = psi[aux1_off(comp) + cc];
+    let a2 = psi[aux2_off(comp) + cc];
+    let a_new = ade_c0(cc) * a1 + ade_c1(cc) * a2 + ade_c2(cc) * e_old;
+    psi[aux2_off(comp) + cc] = a1;
+    psi[aux1_off(comp) + cc] = a_new;
+    return e_old + ade_ce(cc) * curl + ade_q(cc) * (a_new + ade_s(cc) * a1);
+}
 
 // ---- CPML profile accessors (b | c | kappa | b_h | c_h | kappa_h) ----
 fn prof_b(d: u32) -> f32 { return profiles[d]; }
@@ -249,6 +286,11 @@ fn update_ex(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dhy_dz = (hy_at(i, j, k) - hy_at(i, j, k - 1u)) * p.inv_dz;
     let cellc = icell(i, j, k);
     let idx = iex(i, j, k);
+    if (p.has_dispersion != 0u) {
+        fields[off_ex() + idx] =
+            ade_update(0u, cellc, fields[off_ex() + idx], dhz_dy - dhy_dz);
+        return;
+    }
     var e = ca_at(cellc) * fields[off_ex() + idx] + cb_at(cellc) * (dhz_dy - dhy_dz);
     if (p.has_cpml != 0u) {
         let ce = ce_cpml_at(cellc);
@@ -283,6 +325,11 @@ fn update_ey(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dhz_dx = (hz_at(i, j, k) - hz_at(i - 1u, j, k)) * p.inv_dx;
     let cellc = icell(i, j, k);
     let idx = iey(i, j, k);
+    if (p.has_dispersion != 0u) {
+        fields[off_ey() + idx] =
+            ade_update(1u, cellc, fields[off_ey() + idx], dhx_dz - dhz_dx);
+        return;
+    }
     var e = ca_at(cellc) * fields[off_ey() + idx] + cb_at(cellc) * (dhx_dz - dhz_dx);
     if (p.has_cpml != 0u) {
         let ce = ce_cpml_at(cellc);
@@ -317,6 +364,11 @@ fn update_ez(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dhx_dy = (hx_at(i, j, k) - hx_at(i, j - 1u, k)) * p.inv_dy;
     let cellc = icell(i, j, k);
     let idx = iez(i, j, k);
+    if (p.has_dispersion != 0u) {
+        fields[off_ez() + idx] =
+            ade_update(2u, cellc, fields[off_ez() + idx], dhy_dx - dhx_dy);
+        return;
+    }
     var e = ca_at(cellc) * fields[off_ez() + idx] + cb_at(cellc) * (dhy_dx - dhx_dy);
     if (p.has_cpml != 0u) {
         let ce = ce_cpml_at(cellc);
