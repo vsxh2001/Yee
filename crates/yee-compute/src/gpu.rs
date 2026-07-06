@@ -58,7 +58,8 @@ struct Params {
     inv_dx: f32,
     inv_dy: f32,
     inv_dz: f32,
-    _pad1: f32,
+    /// ω·Δt for the on-GPU NTFF DFT accumulator (E.5b); 0.0 disables it.
+    dft_omega_dt: f32,
 }
 
 /// GPU FDTD stepper (per-cell materials, CPML or PEC box, interior masks).
@@ -75,7 +76,11 @@ pub struct GpuFdtd {
     /// Drive pipelines: inject_soft, apply_ports, record_probes, bump_step.
     drive_pipelines: [wgpu::ComputePipeline; 4],
     has_mask: bool,
+    dft_enabled: bool,
+    /// accumulate_dft pipeline (E.5b).
+    dft_pipeline: wgpu::ComputePipeline,
     field_arena: wgpu::Buffer,
+    psi_arena: wgpu::Buffer,
     drive_data: wgpu::Buffer,
     drive_counts: (usize, usize, usize), // (n_soft, n_ports, n_probes)
     max_steps: usize,
@@ -130,7 +135,49 @@ impl GpuFdtd {
         drive: Drive,
         max_steps: usize,
     ) -> Result<Self, ComputeError> {
-        Self::build(spec, fields, materials, boundary, drive, max_steps, None)
+        Self::build(
+            spec, fields, materials, boundary, drive, max_steps, None, None,
+        )
+    }
+
+    /// Build a stepper with the on-GPU NTFF DFT accumulator enabled (E.5b):
+    /// after every completed step the six fields are accumulated into a
+    /// running full-field DFT phasor at `f_probe_hz` (phase from the on-GPU
+    /// step counter, so stepping stays fully chunked). Read the phasor pair
+    /// back once with [`GpuFdtd::read_dft_fields`] and feed it to the
+    /// reference `NtffState` via two synthetic samples (its accumulation is
+    /// linear). Requires `max_steps > 0` (the step counter lives in the
+    /// drive buffer).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `f_probe_hz` is non-positive, `max_steps == 0`, or on any
+    /// shape mismatch.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_ntff_dft(
+        spec: FdtdSpec,
+        fields: Fields,
+        materials: Materials,
+        boundary: Boundary,
+        drive: Drive,
+        max_steps: usize,
+        f_probe_hz: f64,
+    ) -> Result<Self, ComputeError> {
+        assert!(
+            f_probe_hz > 0.0 && f_probe_hz.is_finite(),
+            "f_probe_hz must be positive"
+        );
+        assert!(max_steps > 0, "with_ntff_dft needs max_steps > 0");
+        Self::build(
+            spec,
+            fields,
+            materials,
+            boundary,
+            drive,
+            max_steps,
+            None,
+            Some(f_probe_hz),
+        )
     }
 
     /// Build a dispersive stepper (E.5c): the E half-step runs the unified
@@ -168,6 +215,7 @@ impl GpuFdtd {
             drive,
             max_steps,
             Some(map),
+            None,
         )
     }
 
@@ -180,6 +228,7 @@ impl GpuFdtd {
         drive: Drive,
         max_steps: usize,
         dispersive: Option<&DispersiveMap>,
+        dft_f_probe: Option<f64>,
     ) -> Result<Self, ComputeError> {
         let field_lens = [
             len3(spec.ex_dims()),
@@ -299,6 +348,7 @@ impl GpuFdtd {
             make_pipeline("record_probes"),
             make_pipeline("bump_step"),
         ];
+        let dft_pipeline = make_pipeline("accumulate_dft");
 
         let make_storage_buffer = |label: &str, data: &[f32], writable_by_shader: bool| {
             let mut usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
@@ -399,7 +449,12 @@ impl GpuFdtd {
             // Six aux1/aux2 maps appended after the CPML block (or dummy).
             psi_data.extend(std::iter::repeat_n(0.0f32, 6 * n_cells));
         }
-        let psi_arena = make_storage_buffer("yee-compute psi", &psi_data, false);
+        if dft_f_probe.is_some() {
+            // Full-field DFT phasor pair (re | im) after everything else.
+            let total: usize = field_lens.iter().sum();
+            psi_data.extend(std::iter::repeat_n(0.0f32, 2 * total));
+        }
+        let psi_arena = make_storage_buffer("yee-compute psi", &psi_data, true);
         let profile_buffer = make_storage_buffer("yee-compute profiles", &profile_data, false);
 
         // --- mask arena: ex | ey | ez as u32 (dummy when no masks) ---
@@ -514,7 +569,7 @@ impl GpuFdtd {
             inv_dx: (1.0 / spec.dx) as f32,
             inv_dy: (1.0 / spec.dy) as f32,
             inv_dz: (1.0 / spec.dz) as f32,
-            _pad1: 0.0,
+            dft_omega_dt: dft_f_probe.map_or(0.0, |f| (std::f64::consts::TAU * f * spec.dt) as f32),
         };
         let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("yee-compute params"),
@@ -572,7 +627,10 @@ impl GpuFdtd {
             clamp_pipelines,
             drive_pipelines,
             has_mask,
+            dft_enabled: dft_f_probe.is_some(),
+            dft_pipeline,
             field_arena,
+            psi_arena,
             drive_data,
             drive_counts: (n_soft, n_ports, n_probes),
             max_steps,
@@ -609,7 +667,7 @@ impl GpuFdtd {
     /// chunks.
     pub fn step_n(&mut self, n: usize) -> Result<(), ComputeError> {
         let (n_soft, n_ports, n_probes) = self.drive_counts;
-        let has_drive = n_soft + n_ports + n_probes > 0;
+        let has_drive = n_soft + n_ports + n_probes > 0 || self.dft_enabled;
         if has_drive {
             assert!(
                 self.steps_taken + n <= self.max_steps,
@@ -680,6 +738,20 @@ impl GpuFdtd {
                         pass.set_pipeline(&self.drive_pipelines[2]);
                         pass.dispatch_workgroups(lane_groups(n_probes), 1, 1);
                     }
+                    if self.dft_enabled {
+                        let total: usize = [
+                            len3(self.spec.ex_dims()),
+                            len3(self.spec.ey_dims()),
+                            len3(self.spec.ez_dims()),
+                            len3(self.spec.hx_dims()),
+                            len3(self.spec.hy_dims()),
+                            len3(self.spec.hz_dims()),
+                        ]
+                        .iter()
+                        .sum();
+                        pass.set_pipeline(&self.dft_pipeline);
+                        pass.dispatch_workgroups(lane_groups(total), 1, 1);
+                    }
                     if has_drive {
                         pass.set_pipeline(&self.drive_pipelines[3]);
                         pass.dispatch_workgroups(1, 1, 1);
@@ -708,6 +780,57 @@ impl GpuFdtd {
             }
         }
         Ok(series)
+    }
+
+    /// Read back the on-GPU NTFF DFT phasor pair `(Ê_re, Ê_im)` — the
+    /// running full-field DFT at the `with_ntff_dft` probe frequency,
+    /// accumulated as `Σ F·cos(ωt)` / `−Σ F·sin(ωt)` over completed steps
+    /// (no Δt factor; the reference `NtffState` supplies it when the pair
+    /// is fed back through two synthetic samples).
+    ///
+    /// # Panics
+    ///
+    /// Panics unless the stepper was built with [`GpuFdtd::with_ntff_dft`].
+    pub fn read_dft_fields(&mut self) -> Result<(Fields, Fields), ComputeError> {
+        assert!(self.dft_enabled, "read_dft_fields needs with_ntff_dft");
+        let widened = self.read_f32_buffer(&self.psi_arena)?;
+        let total: usize = [
+            len3(self.spec.ex_dims()),
+            len3(self.spec.ey_dims()),
+            len3(self.spec.ez_dims()),
+            len3(self.spec.hx_dims()),
+            len3(self.spec.hy_dims()),
+            len3(self.spec.hz_dims()),
+        ]
+        .iter()
+        .sum();
+        // DFT region sits at the arena tail (after CPML/dispersion blocks).
+        let base = widened.len() - 2 * total;
+        let re = self.split_fields(&widened[base..base + total]);
+        let im = self.split_fields(&widened[base + total..]);
+        Ok((re, im))
+    }
+
+    /// Split a packed ex|ey|ez|hx|hy|hz slice into a [`Fields`].
+    fn split_fields(&self, packed: &[f64]) -> Fields {
+        let lens = [
+            len3(self.spec.ex_dims()),
+            len3(self.spec.ey_dims()),
+            len3(self.spec.ez_dims()),
+            len3(self.spec.hx_dims()),
+            len3(self.spec.hy_dims()),
+            len3(self.spec.hz_dims()),
+        ];
+        let mut iter = packed.iter().copied();
+        let mut take = |len: usize| iter.by_ref().take(len).collect::<Vec<f64>>();
+        Fields {
+            ex: take(lens[0]),
+            ey: take(lens[1]),
+            ez: take(lens[2]),
+            hx: take(lens[3]),
+            hy: take(lens[4]),
+            hz: take(lens[5]),
+        }
     }
 
     /// Copy all six components back to the host, widened to FP64.

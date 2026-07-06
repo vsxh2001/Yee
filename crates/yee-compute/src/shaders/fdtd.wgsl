@@ -36,7 +36,8 @@ struct Params {
     inv_dx: f32,
     inv_dy: f32,
     inv_dz: f32,
-    _pad1: f32,
+    // ω·Δt for the on-GPU NTFF DFT accumulator (E.5b); 0.0 disables it.
+    dft_omega_dt: f32,
 }
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -510,4 +511,35 @@ fn bump_step(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x == 0u) {
         drv_data[0] = drv_data[0] + 1.0;
     }
+}
+
+
+// ======================= NTFF DFT accumulation (E.5b) =======================
+// Full-field running DFT at f_probe: after each completed step (fields at
+// t = (n+1)·Δt, matching NtffState::sample's timing) accumulate
+//   acc_re[i] += F[i]·cos(ω·t),  acc_im[i] −= F[i]·sin(ω·t).
+// The phasor pair lives at the end of the psi arena, after the CPML and
+// dispersion blocks; the host reads it back once and feeds the reference
+// NtffState through two synthetic samples (the accumulation is linear).
+
+fn len_fields() -> u32 {
+    return off_hz() + len_hz();
+}
+fn dft_base() -> u32 {
+    if (p.has_dispersion != 0u) {
+        return disp_aux_base() + 6u * len_cell();
+    }
+    return disp_aux_base();
+}
+
+@compute @workgroup_size(64)
+fn accumulate_dft(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if (i >= len_fields()) {
+        return;
+    }
+    let phase = p.dft_omega_dt * (drv_data[0] + 1.0);
+    let f = fields[i];
+    psi[dft_base() + i] += f * cos(phase);
+    psi[dft_base() + len_fields() + i] -= f * sin(phase);
 }
