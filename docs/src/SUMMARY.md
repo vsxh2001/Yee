@@ -219,3 +219,4 @@
 - [ADR-0173: Group delay — a core filter metric from the complex S21 phase (T10)](decisions/0173-group-delay.md)
 - [ADR-0174: CLI default `.s2p` phase parity — complex coupling-matrix S (T11)](decisions/0174-cli-s2p-phase-parity.md)
 - [ADR-0175: GPU/CPU compute engine (`yee-compute`) + engine-service → web studio direction](decisions/0175-gpu-engine-web-studio.md)
+- [ADR-0176: E.1 — CPML + per-cell materials on `yee-compute` (both backends)](decisions/0176-e1-cpml-materials-compute.md)

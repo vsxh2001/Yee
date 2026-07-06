@@ -24,7 +24,7 @@ gate; walking-skeleton first; phases get ADRs when they make a decision worth re
 | Phase | Scope | Gate | Status |
 |-------|-------|------|--------|
 | **E.0** | `yee-compute` walking skeleton: `FdtdSpec`/`Fields`/`FdtdEngine`, rayon FP64 `CpuFdtd`, wgpu/WGSL FP32 `GpuFdtd`, uniform lossless vacuum + PEC box | `compute-001` (CPU **bit-exact** vs `yee-fdtd` scalar reference, 25 steps, non-cubic grid); `compute-002` (GPU vs CPU, rel-L2 < 1e-4 / L∞ < 1e-3, 100 steps; self-skips without adapter, real on GPU nightly) | **SHIPPED** (ADR-0175, this branch) |
-| **E.1** | CPML + per-cell ε_r/σ/PEC masks on both backends | `cpml_reflection` ≥ 30 dB reproduced via `yee-compute`; per-cell arms bit-exact on CPU | queued |
+| **E.1** | CPML + per-cell ε_r/μ_r/σ + interior PEC masks + legacy PEC box on both backends; GPU arena-buffer layout (5 storage bindings — inside WebGPU browser limits) | `compute-003` (CPU **bit-exact** vs reference, heterogeneous + CPML + masks, both boundary modes); `compute-004` (CPML reflection: **69.3 dB** measured vs ≥ 30 dB target); `compute-005` (GPU vs CPU on the full E.1 scenario: ~2e-7 E / ~3e-6 H family-rel on llvmpipe; CPML holds 210× less ‖H‖ than PEC) | **SHIPPED** (ADR-0176) |
 | **E.2** | Sources, lumped ports, driver-equivalent step loop; first real workload end-to-end | `fdtd-line-eeff-001` ε_eff via `yee-compute` within the existing ±15% HJ gate; CPU↔GPU ε_eff agreement < 0.5% | queued |
 | **E.3** | Precision policy: FP64-on-GPU where `SHADER_F64` exists, error-budget doc, long-run drift bounds | drift gate over ≥ 10⁴ steps against CPU FP64 | queued |
 | **E.4** | Performance: `yee-bench` `compute_step` benches, workgroup/occupancy tuning, CPU SIMD pass | ≥ 20× scalar-CPU throughput on mid-range dGPU at 128³; rayon CPU ≥ 0.6·cores× scaling | queued |
@@ -48,5 +48,8 @@ until S.4 concludes (ADR-0175). `yee-gui` (egui EM-analysis shell) is unaffected
 
 ---
 
-*Last updated: 2026-07-05 — E.0 shipped (ADR-0175): `yee-compute` walking skeleton with
-`compute-001`/`compute-002` gates; GPU nightly runs the parity gate on real hardware.*
+*Last updated: 2026-07-06 — E.1 shipped (ADR-0176): CPML + per-cell materials + PEC masks on
+both backends; GPU moved to arena buffers (WebGPU-limit-safe); gates compute-003/004/005 green
+(69.3 dB reflection reduction; GPU parity ~2e-7 on llvmpipe). E.0 (ADR-0175) shipped the day
+before. Next: E.2 (sources/ports + `fdtd-line-eeff-001` on the engine) or S.0 (`yee-engine`
+job API).*
