@@ -12,10 +12,15 @@
 //!   FP32 accumulation tolerance (gate `compute-002`; self-skips when no
 //!   adapter is present, runs for real on the GPU nightly).
 //!
-//! The E.0 walking-skeleton scope is a uniform lossless vacuum inside a PEC
-//! box: no CPML, per-cell materials, sources, or NTFF yet — those are phases
-//! E.1/E.2 in `ENGINE-STUDIO-ROADMAP.md`. The spec lives at
-//! `docs/superpowers/specs/2026-07-05-gpu-engine-web-studio-design.md`.
+//! E.1 (ADR-0176) added Roden–Gedney CPML absorbing boundaries, per-cell
+//! ε_r / μ_r / σ maps (lossy CA/CB update), interior PEC masks, the legacy
+//! PEC box, and a Gaussian soft source on the CPU backend — configured via
+//! [`Materials`] + [`Boundary`] through the `with_config` constructors, and
+//! gated by `compute-003` (bit-exact), `compute-004` (CPML ≥ 30 dB), and
+//! `compute-005` (GPU parity). Sources/ports as engine primitives are E.2;
+//! dispersive ADE + NTFF are E.5 — see `ENGINE-STUDIO-ROADMAP.md`. Specs:
+//! `docs/superpowers/specs/2026-07-05-gpu-engine-web-studio-design.md` and
+//! `docs/superpowers/specs/2026-07-06-e1-cpml-materials-design.md`.
 //!
 //! # Example
 //!
@@ -30,10 +35,12 @@
 //! assert!(fields.hx.iter().any(|v| *v != 0.0));
 //! ```
 
+mod cpml;
 mod cpu;
 mod engine;
 mod error;
 mod fields;
+mod materials;
 mod spec;
 
 #[cfg(feature = "gpu")]
@@ -43,6 +50,7 @@ pub use cpu::CpuFdtd;
 pub use engine::FdtdEngine;
 pub use error::ComputeError;
 pub use fields::Fields;
+pub use materials::{Boundary, CpmlConfig, Materials};
 pub use spec::FdtdSpec;
 
 #[cfg(feature = "gpu")]

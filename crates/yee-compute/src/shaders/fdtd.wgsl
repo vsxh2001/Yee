@@ -1,55 +1,132 @@
-// FP32 Yee FDTD update kernels (uniform lossless vacuum, PEC box) — E.0.
+// FP32 Yee FDTD update kernels (E.1: per-cell materials + Roden-Gedney CPML
+// + interior PEC masks), fused bulk+CPML, arena-buffer layout.
 //
-// Six entry points, one per staggered field component, each dispatched over
-// its own array extent with in-shader bounds checks. Linearization matches
-// the host side (ndarray default C order): idx = (i * dim_j + j) * dim_k + k.
-// The E entry points update interior cells only; outer tangential E faces
-// are the PEC box and are never written, mirroring the FP64 reference in
-// yee-fdtd's update.rs.
+// Nine entry points: six field updates (one per staggered component, each
+// dispatched over its own extent with in-shader bounds checks) and three
+// PEC-mask clamps for the E components. Linearization matches the host side
+// (ndarray default C order): idx = (i * dim_j + j) * dim_k + k.
+//
+// Arena layout (all offsets derived from nx/ny/nz in the helpers below —
+// the host packs buffers in the identical order):
+//   fields:   ex | ey | ez | hx | hy | hz
+//   coeffs:   ca | cb | ce_cpml | ch          (four [nx+1,ny+1,nz+1] maps)
+//   psi:      exy|exz|eyx|eyz|ezx|ezy | hxy|hxz|hyx|hyz|hzx|hzy
+//   profiles: b | c | kappa | b_h | c_h | kappa_h   (six npml-vectors)
+//   masks:    ex | ey | ez                    (u32 per element)
+//
+// The bulk update uses the CA/CB form everywhere: the host materializes
+// ca = 1 for lossless cells, and `e = 1.0*e + cb*curl` is bit-identical to
+// the plain add in IEEE 754. The CPML correction is fused into the same
+// kernel — algebraically identical to the reference's separate second pass,
+// because it reads the same frozen opposite-family field and each psi cell
+// is touched exactly once per step. The E entry points update interior
+// cells only; outer tangential E faces are never written (the PEC box is
+// enforced host-side by zeroing them at upload).
 
 struct Params {
     nx: u32,
     ny: u32,
     nz: u32,
+    npml: u32,
+    // Per-axis CPML enable: bit0 = x, bit1 = y, bit2 = z.
+    axes_mask: u32,
+    has_cpml: u32,
+    has_mask: u32,
     _pad0: u32,
-    // dt / (mu0 * mu_r) and dt / (eps0 * eps_r), precomputed in f64 host-side.
-    ch: f32,
-    ce: f32,
     inv_dx: f32,
     inv_dy: f32,
     inv_dz: f32,
     _pad1: f32,
-    _pad2: f32,
-    _pad3: f32,
 }
 
 @group(0) @binding(0) var<uniform> p: Params;
-@group(0) @binding(1) var<storage, read_write> ex: array<f32>;
-@group(0) @binding(2) var<storage, read_write> ey: array<f32>;
-@group(0) @binding(3) var<storage, read_write> ez: array<f32>;
-@group(0) @binding(4) var<storage, read_write> hx: array<f32>;
-@group(0) @binding(5) var<storage, read_write> hy: array<f32>;
-@group(0) @binding(6) var<storage, read_write> hz: array<f32>;
+@group(0) @binding(1) var<storage, read_write> fields: array<f32>;
+@group(0) @binding(2) var<storage, read> coeffs: array<f32>;
+@group(0) @binding(3) var<storage, read_write> psi: array<f32>;
+@group(0) @binding(4) var<storage, read> profiles: array<f32>;
+@group(0) @binding(5) var<storage, read> masks: array<u32>;
 
-// Per-component linear indices (staggered shapes; see FdtdSpec).
-fn iex(i: u32, j: u32, k: u32) -> u32 { // [nx, ny+1, nz+1]
-    return (i * (p.ny + 1u) + j) * (p.nz + 1u) + k;
+// ---- component lengths ----
+fn len_ex() -> u32 { return p.nx * (p.ny + 1u) * (p.nz + 1u); }
+fn len_ey() -> u32 { return (p.nx + 1u) * p.ny * (p.nz + 1u); }
+fn len_ez() -> u32 { return (p.nx + 1u) * (p.ny + 1u) * p.nz; }
+fn len_hx() -> u32 { return (p.nx + 1u) * p.ny * p.nz; }
+fn len_hy() -> u32 { return p.nx * (p.ny + 1u) * p.nz; }
+fn len_hz() -> u32 { return p.nx * p.ny * (p.nz + 1u); }
+fn len_cell() -> u32 { return (p.nx + 1u) * (p.ny + 1u) * (p.nz + 1u); }
+
+// ---- field arena offsets ----
+fn off_ex() -> u32 { return 0u; }
+fn off_ey() -> u32 { return len_ex(); }
+fn off_ez() -> u32 { return off_ey() + len_ey(); }
+fn off_hx() -> u32 { return off_ez() + len_ez(); }
+fn off_hy() -> u32 { return off_hx() + len_hx(); }
+fn off_hz() -> u32 { return off_hy() + len_hy(); }
+
+// ---- per-component linear indices (staggered shapes) ----
+fn iex(i: u32, j: u32, k: u32) -> u32 { return (i * (p.ny + 1u) + j) * (p.nz + 1u) + k; }
+fn iey(i: u32, j: u32, k: u32) -> u32 { return (i * p.ny + j) * (p.nz + 1u) + k; }
+fn iez(i: u32, j: u32, k: u32) -> u32 { return (i * (p.ny + 1u) + j) * p.nz + k; }
+fn ihx(i: u32, j: u32, k: u32) -> u32 { return (i * p.ny + j) * p.nz + k; }
+fn ihy(i: u32, j: u32, k: u32) -> u32 { return (i * (p.ny + 1u) + j) * p.nz + k; }
+fn ihz(i: u32, j: u32, k: u32) -> u32 { return (i * p.ny + j) * (p.nz + 1u) + k; }
+fn icell(i: u32, j: u32, k: u32) -> u32 { return (i * (p.ny + 1u) + j) * (p.nz + 1u) + k; }
+
+// ---- field accessors ----
+fn ex_at(i: u32, j: u32, k: u32) -> f32 { return fields[off_ex() + iex(i, j, k)]; }
+fn ey_at(i: u32, j: u32, k: u32) -> f32 { return fields[off_ey() + iey(i, j, k)]; }
+fn ez_at(i: u32, j: u32, k: u32) -> f32 { return fields[off_ez() + iez(i, j, k)]; }
+fn hx_at(i: u32, j: u32, k: u32) -> f32 { return fields[off_hx() + ihx(i, j, k)]; }
+fn hy_at(i: u32, j: u32, k: u32) -> f32 { return fields[off_hy() + ihy(i, j, k)]; }
+fn hz_at(i: u32, j: u32, k: u32) -> f32 { return fields[off_hz() + ihz(i, j, k)]; }
+
+// ---- coefficient accessors (arena order: ca | cb | ce_cpml | ch) ----
+fn ca_at(c: u32) -> f32 { return coeffs[c]; }
+fn cb_at(c: u32) -> f32 { return coeffs[len_cell() + c]; }
+fn ce_cpml_at(c: u32) -> f32 { return coeffs[2u * len_cell() + c]; }
+fn ch_at(c: u32) -> f32 { return coeffs[3u * len_cell() + c]; }
+
+// ---- psi arena offsets (E-shaped x6, then H-shaped x6) ----
+fn off_psi_exy() -> u32 { return 0u; }
+fn off_psi_exz() -> u32 { return len_ex(); }
+fn off_psi_eyx() -> u32 { return off_psi_exz() + len_ex(); }
+fn off_psi_eyz() -> u32 { return off_psi_eyx() + len_ey(); }
+fn off_psi_ezx() -> u32 { return off_psi_eyz() + len_ey(); }
+fn off_psi_ezy() -> u32 { return off_psi_ezx() + len_ez(); }
+fn off_psi_hxy() -> u32 { return off_psi_ezy() + len_ez(); }
+fn off_psi_hxz() -> u32 { return off_psi_hxy() + len_hx(); }
+fn off_psi_hyx() -> u32 { return off_psi_hxz() + len_hx(); }
+fn off_psi_hyz() -> u32 { return off_psi_hyx() + len_hy(); }
+fn off_psi_hzx() -> u32 { return off_psi_hyz() + len_hy(); }
+fn off_psi_hzy() -> u32 { return off_psi_hzx() + len_hz(); }
+
+// ---- CPML profile accessors (b | c | kappa | b_h | c_h | kappa_h) ----
+fn prof_b(d: u32) -> f32 { return profiles[d]; }
+fn prof_c(d: u32) -> f32 { return profiles[p.npml + d]; }
+fn prof_kappa(d: u32) -> f32 { return profiles[2u * p.npml + d]; }
+fn prof_b_h(d: u32) -> f32 { return profiles[3u * p.npml + d]; }
+fn prof_c_h(d: u32) -> f32 { return profiles[4u * p.npml + d]; }
+fn prof_kappa_h(d: u32) -> f32 { return profiles[5u * p.npml + d]; }
+
+// PML profile depth for absolute index i on an axis of length n, or -1
+// outside the PML / on a disabled axis (mirrors CpuCpmlState's pml_depth).
+fn pml_depth(axis: u32, i: u32, n: u32) -> i32 {
+    if (((p.axes_mask >> axis) & 1u) == 0u) {
+        return -1;
+    }
+    if (i < p.npml) {
+        return i32(p.npml - 1u - i);
+    }
+    if (n >= p.npml && i >= n - p.npml) {
+        let depth = i - (n - p.npml);
+        if (depth < p.npml) {
+            return i32(depth);
+        }
+    }
+    return -1;
 }
-fn iey(i: u32, j: u32, k: u32) -> u32 { // [nx+1, ny, nz+1]
-    return (i * p.ny + j) * (p.nz + 1u) + k;
-}
-fn iez(i: u32, j: u32, k: u32) -> u32 { // [nx+1, ny+1, nz]
-    return (i * (p.ny + 1u) + j) * p.nz + k;
-}
-fn ihx(i: u32, j: u32, k: u32) -> u32 { // [nx+1, ny, nz]
-    return (i * p.ny + j) * p.nz + k;
-}
-fn ihy(i: u32, j: u32, k: u32) -> u32 { // [nx, ny+1, nz]
-    return (i * (p.ny + 1u) + j) * p.nz + k;
-}
-fn ihz(i: u32, j: u32, k: u32) -> u32 { // [nx, ny, nz+1]
-    return (i * p.ny + j) * (p.nz + 1u) + k;
-}
+
+// ============================= H updates =============================
 
 @compute @workgroup_size(4, 4, 4)
 fn update_hx(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -59,9 +136,28 @@ fn update_hx(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (i > p.nx || j >= p.ny || k >= p.nz) {
         return;
     }
-    let dey_dz = (ey[iey(i, j, k + 1u)] - ey[iey(i, j, k)]) * p.inv_dz;
-    let dez_dy = (ez[iez(i, j + 1u, k)] - ez[iez(i, j, k)]) * p.inv_dy;
-    hx[ihx(i, j, k)] += p.ch * (dey_dz - dez_dy);
+    let dey_dz = (ey_at(i, j, k + 1u) - ey_at(i, j, k)) * p.inv_dz;
+    let dez_dy = (ez_at(i, j + 1u, k) - ez_at(i, j, k)) * p.inv_dy;
+    let coeff = ch_at(icell(i, j, k));
+    let idx = ihx(i, j, k);
+    var h = fields[off_hx() + idx] + coeff * (dey_dz - dez_dy);
+    if (p.has_cpml != 0u) {
+        let dep_z = pml_depth(2u, k, p.nz);
+        if (dep_z >= 0) {
+            let d = u32(dep_z);
+            let ps = prof_b_h(d) * psi[off_psi_hxz() + idx] + prof_c_h(d) * dey_dz;
+            psi[off_psi_hxz() + idx] = ps;
+            h += coeff * (ps - (1.0 - 1.0 / prof_kappa_h(d)) * dey_dz);
+        }
+        let dep_y = pml_depth(1u, j, p.ny);
+        if (dep_y >= 0) {
+            let d = u32(dep_y);
+            let ps = prof_b_h(d) * psi[off_psi_hxy() + idx] + prof_c_h(d) * dez_dy;
+            psi[off_psi_hxy() + idx] = ps;
+            h -= coeff * (ps - (1.0 - 1.0 / prof_kappa_h(d)) * dez_dy);
+        }
+    }
+    fields[off_hx() + idx] = h;
 }
 
 @compute @workgroup_size(4, 4, 4)
@@ -72,9 +168,28 @@ fn update_hy(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (i >= p.nx || j > p.ny || k >= p.nz) {
         return;
     }
-    let dez_dx = (ez[iez(i + 1u, j, k)] - ez[iez(i, j, k)]) * p.inv_dx;
-    let dex_dz = (ex[iex(i, j, k + 1u)] - ex[iex(i, j, k)]) * p.inv_dz;
-    hy[ihy(i, j, k)] += p.ch * (dez_dx - dex_dz);
+    let dez_dx = (ez_at(i + 1u, j, k) - ez_at(i, j, k)) * p.inv_dx;
+    let dex_dz = (ex_at(i, j, k + 1u) - ex_at(i, j, k)) * p.inv_dz;
+    let coeff = ch_at(icell(i, j, k));
+    let idx = ihy(i, j, k);
+    var h = fields[off_hy() + idx] + coeff * (dez_dx - dex_dz);
+    if (p.has_cpml != 0u) {
+        let dep_x = pml_depth(0u, i, p.nx);
+        if (dep_x >= 0) {
+            let d = u32(dep_x);
+            let ps = prof_b_h(d) * psi[off_psi_hyx() + idx] + prof_c_h(d) * dez_dx;
+            psi[off_psi_hyx() + idx] = ps;
+            h += coeff * (ps - (1.0 - 1.0 / prof_kappa_h(d)) * dez_dx);
+        }
+        let dep_z = pml_depth(2u, k, p.nz);
+        if (dep_z >= 0) {
+            let d = u32(dep_z);
+            let ps = prof_b_h(d) * psi[off_psi_hyz() + idx] + prof_c_h(d) * dex_dz;
+            psi[off_psi_hyz() + idx] = ps;
+            h -= coeff * (ps - (1.0 - 1.0 / prof_kappa_h(d)) * dex_dz);
+        }
+    }
+    fields[off_hy() + idx] = h;
 }
 
 @compute @workgroup_size(4, 4, 4)
@@ -85,23 +200,64 @@ fn update_hz(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (i >= p.nx || j >= p.ny || k > p.nz) {
         return;
     }
-    let dex_dy = (ex[iex(i, j + 1u, k)] - ex[iex(i, j, k)]) * p.inv_dy;
-    let dey_dx = (ey[iey(i + 1u, j, k)] - ey[iey(i, j, k)]) * p.inv_dx;
-    hz[ihz(i, j, k)] += p.ch * (dex_dy - dey_dx);
+    let dex_dy = (ex_at(i, j + 1u, k) - ex_at(i, j, k)) * p.inv_dy;
+    let dey_dx = (ey_at(i + 1u, j, k) - ey_at(i, j, k)) * p.inv_dx;
+    let coeff = ch_at(icell(i, j, k));
+    let idx = ihz(i, j, k);
+    var h = fields[off_hz() + idx] + coeff * (dex_dy - dey_dx);
+    if (p.has_cpml != 0u) {
+        let dep_y = pml_depth(1u, j, p.ny);
+        if (dep_y >= 0) {
+            let d = u32(dep_y);
+            let ps = prof_b_h(d) * psi[off_psi_hzy() + idx] + prof_c_h(d) * dex_dy;
+            psi[off_psi_hzy() + idx] = ps;
+            h += coeff * (ps - (1.0 - 1.0 / prof_kappa_h(d)) * dex_dy);
+        }
+        let dep_x = pml_depth(0u, i, p.nx);
+        if (dep_x >= 0) {
+            let d = u32(dep_x);
+            let ps = prof_b_h(d) * psi[off_psi_hzx() + idx] + prof_c_h(d) * dey_dx;
+            psi[off_psi_hzx() + idx] = ps;
+            h -= coeff * (ps - (1.0 - 1.0 / prof_kappa_h(d)) * dey_dx);
+        }
+    }
+    fields[off_hz() + idx] = h;
 }
+
+// ============================= E updates =============================
 
 @compute @workgroup_size(4, 4, 4)
 fn update_ex(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
     let j = gid.y;
     let k = gid.z;
-    // Interior j ∈ [1, ny), k ∈ [1, nz); outer faces are PEC.
+    // Interior j ∈ [1, ny), k ∈ [1, nz); outer faces are the PEC box.
     if (i >= p.nx || j == 0u || j >= p.ny || k == 0u || k >= p.nz) {
         return;
     }
-    let dhz_dy = (hz[ihz(i, j, k)] - hz[ihz(i, j - 1u, k)]) * p.inv_dy;
-    let dhy_dz = (hy[ihy(i, j, k)] - hy[ihy(i, j, k - 1u)]) * p.inv_dz;
-    ex[iex(i, j, k)] += p.ce * (dhz_dy - dhy_dz);
+    let dhz_dy = (hz_at(i, j, k) - hz_at(i, j - 1u, k)) * p.inv_dy;
+    let dhy_dz = (hy_at(i, j, k) - hy_at(i, j, k - 1u)) * p.inv_dz;
+    let cellc = icell(i, j, k);
+    let idx = iex(i, j, k);
+    var e = ca_at(cellc) * fields[off_ex() + idx] + cb_at(cellc) * (dhz_dy - dhy_dz);
+    if (p.has_cpml != 0u) {
+        let ce = ce_cpml_at(cellc);
+        let dep_y = pml_depth(1u, j, p.ny + 1u);
+        if (dep_y >= 0) {
+            let d = u32(dep_y);
+            let ps = prof_b(d) * psi[off_psi_exy() + idx] + prof_c(d) * dhz_dy;
+            psi[off_psi_exy() + idx] = ps;
+            e += ce * (ps - (1.0 - 1.0 / prof_kappa(d)) * dhz_dy);
+        }
+        let dep_z = pml_depth(2u, k, p.nz + 1u);
+        if (dep_z >= 0) {
+            let d = u32(dep_z);
+            let ps = prof_b(d) * psi[off_psi_exz() + idx] + prof_c(d) * dhy_dz;
+            psi[off_psi_exz() + idx] = ps;
+            e -= ce * (ps - (1.0 - 1.0 / prof_kappa(d)) * dhy_dz);
+        }
+    }
+    fields[off_ex() + idx] = e;
 }
 
 @compute @workgroup_size(4, 4, 4)
@@ -113,9 +269,29 @@ fn update_ey(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (i == 0u || i >= p.nx || j >= p.ny || k == 0u || k >= p.nz) {
         return;
     }
-    let dhx_dz = (hx[ihx(i, j, k)] - hx[ihx(i, j, k - 1u)]) * p.inv_dz;
-    let dhz_dx = (hz[ihz(i, j, k)] - hz[ihz(i - 1u, j, k)]) * p.inv_dx;
-    ey[iey(i, j, k)] += p.ce * (dhx_dz - dhz_dx);
+    let dhx_dz = (hx_at(i, j, k) - hx_at(i, j, k - 1u)) * p.inv_dz;
+    let dhz_dx = (hz_at(i, j, k) - hz_at(i - 1u, j, k)) * p.inv_dx;
+    let cellc = icell(i, j, k);
+    let idx = iey(i, j, k);
+    var e = ca_at(cellc) * fields[off_ey() + idx] + cb_at(cellc) * (dhx_dz - dhz_dx);
+    if (p.has_cpml != 0u) {
+        let ce = ce_cpml_at(cellc);
+        let dep_z = pml_depth(2u, k, p.nz + 1u);
+        if (dep_z >= 0) {
+            let d = u32(dep_z);
+            let ps = prof_b(d) * psi[off_psi_eyz() + idx] + prof_c(d) * dhx_dz;
+            psi[off_psi_eyz() + idx] = ps;
+            e += ce * (ps - (1.0 - 1.0 / prof_kappa(d)) * dhx_dz);
+        }
+        let dep_x = pml_depth(0u, i, p.nx + 1u);
+        if (dep_x >= 0) {
+            let d = u32(dep_x);
+            let ps = prof_b(d) * psi[off_psi_eyx() + idx] + prof_c(d) * dhz_dx;
+            psi[off_psi_eyx() + idx] = ps;
+            e -= ce * (ps - (1.0 - 1.0 / prof_kappa(d)) * dhz_dx);
+        }
+    }
+    fields[off_ey() + idx] = e;
 }
 
 @compute @workgroup_size(4, 4, 4)
@@ -127,7 +303,74 @@ fn update_ez(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (i == 0u || i >= p.nx || j == 0u || j >= p.ny || k >= p.nz) {
         return;
     }
-    let dhy_dx = (hy[ihy(i, j, k)] - hy[ihy(i - 1u, j, k)]) * p.inv_dx;
-    let dhx_dy = (hx[ihx(i, j, k)] - hx[ihx(i, j - 1u, k)]) * p.inv_dy;
-    ez[iez(i, j, k)] += p.ce * (dhy_dx - dhx_dy);
+    let dhy_dx = (hy_at(i, j, k) - hy_at(i - 1u, j, k)) * p.inv_dx;
+    let dhx_dy = (hx_at(i, j, k) - hx_at(i, j - 1u, k)) * p.inv_dy;
+    let cellc = icell(i, j, k);
+    let idx = iez(i, j, k);
+    var e = ca_at(cellc) * fields[off_ez() + idx] + cb_at(cellc) * (dhy_dx - dhx_dy);
+    if (p.has_cpml != 0u) {
+        let ce = ce_cpml_at(cellc);
+        let dep_x = pml_depth(0u, i, p.nx + 1u);
+        if (dep_x >= 0) {
+            let d = u32(dep_x);
+            let ps = prof_b(d) * psi[off_psi_ezx() + idx] + prof_c(d) * dhy_dx;
+            psi[off_psi_ezx() + idx] = ps;
+            e += ce * (ps - (1.0 - 1.0 / prof_kappa(d)) * dhy_dx);
+        }
+        let dep_y = pml_depth(1u, j, p.ny + 1u);
+        if (dep_y >= 0) {
+            let d = u32(dep_y);
+            let ps = prof_b(d) * psi[off_psi_ezy() + idx] + prof_c(d) * dhx_dy;
+            psi[off_psi_ezy() + idx] = ps;
+            e -= ce * (ps - (1.0 - 1.0 / prof_kappa(d)) * dhx_dy);
+        }
+    }
+    fields[off_ez() + idx] = e;
+}
+
+// ========================== PEC mask clamps ==========================
+// Mask arena order: ex | ey | ez, u32 per element. Dispatched only when
+// masks are attached; runs after the E updates so the clamp is the final
+// word for the step.
+
+@compute @workgroup_size(4, 4, 4)
+fn clamp_ex(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    let j = gid.y;
+    let k = gid.z;
+    if (i >= p.nx || j > p.ny || k > p.nz) {
+        return;
+    }
+    let idx = iex(i, j, k);
+    if (masks[idx] != 0u) {
+        fields[off_ex() + idx] = 0.0;
+    }
+}
+
+@compute @workgroup_size(4, 4, 4)
+fn clamp_ey(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    let j = gid.y;
+    let k = gid.z;
+    if (i > p.nx || j >= p.ny || k > p.nz) {
+        return;
+    }
+    let idx = iey(i, j, k);
+    if (masks[len_ex() + idx] != 0u) {
+        fields[off_ey() + idx] = 0.0;
+    }
+}
+
+@compute @workgroup_size(4, 4, 4)
+fn clamp_ez(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    let j = gid.y;
+    let k = gid.z;
+    if (i > p.nx || j > p.ny || k >= p.nz) {
+        return;
+    }
+    let idx = iez(i, j, k);
+    if (masks[len_ex() + len_ey() + idx] != 0u) {
+        fields[off_ez() + idx] = 0.0;
+    }
 }

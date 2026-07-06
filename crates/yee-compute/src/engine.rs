@@ -3,6 +3,7 @@
 use crate::cpu::CpuFdtd;
 use crate::error::ComputeError;
 use crate::fields::Fields;
+use crate::materials::{Boundary, Materials};
 use crate::spec::FdtdSpec;
 
 #[cfg(feature = "gpu")]
@@ -14,17 +15,52 @@ use crate::gpu::GpuFdtd;
 /// or let [`FdtdEngine::new_auto`] try the GPU and fall back to the CPU.
 #[derive(Debug)]
 pub enum FdtdEngine {
-    /// Rayon-parallel FP64 CPU backend.
-    Cpu(CpuFdtd),
-    /// wgpu FP32 GPU backend (feature `gpu`).
+    /// Rayon-parallel FP64 CPU backend (boxed: `CpuFdtd` carries material
+    /// maps and CPML state, so it dwarfs the GPU handle by-value).
+    Cpu(Box<CpuFdtd>),
+    /// wgpu FP32 GPU backend (feature `gpu`; boxed like the CPU variant so
+    /// the enum stays pointer-sized regardless of backend growth).
     #[cfg(feature = "gpu")]
-    Gpu(GpuFdtd),
+    Gpu(Box<GpuFdtd>),
 }
 
 impl FdtdEngine {
     /// Build on the CPU backend (always available, FP64).
     pub fn new_cpu(spec: FdtdSpec, fields: Fields) -> Self {
-        Self::Cpu(CpuFdtd::new(spec, fields))
+        Self::Cpu(Box::new(CpuFdtd::new(spec, fields)))
+    }
+
+    /// Build on the CPU backend with per-cell materials / masks and an
+    /// outer-boundary treatment (E.1).
+    pub fn new_cpu_with_config(
+        spec: FdtdSpec,
+        fields: Fields,
+        materials: Materials,
+        boundary: Boundary,
+    ) -> Self {
+        Self::Cpu(Box::new(CpuFdtd::with_config(
+            spec, fields, materials, boundary,
+        )))
+    }
+
+    /// Build on the GPU backend with per-cell materials / masks and an
+    /// outer-boundary treatment (E.1). Fails like [`FdtdEngine::new_gpu`].
+    pub fn new_gpu_with_config(
+        spec: FdtdSpec,
+        fields: Fields,
+        materials: Materials,
+        boundary: Boundary,
+    ) -> Result<Self, ComputeError> {
+        #[cfg(feature = "gpu")]
+        {
+            GpuFdtd::with_config(spec, fields, materials, boundary)
+                .map(|gpu| Self::Gpu(Box::new(gpu)))
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            let _ = (spec, fields, materials, boundary);
+            Err(ComputeError::GpuNotEnabled)
+        }
     }
 
     /// Build on the GPU backend (FP32). Fails with
@@ -34,7 +70,7 @@ impl FdtdEngine {
     pub fn new_gpu(spec: FdtdSpec, fields: Fields) -> Result<Self, ComputeError> {
         #[cfg(feature = "gpu")]
         {
-            GpuFdtd::new(spec, fields).map(Self::Gpu)
+            GpuFdtd::new(spec, fields).map(|gpu| Self::Gpu(Box::new(gpu)))
         }
         #[cfg(not(feature = "gpu"))]
         {
@@ -48,7 +84,7 @@ impl FdtdEngine {
         #[cfg(feature = "gpu")]
         {
             match GpuFdtd::new(spec, fields.clone()) {
-                Ok(gpu) => Self::Gpu(gpu),
+                Ok(gpu) => Self::Gpu(Box::new(gpu)),
                 Err(_) => Self::new_cpu(spec, fields),
             }
         }
