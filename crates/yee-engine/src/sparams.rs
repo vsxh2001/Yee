@@ -7,7 +7,10 @@
 //! run the bare feed line (reference) and the device (DUT) as two
 //! otherwise-identical jobs, then
 //! `|S21|(f) = |DFT(dut)(f)| / |DFT(reference)(f)|` — feed-line loss,
-//! launch discontinuity, and probe coupling divide out.
+//! launch discontinuity, and probe coupling divide out. The same two
+//! runs also yield |S11| ([`reflection_db`], S.7): the reference run's
+//! port-1 probe is the incident wave, so subtracting it from the DUT
+//! run's isolates the device-caused reflection.
 
 /// Complex single-bin DFT of a uniformly sampled series:
 /// `X(f) = Σₙ x[n]·e^{−j·2πf·n·dt}`, returned as `(re, im)`.
@@ -48,6 +51,32 @@ pub fn transmission_db(dut: &[f64], reference: &[f64], dt_s: f64, freqs_hz: &[f6
         .collect()
 }
 
+/// Reflection magnitude in dB at each requested frequency, via
+/// incident/reflected separation at the port-1 reference plane (S.7):
+/// `reflected(t) = dut_p1(t) − ref_p1(t)`, then
+/// `20·log₁₀(|DFT(reflected)(f)| / |DFT(ref_p1)(f)|)`.
+///
+/// `ref_p1` is the same probe recorded on the reference (bare-line) run —
+/// the two runs share launch, line, and grid, so that series **is** the
+/// incident wave at the plane, and the sample-wise difference isolates
+/// the device-caused reflection. Second-order caveat: the reflected wave
+/// re-reflects off the imperfectly matched drive port and passes the
+/// plane again; accepted at walking-skeleton tolerance.
+///
+/// # Panics
+///
+/// Panics if the series lengths differ — they must come from the same
+/// pair of jobs.
+pub fn reflection_db(dut_p1: &[f64], ref_p1: &[f64], dt_s: f64, freqs_hz: &[f64]) -> Vec<f64> {
+    assert_eq!(
+        dut_p1.len(),
+        ref_p1.len(),
+        "reflection_db: P1 series lengths differ — not the same job pair"
+    );
+    let reflected: Vec<f64> = dut_p1.iter().zip(ref_p1).map(|(d, r)| d - r).collect();
+    transmission_db(&reflected, ref_p1, dt_s, freqs_hz)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,6 +114,25 @@ mod tests {
         let freqs = [0.8 * f0, f0, 1.2 * f0];
         for db in transmission_db(&dut, &reference, dt, &freqs) {
             assert!((db - 20.0 * 0.5_f64.log10()).abs() < 1e-9, "got {db} dB");
+        }
+    }
+
+    #[test]
+    fn reflection_of_a_synthetic_quarter_echo_is_minus_12_db() {
+        // dut_p1 = incident + 0.25·incident → reflected/incident = 0.25
+        // exactly, i.e. −12.04 dB at every in-band frequency.
+        let f0 = 2.0e9;
+        let dt = 1.0 / (f0 * 64.0);
+        let incident: Vec<f64> = (0..1024)
+            .map(|i| {
+                let t = i as f64 * dt;
+                (-((t - 512.0 * dt) / (128.0 * dt)).powi(2)).exp() * (TAU * f0 * t).sin()
+            })
+            .collect();
+        let dut_p1: Vec<f64> = incident.iter().map(|x| 1.25 * x).collect();
+        let freqs = [0.8 * f0, f0, 1.2 * f0];
+        for db in reflection_db(&dut_p1, &incident, dt, &freqs) {
+            assert!((db - 20.0 * 0.25_f64.log10()).abs() < 1e-9, "got {db} dB");
         }
     }
 }

@@ -47,25 +47,30 @@ wgpu (revisit after E.4 with data).
 | **S.4** | Parity audit done (ADR-0181 capability table): the studios serve disjoint roles — Dioxus = shipped filter designer, Tauri = engine studio. Freeze stands; retirement re-decided when the filter flow consumes engine jobs (the defined convergence path via `yee-server`) | audit table + decision recorded | **AUDITED** (ADR-0181; retirement deferred) |
 | **S.5** | Engine-powered verify, walking skeleton: `JobSpec` gains per-cell materials + interior PEC masks (`MaterialsSpec`) and an explicit `dt_s` (both `#[serde(default)]` — the protocol stays backward-compatible), validated at submission (`Error` events, no worker panics); voxelized layouts now run over the S.0/S.1 protocol on both backends | `engine-verify-001` (`#[ignore]`, release CI): the fdtd-line-eeff-001 FR-4 microstrip expressed **as a `JobSpec`** through `submit()`/events → ε_eff vs **Hammerstad–Jensen** ≤ 15 %; fast gates: serde round-trip + legacy specs, heterogeneous job **bit-exact** vs direct `CpuFdtd`, 4 malformed-spec error paths | **SHIPPED** (ADR-0182) |
 | **S.6** | S-parameters on the engine, walking skeleton: `yee_engine::sparams` (`single_bin_dft`, `transmission_db` — pure post-processing over `JobResult` probe series) + the two-run reference/DUT transmission method with a passive resistive-port termination (`v0 = 0`); no protocol or `yee-compute` changes | `engine-sparams-001` (`#[ignore]`, release CI): λ/4 open-stub bandstop over the job protocol — notch **4.850 GHz / −36.8 dB**, **3.0 %** from the closed-form TL-theory prediction (±15 % / ≥ 8 dB gate; band-edge standing-wave ripple bounded at |12| dB, measured +8.7/+5.2 dB); fast gates: known-sinusoid DFT, −6.02 dB scaled copy | **SHIPPED** (ADR-0183) |
+| **S.7** | |S11| via incident/reflected separation: `sparams::reflection_db` — the reference run's port-1 probe is the incident wave, `dut − ref` isolates the device reflection; zero extra solve cost (one more probe on the same two jobs) | `engine-sparams-001` extended: at the stub notch **\|S11\| = −0.93 dB** (≥ −4 dB gate — a λ/4 open stub reflects ~everything at resonance) and **\|S11\|²+\|S21\|² = 0.807** (physical band [0.5, 1.3]; the deficit is the documented second-order re-reflection + ripple); fast gate: synthetic 0.25 reflection → −12.04 dB | **SHIPPED** (ADR-0184) |
 
 Standing decision during S.*: **`yee-studio-web` (Dioxus) is feature-frozen but stays deployed**
 until S.4 concludes (ADR-0175). `yee-gui` (egui EM-analysis shell) is unaffected by this track.
 
 ---
 
-*Last updated: 2026-07-06 (latest) — S.6 SHIPPED (ADR-0183): `yee_engine::sparams`
+*Last updated: 2026-07-06 (latest) — S.7 SHIPPED (ADR-0184): |S11| via incident/reflected
+separation (`sparams::reflection_db`, zero extra solve cost); at the stub notch
+|S11| = −0.93 dB and |S11|²+|S21|² = 0.807 — both halves of a filter response now come out
+of two engine jobs. Before that, S.6 SHIPPED (ADR-0183): `yee_engine::sparams`
 (single-bin DFT + transmission ratio, pure post-processing) and gate `engine-sparams-001`:
 a λ/4 open-stub bandstop run twice over the job protocol (reference line / DUT, passive
 resistive-port termination) notches at **4.850 GHz / −36.8 dB — 3.0 %** from the closed-form
 TL-theory prediction. The full filter-verify chain now exists on the engine: layout →
-voxelize → JobSpec → FDTD → probes → |S21|(f). Earlier: S.5 SHIPPED (ADR-0182): per-cell
+voxelize → JobSpec → FDTD → probes → |S21|(f) + |S11|(f). Earlier: S.5 SHIPPED (ADR-0182): per-cell
 materials + PEC masks + explicit dt on the job protocol (`MaterialsSpec`/`dt_s`,
 serde-defaulted, validated at submission with Error events instead of worker panics); gate
 `engine-verify-001` runs the fdtd-line-eeff-001 FR-4 microstrip **as a JobSpec** through
 `submit()`/events and recovers ε_eff to **0.132 %** of Hammerstad–Jensen (identical to
 compute-008 — the protocol adds no physics), plus a bit-exact heterogeneous-job parity gate
-vs direct `CpuFdtd`. Remaining candidates: S11/incident-reflected separation, spec-mask
-overlay (F1.3 proper), live-streamed visualization over WS, real-GPU nightly numbers.
+vs direct `CpuFdtd`. Remaining candidates: spec-mask overlay (F1.3 proper), Touchstone
+export of engine-measured responses, complex/de-embedded S-parameters, live-streamed
+visualization over WS, real-GPU nightly numbers.
 Earlier same day — engine track COMPLETE through E.5 (ADR-0179): E.4 closed
 (row-sliced kernels), E.5b shipped (on-GPU NTFF accumulation, 315.4 dB / 2.9e-7 cross-backend),
 E.5c shipped (dispersive ADE, bit-exact CPU + differential GPU gate). Python bindings

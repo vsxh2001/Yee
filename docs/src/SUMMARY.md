@@ -227,3 +227,4 @@
 - [ADR-0181: S.3b 3-D field surface + S.4 Dioxus parity audit (retirement deferred)](decisions/0181-s3b-surface3d-s4-parity-audit.md)
 - [ADR-0182: S.5 engine-powered verify — materials on the job protocol](decisions/0182-s5-engine-filter-verify.md)
 - [ADR-0183: S.6 S-parameters on the engine — two-run transmission over the job protocol](decisions/0183-s6-engine-sparams.md)
+- [ADR-0184: S.7 S11 on the engine — incident/reflected separation](decisions/0184-s7-engine-s11.md)

@@ -13,7 +13,10 @@
 //! alone predict the notch at f₀ = 5 GHz. `sparams::transmission_db`
 //! divides the runs; assert the notch lands within ±15 % of the
 //! prediction (the filter pipeline's walking-skeleton band), is ≥ 8 dB
-//! deep, and the band-edge ripple stays bounded.
+//! deep, and the band-edge ripple stays bounded. S.7 (ADR-0184) adds a
+//! port-1 reference-plane probe to both runs: `sparams::reflection_db`
+//! separates incident/reflected, and the gate additionally asserts
+//! |S11| peaks near 0 dB at the notch with a physical |S11|²+|S21|².
 //!
 //! `#[ignore]`'d (two multi-minute release FDTD runs on a ~1.7 M-cell grid):
 //!
@@ -107,9 +110,13 @@ fn stub_job(with_stub: bool) -> (JobSpec, f64) {
     let load_cell = model.port_cells[1];
     let k_probe = k_top.saturating_sub(1).max(1);
 
-    // Transmission probe under the trace, 3 mm before the load port.
+    // Transmission probe under the trace, 3 mm before the load port; S11
+    // probe (S.7) at the port-1 reference plane, between the launch and
+    // the stub.
     let x0 = layout.bbox.min.x - MARGIN_CELLS as f64 * dx;
-    let i_m = ((((l_m - 3.0e-3) - x0) / dx).round() as isize).clamp(0, nx as isize - 1) as usize;
+    let i_for = |xp: f64| ((xp - x0) / dx).round().clamp(0.0, nx as f64 - 1.0) as usize;
+    let i_m = i_for(l_m - 3.0e-3);
+    let i_p1 = i_for(12.0e-3);
 
     let materials = MaterialsSpec {
         eps_r_cells: model
@@ -162,10 +169,16 @@ fn stub_job(with_stub: bool) -> (JobSpec, f64) {
                 t0_steps,
             },
         ],
-        probes: vec![ProbeSpec {
-            component: "ez".into(),
-            cell: (i_m, j_strip, k_probe),
-        }],
+        probes: vec![
+            ProbeSpec {
+                component: "ez".into(),
+                cell: (i_m, j_strip, k_probe),
+            },
+            ProbeSpec {
+                component: "ez".into(),
+                cell: (i_p1, j_strip, k_probe),
+            },
+        ],
         slice: None,
         materials: Some(materials),
         dt_s: Some(dt),
@@ -174,7 +187,8 @@ fn stub_job(with_stub: bool) -> (JobSpec, f64) {
     (spec, dt)
 }
 
-fn run(spec: JobSpec) -> Vec<f64> {
+/// Run one job; returns `(transmission_probe, p1_probe)` series.
+fn run(spec: JobSpec) -> (Vec<f64>, Vec<f64>) {
     let handle = yee_engine::submit(spec);
     let result = handle
         .events()
@@ -185,7 +199,10 @@ fn run(spec: JobSpec) -> Vec<f64> {
         })
         .expect("no Done event");
     assert_eq!(result.steps_done, N_STEPS);
-    result.probes.into_iter().next().expect("no probe series")
+    let mut probes = result.probes.into_iter();
+    let p2 = probes.next().expect("no transmission probe");
+    let p1 = probes.next().expect("no P1 probe");
+    (p2, p1)
 }
 
 #[test]
@@ -200,17 +217,18 @@ fn open_stub_notch_matches_transmission_line_theory() {
         "runs must share the grid"
     );
 
-    let reference = run(ref_spec);
-    let dut = run(dut_spec);
+    let (reference, ref_p1) = run(ref_spec);
+    let (dut, dut_p1) = run(dut_spec);
     assert!(
         reference.iter().any(|v| *v != 0.0),
         "reference probe silent"
     );
     assert!(dut.iter().any(|v| *v != 0.0), "dut probe silent");
 
-    // |S21|(f) over the drive band, 50 MHz raster.
+    // |S21|(f) and |S11|(f) over the drive band, 50 MHz raster.
     let freqs: Vec<f64> = (0..=80).map(|n| 3.0e9 + n as f64 * 50.0e6).collect();
     let s21_db = sparams::transmission_db(&dut, &reference, dt, &freqs);
+    let s11_db = sparams::reflection_db(&dut_p1, &ref_p1, dt, &freqs);
 
     // Deepest point of the notch, searched inside 3.5–6.5 GHz.
     let (n_min, db_min) = freqs
@@ -232,17 +250,27 @@ fn open_stub_notch_matches_transmission_line_theory() {
     // is |edge| ≤ 12 dB.
     let edge_db = s21_db[0].abs().max(s21_db[s21_db.len() - 1].abs());
 
+    // S.7: at resonance the stub reflects nearly everything — |S11| must
+    // peak near 0 dB at the notch, and the lossless-DUT energy balance
+    // |S11|² + |S21|² must stay physical (within the known band-edge
+    // ripple budget).
+    let s11_notch_db = s11_db[n_min];
+    let energy_notch = 10.0_f64.powf(s11_notch_db / 10.0) + 10.0_f64.powf(s21_db[n_min] / 10.0);
+
     let rel_err = (f_notch - F0_HZ).abs() / F0_HZ;
     eprintln!(
         "engine-sparams-001 open-stub notch over the job protocol: \
          notch {:.3} GHz ({:.1} dB) vs TL-theory {:.1} GHz → err {:.2} % \
-         | band edges: {:.1} dB @3 GHz, {:.1} dB @7 GHz",
+         | band edges: {:.1} dB @3 GHz, {:.1} dB @7 GHz \
+         | S11 at notch: {:.2} dB, |S11|²+|S21|² = {:.3}",
         f_notch / 1e9,
         db_min,
         F0_HZ / 1e9,
         rel_err * 100.0,
         s21_db[0],
         s21_db[s21_db.len() - 1],
+        s11_notch_db,
+        energy_notch,
     );
 
     assert!(
@@ -259,5 +287,15 @@ fn open_stub_notch_matches_transmission_line_theory() {
     assert!(
         edge_db <= 12.0,
         "engine-sparams-001 FAILED: band-edge |ripple| {edge_db:.1} dB > 12 dB — not a clean notch measurement"
+    );
+    assert!(
+        s11_notch_db >= -4.0,
+        "engine-sparams-001 FAILED: |S11| at the notch only {s11_notch_db:.2} dB — \
+         a λ/4 open stub must reflect nearly everything at resonance"
+    );
+    assert!(
+        (0.5..=1.3).contains(&energy_notch),
+        "engine-sparams-001 FAILED: |S11|²+|S21|² = {energy_notch:.3} at the notch — \
+         outside the physical band for a lossless DUT (+ ripple budget)"
     );
 }
