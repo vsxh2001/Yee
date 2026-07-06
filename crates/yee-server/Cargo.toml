@@ -1,0 +1,23 @@
+[package]
+name         = "yee-server"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "WebSocket exposure of the yee-engine job protocol (S.1, ADR-0180)."
+
+[dependencies]
+yee-engine   = { workspace = true }
+axum         = { workspace = true }
+tokio        = { workspace = true }
+futures-util = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+
+[dev-dependencies]
+tokio-tungstenite = { workspace = true }
+
+[lints.rust]
+unsafe_code  = "forbid"
+missing_docs = "warn"

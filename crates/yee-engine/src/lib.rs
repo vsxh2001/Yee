@@ -18,6 +18,7 @@
 //!     sources: vec![SourceSpec::GaussianEz { cell: (6, 6, 6), t0_steps: 8.0, sigma_steps: 3.0 }],
 //!     ports: vec![],
 //!     probes: vec![ProbeSpec { component: "ez".into(), cell: (8, 6, 6) }],
+//!     slice: None,
 //!     backend: BackendChoice::Cpu,
 //! };
 //! let handle = yee_engine::submit(spec);
@@ -102,6 +103,27 @@ pub struct PortSpec {
     pub t0_steps: usize,
 }
 
+/// Field-slice request: one z-plane of a component, returned with the
+/// result for visualization (S.3).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SliceSpec {
+    /// `"ex"`, `"ey"`, or `"ez"`.
+    pub component: String,
+    /// z-index (`k`) of the plane, in the component's staggered indexing.
+    pub k: usize,
+}
+
+/// A field slice payload (row-major `[ni, nj]`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FieldSlice {
+    /// First dimension (i extent).
+    pub ni: usize,
+    /// Second dimension (j extent).
+    pub nj: usize,
+    /// Row-major values.
+    pub data: Vec<f64>,
+}
+
 /// Probe description.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProbeSpec {
@@ -132,6 +154,9 @@ pub struct JobSpec {
     pub ports: Vec<PortSpec>,
     /// Probes (recorded every step).
     pub probes: Vec<ProbeSpec>,
+    /// Optional final-field slice to return for visualization.
+    #[serde(default)]
+    pub slice: Option<SliceSpec>,
     /// Backend selection.
     pub backend: BackendChoice,
 }
@@ -145,6 +170,9 @@ pub struct JobResult {
     pub dt_s: f64,
     /// One series per probe, one sample per completed step.
     pub probes: Vec<Vec<f64>>,
+    /// The requested final-field slice, if any.
+    #[serde(default)]
+    pub slice: Option<FieldSlice>,
     /// Steps completed (equals the request unless cancelled).
     pub steps_done: usize,
 }
@@ -188,6 +216,27 @@ impl JobHandle {
 
     /// Request cooperative cancellation; the job emits `Done` with the
     /// steps completed so far.
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// A detachable canceller for use when the handle itself moves to a
+    /// worker (e.g. yee-server cancels on client disconnect).
+    pub fn canceller(&self) -> JobCanceller {
+        JobCanceller {
+            cancel: Arc::clone(&self.cancel),
+        }
+    }
+}
+
+/// Cloneable cancellation handle detached from a [`JobHandle`].
+#[derive(Clone)]
+pub struct JobCanceller {
+    cancel: Arc<AtomicBool>,
+}
+
+impl JobCanceller {
+    /// Request cooperative cancellation.
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Relaxed);
     }
@@ -247,6 +296,37 @@ fn build_drive(spec: &JobSpec, dt: f64) -> Result<Drive, String> {
     Ok(drive)
 }
 
+/// Extract the requested z-plane from the final fields.
+fn extract_slice(
+    spec: &JobSpec,
+    fdtd_spec: &FdtdSpec,
+    fields: &yee_compute::Fields,
+) -> Result<Option<FieldSlice>, String> {
+    let Some(s) = &spec.slice else {
+        return Ok(None);
+    };
+    let (dims, data): ((usize, usize, usize), &[f64]) = match s.component.as_str() {
+        "ex" => (fdtd_spec.ex_dims(), &fields.ex),
+        "ey" => (fdtd_spec.ey_dims(), &fields.ey),
+        "ez" => (fdtd_spec.ez_dims(), &fields.ez),
+        other => return Err(format!("unknown slice component {other:?}")),
+    };
+    if s.k >= dims.2 {
+        return Err(format!("slice k = {} out of range (< {})", s.k, dims.2));
+    }
+    let mut out = Vec::with_capacity(dims.0 * dims.1);
+    for i in 0..dims.0 {
+        for j in 0..dims.1 {
+            out.push(data[(i * dims.1 + j) * dims.2 + s.k]);
+        }
+    }
+    Ok(Some(FieldSlice {
+        ni: dims.0,
+        nj: dims.1,
+        data: out,
+    }))
+}
+
 /// Chunked execution with progress events (~2 % granularity, min 1 step).
 fn run_job(spec: JobSpec, tx: &Sender<JobEvent>, cancel: &AtomicBool) {
     let fdtd_spec = FdtdSpec::vacuum(spec.nx, spec.ny, spec.nz, spec.dx_m);
@@ -291,6 +371,17 @@ fn run_job(spec: JobSpec, tx: &Sender<JobEvent>, cancel: &AtomicBool) {
                     done += n;
                     let _ = tx.send(JobEvent::Progress { step: done, total });
                 }
+                let slice = match engine
+                    .read_fields()
+                    .map_err(|e| e.to_string())
+                    .and_then(|f| extract_slice(&spec, &fdtd_spec, &f))
+                {
+                    Ok(s) => s,
+                    Err(message) => {
+                        let _ = tx.send(JobEvent::Error { message });
+                        return;
+                    }
+                };
                 match engine.read_probes() {
                     Ok(probes) => {
                         let _ = tx.send(JobEvent::Done {
@@ -298,6 +389,7 @@ fn run_job(spec: JobSpec, tx: &Sender<JobEvent>, cancel: &AtomicBool) {
                                 backend: "gpu".into(),
                                 dt_s,
                                 probes,
+                                slice,
                                 steps_done: done,
                             },
                         });
@@ -343,11 +435,19 @@ fn run_job(spec: JobSpec, tx: &Sender<JobEvent>, cancel: &AtomicBool) {
         done += n;
         let _ = tx.send(JobEvent::Progress { step: done, total });
     }
+    let slice = match extract_slice(&spec, &fdtd_spec, engine.fields()) {
+        Ok(s) => s,
+        Err(message) => {
+            let _ = tx.send(JobEvent::Error { message });
+            return;
+        }
+    };
     let _ = tx.send(JobEvent::Done {
         result: JobResult {
             backend: "cpu".into(),
             dt_s,
             probes: engine.probe_series().to_vec(),
+            slice,
             steps_done: done,
         },
     });
@@ -375,6 +475,7 @@ mod tests {
                 component: "ez".into(),
                 cell: (8, 6, 6),
             }],
+            slice: None,
             backend,
         }
     }
@@ -409,6 +510,28 @@ mod tests {
         assert_eq!(result.probes[0].len(), 60);
         assert!(result.probes[0].iter().any(|v| *v != 0.0));
         assert_eq!(result.backend, "cpu");
+    }
+
+    #[test]
+    fn slice_is_returned_when_requested() {
+        let mut spec = cavity_spec(BackendChoice::Cpu);
+        spec.slice = Some(SliceSpec {
+            component: "ez".into(),
+            k: 6,
+        });
+        let handle = submit(spec);
+        let result = handle
+            .events()
+            .find_map(|e| match e {
+                JobEvent::Done { result } => Some(result),
+                JobEvent::Error { message } => panic!("job failed: {message}"),
+                _ => None,
+            })
+            .expect("no Done event");
+        let slice = result.slice.expect("no slice returned");
+        assert_eq!((slice.ni, slice.nj), (13, 13)); // ez dims: [nx+1, ny+1, nz]
+        assert_eq!(slice.data.len(), 13 * 13);
+        assert!(slice.data.iter().any(|v| *v != 0.0));
     }
 
     #[test]
