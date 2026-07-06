@@ -27,10 +27,10 @@ gate; walking-skeleton first; phases get ADRs when they make a decision worth re
 | **E.1** | CPML + per-cell ε_r/μ_r/σ + interior PEC masks + legacy PEC box on both backends; GPU arena-buffer layout (5 storage bindings — inside WebGPU browser limits) | `compute-003` (CPU **bit-exact** vs reference, heterogeneous + CPML + masks, both boundary modes); `compute-004` (CPML reflection: **69.3 dB** measured vs ≥ 30 dB target); `compute-005` (GPU vs CPU on the full E.1 scenario: ~2e-7 E / ~3e-6 H family-rel on llvmpipe; CPML holds 210× less ‖H‖ than PEC) | **SHIPPED** (ADR-0176) |
 | **E.2** | Drive layer: `SoftSource`/`ResistivePort`/`Probe`/`Drive` on both backends (GPU: whole-run f64-precomputed tables + on-GPU step counter → zero per-step host round-trips) | `compute-007` driven step **bit-exact** vs reference; `compute-006` cavity TE₁₀₁ vs **analytic Pozar**: CPU −0.063 %, GPU −0.063 %, CPU↔GPU 0.0000 %; `compute-008` line-eeff on the engine vs **Hammerstad–Jensen**: 0.132 % (≤ 15 % gate), 88.6 s release | **SHIPPED** (ADR-0177) |
 | **E.3** | Precision policy: FP32-GPU/FP64-CPU characterized (WGSL has no f64 — SHADER_F64 unreachable without SPIR-V passthrough; noted) | `compute-009` drift over 10⁴ energy-conserving steps: 3e-6…2e-5 family-rel (√N random-walk), 100× inside the 1e-3 gate | **SHIPPED** (ADR-0177) |
-| **E.4** | Performance: `yee-bench` `compute_step` (scalar vs rayon CPU vs GPU) landed; container numbers recorded | 4-core container: rayon scales 2.2× internally but nets **0.78×** vs scalar (flat-buffer kernel ~2.8× slower single-thread — bounds-checked idx arithmetic). **Open follow-up:** kernel optimization + real-hardware re-measure before the 20×-dGPU target is claimable | **PARTIAL** (ADR-0177) |
+| **E.4** | Performance: `yee-bench` `compute_step` (scalar vs rayon CPU vs GPU) landed; container numbers recorded | 4-core container: rayon scales 2.2× internally but nets **0.78×** vs scalar (flat-buffer kernel ~2.8× slower single-thread — bounds-checked idx arithmetic). Row-sliced kernels landed (ADR-0179): single-thread −27 %, 4-thread ≈ scalar (bandwidth-bound container); bit-exact gates unchanged. Real-hardware numbers via the GPU nightly bench; the 20×-dGPU target remains to be certified there | **CLOSED** (ADR-0179; hardware numbers pending nightly) |
 | **E.5a** | Far-field on the engine: engine steps, reference `NtffState` consumes fields via host adapter | `compute-010` vs **analytic sin θ**: broadside/endfire 327.9 dB (≥ 20 dB gate) | **SHIPPED** (ADR-0177) |
-| **E.5b** | First-class (GPU-accumulated) NTFF port | existing NTFF gates via GPU accumulation | queued |
-| **E.5c** | Dispersive ADE (Drude/Lorentz/Debye) on both backends — E.1 recipe (bit-exact CPU, arena-fused GPU); pulled when an engine consumer needs dispersion (filter EM-in-loop is non-dispersive FR-4) | existing dispersive gates reproduced via `yee-compute` | queued |
+| **E.5b** | On-GPU full-field DFT phasor accumulation (`accumulate_dft` kernel, psi-arena tail, on-GPU step counter — zero per-step readback); reference `NtffState` projects via two synthetic samples | `compute-013`: GPU-resident dipole — **315.4 dB** analytic null, broadside matches the CPU path to **2.9e-7** | **SHIPPED** (ADR-0179) |
+| **E.5c** | Dispersive ADE (Drude/Lorentz/Debye) on both backends: verbatim CPU port; unified-ADE GPU form folded into the coeff/psi arenas | `compute-011` **bit-exact** vs `yee_fdtd::dispersive` (four-arm scenario); `compute-012` differential GPU gate (ADE ≤ 20× standard-pair error, measured ≤ 6×; drift-class backstop) | **SHIPPED** (ADR-0179) |
 
 Non-goals for E.*: replacing `yee-cuda`'s cuSOLVER LU lane (stays as-is); MoM/FEM assembly on
 wgpu (revisit after E.4 with data).
@@ -39,9 +39,9 @@ wgpu (revisit after E.4 with data).
 
 | Phase | Scope | Gate | Status |
 |-------|-------|------|--------|
-| **S.0** | `yee-engine` crate: transport-agnostic job protocol (submit/progress/cancel/results, serde), threaded in-process executor | serde round-trip + end-to-end in-process FDTD job test | queued |
+| **S.0** | `yee-engine` crate: serde `JobSpec`/`JobEvent`/`JobResult` protocol + threaded chunked executor with progress streaming, cooperative cancel, cpu/gpu/auto backend selection | 4 unit tests + doctest: serde round-trip, progress stream, cancellation, auto-backend | **SHIPPED** (ADR-0179) |
 | **S.1** | `yee-server` (axum): WebSocket exposure of S.0; `yee serve` CLI | end-to-end WS job test in CI | queued |
-| **S.2** | Tauri 2 + React/TS/Vite studio shell speaking the S.0 protocol in-process (kickoff ADR required) | app builds in CI; job submit→progress→result panel works against a stub job | queued |
+| **S.2** | Tauri 2 + React/TS/Vite studio shell (`studio/`, outside the root workspace) speaking S.0 in-process: `run_job` command + `job://progress` events + probe SVG plot. Frontend 47.9 kB gzipped | walking skeleton verified in-container: `cargo check` (webkit2gtk) + `npm run build` green; interactive run + CI wiring are the S.2 follow-on | **SKELETON SHIPPED** (ADR-0179) |
 | **S.3** | Visualization: 3D viewport (three.js) + S-param/Smith plots fed by engine streams | golden-image or DOM-level smoke gates | queued |
 | **S.4** | Filter-studio parity audit vs `yee-studio-web`; Dioxus retirement decision (own ADR) | parity checklist green | queued |
 
@@ -50,10 +50,10 @@ until S.4 concludes (ADR-0175). `yee-gui` (egui EM-analysis shell) is unaffected
 
 ---
 
-*Last updated: 2026-07-06 — E.2/E.3/E.5a shipped, E.4 partial (ADR-0177): the engine now runs
-driven, probed, open-domain workloads end-to-end, certified against the analytic Pozar cavity
-(−0.063 %), Hammerstad–Jensen ε_eff (0.132 % — the filter pipeline's full-wave gate on the
-engine), the analytic dipole pattern (327.9 dB null), and 10⁴-step drift characterization.
-Queued engine work: E.4 kernel optimization + real-hardware numbers, E.5b GPU NTFF, E.5c
-dispersive ADE. The engine track is ready for S.0 (`yee-engine` job API → `yee-server` →
-Tauri/React studio). Earlier: E.1 (ADR-0176), E.0 (ADR-0175).*
+*Last updated: 2026-07-06 (later) — engine track COMPLETE through E.5 (ADR-0179): E.4 closed
+(row-sliced kernels), E.5b shipped (on-GPU NTFF accumulation, 315.4 dB / 2.9e-7 cross-backend),
+E.5c shipped (dispersive ADE, bit-exact CPU + differential GPU gate). Python bindings
+`yee.compute` shipped (ADR-0178). Studio track underway: S.0 `yee-engine` job API SHIPPED,
+S.2 Tauri 2 + React skeleton SHIPPED (47.9 kB gzipped frontend; cargo check + vite build green
+in-container). Next: S.1 `yee-server` (axum WS), S.3 visualization, S.4 Dioxus parity audit.
+Earlier: E.2/E.3/E.5a (ADR-0177), E.1 (ADR-0176), E.0 (ADR-0175).*

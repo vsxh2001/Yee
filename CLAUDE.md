@@ -28,12 +28,14 @@ crates/
   yee-mom/        — planar Method of Moments solver
   yee-fdtd/       — FDTD walking skeleton + CPML + NTFF + dispersive ADE materials
   yee-compute/    — GPU/CPU execution layer: rayon CPU + wgpu/WGSL compute (ADR-0175)
+  yee-engine/     — transport-agnostic simulation job API over yee-compute (S.0, ADR-0179)
   yee-io/         — Touchstone v1.1 I/O
   yee-cli/        — yee CLI (validate / mesh / run / export / plot)
   yee-py/         — PyO3 0.28 Python bindings (abi3-py310)
   yee-gui/        — egui desktop shell + wgpu 3D viewport
   yee-plotters/   — static PNG/SVG plot export (plotters)
 examples/         — 3 runnable example binaries (half-wave-dipole, microstrip-line, patch-2g4)
+studio/           — Tauri 2 + React studio (own cargo workspace — NOT a root-workspace member; ADR-0179)
 docs/             — mdBook (theory + tutorials) + superpowers/specs + superpowers/plans
 .github/workflows/ — CI + GPU nightly + wheels + docs deploy
 ```

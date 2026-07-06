@@ -222,3 +222,4 @@
 - [ADR-0176: E.1 — CPML + per-cell materials on `yee-compute` (both backends)](decisions/0176-e1-cpml-materials-compute.md)
 - [ADR-0177: E.2–E.5a — engine drive layer + strong-reference validation sweep](decisions/0177-e2-e5a-engine-drive-validation.md)
 - [ADR-0178: `yee.compute` — Python bindings for the GPU/CPU engine](decisions/0178-python-compute-bindings.md)
+- [ADR-0179: engine tickets closed (E.4/E.5b/E.5c) + S.0 job API + Tauri/React studio skeleton](decisions/0179-engine-close-s0-tauri-studio.md)

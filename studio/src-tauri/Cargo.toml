@@ -1,0 +1,29 @@
+[package]
+name         = "yee-studio-app"
+version      = "0.0.0"
+edition      = "2024"
+rust-version = "1.92"
+license      = "GPL-3.0-or-later"
+description  = "Yee Studio — Tauri 2 + React shell over the yee-engine job API (ADR-0179)."
+
+# Deliberately NOT a member of the root workspace: the Tauri dependency
+# tree (webkit2gtk et al.) would otherwise weigh down every workspace-wide
+# build/clippy/test. The studio builds on its own via `npm run tauri`.
+[workspace]
+
+[lib]
+name       = "yee_studio_app"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri      = { version = "2", features = [] }
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+yee-engine = { path = "../../crates/yee-engine" }
+
+[profile.release]
+lto           = "thin"
+codegen-units = 1
