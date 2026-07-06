@@ -7602,6 +7602,7 @@ dependencies = [
  "numpy",
  "pyo3",
  "thiserror 1.0.69",
+ "yee-compute",
  "yee-core",
  "yee-design",
  "yee-fdtd",

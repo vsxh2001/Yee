@@ -9,6 +9,7 @@ use pyo3::prelude::*;
 
 mod al;
 mod bo;
+mod compute;
 mod design;
 mod eigensolver;
 mod errors;
@@ -68,6 +69,12 @@ fn _yee(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<validation::PyValidationCase>()?;
     m.add_class::<validation::PyValidationReport>()?;
     m.add_function(wrap_pyfunction!(validation::run_validation, m)?)?;
+    let compute_mod = PyModule::new(py, "yee.compute")?;
+    compute::register(&compute_mod)?;
+    m.add_submodule(&compute_mod)?;
+    py.import("sys")?
+        .getattr("modules")?
+        .set_item("yee.compute", &compute_mod)?;
     let ts_mod = PyModule::new(py, "yee.touchstone")?;
     touchstone::register(&ts_mod)?;
     m.add_submodule(&ts_mod)?;
