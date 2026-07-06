@@ -7465,6 +7465,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "yee-engine"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "yee-compute",
+]
+
+[[package]]
 name = "yee-export"
 version = "0.0.0"
 dependencies = [
