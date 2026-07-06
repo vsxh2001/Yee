@@ -159,6 +159,32 @@ jobs:
       - name: cargo clippy (yee-py)
         run: cargo clippy -p yee-py --all-targets -- -D warnings
 
+  compute-engine-gates:
+    name: Compute engine gates (yee-compute, release)
+    runs-on: ubuntu-latest
+    # No `needs: lint-test` — same rationale as fdtd-coupling-gate. Runs the
+    # `#[ignore]`'d yee-compute gates (ADR-0175..0177): compute-006 cavity
+    # TE101 vs the analytic Pozar frequency, compute-008 line-eeff vs
+    # Hammerstad-Jensen on the engine, compute-009 FP32 drift, compute-010
+    # NTFF dipole vs the analytic sin θ pattern. GPU-dependent gates
+    # self-skip on the GPU-less runner and bite on the GPU nightly instead;
+    # the fast non-ignored gates (compute-001..005, 007) already run in the
+    # workspace lint-test job.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.92"
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: yee-compute gates (release, include-ignored)
+        run: cargo test -p yee-compute --release -- --include-ignored --nocapture
+
   fdtd-coupling-gate:
     name: FDTD propagation ε_eff gate (fdtd-line-eeff, release)
     runs-on: ubuntu-latest

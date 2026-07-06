@@ -25,10 +25,12 @@ gate; walking-skeleton first; phases get ADRs when they make a decision worth re
 |-------|-------|------|--------|
 | **E.0** | `yee-compute` walking skeleton: `FdtdSpec`/`Fields`/`FdtdEngine`, rayon FP64 `CpuFdtd`, wgpu/WGSL FP32 `GpuFdtd`, uniform lossless vacuum + PEC box | `compute-001` (CPU **bit-exact** vs `yee-fdtd` scalar reference, 25 steps, non-cubic grid); `compute-002` (GPU vs CPU, rel-L2 < 1e-4 / L∞ < 1e-3, 100 steps; self-skips without adapter, real on GPU nightly) | **SHIPPED** (ADR-0175, this branch) |
 | **E.1** | CPML + per-cell ε_r/μ_r/σ + interior PEC masks + legacy PEC box on both backends; GPU arena-buffer layout (5 storage bindings — inside WebGPU browser limits) | `compute-003` (CPU **bit-exact** vs reference, heterogeneous + CPML + masks, both boundary modes); `compute-004` (CPML reflection: **69.3 dB** measured vs ≥ 30 dB target); `compute-005` (GPU vs CPU on the full E.1 scenario: ~2e-7 E / ~3e-6 H family-rel on llvmpipe; CPML holds 210× less ‖H‖ than PEC) | **SHIPPED** (ADR-0176) |
-| **E.2** | Sources, lumped ports, driver-equivalent step loop; first real workload end-to-end | `fdtd-line-eeff-001` ε_eff via `yee-compute` within the existing ±15% HJ gate; CPU↔GPU ε_eff agreement < 0.5% | queued |
-| **E.3** | Precision policy: FP64-on-GPU where `SHADER_F64` exists, error-budget doc, long-run drift bounds | drift gate over ≥ 10⁴ steps against CPU FP64 | queued |
-| **E.4** | Performance: `yee-bench` `compute_step` benches, workgroup/occupancy tuning, CPU SIMD pass | ≥ 20× scalar-CPU throughput on mid-range dGPU at 128³; rayon CPU ≥ 0.6·cores× scaling | queued |
-| **E.5** | Dispersive ADE + NTFF on the engine (full `yee-fdtd` feature parity) | existing dispersive/NTFF gates reproduced via `yee-compute` | queued |
+| **E.2** | Drive layer: `SoftSource`/`ResistivePort`/`Probe`/`Drive` on both backends (GPU: whole-run f64-precomputed tables + on-GPU step counter → zero per-step host round-trips) | `compute-007` driven step **bit-exact** vs reference; `compute-006` cavity TE₁₀₁ vs **analytic Pozar**: CPU −0.063 %, GPU −0.063 %, CPU↔GPU 0.0000 %; `compute-008` line-eeff on the engine vs **Hammerstad–Jensen**: 0.132 % (≤ 15 % gate), 88.6 s release | **SHIPPED** (ADR-0177) |
+| **E.3** | Precision policy: FP32-GPU/FP64-CPU characterized (WGSL has no f64 — SHADER_F64 unreachable without SPIR-V passthrough; noted) | `compute-009` drift over 10⁴ energy-conserving steps: 3e-6…2e-5 family-rel (√N random-walk), 100× inside the 1e-3 gate | **SHIPPED** (ADR-0177) |
+| **E.4** | Performance: `yee-bench` `compute_step` (scalar vs rayon CPU vs GPU) landed; container numbers recorded | 4-core container: rayon scales 2.2× internally but nets **0.78×** vs scalar (flat-buffer kernel ~2.8× slower single-thread — bounds-checked idx arithmetic). **Open follow-up:** kernel optimization + real-hardware re-measure before the 20×-dGPU target is claimable | **PARTIAL** (ADR-0177) |
+| **E.5a** | Far-field on the engine: engine steps, reference `NtffState` consumes fields via host adapter | `compute-010` vs **analytic sin θ**: broadside/endfire 327.9 dB (≥ 20 dB gate) | **SHIPPED** (ADR-0177) |
+| **E.5b** | First-class (GPU-accumulated) NTFF port | existing NTFF gates via GPU accumulation | queued |
+| **E.5c** | Dispersive ADE (Drude/Lorentz/Debye) on both backends — E.1 recipe (bit-exact CPU, arena-fused GPU); pulled when an engine consumer needs dispersion (filter EM-in-loop is non-dispersive FR-4) | existing dispersive gates reproduced via `yee-compute` | queued |
 
 Non-goals for E.*: replacing `yee-cuda`'s cuSOLVER LU lane (stays as-is); MoM/FEM assembly on
 wgpu (revisit after E.4 with data).
@@ -48,8 +50,10 @@ until S.4 concludes (ADR-0175). `yee-gui` (egui EM-analysis shell) is unaffected
 
 ---
 
-*Last updated: 2026-07-06 — E.1 shipped (ADR-0176): CPML + per-cell materials + PEC masks on
-both backends; GPU moved to arena buffers (WebGPU-limit-safe); gates compute-003/004/005 green
-(69.3 dB reflection reduction; GPU parity ~2e-7 on llvmpipe). E.0 (ADR-0175) shipped the day
-before. Next: E.2 (sources/ports + `fdtd-line-eeff-001` on the engine) or S.0 (`yee-engine`
-job API).*
+*Last updated: 2026-07-06 — E.2/E.3/E.5a shipped, E.4 partial (ADR-0177): the engine now runs
+driven, probed, open-domain workloads end-to-end, certified against the analytic Pozar cavity
+(−0.063 %), Hammerstad–Jensen ε_eff (0.132 % — the filter pipeline's full-wave gate on the
+engine), the analytic dipole pattern (327.9 dB null), and 10⁴-step drift characterization.
+Queued engine work: E.4 kernel optimization + real-hardware numbers, E.5b GPU NTFF, E.5c
+dispersive ADE. The engine track is ready for S.0 (`yee-engine` job API → `yee-server` →
+Tauri/React studio). Earlier: E.1 (ADR-0176), E.0 (ADR-0175).*

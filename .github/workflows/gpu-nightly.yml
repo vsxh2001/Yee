@@ -45,7 +45,9 @@ jobs:
       - name: cargo test (yee-cuda, cuda feature, release, include ignored)
         run: cargo test -p yee-cuda --features cuda --release -- --include-ignored
 
-      # compute-002 (GPU↔CPU FDTD parity) self-skips without a wgpu adapter,
-      # so this runner — which has one — is where it actually gates (ADR-0175).
-      - name: cargo test (yee-compute, release — wgpu compute parity gate)
-        run: cargo test -p yee-compute --release -- --nocapture
+      # The GPU-dependent yee-compute gates (compute-002/005 parity,
+      # compute-006 cavity, compute-009 drift) self-skip without a wgpu
+      # adapter, so this runner — which has one — is where they actually
+      # gate (ADR-0175..0177). include-ignored pulls in the slow ones.
+      - name: cargo test (yee-compute, release — wgpu compute gates)
+        run: cargo test -p yee-compute --release -- --include-ignored --nocapture
