@@ -7821,8 +7821,10 @@ dependencies = [
  "num-complex",
  "serde",
  "serde_json",
+ "yee-engine",
  "yee-layout",
  "yee-synth",
+ "yee-voxel",
 ]
 
 [[package]]

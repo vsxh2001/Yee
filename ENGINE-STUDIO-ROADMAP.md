@@ -48,13 +48,20 @@ wgpu (revisit after E.4 with data).
 | **S.5** | Engine-powered verify, walking skeleton: `JobSpec` gains per-cell materials + interior PEC masks (`MaterialsSpec`) and an explicit `dt_s` (both `#[serde(default)]` — the protocol stays backward-compatible), validated at submission (`Error` events, no worker panics); voxelized layouts now run over the S.0/S.1 protocol on both backends | `engine-verify-001` (`#[ignore]`, release CI): the fdtd-line-eeff-001 FR-4 microstrip expressed **as a `JobSpec`** through `submit()`/events → ε_eff vs **Hammerstad–Jensen** ≤ 15 %; fast gates: serde round-trip + legacy specs, heterogeneous job **bit-exact** vs direct `CpuFdtd`, 4 malformed-spec error paths | **SHIPPED** (ADR-0182) |
 | **S.6** | S-parameters on the engine, walking skeleton: `yee_engine::sparams` (`single_bin_dft`, `transmission_db` — pure post-processing over `JobResult` probe series) + the two-run reference/DUT transmission method with a passive resistive-port termination (`v0 = 0`); no protocol or `yee-compute` changes | `engine-sparams-001` (`#[ignore]`, release CI): λ/4 open-stub bandstop over the job protocol — notch **4.850 GHz / −36.8 dB**, **3.0 %** from the closed-form TL-theory prediction (±15 % / ≥ 8 dB gate; band-edge standing-wave ripple bounded at |12| dB, measured +8.7/+5.2 dB); fast gates: known-sinusoid DFT, −6.02 dB scaled copy | **SHIPPED** (ADR-0183) |
 | **S.7** | |S11| via incident/reflected separation: `sparams::reflection_db` — the reference run's port-1 probe is the incident wave, `dut − ref` isolates the device reflection; zero extra solve cost (one more probe on the same two jobs) | `engine-sparams-001` extended: at the stub notch **\|S11\| = −0.93 dB** (≥ −4 dB gate — a λ/4 open stub reflects ~everything at resonance) and **\|S11\|²+\|S21\|² = 0.807** (physical band [0.5, 1.3]; the deficit is the documented second-order re-reflection + ripple); fast gate: synthetic 0.25 reflection → −12.04 dB | **SHIPPED** (ADR-0184) |
+| **S.8** | = **F1.3.0**: the first filter **synthesized by the pipeline and verified by the engine** — N=5 Butterworth stepped-impedance LPF (f_c = 2 GHz, FR-4) from `yee_synth::prototype` → `dimension_stepped_impedance_layout` → voxelize → two engine jobs → measured response vs the `ideal_response_lowpass` design targets; gate lives in `yee-filter/tests` (dev-deps on the engine keep the lib WASM-safe) | `engine-filter-verify-001` (`#[ignore]`, own release CI step): cutoff **1.900 GHz vs designed 2.0 GHz — 5.0 %** (±20 % gate, sustained-crossing scan); **rejection 30.6 dB** (ideal 30.1; ≥ 20 dB gate); passband-mean ripple bound ±6 dB (measured +3.4 dB; PEC-box single-probe ripple documented up to +17.8 dB at the band edge). Boundary finding recorded: all-face CPML collapsed the passband — investigate before board-level CPML verify | **SHIPPED** (ADR-0185) |
 
 Standing decision during S.*: **`yee-studio-web` (Dioxus) is feature-frozen but stays deployed**
 until S.4 concludes (ADR-0175). `yee-gui` (egui EM-analysis shell) is unaffected by this track.
 
 ---
 
-*Last updated: 2026-07-06 (latest) — S.7 SHIPPED (ADR-0184): |S11| via incident/reflected
+*Last updated: 2026-07-06 (latest) — S.8/F1.3.0 SHIPPED (ADR-0185): the design→verify loop
+closed for the first time — an N=5 Butterworth stepped-impedance LPF synthesized by the
+pipeline, run through the engine, measured cutoff 1.900 GHz vs designed 2.0 GHz (5.0 %)
+with 30.6 dB passband/stopband rejection (ideal 30.1 dB). PEC-box ripple bounded ±6 dB;
+CPML-boundary anomaly recorded for investigation. Follow-ons named there: measurement
+fidelity (matched terminations / de-embedding), F1.3 spec-mask API, F1.2.1 EM-in-loop
+refinement. Before that, S.7 SHIPPED (ADR-0184): |S11| via incident/reflected
 separation (`sparams::reflection_db`, zero extra solve cost); at the stub notch
 |S11| = −0.93 dB and |S11|²+|S21|² = 0.807 — both halves of a filter response now come out
 of two engine jobs. Before that, S.6 SHIPPED (ADR-0183): `yee_engine::sparams`

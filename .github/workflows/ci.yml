@@ -237,6 +237,13 @@ jobs:
       - name: yee-engine gates incl. engine-verify-001 (release, include-ignored)
         run: cargo test -p yee-engine --release -- --include-ignored --nocapture
 
+      # F1.3.0/S.8 (ADR-0185): the first synthesized-filter-vs-its-design
+      # full-wave verify — N=5 Butterworth stepped-impedance LPF through the
+      # job protocol, cutoff/passband/stopband held against the closed-form
+      # design targets.
+      - name: engine-filter-verify-001 (yee-filter, release, ignored)
+        run: cargo test -p yee-filter --release --test engine_lpf_verify -- --ignored --nocapture
+
   fdtd-coupling-gate:
     name: FDTD propagation ε_eff gate (fdtd-line-eeff, release)
     runs-on: ubuntu-latest

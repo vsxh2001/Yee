@@ -458,7 +458,16 @@ in-browser front-end; heavy EM goes behind a native `yee-server`. See §5a.
   (uniform-gap walking-skeleton limitation, documented; per-section geometry =
   follow-on). **NEXT = F1.2.1** = surrogate-BO + EM-in-loop refinement
   (consumes F1.1b.1's FDTD k/Qe to refine the F1.2.0 seed) + `qe`→I/O feed
-  dimensioning. Then **F1.3** verify + mask gate. **F1.4.0 `yee-export` Gerber
+  dimensioning. **F1.3.0 engine verify ✅ SHIPPED** (ADR-0185, 2026-07-06): the
+  first synthesized-filter-vs-its-design full-wave verify — an N=5 Butterworth
+  stepped-impedance LPF (F1.2.3 dims) voxelized and run over the `yee-engine`
+  job protocol (ADR-0182..0184 machinery); gate `engine-filter-verify-001`
+  measures cutoff 1.900 GHz vs the designed 2.0 GHz (5.0%) and 30.6 dB
+  passband/stopband rejection (ideal 30.1 dB). PEC-box single-probe ripple
+  bounded ±6 dB (documented); an all-face-CPML run collapsed the passband —
+  recorded in ADR-0185 as a pre-requisite investigation for board-level CPML
+  verify. Then **F1.3 proper** = spec-mask data structure + pass/fail API
+  (+ BPF verify once F1.2.1 lands). **F1.4.0 `yee-export` Gerber
   ✅ SHIPPED** (ADR-0100, merge `21614fe`) — `layout_to_gerber` single-copper-layer
   RS-274X. **F1.4.1a board-outline ✅ SHIPPED** (ADR-0103, `1b3d0da`) —
   Edge.Cuts stroked contour. **F1.4.1b KiCad `.kicad_pcb` ✅ SHIPPED** (ADR-0105,
