@@ -34,6 +34,8 @@
 //! assert!(done);
 //! ```
 
+pub mod sparams;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
