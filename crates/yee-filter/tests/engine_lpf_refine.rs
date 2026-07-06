@@ -1,11 +1,12 @@
-//! Diagnostic `engine-refine-001` (F1.2.1.0 / S.11, ADR-0188): the first
-//! **closed design loop** on the engine — the EM measurement corrects the
-//! synthesis and the corrected design re-verifies. **Loop-mechanics
-//! diagnostic, not yet a convergence gate** (see the assertion block):
-//! convergence is blocked on the port-to-port standing-wave ripple in the
-//! |S21| observable, with the known in-repo fix (3-probe directional
-//! separation, ADR-0129/0131) queued as S.12. Run manually; deliberately
-//! NOT in CI until the convergence asserts return.
+//! Gate `engine-refine-001` (F1.2.1.0 / S.11-S.12, ADR-0188/0189): the
+//! first **closed design loop** on the engine — the EM measurement
+//! corrects the synthesis and the corrected design re-verifies on
+//! target. Convergence required S.12's **directional** |S21| (3-probe
+//! standing-wave fit, `sparams::directional_transmission_db`): on the
+//! plain single-probe ratio the port-to-port reflected wave rippled the
+//! skirt and the secant oscillated (full history in ADR-0188/0189).
+//! Measured with the directional observable: seed −27.0 % →
+//! +25.5 % → +10.5 % → **+1.0 %** in four map points.
 //!
 //! Loop (one scalar knob — the synthesis frequency — driven by a secant
 //! iteration on the measured map; the loop structure, not an optimizer):
@@ -59,6 +60,10 @@ const DRIVE_V0: f64 = 1.0;
 const F_DRIVE_HZ: f64 = 2.4e9;
 const BW_HZ: f64 = 3.4e9;
 const N_STEPS: usize = 9000;
+// Probe-triple spacing for the directional fit: 17 cells = 5.1 mm keeps
+// beta*d in ~(0.15, 0.85) rad over the 0.8-4.2 GHz band (away from the
+// 0 / pi degeneracies).
+const SPACING_CELLS: usize = 17;
 
 fn fr4() -> Substrate {
     Substrate {
@@ -108,7 +113,12 @@ fn job_for(layout: &Layout) -> (JobSpec, f64) {
 
     let x0 = layout.bbox.min.x - MARGIN_CELLS as f64 * dx;
     let i_for = |xp: f64| ((xp - x0) / dx).round().clamp(0.0, nx as f64 - 1.0) as usize;
-    let i_p2 = i_for(layout.ports[1].at.x - 3.0e-3);
+    // Directional probe triple (S.12): three planes on the output feed,
+    // SPACING_CELLS apart, outermost 3 mm before the load; the
+    // standing-wave fit needs them equally spaced along +x.
+    let i_p2c = i_for(layout.ports[1].at.x - 3.0e-3);
+    let i_p2b = i_p2c - SPACING_CELLS;
+    let i_p2a = i_p2b - SPACING_CELLS;
 
     let w_feed = layout.ports[0].width_m;
     let y0 = layout.bbox.min.y - MARGIN_CELLS as f64 * dx;
@@ -174,10 +184,20 @@ fn job_for(layout: &Layout) -> (JobSpec, f64) {
                 t0_steps,
             },
         ],
-        probes: vec![ProbeSpec {
-            component: "ez".into(),
-            cell: (i_p2, j_strip, k_probe),
-        }],
+        probes: vec![
+            ProbeSpec {
+                component: "ez".into(),
+                cell: (i_p2a, j_strip, k_probe),
+            },
+            ProbeSpec {
+                component: "ez".into(),
+                cell: (i_p2b, j_strip, k_probe),
+            },
+            ProbeSpec {
+                component: "ez".into(),
+                cell: (i_p2c, j_strip, k_probe),
+            },
+        ],
         slice: None,
         materials: Some(materials),
         dt_s: Some(dt),
@@ -186,7 +206,7 @@ fn job_for(layout: &Layout) -> (JobSpec, f64) {
     (spec, dt)
 }
 
-fn run(spec: JobSpec) -> Vec<f64> {
+fn run(spec: JobSpec) -> Vec<Vec<f64>> {
     let handle = yee_engine::submit(spec);
     let result = handle
         .events()
@@ -197,7 +217,8 @@ fn run(spec: JobSpec) -> Vec<f64> {
         })
         .expect("no Done event");
     assert_eq!(result.steps_done, N_STEPS);
-    result.probes.into_iter().next().expect("no probe series")
+    assert_eq!(result.probes.len(), 3, "expected the directional triple");
+    result.probes
 }
 
 /// One full verify: synthesize at `f_c_synth_hz`, run DUT + reference,
@@ -218,11 +239,21 @@ fn verify_cutoff(f_c_synth_hz: f64) -> f64 {
     let (dut_spec, dt) = job_for(&dut);
     let (ref_spec, dt2) = job_for(&reference);
     assert_eq!(dt, dt2, "runs must share dt");
-    let ref_p2 = run(ref_spec);
-    let dut_p2 = run(dut_spec);
+    let ref_p = run(ref_spec);
+    let dut_p = run(dut_spec);
 
     let freqs: Vec<f64> = (0..=68).map(|n| 0.8e9 + n as f64 * 50.0e6).collect();
-    let s21_db = sparams::transmission_db(&dut_p2, &ref_p2, dt, &freqs);
+    // Directional |S21| (S.12): forward-wave ratio from the three-probe
+    // standing-wave fit — immune to the port-to-port reflected wave that
+    // oscillated the ADR-0188 secant.
+    let spacing_m = SPACING_CELLS as f64 * DX_M;
+    let s21_db = sparams::directional_transmission_db(
+        [&dut_p[0], &dut_p[1], &dut_p[2]],
+        [&ref_p[0], &ref_p[1], &ref_p[2]],
+        dt,
+        spacing_m,
+        &freqs,
+    );
     eprintln!(
         "  spectrum for synthesis f_c = {:.3} GHz:",
         f_c_synth_hz / 1e9
@@ -299,35 +330,22 @@ fn em_in_the_loop_secant_moves_the_cutoff_to_target() {
         );
     }
 
-    // DIAGNOSTIC-ONLY assertions (ADR-0188): the convergence gate does NOT
-    // ship yet. The measured synth→cutoff map is non-smooth at the
-    // ±15–25 % level — the fitted-cutoff rms residual alternates between
-    // ~1.3 dB (trustworthy Butterworth-shaped curves) and ~5.5 dB (curves
-    // carrying ~1 GHz-spaced bumps whose spacing matches the port-to-port
-    // round trip), so the secant oscillates: measured
-    // 2.000→1.460, 2.740→2.530, 2.373→1.740, 2.494→2.330 GHz. The same
-    // artifact class was solved in F2.3 (ADR-0129/0131) with 3-probe
-    // directional separation (`fit_standing_wave`); porting that
-    // observable to the S-parameter path is the S.12 follow-on, and the
-    // convergence asserts return with it. Until then this test certifies
-    // the LOOP MECHANICS (synthesize → verify → correct → repeat, all
-    // over the job protocol) and records the map for the ADR.
     assert!(
         err_seed >= 0.05,
         "engine-refine-001: seed error only {:.1} % — the premise (closed-form seeds \
-         are off) no longer holds, re-scope",
+         are off) no longer holds, re-scope the gate",
         err_seed * 100.0
     );
     assert!(
-        history.len() >= 2 && history.len() <= 4,
-        "loop mechanics broken: {} iterations",
-        history.len()
+        err_final <= 0.5 * err_seed,
+        "engine-refine-001 FAILED: refinement did not halve the error \
+         (seed {:.1} % → final {:.1} %)",
+        err_seed * 100.0,
+        err_final * 100.0
     );
-    for (x, y) in &history {
-        assert!(
-            (0.8e9..=3.6e9).contains(y) && x.is_finite(),
-            "non-physical map point: synth {x:e} → measured {y:e}"
-        );
-    }
-    let _ = err_final; // recorded above; asserted once S.12 lands
+    assert!(
+        err_final <= 0.10,
+        "engine-refine-001 FAILED: refined cutoff still {:.1} % off target (> 10 %)",
+        err_final * 100.0
+    );
 }

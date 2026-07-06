@@ -244,6 +244,14 @@ jobs:
       - name: engine-filter-verify-001 (yee-filter, release, ignored)
         run: cargo test -p yee-filter --release --test engine_lpf_verify -- --ignored --nocapture
 
+      # F1.2.1.0/S.11-S.12 (ADR-0188/0189): the closed design loop —
+      # synthesize -> engine-verify -> secant-correct the synthesis f_c ->
+      # repeat, on the DIRECTIONAL (3-probe standing-wave) |S21| observable.
+      # Converges 27% seed error -> 1.0% in four map points (~8 release
+      # solves, ~19 min).
+      - name: engine-refine-001 (yee-filter, release, ignored)
+        run: cargo test -p yee-filter --release --test engine_lpf_refine -- --ignored --nocapture
+
   fdtd-coupling-gate:
     name: FDTD propagation ε_eff gate (fdtd-line-eeff, release)
     runs-on: ubuntu-latest
