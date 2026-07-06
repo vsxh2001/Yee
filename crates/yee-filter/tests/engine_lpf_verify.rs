@@ -20,9 +20,9 @@
 //! Known measurement limits (documented, accepted at walking-skeleton
 //! tolerance): dx = 0.3 mm staircases the ~0.55 mm high-Z sections to
 //! ~2 cells (impedance error → cutoff shift); feeds/junctions are not
-//! de-embedded; single-probe PEC-box ripple up to ~18 dB at the band
-//! edges (see the boundary comment in `job_for` — the CPML alternative
-//! measured worse and is recorded in ADR-0185 as its own follow-on).
+//! de-embedded; single-probe band-edge ripple up to ~12 dB from the
+//! lumped-port mismatch (ADR-0186 measured all three boundary options —
+//! see the comment in `job_for`; side-wall CPML with PEC ground/lid won).
 //!
 //! `#[ignore]`'d (two multi-minute release FDTD runs):
 //!
@@ -138,20 +138,21 @@ fn job_for(layout: &Layout) -> (JobSpec, f64) {
         nz,
         dx_m: DX_M,
         n_steps: N_STEPS,
-        // PEC box, deliberately. Both boundary options were measured:
-        // - PEC box: the correct LPF shape (cutoff 1.900 GHz, −27 dB
-        //   stopband) with strong standing-wave ripple at the single probe
-        //   (up to +17.8 dB at the 0.8 GHz band edge) because every DUT
-        //   reflection becomes a cavity mode.
-        // - CPML (npml = 10, all faces): transmission collapsed below
-        //   −3 dB across the entire band including the passband —
-        //   non-physical for this DUT; the microstrip-into-CPML
-        //   interaction on this stack needs its own investigation
-        //   (recorded in ADR-0185, deferred).
-        // So the gate keeps the PEC box and asserts RELATIVE quantities
-        // (cutoff position, passband-vs-stopband rejection) that are
-        // robust to ripple, plus an explicit ripple bound.
-        boundary: BoundarySpec::Pec,
+        // Side-wall CPML, PEC ground/lid (S.9, ADR-0186). Three boundary
+        // options were measured on this scenario:
+        // - PEC box: correct LPF shape but every DUT reflection becomes a
+        //   cavity mode — single-probe ripple up to +17.8 dB.
+        // - All-face CPML (npml = 10): |S21| collapsed below −3 dB across
+        //   the whole band. Root cause (ADR-0186): the substrate is ~5
+        //   cells tall, so the ENTIRE line sat inside the 10-layer z-min
+        //   absorber and propagated ~76 mm through it.
+        // - CPML on x/y only (this setting): side-wall cavity modes are
+        //   absorbed while the ground plane and lid stay PEC — the
+        //   correct board-level open boundary for a thin stack.
+        boundary: BoundarySpec::Cpml {
+            npml: 10,
+            axes: [true, true, false],
+        },
         sources: vec![],
         ports: vec![
             PortSpec {

@@ -464,9 +464,10 @@ in-browser front-end; heavy EM goes behind a native `yee-server`. See §5a.
   job protocol (ADR-0182..0184 machinery); gate `engine-filter-verify-001`
   measures cutoff 1.900 GHz vs the designed 2.0 GHz (5.0%) and 30.6 dB
   passband/stopband rejection (ideal 30.1 dB). PEC-box single-probe ripple
-  bounded ±6 dB (documented); an all-face-CPML run collapsed the passband —
-  recorded in ADR-0185 as a pre-requisite investigation for board-level CPML
-  verify. Then **F1.3 proper** = spec-mask data structure + pass/fail API
+  bounded ±6 dB (documented). The all-face-CPML collapse was root-caused in
+  ADR-0186 (the thin substrate sat inside the z-min absorber); the gate now
+  runs under side-wall CPML + PEC ground/lid (passband mean +1.3 dB,
+  rejection 34.2 dB — residual ripple is the lumped-port mismatch). Then **F1.3 proper** = spec-mask data structure + pass/fail API
   (+ BPF verify once F1.2.1 lands). **F1.4.0 `yee-export` Gerber
   ✅ SHIPPED** (ADR-0100, merge `21614fe`) — `layout_to_gerber` single-copper-layer
   RS-274X. **F1.4.1a board-outline ✅ SHIPPED** (ADR-0103, `1b3d0da`) —

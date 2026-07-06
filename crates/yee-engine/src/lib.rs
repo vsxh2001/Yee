@@ -68,11 +68,24 @@ pub enum BoundarySpec {
     None,
     /// Reflecting PEC box.
     Pec,
-    /// Roden–Gedney CPML with `npml` layers on every face.
+    /// Roden–Gedney CPML with `npml` layers on the enabled axes.
     Cpml {
         /// PML thickness in cells.
         npml: usize,
+        /// Per-axis enable `[x, y, z]` (S.9, ADR-0186); a disabled axis
+        /// keeps its faces PEC. Defaults to all-on (the pre-S.9 wire
+        /// format, with no `axes` key, still deserializes). Board-level
+        /// verify wants `[true, true, false]`: absorbing side walls, PEC
+        /// ground/lid — a thin substrate stack otherwise sits *inside*
+        /// the z-min absorber and the line mode is eaten (ADR-0185/0186).
+        #[serde(default = "all_axes")]
+        axes: [bool; 3],
     },
+}
+
+/// The pre-S.9 default: CPML on every axis.
+fn all_axes() -> [bool; 3] {
+    [true; 3]
 }
 
 /// Source description (times in steps so the spec is dt-agnostic).
@@ -469,7 +482,9 @@ fn run_job(mut spec: JobSpec, tx: &Sender<JobEvent>, cancel: &AtomicBool) {
     let boundary = match spec.boundary {
         BoundarySpec::None => Boundary::None,
         BoundarySpec::Pec => Boundary::PecBox,
-        BoundarySpec::Cpml { npml } => Boundary::Cpml(CpmlConfig::for_spec(&fdtd_spec, npml)),
+        BoundarySpec::Cpml { npml, axes } => {
+            Boundary::Cpml(CpmlConfig::for_spec(&fdtd_spec, npml).with_axes(axes))
+        }
     };
     let drive = match build_drive(&spec, fdtd_spec.dt) {
         Ok(d) => d,
@@ -701,6 +716,27 @@ mod tests {
             .replace(",\"dt_s\":null", "");
         let back: JobSpec = serde_json::from_str(&legacy).unwrap();
         assert!(back.materials.is_none() && back.dt_s.is_none());
+    }
+
+    #[test]
+    fn cpml_axes_default_and_round_trip() {
+        // Pre-S.9 wire format (no `axes` key) still deserializes: all-on.
+        let legacy: BoundarySpec = serde_json::from_str(r#"{"kind":"cpml","npml":10}"#).unwrap();
+        assert_eq!(
+            legacy,
+            BoundarySpec::Cpml {
+                npml: 10,
+                axes: [true; 3]
+            }
+        );
+        // Explicit per-axis enables round-trip.
+        let side_walls = BoundarySpec::Cpml {
+            npml: 8,
+            axes: [true, true, false],
+        };
+        let json = serde_json::to_string(&side_walls).unwrap();
+        let back: BoundarySpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(side_walls, back);
     }
 
     #[test]
