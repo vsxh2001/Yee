@@ -5,10 +5,15 @@
 // events stream, and see the probe time series plotted. The plot is a
 // dependency-free inline SVG — charting/3D libraries arrive with S.3.
 
-import { useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { SliceHeatmap, SpectrumPlot, type Slice } from "./views";
+
+// three.js rides its own chunk, fetched only once a result is on screen.
+const FieldSurface3D = lazy(() =>
+  import("./FieldSurface3D").then((m) => ({ default: m.FieldSurface3D })),
+);
 
 type Backend = "cpu" | "gpu" | "auto";
 
@@ -180,6 +185,11 @@ export default function App() {
           <ProbePlot series={result.probes[0] ?? []} dt={result.dt_s} />
           <SpectrumPlot series={result.probes[0] ?? []} dt={result.dt_s} />
           {result.slice && <SliceHeatmap slice={result.slice} />}
+          {result.slice && (
+            <Suspense fallback={<p className="meta">loading 3-D view…</p>}>
+              <FieldSurface3D slice={result.slice} />
+            </Suspense>
+          )}
         </section>
       )}
     </main>

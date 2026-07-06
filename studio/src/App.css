@@ -112,3 +112,18 @@ h1 {
   border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
   border-radius: 4px;
 }
+
+.surface3d {
+  width: 100%;
+  min-height: 320px;
+}
+
+.surface3d canvas {
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-radius: 4px;
+}
+
+.surface3d-fallback {
+  opacity: 0.7;
+  font-size: 0.9rem;
+}

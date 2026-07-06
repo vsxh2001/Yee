@@ -42,8 +42,9 @@ wgpu (revisit after E.4 with data).
 | **S.0** | `yee-engine` crate: serde `JobSpec`/`JobEvent`/`JobResult` protocol + threaded chunked executor with progress streaming, cooperative cancel, cpu/gpu/auto backend selection | 4 unit tests + doctest: serde round-trip, progress stream, cancellation, auto-backend | **SHIPPED** (ADR-0179) |
 | **S.1** | `yee-server` (axum 0.8): `/healthz` + WS `/v1/jobs` streaming live `JobEvent`s; disconnect cancels via `JobCanceller`; `yee serve` CLI subcommand | end-to-end tokio-tungstenite gates in the workspace suite (round trip incl. probe series + field slice; invalid-spec error event); `/healthz` verified live | **SHIPPED** (ADR-0180) |
 | **S.2** | Tauri 2 + React/TS/Vite studio shell (`studio/`, outside the root workspace) speaking S.0 in-process: `run_job` command + `job://progress` events + probe SVG plot. Frontend 47.9 kB gzipped | walking skeleton verified in-container: `cargo check` (webkit2gtk) + `npm run build` green; interactive run + CI wiring are the S.2 follow-on | **SKELETON SHIPPED** (ADR-0179) |
-| **S.3** | Visualization walking skeleton: engine `slice` option (final E-plane in `JobResult`) → canvas heatmap + single-bin-DFT spectrum plot in the studio; `studio-build` CI job (typecheck + vite + vitest + Tauri cargo check) | vitest gates: DFT recovers a **known sinusoid** to one bin; color-map extremes; DOM smoke renders of both views (7 tests). three.js 3-D volumetrics = S.3b follow-on | **SKELETON SHIPPED** (ADR-0180) |
-| **S.4** | Filter-studio parity audit vs `yee-studio-web`; Dioxus retirement decision (own ADR) | parity checklist green | queued |
+| **S.3** | Visualization walking skeleton: engine `slice` option (final E-plane in `JobResult`) → canvas heatmap + single-bin-DFT spectrum plot in the studio; `studio-build` CI job (typecheck + vite + vitest + Tauri cargo check) | vitest gates: DFT recovers a **known sinusoid** to one bin; color-map extremes; DOM smoke renders of both views (7 tests) | **SKELETON SHIPPED** (ADR-0180) |
+| **S.3b** | three.js 3-D field surface: height-mapped vertex-colored mesh + orbit controls, lazy-chunked (initial bundle stays 49.4 kB gz; three rides a 133 kB on-demand chunk); WebGL fallback | geometry is a pure function gated against hand-computable values; the fallback path DOM-renders under jsdom (11 vitest tests total) | **SHIPPED** (ADR-0181) |
+| **S.4** | Parity audit done (ADR-0181 capability table): the studios serve disjoint roles — Dioxus = shipped filter designer, Tauri = engine studio. Freeze stands; retirement re-decided when the filter flow consumes engine jobs (the defined convergence path via `yee-server`) | audit table + decision recorded | **AUDITED** (ADR-0181; retirement deferred) |
 
 Standing decision during S.*: **`yee-studio-web` (Dioxus) is feature-frozen but stays deployed**
 until S.4 concludes (ADR-0175). `yee-gui` (egui EM-analysis shell) is unaffected by this track.
@@ -58,5 +59,9 @@ S.2 Tauri 2 + React skeleton SHIPPED (47.9 kB gzipped frontend; cargo check + vi
 in-container). Later same day (ADR-0180): S.1 `yee-server` SHIPPED (WS job streaming +
 cancel-on-disconnect + `yee serve`; e2e WS gates) and the S.3 visualization skeleton SHIPPED
 (engine field-slice → heatmap + DFT spectrum, vitest/DOM gates, `studio-build` CI job).
-Remaining studio work: S.3b (three.js volumetrics), S.4 (Dioxus parity audit).
+Still later (ADR-0181): S.3b SHIPPED (three.js field surface, lazy-chunked, pure-function
+geometry gates) and S.4 AUDITED (capability table; Dioxus retirement deferred with a defined
+convergence path — engine-powered verify over the S.0/S.1 protocol). The S.* track as
+originally scoped is complete; next candidates: engine-powered filter verify ("S.5"),
+live-streamed visualization over WS, real-GPU perf numbers from the nightly.
 Earlier: E.2/E.3/E.5a (ADR-0177), E.1 (ADR-0176), E.0 (ADR-0175).*
