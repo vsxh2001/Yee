@@ -456,7 +456,10 @@ in-browser front-end; heavy EM goes behind a native `yee-server`. See §5a.
   arms; gate hairpin_dim_001 (round-trip <1%); pure-math, WASM-safe. Per-section
   gaps validated in `HairpinDimensions`; `hairpin_bpf` Layout uses the mean gap
   (uniform-gap walking-skeleton limitation, documented; per-section geometry =
-  follow-on). **NEXT = F1.2.1** = surrogate-BO + EM-in-loop refinement
+  follow-on). **F1.2.1.0 loop skeleton LANDED** (ADR-0188, 2026-07-06): the closed refine loop
+  runs on the engine protocol; convergence deferred to the S.12 directional-S21
+  observable (port-to-port standing-wave ripple oscillates the secant — measured
+  map in the ADR). **NEXT = F1.2.1** = surrogate-BO + EM-in-loop refinement
   (consumes F1.1b.1's FDTD k/Qe to refine the F1.2.0 seed) + `qe`→I/O feed
   dimensioning. **F1.3.0 engine verify ✅ SHIPPED** (ADR-0185, 2026-07-06): the
   first synthesized-filter-vs-its-design full-wave verify — an N=5 Butterworth
