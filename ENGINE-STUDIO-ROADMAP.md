@@ -54,12 +54,30 @@ wgpu (revisit after E.4 with data).
 | **S.11** | = **F1.2.1.0**: EM-in-the-loop refinement, first slice. The closed loop LANDED (synthesize → verify → fit → secant-correct the synthesis f_c → repeat, all over the protocol; observable = whole-curve fitted Butterworth cutoff, itself the survivor of two rejected threshold detectors). **Convergence gate deferred**: the measured map oscillates (−27 % → +26.5 % → −13 % → +16.5 %) because curves alternate clean (fit rms ~1.3 dB) / bumpy (~5.5 dB, ~1 GHz bump spacing = the port-to-port round trip) — the ADR-0129/0131 standing-wave artifact class. Named fix = 3-probe directional separation (S.12) | `engine_lpf_refine.rs` runs the loop end-to-end as a **manual diagnostic** (mechanics asserts only; deliberately not in CI); full map recorded in ADR-0188; N = 3 mini-board rejected (over-substrate leak) | **LOOP LANDED** (ADR-0188; convergence = S.12) |
 | **S.12** | Directional S-parameters: `sparams::fit_standing_wave` (verbatim port of the F2.3 three-probe fit, ADR-0129/0131) + `directional_transmission_db` — the **forward-wave** |S21|, immune to the port-to-port reflected wave; pure protocol-side post-processing, no engine change | Unit gates: known (a, b, β) recovered to 1e-9; 0.5×-forward + strong-backward DUT reads −6.02 dB. **`engine-refine-001` CONVERGES and joins CI**: seed −27.0 % → +25.5 % → +10.5 % → **+1.0 %** (measured cutoff 2.020 GHz vs the 2.0 GHz target) — the first filter designed-to-target by the engine | **SHIPPED** (ADR-0189) |
 
+## Part 3 — Antenna track (A.*)
+
+Opened 2026-07-06 (ADR-0190) toward the project goal "design an antenna or filter with
+the engine". Inherits the S.9–S.12 measurement stack (CPML-xy walls, aperture ports,
+directional/two-run S-parameters) wholesale.
+
+| Phase | Scope | Gate | Status |
+|-------|-------|------|--------|
+| **A.0** | Patch synthesis + engine resonance verify: `yee-layout::patch_antenna_dims` (Balanis §14.2 closed forms; unit-gated vs hand-computed W = 37.26 mm / ε_eff = 4.09 / L ≈ 28.8 mm on 2.45 GHz FR-4) + `edge_fed_patch` layout generator; S.7 two-run \|S11\| on the engine | `engine-antenna-001` (release CI): **dip at 2.450 GHz — 0.0 %** from the designed 2.45 GHz (±10 % gate), −5.4 dB vs +2.0 dB band median (≥ 2 dB prominence gate). Off-resonance subtraction artifacts documented; only the localized dip is asserted | **SHIPPED** (ADR-0190) |
+| **A.1** | Inset-fed matching + directional S11 (real return-loss magnitude) | — | queued |
+| **A.2** | Radiation pattern over the protocol: NTFF exposure + per-face z-boundary (open top, PEC ground) | — | queued |
+| **A.3** | Antenna design loop: the S.11/S.12 secant machinery on patch length vs measured resonance | — | queued |
+
 Standing decision during S.*: **`yee-studio-web` (Dioxus) is feature-frozen but stays deployed**
 until S.4 concludes (ADR-0175). `yee-gui` (egui EM-analysis shell) is unaffected by this track.
 
 ---
 
-*Last updated: 2026-07-06 (latest) — S.12 SHIPPED (ADR-0189): directional S-parameters
+*Last updated: 2026-07-06 (latest) — A.0 SHIPPED (ADR-0190): the antenna track opens —
+Balanis closed-form patch synthesis in `yee-layout` + `engine-antenna-001`: the measured
+|S11| dip lands at 2.450 GHz, **0.0 %** from the design frequency (−5.4 dB vs +2.0 dB band
+median). Queued: A.1 inset matching + directional S11, A.2 radiation pattern (NTFF over
+the protocol + per-face z-boundary), A.3 the antenna design loop. Before that,
+S.12 SHIPPED (ADR-0189): directional S-parameters
 (3-probe standing-wave fit ported from F2.3) remove the ADR-0188 blocker — the refine loop
 CONVERGES: seed 27 % cutoff error → **1.0 %** in four map points (measured 2.020 GHz vs the
 2.0 GHz design target). The engine now designs: synthesize → full-wave verify → correct →

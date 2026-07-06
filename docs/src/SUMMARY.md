@@ -233,3 +233,4 @@
 - [ADR-0187: S.10 aperture ports on the engine — the port-mismatch ripple solved](decisions/0187-s10-aperture-ports.md)
 - [ADR-0188: S.11 EM-in-the-loop refinement — loop landed, convergence blocked on a named artifact](decisions/0188-s11-em-in-loop-refine.md)
 - [ADR-0189: S.12 directional S-parameters — the refine loop converges](decisions/0189-s12-directional-sparams.md)
+- [ADR-0190: A.0 — the antenna track opens; patch resonance verified at 0.0 %](decisions/0190-a0-patch-antenna.md)

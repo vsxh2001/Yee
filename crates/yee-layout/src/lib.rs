@@ -534,3 +534,127 @@ pub fn hairpin_bpf(p: &HairpinParams) -> Layout {
         bbox,
     }
 }
+
+// ---------------------------------------------------------------------------
+// Rectangular patch antenna (A.0, ADR-0190) — Balanis closed forms.
+// ---------------------------------------------------------------------------
+
+/// Closed-form rectangular-patch dimensions (Balanis, *Antenna Theory*
+/// §14.2, transmission-line model), returned by [`patch_antenna_dims`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PatchDims {
+    /// Radiating-edge width `W = c/(2f0) * sqrt(2/(eps_r+1))` (metres).
+    pub width_m: f64,
+    /// Resonant length `L = c/(2 f0 sqrt(eps_eff)) - 2*dL` (metres).
+    pub length_m: f64,
+    /// Effective permittivity of the patch section at width `W`.
+    pub eps_eff: f64,
+    /// Hammerstad open-end length extension `dL` (metres).
+    pub delta_l_m: f64,
+}
+
+/// Hammerstad microstrip open-end length correction (also used by the
+/// engine-sparams stub gate): the fringing field makes an open microstrip
+/// edge electrically longer than its metal:
+/// `dL = 0.412*h*(eps_eff+0.3)(W/h+0.264) / ((eps_eff-0.258)(W/h+0.8))`.
+pub fn open_end_delta_l(w_m: f64, h_m: f64, e_eff: f64) -> f64 {
+    let u = w_m / h_m;
+    0.412 * h_m * ((e_eff + 0.3) * (u + 0.264)) / ((e_eff - 0.258) * (u + 0.8))
+}
+
+/// Design a rectangular patch for resonance at `f0_hz` on a substrate of
+/// `eps_r`, height `h_m` (Balanis §14.2):
+/// `W = c/(2 f0) * sqrt(2/(eps_r+1))`, `eps_eff` from the Hammerstad
+/// closed form ([`eps_eff`]) at that width, and
+/// `L = c/(2 f0 sqrt(eps_eff)) - 2*dL` with the open-end extension `dL`.
+///
+/// # Panics
+///
+/// Panics if `f0_hz`, `eps_r`, or `h_m` is non-positive.
+pub fn patch_antenna_dims(f0_hz: f64, eps_r: f64, h_m: f64) -> PatchDims {
+    assert!(
+        f0_hz > 0.0 && eps_r > 0.0 && h_m > 0.0,
+        "non-physical patch inputs"
+    );
+    const C: f64 = 299_792_458.0;
+    let width_m = C / (2.0 * f0_hz) * (2.0 / (eps_r + 1.0)).sqrt();
+    let e_eff = eps_eff(width_m, h_m, eps_r);
+    let delta_l_m = open_end_delta_l(width_m, h_m, e_eff);
+    let length_m = C / (2.0 * f0_hz * e_eff.sqrt()) - 2.0 * delta_l_m;
+    PatchDims {
+        width_m,
+        length_m,
+        eps_eff: e_eff,
+        delta_l_m,
+    }
+}
+
+/// Assemble an **edge-fed** rectangular-patch [`Layout`]: a `feed_z0_ohm`
+/// microstrip feed line joining the centre of the patch's radiating edge,
+/// one `PortRef` at the outer feed end. The resonant length `L` runs
+/// along `x` (the feed direction); the radiating edges are the two
+/// `y`-parallel ends. Edge feeding is deliberately unmatched (the edge
+/// resistance of a patch is hundreds of ohms) — resonance shows as a
+/// localized |S11| dip, and matching (inset feed) is the A.1 follow-on.
+///
+/// The feed is half a guided wavelength long so measurement probes fit
+/// on it upstream of the patch.
+pub fn edge_fed_patch(f0_hz: f64, substrate: &Substrate, feed_z0_ohm: f64) -> Layout {
+    const C: f64 = 299_792_458.0;
+    let dims = patch_antenna_dims(f0_hz, substrate.eps_r, substrate.height_m);
+    let feed_w = microstrip_width(feed_z0_ohm, substrate.eps_r, substrate.height_m);
+    let feed_e_eff = eps_eff(feed_w, substrate.height_m, substrate.eps_r);
+    let feed_len = C / (2.0 * f0_hz * feed_e_eff.sqrt());
+
+    let traces = vec![
+        // Feed line along x, centred on y = 0, ending at the patch edge.
+        Polygon::rect(-feed_len, -feed_w / 2.0, feed_len, feed_w),
+        // The patch: resonant length L along x, width W along y.
+        Polygon::rect(0.0, -dims.width_m / 2.0, dims.length_m, dims.width_m),
+    ];
+    let port = PortRef {
+        at: Point2::new(-feed_len, 0.0),
+        width_m: feed_w,
+        ref_impedance_ohm: feed_z0_ohm,
+    };
+    let bbox = BBox::from_polygons(&traces);
+    Layout {
+        substrate: *substrate,
+        traces,
+        ports: vec![port],
+        bbox,
+    }
+}
+
+#[cfg(test)]
+mod patch_tests {
+    use super::*;
+
+    #[test]
+    fn patch_dims_match_hand_computed_balanis_values() {
+        // 2.45 GHz on FR-4 (eps_r 4.4, h 1.6 mm) — Balanis worked-example
+        // arithmetic: W = c/(2 f0) sqrt(2/5.4) = 37.26 mm;
+        // eps_eff(W) ~ 4.09; L = c/(2 f0 sqrt(eps_eff)) - 2 dL ~ 28.8 mm.
+        let d = patch_antenna_dims(2.45e9, 4.4, 1.6e-3);
+        assert!((d.width_m - 37.26e-3).abs() < 0.05e-3, "W = {}", d.width_m);
+        assert!((d.eps_eff - 4.09).abs() < 0.03, "eps_eff = {}", d.eps_eff);
+        assert!((d.length_m - 28.8e-3).abs() < 0.3e-3, "L = {}", d.length_m);
+        assert!(d.delta_l_m > 0.5e-3 && d.delta_l_m < 1.0e-3);
+    }
+
+    #[test]
+    fn edge_fed_patch_layout_is_connected_and_ported() {
+        let sub = Substrate {
+            eps_r: 4.4,
+            height_m: 1.6e-3,
+            loss_tangent: 0.0,
+            metal_thickness_m: 35e-6,
+        };
+        let layout = edge_fed_patch(2.45e9, &sub, 50.0);
+        assert_eq!(layout.traces.len(), 2);
+        assert_eq!(layout.ports.len(), 1);
+        // Feed end and patch start meet at x = 0 (connected footprint).
+        assert!(layout.bbox.min.x < 0.0 && layout.bbox.max.x > 20e-3);
+        assert!(layout.ports[0].at.x == layout.bbox.min.x);
+    }
+}
