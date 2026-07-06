@@ -24,10 +24,14 @@ pollster = { workspace = true, optional = true }
 bytemuck = { workspace = true, optional = true }
 
 [dev-dependencies]
-# compute-001 gates the CPU backend bit-for-bit against yee-fdtd's scalar
+# compute-001/003/007 gate the CPU backend bit-for-bit against yee-fdtd's
 # reference kernels; ndarray is needed only to drive that reference grid.
 yee-fdtd = { workspace = true }
 ndarray  = { workspace = true }
+# compute-008 (line-eeff) voxelizes the same microstrip layout as the
+# original fdtd-line-eeff-001 gate and reuses its analytic eps_eff reference.
+yee-voxel  = { path = "../yee-voxel", version = "0.0.0" }
+yee-layout = { workspace = true }
 
 [lints.rust]
 unsafe_code  = "forbid"

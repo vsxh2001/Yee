@@ -37,6 +37,7 @@
 
 mod cpml;
 mod cpu;
+mod drive;
 mod engine;
 mod error;
 mod fields;
@@ -47,6 +48,7 @@ mod spec;
 mod gpu;
 
 pub use cpu::CpuFdtd;
+pub use drive::{Drive, EComponent, Probe, ResistivePort, SoftSource, Waveform};
 pub use engine::FdtdEngine;
 pub use error::ComputeError;
 pub use fields::Fields;

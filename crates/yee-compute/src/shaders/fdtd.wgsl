@@ -45,6 +45,16 @@ struct Params {
 @group(0) @binding(3) var<storage, read_write> psi: array<f32>;
 @group(0) @binding(4) var<storage, read> profiles: array<f32>;
 @group(0) @binding(5) var<storage, read> masks: array<u32>;
+// Drive plumbing (E.2). drv_idx: [n_soft, n_ports, n_probes, max_steps],
+// then n_soft + n_ports + n_probes field-arena offsets. drv_data:
+// [0] step counter (f32; exact to 2^24), [1..] port e_z_prev state, per-port
+// alpha and gamma, the per-step soft-amplitude table (max_steps x n_soft),
+// the per-step port-EMF table (max_steps x n_ports), and the probe output
+// region (max_steps x n_probes). All amplitudes precomputed host-side in
+// f64 for the entire run, so a chunk of steps encodes with zero host
+// round-trips; the `bump_step` dispatch advances the counter between steps.
+@group(0) @binding(6) var<storage, read> drv_idx: array<u32>;
+@group(0) @binding(7) var<storage, read_write> drv_data: array<f32>;
 
 // ---- component lengths ----
 fn len_ex() -> u32 { return p.nx * (p.ny + 1u) * (p.nz + 1u); }
@@ -372,5 +382,80 @@ fn clamp_ez(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = iez(i, j, k);
     if (masks[len_ex() + len_ey() + idx] != 0u) {
         fields[off_ez() + idx] = 0.0;
+    }
+}
+
+// ============================ drive (E.2) ============================
+
+fn d_nsoft() -> u32 { return drv_idx[0]; }
+fn d_nports() -> u32 { return drv_idx[1]; }
+fn d_nprobes() -> u32 { return drv_idx[2]; }
+fn d_maxsteps() -> u32 { return drv_idx[3]; }
+fn soft_field_off(s: u32) -> u32 { return drv_idx[4u + s]; }
+fn port_field_off(q: u32) -> u32 { return drv_idx[4u + d_nsoft() + q]; }
+fn probe_field_off(q: u32) -> u32 { return drv_idx[4u + d_nsoft() + d_nports() + q]; }
+
+fn dd_step() -> u32 { return u32(drv_data[0]); }
+fn dd_state(q: u32) -> u32 { return 1u + q; }
+fn dd_alpha(q: u32) -> u32 { return 1u + d_nports() + q; }
+fn dd_gamma(q: u32) -> u32 { return 1u + 2u * d_nports() + q; }
+fn dd_amp(step: u32, s: u32) -> u32 {
+    return 1u + 3u * d_nports() + step * d_nsoft() + s;
+}
+fn dd_vsrc(step: u32, q: u32) -> u32 {
+    return 1u + 3u * d_nports() + d_maxsteps() * d_nsoft() + step * d_nports() + q;
+}
+fn dd_probe(step: u32, q: u32) -> u32 {
+    return 1u + 3u * d_nports() + d_maxsteps() * (d_nsoft() + d_nports())
+        + step * d_nprobes() + q;
+}
+
+// Soft sources: fields[off] += amp[step]; dispatched between the H and E
+// half-steps, matching the reference injection point.
+@compute @workgroup_size(64)
+fn inject_soft(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let s = gid.x;
+    if (s >= d_nsoft()) {
+        return;
+    }
+    fields[soft_field_off(s)] += drv_data[dd_amp(dd_step(), s)];
+}
+
+// Resistive ports (pure-resistor lumped update, semi-implicit): applied
+// after the E half-step + clamps, matching LumpedRlcPort::correct_e.
+@compute @workgroup_size(64)
+fn apply_ports(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let q = gid.x;
+    if (q >= d_nports()) {
+        return;
+    }
+    let off = port_field_off(q);
+    let e1_star = fields[off];
+    let e0 = drv_data[dd_state(q)];
+    let v_src = drv_data[dd_vsrc(dd_step(), q)];
+    let alpha = drv_data[dd_alpha(q)];
+    let gamma = drv_data[dd_gamma(q)];
+    let e1 = (e1_star - alpha * e0 + gamma * v_src) / (1.0 + alpha);
+    fields[off] = e1;
+    drv_data[dd_state(q)] = e1;
+}
+
+// Probe recording: one sample per probe per step, written to the output
+// region indexed by the step counter.
+@compute @workgroup_size(64)
+fn record_probes(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let q = gid.x;
+    if (q >= d_nprobes()) {
+        return;
+    }
+    drv_data[dd_probe(dd_step(), q)] = fields[probe_field_off(q)];
+}
+
+// Advance the step counter; dispatched last in each step so every drive
+// kernel in the step reads the same index.
+@compute @workgroup_size(1)
+fn bump_step(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x == 0u) {
+        drv_data[0] = drv_data[0] + 1.0;
     }
 }

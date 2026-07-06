@@ -7377,6 +7377,7 @@ dependencies = [
  "faer",
  "nalgebra 0.34.2",
  "num-complex",
+ "yee-compute",
  "yee-core",
  "yee-fdtd",
  "yee-mesh",
@@ -7427,6 +7428,8 @@ dependencies = [
  "wgpu",
  "yee-core",
  "yee-fdtd",
+ "yee-layout",
+ "yee-voxel",
 ]
 
 [[package]]

@@ -30,6 +30,7 @@ use yee_core::units::{EPS0, MU0};
 
 use crate::cpml::make_profiles;
 use crate::cpu::apply_pec_box;
+use crate::drive::{Drive, EComponent};
 use crate::error::ComputeError;
 use crate::fields::Fields;
 use crate::materials::{Boundary, Materials};
@@ -70,8 +71,14 @@ pub struct GpuFdtd {
     update_pipelines: [wgpu::ComputePipeline; 6],
     /// Mask clamp pipelines (ex, ey, ez); dispatched only when `has_mask`.
     clamp_pipelines: [wgpu::ComputePipeline; 3],
+    /// Drive pipelines: inject_soft, apply_ports, record_probes, bump_step.
+    drive_pipelines: [wgpu::ComputePipeline; 4],
     has_mask: bool,
     field_arena: wgpu::Buffer,
+    drive_data: wgpu::Buffer,
+    drive_counts: (usize, usize, usize), // (n_soft, n_ports, n_probes)
+    max_steps: usize,
+    steps_taken: usize,
     adapter_name: String,
 }
 
@@ -96,9 +103,31 @@ impl GpuFdtd {
     /// the spec's staggered shapes (same contract as `CpuFdtd`).
     pub fn with_config(
         spec: FdtdSpec,
+        fields: Fields,
+        materials: Materials,
+        boundary: Boundary,
+    ) -> Result<Self, ComputeError> {
+        Self::with_drive(spec, fields, materials, boundary, Drive::default(), 0)
+    }
+
+    /// Build a driven stepper (E.2). All drive amplitudes for up to
+    /// `max_steps` steps are precomputed host-side (in f64, then narrowed)
+    /// and uploaded once, so stepping stays fully chunked with zero per-step
+    /// host round-trips; an on-GPU step counter indexes the tables and the
+    /// probe output region. `step_n` beyond `max_steps` panics when a drive
+    /// is attached.
+    ///
+    /// # Panics
+    ///
+    /// Panics on shape mismatches, out-of-bounds drive cells, or a non-empty
+    /// drive with `max_steps == 0`.
+    pub fn with_drive(
+        spec: FdtdSpec,
         mut fields: Fields,
         materials: Materials,
         boundary: Boundary,
+        drive: Drive,
+        max_steps: usize,
     ) -> Result<Self, ComputeError> {
         let field_lens = [
             len3(spec.ex_dims()),
@@ -115,6 +144,11 @@ impl GpuFdtd {
         assert_eq!(fields.hy.len(), field_lens[4], "hy length mismatch");
         assert_eq!(fields.hz.len(), field_lens[5], "hz length mismatch");
         materials.validate(&spec);
+        drive.validate(&spec);
+        assert!(
+            drive.is_empty() || max_steps > 0,
+            "GpuFdtd::with_drive: a non-empty drive needs max_steps > 0"
+        );
 
         // The PEC box is a host-side invariant: zero the outer tangential E
         // faces once; no kernel ever writes them afterwards.
@@ -175,6 +209,8 @@ impl GpuFdtd {
                 storage(3, false),
                 storage(4, true),
                 storage(5, true),
+                storage(6, true),
+                storage(7, false),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -204,6 +240,12 @@ impl GpuFdtd {
             make_pipeline("clamp_ex"),
             make_pipeline("clamp_ey"),
             make_pipeline("clamp_ez"),
+        ];
+        let drive_pipelines = [
+            make_pipeline("inject_soft"),
+            make_pipeline("apply_ports"),
+            make_pipeline("record_probes"),
+            make_pipeline("bump_step"),
         ];
 
         let make_storage_buffer = |label: &str, data: &[f32], writable_by_shader: bool| {
@@ -315,6 +357,79 @@ impl GpuFdtd {
         });
         queue.write_buffer(&mask_arena, 0, bytemuck::cast_slice(&mask_data));
 
+        // --- drive buffers: index table + state/amplitude/probe data.
+        // Layout mirrored by the drv_* helpers in fdtd.wgsl. ---
+        let (n_soft, n_ports, n_probes) = (
+            drive.soft_sources.len(),
+            drive.ports.len(),
+            drive.probes.len(),
+        );
+        let mut drv_idx: Vec<u32> = vec![
+            n_soft as u32,
+            n_ports as u32,
+            n_probes as u32,
+            max_steps as u32,
+        ];
+        for s in &drive.soft_sources {
+            drv_idx
+                .push((s.component.arena_offset(&spec) + s.component.flat(&spec, s.cell)) as u32);
+        }
+        for port in &drive.ports {
+            drv_idx.push(
+                (EComponent::Ez.arena_offset(&spec) + EComponent::Ez.flat(&spec, port.cell)) as u32,
+            );
+        }
+        for probe in &drive.probes {
+            drv_idx.push(
+                (probe.component.arena_offset(&spec) + probe.component.flat(&spec, probe.cell))
+                    as u32,
+            );
+        }
+        let drive_index = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("yee-compute drive index"),
+            size: std::mem::size_of_val(drv_idx.as_slice()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&drive_index, 0, bytemuck::cast_slice(&drv_idx));
+
+        // drv_data: [counter, port state ×n, alpha ×n, gamma ×n,
+        //            amps (max_steps × n_soft), vsrc (max_steps × n_ports),
+        //            probes (max_steps × n_probes)] — all f64-precomputed.
+        let mut drv_data: Vec<f32> =
+            Vec::with_capacity(1 + 3 * n_ports + max_steps * (n_soft + n_ports + n_probes));
+        drv_data.push(0.0); // step counter
+        drv_data.extend(std::iter::repeat_n(0.0, n_ports)); // e_z_prev
+        let area = spec.dx * spec.dy;
+        for port in &drive.ports {
+            let alpha = spec.dt * spec.dz / (2.0 * EPS0 * port.resistance * area);
+            drv_data.push(alpha as f32);
+        }
+        for port in &drive.ports {
+            let gamma = spec.dt / (EPS0 * port.resistance * area);
+            drv_data.push(gamma as f32);
+        }
+        for n in 0..max_steps {
+            for s in &drive.soft_sources {
+                drv_data.push(s.waveform.value(n, spec.dt) as f32);
+            }
+        }
+        for n in 0..max_steps {
+            for port in &drive.ports {
+                drv_data.push(port.waveform.value(n, spec.dt) as f32);
+            }
+        }
+        drv_data.extend(std::iter::repeat_n(0.0, max_steps * n_probes));
+        let drive_data = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("yee-compute drive data"),
+            size: std::mem::size_of_val(drv_data.as_slice()) as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&drive_data, 0, bytemuck::cast_slice(&drv_data));
+
         // --- params ---
         let params = Params {
             nx: spec.nx as u32,
@@ -366,6 +481,14 @@ impl GpuFdtd {
                     binding: 5,
                     resource: mask_arena.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: drive_index.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: drive_data.as_entire_binding(),
+                },
             ],
         });
 
@@ -376,8 +499,13 @@ impl GpuFdtd {
             bind_group,
             update_pipelines,
             clamp_pipelines,
+            drive_pipelines,
             has_mask,
             field_arena,
+            drive_data,
+            drive_counts: (n_soft, n_ports, n_probes),
+            max_steps,
+            steps_taken: 0,
             adapter_name,
         })
     }
@@ -409,8 +537,19 @@ impl GpuFdtd {
     /// clamps when masks are attached), submitting in [`STEPS_PER_SUBMIT`]
     /// chunks.
     pub fn step_n(&mut self, n: usize) -> Result<(), ComputeError> {
+        let (n_soft, n_ports, n_probes) = self.drive_counts;
+        let has_drive = n_soft + n_ports + n_probes > 0;
+        if has_drive {
+            assert!(
+                self.steps_taken + n <= self.max_steps,
+                "GpuFdtd: driven run exceeds max_steps ({} + {n} > {})",
+                self.steps_taken,
+                self.max_steps
+            );
+        }
         let extents = self.dispatch_extents();
         let groups = |len: usize| (len as u32).div_ceil(WORKGROUP);
+        let lane_groups = |count: usize| (count as u32).div_ceil(64).max(1);
         let mut remaining = n;
         while remaining > 0 {
             let chunk = remaining.min(STEPS_PER_SUBMIT);
@@ -427,7 +566,23 @@ impl GpuFdtd {
                 });
                 pass.set_bind_group(0, &self.bind_group, &[]);
                 for _ in 0..chunk {
-                    for (pipeline, extent) in self.update_pipelines.iter().zip(extents) {
+                    // H half-step (3 components).
+                    for (pipeline, extent) in self.update_pipelines[..3].iter().zip(extents) {
+                        pass.set_pipeline(pipeline);
+                        pass.dispatch_workgroups(
+                            groups(extent.0),
+                            groups(extent.1),
+                            groups(extent.2),
+                        );
+                    }
+                    // Soft sources between the half-steps (reference order).
+                    if n_soft > 0 {
+                        pass.set_pipeline(&self.drive_pipelines[0]);
+                        pass.dispatch_workgroups(lane_groups(n_soft), 1, 1);
+                    }
+                    // E half-step (3 components), CPML fused.
+                    for (pipeline, extent) in self.update_pipelines[3..].iter().zip(&extents[3..6])
+                    {
                         pass.set_pipeline(pipeline);
                         pass.dispatch_workgroups(
                             groups(extent.0),
@@ -445,11 +600,43 @@ impl GpuFdtd {
                             );
                         }
                     }
+                    // Ports, probes, then the counter bump (reference order).
+                    if n_ports > 0 {
+                        pass.set_pipeline(&self.drive_pipelines[1]);
+                        pass.dispatch_workgroups(lane_groups(n_ports), 1, 1);
+                    }
+                    if n_probes > 0 {
+                        pass.set_pipeline(&self.drive_pipelines[2]);
+                        pass.dispatch_workgroups(lane_groups(n_probes), 1, 1);
+                    }
+                    if has_drive {
+                        pass.set_pipeline(&self.drive_pipelines[3]);
+                        pass.dispatch_workgroups(1, 1, 1);
+                    }
                 }
             }
             self.queue.submit(Some(encoder.finish()));
         }
+        self.steps_taken += n;
         Ok(())
+    }
+
+    /// Read back the recorded probe series (one `Vec` per [`Drive::probes`]
+    /// entry, `steps_taken` samples each), widened to FP64.
+    pub fn read_probes(&mut self) -> Result<Vec<Vec<f64>>, ComputeError> {
+        let (n_soft, n_ports, n_probes) = self.drive_counts;
+        if n_probes == 0 {
+            return Ok(Vec::new());
+        }
+        let widened = self.read_f32_buffer(&self.drive_data)?;
+        let probe_base = 1 + 3 * n_ports + self.max_steps * (n_soft + n_ports);
+        let mut series = vec![Vec::with_capacity(self.steps_taken); n_probes];
+        for step in 0..self.steps_taken {
+            for (q, out) in series.iter_mut().enumerate() {
+                out.push(widened[probe_base + step * n_probes + q]);
+            }
+        }
+        Ok(series)
     }
 
     /// Copy all six components back to the host, widened to FP64.
@@ -476,7 +663,12 @@ impl GpuFdtd {
     }
 
     fn read_field_arena(&self) -> Result<Vec<f64>, ComputeError> {
-        let size = self.field_arena.size();
+        self.read_f32_buffer(&self.field_arena)
+    }
+
+    /// Copy a whole f32 storage buffer back to the host, widened to FP64.
+    fn read_f32_buffer(&self, source: &wgpu::Buffer) -> Result<Vec<f64>, ComputeError> {
+        let size = source.size();
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("yee-compute staging"),
             size,
@@ -488,7 +680,7 @@ impl GpuFdtd {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("yee-compute readback"),
             });
-        encoder.copy_buffer_to_buffer(&self.field_arena, 0, &staging, 0, size);
+        encoder.copy_buffer_to_buffer(source, 0, &staging, 0, size);
         self.queue.submit(Some(encoder.finish()));
 
         let (tx, rx) = mpsc::channel();

@@ -18,6 +18,7 @@ use rayon::prelude::*;
 use yee_core::units::{EPS0, MU0};
 
 use crate::cpml::CpuCpmlState;
+use crate::drive::{Drive, EComponent};
 use crate::fields::Fields;
 use crate::materials::{Boundary, Materials};
 use crate::spec::{FdtdSpec, idx3, len3};
@@ -41,6 +42,11 @@ pub struct CpuFdtd {
     cpml: Option<CpuCpmlState>,
     pec_box: bool,
     step: u64,
+    drive: Drive,
+    /// `e_z_prev` per resistive port (`LumpedRlcPort::e_z_prev` equivalent).
+    port_state: Vec<f64>,
+    /// Recorded probe series, one inner `Vec` per [`Drive::probes`] entry.
+    probe_series: Vec<Vec<f64>>,
 }
 
 impl CpuFdtd {
@@ -67,6 +73,24 @@ impl CpuFdtd {
         materials: Materials,
         boundary: Boundary,
     ) -> Self {
+        Self::with_drive(spec, fields, materials, boundary, Drive::default())
+    }
+
+    /// Build a driven stepper (E.2): soft sources injected between the H and
+    /// E half-steps, resistive ports applied after the E boundary phase, and
+    /// probes recorded once per step — the exact `WalkingSkeletonSolver` +
+    /// `LumpedRlcPort` orchestration.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any shape mismatch or out-of-bounds drive cell.
+    pub fn with_drive(
+        spec: FdtdSpec,
+        fields: Fields,
+        materials: Materials,
+        boundary: Boundary,
+        drive: Drive,
+    ) -> Self {
         assert_eq!(fields.ex.len(), len3(spec.ex_dims()), "ex length mismatch");
         assert_eq!(fields.ey.len(), len3(spec.ey_dims()), "ey length mismatch");
         assert_eq!(fields.ez.len(), len3(spec.ez_dims()), "ez length mismatch");
@@ -74,11 +98,14 @@ impl CpuFdtd {
         assert_eq!(fields.hy.len(), len3(spec.hy_dims()), "hy length mismatch");
         assert_eq!(fields.hz.len(), len3(spec.hz_dims()), "hz length mismatch");
         materials.validate(&spec);
+        drive.validate(&spec);
         let (cpml, pec_box) = match boundary {
             Boundary::None => (None, false),
             Boundary::PecBox => (None, true),
             Boundary::Cpml(config) => (Some(CpuCpmlState::new(&spec, config)), false),
         };
+        let port_state = vec![0.0; drive.ports.len()];
+        let probe_series = vec![Vec::new(); drive.probes.len()];
         Self {
             spec,
             fields,
@@ -86,6 +113,9 @@ impl CpuFdtd {
             cpml,
             pec_box,
             step: 0,
+            drive,
+            port_state,
+            probe_series,
         }
     }
 
@@ -99,15 +129,64 @@ impl CpuFdtd {
         self.step as f64 * self.spec.dt
     }
 
-    /// Advance the state by `n` full leapfrog steps (no source).
+    /// Advance the state by `n` full leapfrog steps, applying the drive (if
+    /// any): H → boundary-H → soft sources → E → boundary-E (incl. masks) →
+    /// resistive ports → probe recording → clock.
     pub fn step_n(&mut self, n: usize) {
+        use yee_core::units::EPS0;
+        let dt = self.spec.dt;
         for _ in 0..n {
+            let n_step = self.step as usize;
             self.update_h();
             self.boundary_h();
+            if !self.drive.soft_sources.is_empty() {
+                for src in &self.drive.soft_sources {
+                    let flat = src.component.flat(&self.spec, src.cell);
+                    let field = match src.component {
+                        EComponent::Ex => &mut self.fields.ex,
+                        EComponent::Ey => &mut self.fields.ey,
+                        EComponent::Ez => &mut self.fields.ez,
+                    };
+                    field[flat] += src.waveform.value(n_step, dt);
+                }
+            }
             self.update_e();
             self.boundary_e();
+            if !self.drive.ports.is_empty() {
+                // Verbatim `LumpedRlcPort::{correct_e, update_pure_resistor}`.
+                let s = self.spec;
+                let area = s.dx * s.dy;
+                for (port, e_z_prev) in self.drive.ports.iter().zip(&mut self.port_state) {
+                    let flat = EComponent::Ez.flat(&s, port.cell);
+                    let e1_star = self.fields.ez[flat];
+                    let e0 = *e_z_prev;
+                    let v_src = port.waveform.value(n_step, dt);
+                    let alpha = dt * s.dz / (2.0 * EPS0 * port.resistance * area);
+                    let gamma = dt / (EPS0 * port.resistance * area);
+                    let e1 = (e1_star - alpha * e0 + gamma * v_src) / (1.0 + alpha);
+                    self.fields.ez[flat] = e1;
+                    *e_z_prev = e1;
+                }
+            }
             self.step += 1;
+            if !self.drive.probes.is_empty() {
+                for (probe, series) in self.drive.probes.iter().zip(&mut self.probe_series) {
+                    let flat = probe.component.flat(&self.spec, probe.cell);
+                    let field = match probe.component {
+                        EComponent::Ex => &self.fields.ex,
+                        EComponent::Ey => &self.fields.ey,
+                        EComponent::Ez => &self.fields.ez,
+                    };
+                    series.push(field[flat]);
+                }
+            }
         }
+    }
+
+    /// Recorded probe series (one inner slice per [`Drive::probes`] entry,
+    /// one sample per completed step).
+    pub fn probe_series(&self) -> &[Vec<f64>] {
+        &self.probe_series
     }
 
     /// One full step injecting a Gaussian-in-time soft pulse on `E_z` at
