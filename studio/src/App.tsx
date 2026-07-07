@@ -8,7 +8,7 @@
 import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { SliceHeatmap, SpectrumPlot, type Slice } from "./views";
+import { SliceHeatmap, SparamPlot, SpectrumPlot, type Slice } from "./views";
 
 // three.js rides its own chunk, fetched only once a result is on screen.
 const FieldSurface3D = lazy(() =>
@@ -28,6 +28,176 @@ interface JobResult {
 interface ProgressEvent {
   step: number;
   total: number;
+}
+
+// R.5 (ADR-0198): the closed-form filter design flow's response.
+interface FilterDesignResponse {
+  freqs_hz: number[];
+  s11_db: number[];
+  s21_db: number[];
+  s2p: string;
+  gerber_copper: string;
+  gerber_outline: string;
+  line_width_m: number;
+  arm_length_m: number;
+  gaps_m: number[];
+  tap_offset_m: number;
+}
+
+function download(name: string, text: string) {
+  const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// Spec-entry form + design response + export buttons (R.5 walking
+// skeleton): the closed-form design flow — synthesis, dimensions, layout,
+// coupling-matrix response, .s2p/Gerber artifacts — is instant; the
+// full-wave verify loop stays on the engine job path above.
+export function FilterDesignPanel() {
+  const [f0Ghz, setF0Ghz] = useState(5.0);
+  const [fbw, setFbw] = useState(0.22);
+  const [order, setOrder] = useState(3);
+  const [rippleDb, setRippleDb] = useState("");
+  const [epsR, setEpsR] = useState(4.4);
+  const [heightMm, setHeightMm] = useState(0.8);
+  const [design, setDesign] = useState<FilterDesignResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function runDesign() {
+    setBusy(true);
+    setError(null);
+    setDesign(null);
+    try {
+      const req: Record<string, unknown> = {
+        f0_hz: f0Ghz * 1e9,
+        fbw,
+        order,
+        eps_r: epsR,
+        height_m: heightMm * 1e-3,
+      };
+      const ripple = Number(rippleDb);
+      if (rippleDb.trim() !== "" && ripple > 0) req.ripple_db = ripple;
+      setDesign(await invoke<FilterDesignResponse>("design_filter", { req }));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section data-testid="filter-design">
+      <h2>Filter design</h2>
+      <p className="sub">
+        hairpin BPF · synthesis → dimensions → layout → design response
+      </p>
+      <section className="controls">
+        <label>
+          f₀ (GHz)
+          <input
+            type="number"
+            step={0.1}
+            value={f0Ghz}
+            disabled={busy}
+            onChange={(e) => setF0Ghz(Number(e.target.value))}
+          />
+        </label>
+        <label>
+          FBW
+          <input
+            type="number"
+            step={0.01}
+            value={fbw}
+            disabled={busy}
+            onChange={(e) => setFbw(Number(e.target.value))}
+          />
+        </label>
+        <label>
+          Order
+          <input
+            type="number"
+            min={2}
+            max={9}
+            value={order}
+            disabled={busy}
+            onChange={(e) => setOrder(Number(e.target.value))}
+          />
+        </label>
+        <label>
+          Ripple (dB, blank = Butterworth)
+          <input
+            type="text"
+            value={rippleDb}
+            disabled={busy}
+            onChange={(e) => setRippleDb(e.target.value)}
+          />
+        </label>
+        <label>
+          ε_r
+          <input
+            type="number"
+            step={0.1}
+            value={epsR}
+            disabled={busy}
+            onChange={(e) => setEpsR(Number(e.target.value))}
+          />
+        </label>
+        <label>
+          h (mm)
+          <input
+            type="number"
+            step={0.1}
+            value={heightMm}
+            disabled={busy}
+            onChange={(e) => setHeightMm(Number(e.target.value))}
+          />
+        </label>
+        <button onClick={runDesign} disabled={busy}>
+          {busy ? "Designing…" : "Design"}
+        </button>
+      </section>
+
+      {error && <p className="error">{error}</p>}
+
+      {design && (
+        <section>
+          <p className="meta">
+            w = {(design.line_width_m * 1e3).toFixed(2)} mm · arm ={" "}
+            {(design.arm_length_m * 1e3).toFixed(2)} mm · gaps ={" "}
+            {design.gaps_m.map((g) => (g * 1e3).toFixed(2)).join(", ")} mm ·
+            tap = {(design.tap_offset_m * 1e3).toFixed(2)} mm
+          </p>
+          <SparamPlot
+            freqsHz={design.freqs_hz}
+            s11Db={design.s11_db}
+            s21Db={design.s21_db}
+          />
+          <section className="controls">
+            <button onClick={() => download("design.s2p", design.s2p)}>
+              Export .s2p
+            </button>
+            <button
+              onClick={() => download("design-F_Cu.gbr", design.gerber_copper)}
+            >
+              Export copper .gbr
+            </button>
+            <button
+              onClick={() =>
+                download("design-Edge_Cuts.gbr", design.gerber_outline)
+              }
+            >
+              Export outline .gbr
+            </button>
+          </section>
+        </section>
+      )}
+    </section>
+  );
 }
 
 function ProbePlot({ series, dt }: { series: number[]; dt: number }) {
@@ -192,6 +362,8 @@ export default function App() {
           )}
         </section>
       )}
+
+      <FilterDesignPanel />
     </main>
   );
 }

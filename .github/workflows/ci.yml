@@ -206,6 +206,14 @@ jobs:
         working-directory: studio/src-tauri
         run: cargo check
 
+      # R.5 (ADR-0198): the scripted design flow at the command layer —
+      # spec -> synthesis -> dims -> layout -> coupling-matrix response,
+      # with the .s2p and Gerber artifacts byte-checked against yee-io /
+      # yee-export (gate studio-design-e2e-001).
+      - name: Studio design-flow e2e (byte-checked exports)
+        working-directory: studio/src-tauri
+        run: cargo test --test design_e2e
+
   compute-engine-gates:
     name: Compute engine gates (yee-compute + yee-engine, release)
     runs-on: ubuntu-latest

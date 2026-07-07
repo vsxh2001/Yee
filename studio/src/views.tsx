@@ -33,6 +33,53 @@ export function SpectrumPlot({ series, dt }: { series: number[]; dt: number }) {
   );
 }
 
+// S-parameter response plot (R.5, ADR-0198): |S21| and |S11| in dB vs
+// frequency, floored at -60 dB. Dependency-free inline SVG like the rest.
+export function SparamPlot({
+  freqsHz,
+  s11Db,
+  s21Db,
+}: {
+  freqsHz: number[];
+  s11Db: number[];
+  s21Db: number[];
+}) {
+  if (freqsHz.length < 2) return null;
+  const w = 640;
+  const h = 240;
+  const pad = 8;
+  const floor = -60;
+  const toPoints = (db: number[]) =>
+    db
+      .map((v, i) => {
+        const x = pad + (i / (freqsHz.length - 1)) * (w - 2 * pad);
+        const clamped = Math.max(v, floor);
+        const y = pad + (clamped / floor) * (h - 2 * pad);
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      })
+      .join(" ");
+  const fLo = freqsHz[0] / 1e9;
+  const fHi = freqsHz[freqsHz.length - 1] / 1e9;
+  return (
+    <figure className="plot" data-testid="sparam-plot">
+      <svg viewBox={`0 0 ${w} ${h}`} role="img" aria-label="S-parameters">
+        <line x1={pad} y1={pad} x2={w - pad} y2={pad} className="axis" />
+        <polyline points={toPoints(s21Db)} className="trace" fill="none" />
+        <polyline
+          points={toPoints(s11Db)}
+          className="trace trace-s11"
+          fill="none"
+          strokeDasharray="4 3"
+        />
+      </svg>
+      <figcaption>
+        |S21| (solid) · |S11| (dashed) · {fLo.toFixed(2)}–{fHi.toFixed(2)} GHz ·
+        floor {floor} dB
+      </figcaption>
+    </figure>
+  );
+}
+
 export interface Slice {
   ni: number;
   nj: number;
