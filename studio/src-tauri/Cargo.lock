@@ -5282,6 +5282,8 @@ dependencies = [
  "thiserror 1.0.69",
  "yee-compute",
  "yee-fdtd",
+ "yee-layout",
+ "yee-voxel",
 ]
 
 [[package]]
@@ -5349,6 +5351,16 @@ name = "yee-synth"
 version = "0.0.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "yee-voxel"
+version = "0.0.0"
+dependencies = [
+ "ndarray",
+ "yee-fdtd",
+ "yee-filter",
+ "yee-layout",
 ]
 
 [[package]]

@@ -11,11 +11,13 @@
 //! transport-agnostic by construction.
 
 pub mod design;
+pub mod verify;
 
 use tauri::Emitter;
 use yee_engine::{JobEvent, JobResult, JobSpec};
 
 use crate::design::{FilterDesignRequest, FilterDesignResponse, design_filter_impl};
+use crate::verify::{FilterVerifyRequest, FilterVerifyResponse, verify_filter_impl};
 
 /// Run a simulation job on the engine, streaming progress events.
 #[tauri::command]
@@ -47,10 +49,27 @@ fn design_filter(req: FilterDesignRequest) -> Result<FilterDesignResponse, Strin
     design_filter_impl(&req)
 }
 
+/// Run the full-wave verify flow for a designed filter (R.5b): reference
+/// + DUT engine solves with `verify://progress` events, returning the
+/// measured directional |S21| next to the design curve.
+#[tauri::command]
+async fn verify_filter(
+    app: tauri::AppHandle,
+    req: FilterVerifyRequest,
+) -> Result<FilterVerifyResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        verify_filter_impl(&req, &mut |p| {
+            let _ = app.emit("verify://progress", serde_json::json!(p));
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Build and run the Tauri application.
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![run_job, design_filter])
+        .invoke_handler(tauri::generate_handler![run_job, design_filter, verify_filter])
         .run(tauri::generate_context!())
         .expect("error while running yee-studio");
 }

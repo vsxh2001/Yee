@@ -30,6 +30,20 @@ interface ProgressEvent {
   total: number;
 }
 
+// R.5b (ADR-0199): the full-wave verify flow's response.
+interface FilterVerifyResponse {
+  freqs_hz: number[];
+  measured_s21_db: number[];
+  design_s21_db: number[];
+  backend: string;
+}
+
+interface VerifyProgress {
+  phase: string;
+  step: number;
+  total: number;
+}
+
 // R.5 (ADR-0198): the closed-form filter design flow's response.
 interface FilterDesignResponse {
   freqs_hz: number[];
@@ -67,26 +81,74 @@ export function FilterDesignPanel() {
   const [design, setDesign] = useState<FilterDesignResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [verify, setVerify] = useState<FilterVerifyResponse | null>(null);
+  const [verifyProgress, setVerifyProgress] = useState<VerifyProgress | null>(
+    null,
+  );
+  const [verifying, setVerifying] = useState(false);
+  const verifyUnlisten = useRef<UnlistenFn | null>(null);
+
+  useEffect(() => {
+    return () => {
+      verifyUnlisten.current?.();
+    };
+  }, []);
+
+  function specRequest(): Record<string, unknown> {
+    const req: Record<string, unknown> = {
+      f0_hz: f0Ghz * 1e9,
+      fbw,
+      order,
+      eps_r: epsR,
+      height_m: heightMm * 1e-3,
+    };
+    const ripple = Number(rippleDb);
+    if (rippleDb.trim() !== "" && ripple > 0) req.ripple_db = ripple;
+    return req;
+  }
 
   async function runDesign() {
     setBusy(true);
     setError(null);
     setDesign(null);
+    setVerify(null);
     try {
-      const req: Record<string, unknown> = {
-        f0_hz: f0Ghz * 1e9,
-        fbw,
-        order,
-        eps_r: epsR,
-        height_m: heightMm * 1e-3,
-      };
-      const ripple = Number(rippleDb);
-      if (rippleDb.trim() !== "" && ripple > 0) req.ripple_db = ripple;
-      setDesign(await invoke<FilterDesignResponse>("design_filter", { req }));
+      setDesign(
+        await invoke<FilterDesignResponse>("design_filter", {
+          req: specRequest(),
+        }),
+      );
     } catch (e) {
       setError(String(e));
     } finally {
       setBusy(false);
+    }
+  }
+
+  // R.5b: the full-wave verify loop — two engine solves streamed over
+  // verify://progress, minutes of compute at full fidelity.
+  async function runVerify() {
+    setVerifying(true);
+    setError(null);
+    setVerify(null);
+    setVerifyProgress(null);
+    verifyUnlisten.current?.();
+    verifyUnlisten.current = await listen<VerifyProgress>(
+      "verify://progress",
+      (e) => setVerifyProgress(e.payload),
+    );
+    try {
+      setVerify(
+        await invoke<FilterVerifyResponse>("verify_filter", {
+          req: { design: specRequest() },
+        }),
+      );
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVerifying(false);
+      verifyUnlisten.current?.();
+      verifyUnlisten.current = null;
     }
   }
 
@@ -157,7 +219,7 @@ export function FilterDesignPanel() {
             onChange={(e) => setHeightMm(Number(e.target.value))}
           />
         </label>
-        <button onClick={runDesign} disabled={busy}>
+        <button onClick={runDesign} disabled={busy || verifying}>
           {busy ? "Designing…" : "Design"}
         </button>
       </section>
@@ -193,7 +255,29 @@ export function FilterDesignPanel() {
             >
               Export outline .gbr
             </button>
+            <button onClick={runVerify} disabled={verifying}>
+              {verifying ? "Verifying…" : "Verify (full-wave)"}
+            </button>
           </section>
+          {verifying && verifyProgress && (
+            <p className="meta">
+              verify: {verifyProgress.phase} · {verifyProgress.step} /{" "}
+              {verifyProgress.total}
+            </p>
+          )}
+          {verify && (
+            <>
+              <p className="meta">
+                full-wave verify ran on <strong>{verify.backend}</strong>
+              </p>
+              <SparamPlot
+                freqsHz={verify.freqs_hz}
+                s21Db={verify.measured_s21_db}
+                s11Db={verify.design_s21_db}
+                labels={["measured |S21|", "designed |S21|"]}
+              />
+            </>
+          )}
         </section>
       )}
     </section>

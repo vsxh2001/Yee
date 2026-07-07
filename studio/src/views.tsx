@@ -39,10 +39,12 @@ export function SparamPlot({
   freqsHz,
   s11Db,
   s21Db,
+  labels = ["|S21|", "|S11|"],
 }: {
   freqsHz: number[];
   s11Db: number[];
   s21Db: number[];
+  labels?: [string, string];
 }) {
   if (freqsHz.length < 2) return null;
   const w = 640;
@@ -73,8 +75,8 @@ export function SparamPlot({
         />
       </svg>
       <figcaption>
-        |S21| (solid) · |S11| (dashed) · {fLo.toFixed(2)}–{fHi.toFixed(2)} GHz ·
-        floor {floor} dB
+        {labels[0]} (solid) · {labels[1]} (dashed) · {fLo.toFixed(2)}–
+        {fHi.toFixed(2)} GHz · floor {floor} dB
       </figcaption>
     </figure>
   );

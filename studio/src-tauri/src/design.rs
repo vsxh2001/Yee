@@ -65,15 +65,10 @@ pub struct FilterDesignResponse {
     pub tap_offset_m: f64,
 }
 
-/// Pure design flow (no Tauri types), unit/e2e-testable headlessly.
-pub fn design_filter_impl(req: &FilterDesignRequest) -> Result<FilterDesignResponse, String> {
-    if !(req.f0_hz > 0.0 && req.fbw > 0.0 && req.fbw < 1.0) {
-        return Err("f0 must be positive and 0 < FBW < 1".into());
-    }
-    if req.order < 2 {
-        return Err("order must be at least 2 (inter-resonator coupling)".into());
-    }
-    let spec = FilterSpec {
+/// The [`yee_filter::FilterSpec`] a design request describes (shared with
+/// the verify flow, R.5b).
+pub fn filter_spec_for(req: &FilterDesignRequest) -> FilterSpec {
+    FilterSpec {
         response: Response::Bandpass,
         approximation: match req.ripple_db {
             Some(r) => Approximation::Chebyshev { ripple_db: r },
@@ -88,13 +83,29 @@ pub fn design_filter_impl(req: &FilterDesignRequest) -> Result<FilterDesignRespo
             return_loss_db: 10.0,
             stopband: vec![],
         },
-    };
-    let substrate = Substrate {
+    }
+}
+
+/// The substrate a design request describes (shared with the verify flow).
+pub fn substrate_for(req: &FilterDesignRequest) -> Substrate {
+    Substrate {
         eps_r: req.eps_r,
         height_m: req.height_m,
         loss_tangent: 0.0,
         metal_thickness_m: 35e-6,
-    };
+    }
+}
+
+/// Pure design flow (no Tauri types), unit/e2e-testable headlessly.
+pub fn design_filter_impl(req: &FilterDesignRequest) -> Result<FilterDesignResponse, String> {
+    if !(req.f0_hz > 0.0 && req.fbw > 0.0 && req.fbw < 1.0) {
+        return Err("f0 must be positive and 0 < FBW < 1".into());
+    }
+    if req.order < 2 {
+        return Err("order must be at least 2 (inter-resonator coupling)".into());
+    }
+    let spec = filter_spec_for(req);
+    let substrate = substrate_for(req);
 
     let project = synthesize(&spec);
     let dims = dimension_hairpin_with_fold(&project, &substrate, req.fold_widths)

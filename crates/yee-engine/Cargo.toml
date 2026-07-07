@@ -21,18 +21,19 @@ yee-compute = { path = "../yee-compute", version = "0.0.0", default-features = f
 # near-to-far transform stays yee-fdtd's validated NtffState; the engine
 # samples it through the host-side grid adapter (the compute-010 pattern).
 yee-fdtd    = { workspace = true }
+# Board-measurement plan builder (R.5b, ADR-0199): promotes the gates'
+# copy-pasted voxelize->JobSpec pattern into a library API shared by the
+# studio's verify command and future gates.
+yee-voxel   = { path = "../yee-voxel", version = "0.0.0" }
+yee-layout  = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }
 
 [dev-dependencies]
-# engine-verify-001 (S.5) voxelizes the fdtd-line-eeff-001 microstrip
-# layout and reuses its analytic Hammerstad-Jensen eps_eff reference —
-# the same pairing as yee-compute's compute-008 gate.
-yee-voxel  = { path = "../yee-voxel", version = "0.0.0" }
-yee-layout = { workspace = true }
 # engine-sparams-002 (R.2) exports an engine-measured response to
-# Touchstone and round-trips it.
+# Touchstone and round-trips it. (yee-voxel / yee-layout moved to
+# [dependencies] for the board module, R.5b.)
 yee-io      = { workspace = true }
 num-complex = { workspace = true }
 

@@ -34,6 +34,7 @@
 //! assert!(done);
 //! ```
 
+pub mod board;
 pub mod sparams;
 
 use std::sync::Arc;

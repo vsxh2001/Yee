@@ -214,6 +214,14 @@ jobs:
         working-directory: studio/src-tauri
         run: cargo test --test design_e2e
 
+      # R.5b (ADR-0199): the full-wave verify PIPE at reduced fidelity —
+      # phase-ordered progress streaming and the exact-identity |S21| = 0 dB
+      # case (two bit-identical solves); physics is gated in yee-engine /
+      # yee-filter (gate studio-verify-e2e-001, ~1-2 min debug).
+      - name: Studio verify-flow e2e (pipe, reduced fidelity)
+        working-directory: studio/src-tauri
+        run: cargo test --test verify_e2e
+
   compute-engine-gates:
     name: Compute engine gates (yee-compute + yee-engine, release)
     runs-on: ubuntu-latest
