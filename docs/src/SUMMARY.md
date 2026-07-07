@@ -243,3 +243,4 @@
 - [ADR-0197: R.4 — BPF end-to-end: the F1.2.1 core + EM-in-the-loop BO](decisions/0197-r4-bpf-end-to-end-bo.md)
 - [ADR-0198: R.5 — the studio designs: spec → response → byte-checked exports](decisions/0198-r5-studio-design-flow.md)
 - [ADR-0199: R.5b — the studio verifies: full-wave loop + the shared board fixture](decisions/0199-r5b-studio-verify-loop.md)
+- [ADR-0200: R.2b — measured complex Γ of a known one-port, differentially](decisions/0200-r2b-shorted-line-gamma.md)
