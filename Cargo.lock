@@ -7821,11 +7821,13 @@ dependencies = [
 name = "yee-filter"
 version = "0.0.0"
 dependencies = [
+ "nalgebra 0.34.2",
  "num-complex",
  "serde",
  "serde_json",
  "yee-engine",
  "yee-layout",
+ "yee-surrogate",
  "yee-synth",
  "yee-voxel",
 ]

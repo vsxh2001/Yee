@@ -535,6 +535,113 @@ pub fn hairpin_bpf(p: &HairpinParams) -> Layout {
     }
 }
 
+/// Parameters for [`hairpin_bpf_sections`] — the **per-section-gap** hairpin
+/// generator (R.4/F1.2.1). Unlike [`HairpinParams`], which bakes one
+/// `coupling_gap_m` into a uniform pitch, this carries the N − 1 *distinct*
+/// inter-resonator gaps synthesis produces (one per coupling `k_{i,i+1}`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HairpinSectionParams {
+    /// The dielectric substrate.
+    pub substrate: Substrate,
+    /// Length of each resonator arm along `y`, metres.
+    pub arm_length_m: f64,
+    /// Line width of each arm / bend, metres.
+    pub line_width_m: f64,
+    /// Centre-to-centre spacing of the two arms of one hairpin, metres.
+    pub fold_spacing_m: f64,
+    /// Per-section edge-coupling gaps, metres — `gaps_m[i]` separates
+    /// resonators `i` and `i + 1`, so the resonator count is
+    /// `gaps_m.len() + 1`.
+    pub gaps_m: Vec<f64>,
+    /// Tap offset of the feed up each end-resonator arm, metres, measured
+    /// from the open (bottom) end.
+    pub tap_offset_m: f64,
+    /// Feed-line width, metres.
+    pub feed_width_m: f64,
+    /// Feed-line length, metres.
+    pub feed_length_m: f64,
+}
+
+/// Generate a **per-section-gap hairpin** band-pass filter [`Layout`]
+/// (R.4/F1.2.1 — "gap option (a)" from the F1.2.2 dimensioning notes).
+///
+/// Identical resonator geometry to [`hairpin_bpf`] — `n` U-folded resonators
+/// of three rectangles each, tapped feeds on the outer arms of the end
+/// resonators — except each adjacent pair sits at its **own** solved gap:
+/// resonator `i + 1`'s x-base is resonator `i`'s base advanced by
+/// `fold_spacing + line_width + gaps_m[i]`. [`hairpin_bpf`] (and its
+/// committed `geo-003` gate) is untouched; a uniform `gaps_m` reproduces its
+/// resonator placement exactly.
+///
+/// # Panics
+///
+/// Panics if `gaps_m` is empty (a one-resonator "filter" has no coupling
+/// section; use [`hairpin_bpf`] for degenerate single-resonator layouts).
+pub fn hairpin_bpf_sections(p: &HairpinSectionParams) -> Layout {
+    assert!(
+        !p.gaps_m.is_empty(),
+        "hairpin_bpf_sections needs at least one coupling gap (two resonators)"
+    );
+    assert!(
+        p.fold_spacing_m > p.line_width_m,
+        "fold_spacing_m is centre-to-centre: <= line_width_m merges the two arms of the U"
+    );
+    let n = p.gaps_m.len() + 1;
+    let mut traces: Vec<Polygon> = Vec::with_capacity(n * 3 + 2);
+    let arm_h = p.arm_length_m;
+    let lw = p.line_width_m;
+
+    let mut x_base = 0.0;
+    let mut last_x_base = 0.0;
+    for i in 0..n {
+        traces.push(Polygon::rect(x_base, 0.0, lw, arm_h));
+        let right_x = x_base + p.fold_spacing_m;
+        traces.push(Polygon::rect(right_x, 0.0, lw, arm_h));
+        let bend_w = (right_x + lw) - x_base;
+        traces.push(Polygon::rect(x_base, arm_h - lw, bend_w, lw));
+        last_x_base = x_base;
+        if i < n - 1 {
+            x_base += p.fold_spacing_m + lw + p.gaps_m[i];
+        }
+    }
+
+    // Tapped feeds on the outer arms of the end resonators, exactly as
+    // hairpin_bpf places them.
+    let in_feed_x = -p.feed_length_m;
+    let in_feed_y = p.tap_offset_m - p.feed_width_m / 2.0;
+    traces.push(Polygon::rect(
+        in_feed_x,
+        in_feed_y,
+        p.feed_length_m,
+        p.feed_width_m,
+    ));
+    let in_port = PortRef {
+        at: Point2::new(in_feed_x, p.tap_offset_m),
+        width_m: p.feed_width_m,
+        ref_impedance_ohm: 50.0,
+    };
+    let last_right_arm_x = last_x_base + p.fold_spacing_m + lw;
+    traces.push(Polygon::rect(
+        last_right_arm_x,
+        in_feed_y,
+        p.feed_length_m,
+        p.feed_width_m,
+    ));
+    let out_port = PortRef {
+        at: Point2::new(last_right_arm_x + p.feed_length_m, p.tap_offset_m),
+        width_m: p.feed_width_m,
+        ref_impedance_ohm: 50.0,
+    };
+
+    let bbox = BBox::from_polygons(&traces);
+    Layout {
+        substrate: p.substrate,
+        traces,
+        ports: vec![in_port, out_port],
+        bbox,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Rectangular patch antenna (A.0, ADR-0190) — Balanis closed forms.
 // ---------------------------------------------------------------------------
@@ -623,6 +730,85 @@ pub fn edge_fed_patch(f0_hz: f64, substrate: &Substrate, feed_z0_ohm: f64) -> La
         traces,
         ports: vec![port],
         bbox,
+    }
+}
+
+#[cfg(test)]
+mod hairpin_sections_tests {
+    use super::*;
+
+    fn substrate() -> Substrate {
+        Substrate {
+            eps_r: 4.4,
+            height_m: 1.6e-3,
+            loss_tangent: 0.0,
+            metal_thickness_m: 35e-6,
+        }
+    }
+
+    #[test]
+    fn per_section_gaps_set_each_resonator_pitch() {
+        let p = HairpinSectionParams {
+            substrate: substrate(),
+            arm_length_m: 8e-3,
+            line_width_m: 1e-3,
+            fold_spacing_m: 3e-3,
+            gaps_m: vec![0.4e-3, 0.9e-3],
+            tap_offset_m: 2e-3,
+            feed_width_m: 1e-3,
+            feed_length_m: 8e-3,
+        };
+        let layout = hairpin_bpf_sections(&p);
+        // 3 resonators × 3 rects + 2 feeds.
+        assert_eq!(layout.traces.len(), 11);
+        // Resonator i's left arm is trace 3i; x-bases accumulate each gap.
+        let min_x = |poly: &Polygon| poly.verts.iter().map(|v| v.x).fold(f64::INFINITY, f64::min);
+        let base = |i: usize| min_x(&layout.traces[3 * i]);
+        let pitch0 = p.fold_spacing_m + p.line_width_m + p.gaps_m[0];
+        let pitch1 = p.fold_spacing_m + p.line_width_m + p.gaps_m[1];
+        assert!((base(1) - base(0) - pitch0).abs() < 1e-12);
+        assert!((base(2) - base(1) - pitch1).abs() < 1e-12);
+        // Ports at tap height, outside the end resonators.
+        assert!((layout.ports[0].at.y - p.tap_offset_m).abs() < 1e-12);
+        assert!((layout.ports[1].at.y - p.tap_offset_m).abs() < 1e-12);
+        assert!(layout.ports[0].at.x < base(0));
+        assert!(layout.ports[1].at.x > base(2) + p.fold_spacing_m + p.line_width_m);
+    }
+
+    #[test]
+    fn uniform_gaps_reproduce_hairpin_bpf_resonator_placement() {
+        let gap = 0.6e-3;
+        let sections = HairpinSectionParams {
+            substrate: substrate(),
+            arm_length_m: 8e-3,
+            line_width_m: 1e-3,
+            fold_spacing_m: 3e-3,
+            gaps_m: vec![gap, gap],
+            tap_offset_m: 8e-3 / 3.0,
+            feed_width_m: 1e-3,
+            feed_length_m: 8e-3,
+        };
+        let uniform = HairpinParams {
+            substrate: substrate(),
+            n: 3,
+            arm_length_m: 8e-3,
+            line_width_m: 1e-3,
+            fold_spacing_m: 3e-3,
+            coupling_gap_m: gap,
+            tap_offset_m: 8e-3 / 3.0,
+            feed_width_m: 1e-3,
+            feed_length_m: 8e-3,
+        };
+        let a = hairpin_bpf_sections(&sections);
+        let b = hairpin_bpf(&uniform);
+        assert_eq!(a.traces.len(), b.traces.len());
+        for (ra, rb) in a.traces.iter().zip(&b.traces) {
+            assert_eq!(ra.verts.len(), rb.verts.len());
+            for (va, vb) in ra.verts.iter().zip(&rb.verts) {
+                assert!((va.x - vb.x).abs() < 1e-15);
+                assert!((va.y - vb.y).abs() < 1e-15);
+            }
+        }
     }
 }
 

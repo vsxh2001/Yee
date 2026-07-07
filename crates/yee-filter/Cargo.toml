@@ -33,3 +33,7 @@ serde_json = { workspace = true }
 # |S21|/|S11|). Dev-deps keep the library itself WASM-safe (ADR-0089).
 yee-engine = { path = "../yee-engine", version = "0.0.0" }
 yee-voxel  = { path = "../yee-voxel", version = "0.0.0" }
+# Test-only (R.4b, ADR-0197): engine-bpf-bo-001 drives the hairpin knobs with
+# yee-surrogate's Bayesian optimizer over engine jobs.
+yee-surrogate = { workspace = true }
+nalgebra      = { workspace = true }

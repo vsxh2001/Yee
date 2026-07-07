@@ -240,3 +240,4 @@
 - [ADR-0194: R.0+R.1 — dielectric loss (0.1 % vs Pozar) and vias on the board path](decisions/0194-r0-r1-losses-vias.md)
 - [ADR-0195: R.2 — complex S-parameters + Touchstone export from engine measurements](decisions/0195-r2-complex-sparams-touchstone.md)
 - [ADR-0196: R.3 — GPU parity for the design flows (aperture ports + per-face CPML)](decisions/0196-r3-gpu-parity-design-flows.md)
+- [ADR-0197: R.4 — BPF end-to-end: the F1.2.1 core + EM-in-the-loop BO](decisions/0197-r4-bpf-end-to-end-bo.md)

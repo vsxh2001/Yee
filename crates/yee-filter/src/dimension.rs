@@ -54,9 +54,9 @@
 use serde::{Deserialize, Serialize};
 
 use yee_layout::{
-    BBox, EdgeCoupledParams, EdgeCoupledSection, HairpinParams, Layout, Point2, Polygon, PortRef,
-    Substrate, coupled_microstrip, coupling_coefficient, edge_coupled_bpf, eps_eff, hairpin_bpf,
-    microstrip_width,
+    BBox, EdgeCoupledParams, EdgeCoupledSection, HairpinSectionParams, Layout, Point2, Polygon,
+    PortRef, Substrate, coupled_microstrip, coupling_coefficient, edge_coupled_bpf, eps_eff,
+    hairpin_bpf_sections, microstrip_width,
 };
 
 use crate::{FilterProject, Topology};
@@ -116,6 +116,21 @@ pub enum DimError {
         /// Largest realizable coupling (at the minimum bracket gap).
         k_max: f64,
     },
+    /// The synthesized external Q cannot be realized by a tapped feed on this
+    /// resonator (R.4/F1.2.1): a tap can only realize
+    /// `qe ∈ [(π/2)(Z0/Zr), (π/2)(Z0/Zr)/cos²(π·arm/L)]` — the lower bound is
+    /// the voltage antinode (open end), the upper bound the last physical
+    /// point on the arm before the bend. Below it the coupling is stronger
+    /// than any tap can deliver; above it the tap lands on the bend.
+    TapNotRealizable {
+        /// The synthesized singly-loaded external Q (`g0·g1/FBW`).
+        qe: f64,
+        /// Smallest realizable external Q (tap at the antinode).
+        qe_min: f64,
+        /// Largest realizable external Q (tap at the end of the arm);
+        /// `+∞` when no arm bound applies (bare [`tap_offset_from_qe`]).
+        qe_max: f64,
+    },
     /// A stepped-impedance input was non-physical: the prototype order is `0`,
     /// or the cut-off frequency / impedances (`f_c`, `Z₀`, `Z_high`, `Z_low`) are
     /// not strictly positive. Carries a human-readable description.
@@ -151,6 +166,11 @@ impl std::fmt::Display for DimError {
                  [{GAP_MIN_M:.1e}, {GAP_MAX_M:.1e}] m; achievable coupling range is \
                  [{k_min:.6}, {k_max:.6}]"
             ),
+            DimError::TapNotRealizable { qe, qe_min, qe_max } => write!(
+                f,
+                "external Q qe = {qe:.4} is outside the tapped-feed realizable range \
+                 [{qe_min:.4}, {qe_max:.4}] (antinode tap .. end-of-arm tap)"
+            ),
             DimError::NonPhysicalInput(why) => {
                 write!(f, "non-physical stepped-impedance input: {why}")
             }
@@ -164,6 +184,44 @@ impl std::fmt::Display for DimError {
 }
 
 impl std::error::Error for DimError {}
+
+/// Tap offset (metres, from the **open end** of the resonator) realizing a
+/// singly-loaded external Q on a tapped half-wave resonator (R.4/F1.2.1;
+/// Hong & Lancaster ch. 6 tapped-line coupling).
+///
+/// For a half-wave resonator of characteristic impedance `zr_ohm` and total
+/// electrical length `L = halfwave_m` (an unfolded hairpin: `2 * arm`),
+/// tapped by a `z0_ohm` feed at distance `t` from the open end, the standing
+/// wave `V(x) = V0 cos(pi x / L)` (antinode at the open ends, null at the
+/// fold) stores `W = C_l V0^2 L / 4` and delivers `P = V(t)^2 / (2 Z0)` to
+/// the feed, so
+///
+/// `Qe(t) = w0 W / P = (pi/2) (Z0/Zr) / cos^2(pi t / L)`
+///
+/// which inverts to `t = (L/pi) acos( sqrt( (pi/2)(Z0/Zr) / qe ) )`. `Qe` is
+/// smallest (strongest coupling) at the antinode `t = 0` and diverges toward
+/// the fold.
+///
+/// # Errors
+///
+/// [`DimError::TapNotRealizable`] when `qe < (pi/2)(Z0/Zr)` — the requested
+/// coupling is stronger than a tap at the antinode can deliver.
+pub fn tap_offset_from_qe(
+    qe: f64,
+    z0_ohm: f64,
+    zr_ohm: f64,
+    halfwave_m: f64,
+) -> Result<f64, DimError> {
+    let qe_min = std::f64::consts::FRAC_PI_2 * z0_ohm / zr_ohm;
+    if qe < qe_min {
+        return Err(DimError::TapNotRealizable {
+            qe,
+            qe_min,
+            qe_max: f64::INFINITY,
+        });
+    }
+    Ok(halfwave_m / std::f64::consts::PI * (qe_min / qe).sqrt().acos())
+}
 
 /// Solve for the gap `s` (metres) whose edge-coupled-line coupling coefficient
 /// equals `target_k`, by bisection over `[GAP_MIN_M, GAP_MAX_M]`.
@@ -374,6 +432,10 @@ pub struct HairpinDimensions {
     pub gaps_m: Vec<f64>,
     /// The `FBW · m_{i,i+1}` coupling each gap was solved for (length `N − 1`).
     pub target_k: Vec<f64>,
+    /// Tapped-feed offset up the end-resonator arms realizing the synthesized
+    /// external Q (R.4/F1.2.1; [`tap_offset_from_qe`] with `L = 2·arm`),
+    /// metres from the open end.
+    pub tap_offset_m: f64,
 }
 
 /// Invert the validated coupled-microstrip model to size a **hairpin**
@@ -414,6 +476,39 @@ pub fn dimension_hairpin(
     project: &FilterProject,
     substrate: &Substrate,
 ) -> Result<HairpinDimensions, DimError> {
+    dimension_hairpin_with_fold(project, substrate, HAIRPIN_FOLD_SPACING_WIDTHS)
+}
+
+/// [`dimension_hairpin`] with an explicit fold spacing in **line widths**
+/// (R.4a). The fold pitch trades layout compactness against intra-resonator
+/// self-coupling; it also consumes resonator length (see the arm formula), so
+/// a tighter fold leaves more arm for the tap. The default wrapper uses
+/// [`HAIRPIN_FOLD_SPACING_WIDTHS`].
+///
+/// **Fold-corrected arm length (R.4a).** The hairpin is a half-wave resonator
+/// *folded into a U*: its total midline length — up one arm, across the bend,
+/// down the other arm — must be `λ_g/2`, so
+///
+/// `arm = (λ_g/2 − fold_spacing) / 2`
+///
+/// with the bend's midline run ≈ the centre-to-centre `fold_spacing`. The
+/// F1.2.2 walking skeleton used `arm = λ_g/4` (fold length *extra*), which the
+/// first full-wave BPF run (gate `engine-bpf-verify-001`) measured as a
+/// low-shifted, wrecked passband — every resonator was electrically long by
+/// the full bend path (~37 % here). First-order correction; the corner
+/// mitres are R.4b's BO residual.
+///
+/// # Errors
+///
+/// All of [`dimension_hairpin`]'s errors, plus
+/// [`DimError::NonPhysicalInput`] when the fold consumes the whole half-wave
+/// (`arm ≤ 0`) and [`DimError::TapNotRealizable`] when the qe→tap offset
+/// falls beyond the (fold-corrected) arm.
+pub fn dimension_hairpin_with_fold(
+    project: &FilterProject,
+    substrate: &Substrate,
+    fold_widths: f64,
+) -> Result<HairpinDimensions, DimError> {
     if project.topology != Topology::CoupledResonator {
         return Err(DimError::UnsupportedTopology);
     }
@@ -432,19 +527,32 @@ pub fn dimension_hairpin(
     // 1. Line width from the Hammerstad-Jensen Z0 synthesis.
     let line_width_m = microstrip_width(z0, eps_r, h_m);
 
-    // 2. Arm length = λ_g/4 = c / (4·f0·√ε_eff). The hairpin half-wave resonator
-    //    is folded into a U, so it is two ≈λ/4 arms (factor-4) vs the edge-coupled
-    //    straight λ/2 strip (factor-2). (Hong & Lancaster ch. 6.)
+    // 2. Fold spacing: intra-hairpin arm pitch (centre-to-centre). At
+    //    fold_widths <= 1 the two arms of the U touch and the resonator
+    //    degenerates into a solid block (measured as a wrecked response by
+    //    an early engine-bpf-verify-001 iteration) — reject it.
+    if fold_widths <= 1.0 {
+        return Err(DimError::NonPhysicalInput(
+            "hairpin fold spacing is centre-to-centre: fold_widths <= 1 merges the two arms",
+        ));
+    }
+    let fold_spacing_m = fold_widths * line_width_m;
+
+    // 3. Fold-corrected arm length: the U's midline — arm + fold + arm —
+    //    is the half-wave, so arm = (lambda_g/2 - fold)/2 (doc above).
     let e_eff = eps_eff(line_width_m, h_m, eps_r);
-    let arm_length_m = C / (4.0 * f0 * e_eff.sqrt());
+    let halfwave_m = C / (2.0 * f0 * e_eff.sqrt());
+    let arm_length_m = (halfwave_m - fold_spacing_m) / 2.0;
+    if arm_length_m <= 0.0 {
+        return Err(DimError::NonPhysicalInput(
+            "hairpin fold spacing consumes the entire half-wave resonator",
+        ));
+    }
 
-    // 3. Fold spacing: intra-hairpin arm pitch — a fixed closed-form choice (not
-    //    the inter-resonator coupling), refined later by F1.2.1 BO.
-    let fold_spacing_m = HAIRPIN_FOLD_SPACING_WIDTHS * line_width_m;
-
-    // 4. Inter-resonator gaps: target_k[i] = FBW · m[i][i+1] (= yee-synth's
-    //    k_{i,i+1}; see module docs), solved by the SAME bisection as edge-coupled
-    //    because adjacent hairpins couple through the edge gap between their arms.
+    // 4. Inter-resonator gaps: target_k[i] = FBW * m[i][i+1] (= yee-synth's
+    //    k_{i,i+1}; see module docs), solved by the SAME bisection as
+    //    edge-coupled because adjacent hairpins couple through the edge gap
+    //    between their arms.
     let mut target_k = Vec::with_capacity(n - 1);
     let mut gaps_m = Vec::with_capacity(n - 1);
     for i in 0..n - 1 {
@@ -454,70 +562,72 @@ pub fn dimension_hairpin(
         gaps_m.push(gap);
     }
 
+    // 5. Tapped-feed offset from the synthesized external Q (R.4/F1.2.1).
+    //    The hairpin resonator line is the spec-Z0 width, so Zr = Z0; qe_in
+    //    and qe_out are equal for the symmetric prototypes synthesis emits.
+    //    t runs along the resonator from the open end, so it must land on
+    //    the physical arm (the region [arm, halfwave/2] is the bend).
+    let tap_offset_m = tap_offset_from_qe(project.coupling.qe_in, z0, z0, halfwave_m)?;
+    if tap_offset_m > arm_length_m {
+        let qe_min = std::f64::consts::FRAC_PI_2;
+        let qe_max = qe_min
+            / (std::f64::consts::PI * arm_length_m / halfwave_m)
+                .cos()
+                .powi(2);
+        return Err(DimError::TapNotRealizable {
+            qe: project.coupling.qe_in,
+            qe_min,
+            qe_max,
+        });
+    }
+
     Ok(HairpinDimensions {
         line_width_m,
         arm_length_m,
         fold_spacing_m,
         gaps_m,
         target_k,
+        tap_offset_m,
     })
 }
 
-/// Convenience: assemble a [`yee_layout::Layout`] from the synthesized hairpin
-/// dimensions via the existing [`yee_layout::hairpin_bpf`].
+/// Assemble a [`yee_layout::Layout`] from the synthesized hairpin dimensions
+/// via the **per-section** generator [`yee_layout::hairpin_bpf_sections`]
+/// (R.4/F1.2.1 — this closed the two gaps the F1.2.2 walking skeleton
+/// documented):
 ///
-/// Builds the `N` U-folded resonators (all of width `line_width_m`, arm length
-/// `arm_length_m`, arm pitch `fold_spacing_m`) with a tapped feed.
+/// - **Per-section gaps (gap option (a)).** Each adjacent resonator pair sits
+///   at its own solved [`HairpinDimensions::gaps_m`] — the mean-gap collapse
+///   through the single-`coupling_gap_m` [`HairpinParams`] is gone. The
+///   uniform-gap [`yee_layout::hairpin_bpf`] (and its committed `geo-003`
+///   gate) is untouched.
+/// - **qe→tap.** The feed taps the end-resonator arms at
+///   [`HairpinDimensions::tap_offset_m`], the [`tap_offset_from_qe`] solution
+///   for the synthesized external Q — the `arm_length/3` placeholder is gone.
 ///
-/// **Uniform-gap walking-skeleton limitation (gap option (b)).**
-/// [`HairpinParams`] today carries a *single* `coupling_gap_m`, which
-/// [`yee_layout::hairpin_bpf`] bakes into a uniform resonator pitch — it has no
-/// per-section gap field. Synthesis, however, produces `N − 1` *distinct* gaps
-/// (one per coupling `k_{i,i+1}`). Extending `hairpin_bpf` to per-section gaps
-/// would rework the generator's coordinate math and perturb the committed
-/// `geo-003` geometry gate, so this skeleton instead passes a **single
-/// representative gap** — the mean of the solved [`HairpinDimensions::gaps_m`] —
-/// and documents the limitation. The per-section `gaps_m` are still returned in
-/// full by [`dimension_hairpin`] (and round-trip-validated by `hairpin_dim_001`),
-/// so the synthesis fidelity is unaffected; only the convenience `Layout` here is
-/// uniform-gap. A per-section `hairpin_bpf` (gap option (a)) and the `qe`→tap
-/// dimensioning are both deferred to F1.2.1.
-///
-/// The tapped-feed geometry uses neutral defaults: `tap_offset_m` is a third of
-/// the arm length, `feed_width_m = line_width_m`, and `feed_length_m` is one arm
-/// length. Mapping the external Q (`qe_in`/`qe_out`) to a tap position is
-/// **deferred to F1.2.1**; this function does **not** invent a `qe`→tap formula.
+/// `feed_width_m = line_width_m` and `feed_length_m = arm_length_m` remain
+/// simple closed-form choices (the feed is a plain spec-`Z0` line).
 ///
 /// # Errors
 ///
-/// Propagates every [`DimError`] from [`dimension_hairpin`].
+/// Propagates every [`DimError`] from [`dimension_hairpin`] (including
+/// [`DimError::TapNotRealizable`] from the qe→tap solve).
 pub fn dimension_hairpin_layout(
     project: &FilterProject,
     substrate: &Substrate,
 ) -> Result<Layout, DimError> {
     let dims = dimension_hairpin(project, substrate)?;
-
-    let n = dims.gaps_m.len() + 1; // N resonators, N−1 gaps.
-
-    // Uniform-gap walking skeleton (gap option (b)): hairpin_bpf takes a single
-    // coupling_gap_m, so collapse the N−1 distinct solved gaps to their mean. The
-    // full per-section gaps stay in `dims.gaps_m`; see the doc-comment above.
-    let representative_gap_m = dims.gaps_m.iter().sum::<f64>() / dims.gaps_m.len() as f64;
-
-    let params = HairpinParams {
+    let params = HairpinSectionParams {
         substrate: *substrate,
-        n,
         arm_length_m: dims.arm_length_m,
         line_width_m: dims.line_width_m,
         fold_spacing_m: dims.fold_spacing_m,
-        coupling_gap_m: representative_gap_m,
-        // Neutral tapped-feed defaults; qe→tap dimensioning is F1.2.1.
-        tap_offset_m: dims.arm_length_m / 3.0,
+        gaps_m: dims.gaps_m.clone(),
+        tap_offset_m: dims.tap_offset_m,
         feed_width_m: dims.line_width_m,
         feed_length_m: dims.arm_length_m,
     };
-
-    Ok(hairpin_bpf(&params))
+    Ok(hairpin_bpf_sections(&params))
 }
 
 // ---------------------------------------------------------------------------
