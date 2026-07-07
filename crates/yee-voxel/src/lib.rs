@@ -236,6 +236,70 @@ pub fn voxelize_microstrip(layout: &Layout, opts: &VoxelOptions) -> MicrostripMo
     }
 }
 
+/// Map a substrate `tan δ` to per-cell conductivity for the engine's
+/// lossy CA/CB update (R.0, ADR-0194): `σ = 2π f_ref ε₀ ε_r tan δ` on
+/// every cell whose ε_r exceeds 1 (the substrate), zero in air. FDTD σ
+/// is frequency-flat, so the map is exact at `f_ref` (the design
+/// frequency) and the standard single-frequency approximation elsewhere.
+/// Returns a flat `[nx+1, ny+1, nz+1]` row-major vector matching the
+/// `MaterialsSpec::sigma_cells` convention.
+///
+/// # Panics
+///
+/// Panics if the model carries no ε_r map, or on non-physical inputs.
+pub fn substrate_sigma_cells(model: &MicrostripModel, tan_d: f64, f_ref_hz: f64) -> Vec<f64> {
+    assert!(
+        tan_d >= 0.0 && tan_d.is_finite(),
+        "tan_d must be finite and >= 0 (got {tan_d})"
+    );
+    assert!(
+        f_ref_hz > 0.0 && f_ref_hz.is_finite(),
+        "f_ref_hz must be positive and finite (got {f_ref_hz})"
+    );
+    const EPS0: f64 = 8.854_187_817e-12;
+    let eps = model
+        .grid
+        .eps_r_cells
+        .as_ref()
+        .expect("substrate_sigma_cells: model has no eps_r map");
+    let omega = std::f64::consts::TAU * f_ref_hz;
+    eps.as_slice()
+        .unwrap()
+        .iter()
+        .map(|&er| {
+            if er > 1.0 {
+                omega * EPS0 * er * tan_d
+            } else {
+                0.0
+            }
+        })
+        .collect()
+}
+
+/// Punch a **via** through the substrate at grid column `(i, j)`
+/// (R.1, ADR-0194): the `E_z` edges `k = 0 .. k_top` become PEC — a ground-to-trace
+/// shorting post when `k_top` is the trace plane.
+///
+/// # Panics
+///
+/// Panics if `(i, j)` or `k_top` exceeds the `E_z` grid.
+pub fn with_via_at_cell(model: &mut MicrostripModel, i: usize, j: usize, k_top: usize) {
+    let (nx, ny, nz) = model.dims;
+    assert!(
+        i <= nx && j <= ny && k_top <= nz,
+        "via at ({i}, {j}) k_top {k_top} outside grid {nx}x{ny}x{nz}"
+    );
+    let mut mask = model
+        .grid
+        .pec_mask_ez
+        .take()
+        .unwrap_or_else(|| ndarray::Array3::from_elem((nx + 1, ny + 1, nz), false));
+    for k in 0..k_top {
+        mask[(i, j, k)] = true;
+    }
+    model.grid.pec_mask_ez = Some(mask);
+}
+
 /// Test whether point `p` lies inside polygon `poly` via the standard
 /// even-odd ray-cast (crossing-number) rule.
 ///
@@ -819,4 +883,75 @@ fn coupled_mode_eeff(
         eps_eff,
     );
     eps_eff
+}
+
+#[cfg(test)]
+mod rf_tool_tests {
+    use super::*;
+    use yee_layout::{BBox, Layout, Point2, Polygon, PortRef, Substrate};
+
+    fn tiny_model() -> MicrostripModel {
+        let traces = vec![Polygon::rect(0.0, 0.0, 6.0e-3, 3.0e-3)];
+        let bbox = BBox::from_polygons(&traces);
+        let layout = Layout {
+            substrate: Substrate {
+                eps_r: 4.4,
+                height_m: 1.6e-3,
+                loss_tangent: 0.0,
+                metal_thickness_m: 35e-6,
+            },
+            traces,
+            ports: vec![PortRef {
+                at: Point2::new(0.5e-3, 1.5e-3),
+                width_m: 3.0e-3,
+                ref_impedance_ohm: 50.0,
+            }],
+            bbox,
+        };
+        voxelize_microstrip(
+            &layout,
+            &VoxelOptions {
+                dx_m: 0.4e-3,
+                xy_margin_cells: 4,
+                air_above_cells: 6,
+            },
+        )
+    }
+
+    #[test]
+    fn sigma_cells_map_substrate_only_at_the_pozar_value() {
+        let model = tiny_model();
+        let tan_d = 0.02;
+        let f = 5.0e9;
+        let sigma = substrate_sigma_cells(&model, tan_d, f);
+        let eps = model.grid.eps_r_cells.as_ref().unwrap();
+        let eps_flat = eps.as_slice().unwrap();
+        assert_eq!(sigma.len(), eps_flat.len());
+        // σ = 2π f ε₀ ε_r tanδ = 2π·5e9·8.854e-12·4.4·0.02 = 0.02448 S/m.
+        let expect = std::f64::consts::TAU * f * 8.854_187_817e-12 * 4.4 * tan_d;
+        let mut in_sub = 0usize;
+        for (s, e) in sigma.iter().zip(eps_flat) {
+            if *e > 1.0 {
+                assert!((s - expect).abs() < 1e-12, "σ = {s}, want {expect}");
+                in_sub += 1;
+            } else {
+                assert_eq!(*s, 0.0, "air cell must be lossless");
+            }
+        }
+        assert!(in_sub > 0, "no substrate cells found");
+    }
+
+    #[test]
+    fn via_sets_a_full_ez_column_and_attaches_the_mask() {
+        let mut model = tiny_model();
+        assert!(model.grid.pec_mask_ez.is_none());
+        let k_top = model.port_cells[0].2;
+        with_via_at_cell(&mut model, 7, 5, k_top);
+        let mask = model.grid.pec_mask_ez.as_ref().unwrap();
+        for k in 0..k_top {
+            assert!(mask[(7, 5, k)], "via edge k = {k} not set");
+        }
+        assert!(!mask[(7, 5, k_top.min(mask.dim().2 - 1))] || k_top == mask.dim().2);
+        assert!(!mask[(6, 5, 0)], "neighbour column must stay free");
+    }
 }

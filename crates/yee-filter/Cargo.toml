@@ -28,3 +28,12 @@ num-complex = { workspace = true }
 [dev-dependencies]
 # Test-only: the dim-003 gate round-trips `EdgeCoupledDimensions` through JSON.
 serde_json = { workspace = true }
+# Test-only (F1.3.0, ADR-0185): engine-filter-verify-001 runs the synthesized
+# stepped-impedance LPF through the yee-engine job protocol (voxelize → FDTD →
+# |S21|/|S11|). Dev-deps keep the library itself WASM-safe (ADR-0089).
+yee-engine = { path = "../yee-engine", version = "0.0.0" }
+yee-voxel  = { path = "../yee-voxel", version = "0.0.0" }
+# Test-only (R.4b, ADR-0197): engine-bpf-bo-001 drives the hairpin knobs with
+# yee-surrogate's Bayesian optimizer over engine jobs.
+yee-surrogate = { workspace = true }
+nalgebra      = { workspace = true }

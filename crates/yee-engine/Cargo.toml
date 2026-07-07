@@ -1,0 +1,42 @@
+[package]
+name         = "yee-engine"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "Transport-agnostic simulation job API over the yee-compute engine (S.0, ADR-0179)."
+
+[features]
+# Passes through to yee-compute; default-on like the engine itself.
+default = ["gpu"]
+gpu     = ["yee-compute/gpu"]
+
+[dependencies]
+# Direct path dep (not workspace-inherited): the workspace entry pins
+# default features on, but this crate re-exposes the engine's `gpu`
+# feature as its own default-on passthrough.
+yee-compute = { path = "../yee-compute", version = "0.0.0", default-features = false }
+# NTFF far-field over the protocol (A.2, ADR-0192): the reference
+# near-to-far transform stays yee-fdtd's validated NtffState; the engine
+# samples it through the host-side grid adapter (the compute-010 pattern).
+yee-fdtd    = { workspace = true }
+# Board-measurement plan builder (R.5b, ADR-0199): promotes the gates'
+# copy-pasted voxelize->JobSpec pattern into a library API shared by the
+# studio's verify command and future gates.
+yee-voxel   = { path = "../yee-voxel", version = "0.0.0" }
+yee-layout  = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+
+[dev-dependencies]
+# engine-sparams-002 (R.2) exports an engine-measured response to
+# Touchstone and round-trips it. (yee-voxel / yee-layout moved to
+# [dependencies] for the board module, R.5b.)
+yee-io      = { workspace = true }
+num-complex = { workspace = true }
+
+[lints.rust]
+unsafe_code  = "forbid"
+missing_docs = "warn"

@@ -1,0 +1,129 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 2rem 1.5rem;
+}
+
+h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.6rem;
+}
+
+.sub {
+  margin: 0 0 1.5rem;
+  opacity: 0.7;
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: end;
+  margin-bottom: 1.5rem;
+}
+
+.controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+}
+
+.controls input,
+.controls select {
+  padding: 0.4rem 0.5rem;
+  font-size: 1rem;
+  width: 7rem;
+}
+
+.controls button {
+  padding: 0.5rem 1.5rem;
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+.progress {
+  position: relative;
+  height: 1.5rem;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 1rem;
+}
+
+.progress div {
+  height: 100%;
+  background: #4a8fd4;
+  transition: width 120ms linear;
+}
+
+.progress span {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 0.8rem;
+}
+
+.error {
+  color: #c0392b;
+  white-space: pre-wrap;
+}
+
+.meta {
+  opacity: 0.8;
+}
+
+.plot svg {
+  width: 100%;
+  height: auto;
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-radius: 4px;
+}
+
+.plot .axis {
+  stroke: color-mix(in srgb, currentColor 25%, transparent);
+  stroke-width: 1;
+}
+
+.plot .trace {
+  stroke: #4a8fd4;
+  stroke-width: 1.5;
+}
+
+.plot figcaption {
+  font-size: 0.8rem;
+  opacity: 0.7;
+  margin-top: 0.3rem;
+}
+
+.plot .heatmap {
+  width: 100%;
+  image-rendering: pixelated;
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-radius: 4px;
+}
+
+.surface3d {
+  width: 100%;
+  min-height: 320px;
+}
+
+.surface3d canvas {
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-radius: 4px;
+}
+
+.surface3d-fallback {
+  opacity: 0.7;
+  font-size: 0.9rem;
+}

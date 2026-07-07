@@ -534,3 +534,439 @@ pub fn hairpin_bpf(p: &HairpinParams) -> Layout {
         bbox,
     }
 }
+
+/// Parameters for [`hairpin_bpf_sections`] — the **per-section-gap** hairpin
+/// generator (R.4/F1.2.1). Unlike [`HairpinParams`], which bakes one
+/// `coupling_gap_m` into a uniform pitch, this carries the N − 1 *distinct*
+/// inter-resonator gaps synthesis produces (one per coupling `k_{i,i+1}`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HairpinSectionParams {
+    /// The dielectric substrate.
+    pub substrate: Substrate,
+    /// Length of each resonator arm along `y`, metres.
+    pub arm_length_m: f64,
+    /// Line width of each arm / bend, metres.
+    pub line_width_m: f64,
+    /// Centre-to-centre spacing of the two arms of one hairpin, metres.
+    pub fold_spacing_m: f64,
+    /// Per-section edge-coupling gaps, metres — `gaps_m[i]` separates
+    /// resonators `i` and `i + 1`, so the resonator count is
+    /// `gaps_m.len() + 1`.
+    pub gaps_m: Vec<f64>,
+    /// Tap offset of the feed up each end-resonator arm, metres, measured
+    /// from the open (bottom) end.
+    pub tap_offset_m: f64,
+    /// Feed-line width, metres.
+    pub feed_width_m: f64,
+    /// Feed-line length, metres.
+    pub feed_length_m: f64,
+}
+
+/// Generate a **per-section-gap hairpin** band-pass filter [`Layout`]
+/// (R.4/F1.2.1 — "gap option (a)" from the F1.2.2 dimensioning notes).
+///
+/// Identical resonator geometry to [`hairpin_bpf`] — `n` U-folded resonators
+/// of three rectangles each, tapped feeds on the outer arms of the end
+/// resonators — except each adjacent pair sits at its **own** solved gap:
+/// resonator `i + 1`'s x-base is resonator `i`'s base advanced by
+/// `fold_spacing + line_width + gaps_m[i]`. [`hairpin_bpf`] (and its
+/// committed `geo-003` gate) is untouched; a uniform `gaps_m` reproduces its
+/// resonator placement exactly.
+///
+/// # Panics
+///
+/// Panics if `gaps_m` is empty (a one-resonator "filter" has no coupling
+/// section; use [`hairpin_bpf`] for degenerate single-resonator layouts).
+pub fn hairpin_bpf_sections(p: &HairpinSectionParams) -> Layout {
+    assert!(
+        !p.gaps_m.is_empty(),
+        "hairpin_bpf_sections needs at least one coupling gap (two resonators)"
+    );
+    assert!(
+        p.fold_spacing_m > p.line_width_m,
+        "fold_spacing_m is centre-to-centre: <= line_width_m merges the two arms of the U"
+    );
+    let n = p.gaps_m.len() + 1;
+    let mut traces: Vec<Polygon> = Vec::with_capacity(n * 3 + 2);
+    let arm_h = p.arm_length_m;
+    let lw = p.line_width_m;
+
+    let mut x_base = 0.0;
+    let mut last_x_base = 0.0;
+    for i in 0..n {
+        traces.push(Polygon::rect(x_base, 0.0, lw, arm_h));
+        let right_x = x_base + p.fold_spacing_m;
+        traces.push(Polygon::rect(right_x, 0.0, lw, arm_h));
+        let bend_w = (right_x + lw) - x_base;
+        traces.push(Polygon::rect(x_base, arm_h - lw, bend_w, lw));
+        last_x_base = x_base;
+        if i < n - 1 {
+            x_base += p.fold_spacing_m + lw + p.gaps_m[i];
+        }
+    }
+
+    // Tapped feeds on the outer arms of the end resonators, exactly as
+    // hairpin_bpf places them.
+    let in_feed_x = -p.feed_length_m;
+    let in_feed_y = p.tap_offset_m - p.feed_width_m / 2.0;
+    traces.push(Polygon::rect(
+        in_feed_x,
+        in_feed_y,
+        p.feed_length_m,
+        p.feed_width_m,
+    ));
+    let in_port = PortRef {
+        at: Point2::new(in_feed_x, p.tap_offset_m),
+        width_m: p.feed_width_m,
+        ref_impedance_ohm: 50.0,
+    };
+    let last_right_arm_x = last_x_base + p.fold_spacing_m + lw;
+    traces.push(Polygon::rect(
+        last_right_arm_x,
+        in_feed_y,
+        p.feed_length_m,
+        p.feed_width_m,
+    ));
+    let out_port = PortRef {
+        at: Point2::new(last_right_arm_x + p.feed_length_m, p.tap_offset_m),
+        width_m: p.feed_width_m,
+        ref_impedance_ohm: 50.0,
+    };
+
+    let bbox = BBox::from_polygons(&traces);
+    Layout {
+        substrate: p.substrate,
+        traces,
+        ports: vec![in_port, out_port],
+        bbox,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rectangular patch antenna (A.0, ADR-0190) — Balanis closed forms.
+// ---------------------------------------------------------------------------
+
+/// Closed-form rectangular-patch dimensions (Balanis, *Antenna Theory*
+/// §14.2, transmission-line model), returned by [`patch_antenna_dims`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PatchDims {
+    /// Radiating-edge width `W = c/(2f0) * sqrt(2/(eps_r+1))` (metres).
+    pub width_m: f64,
+    /// Resonant length `L = c/(2 f0 sqrt(eps_eff)) - 2*dL` (metres).
+    pub length_m: f64,
+    /// Effective permittivity of the patch section at width `W`.
+    pub eps_eff: f64,
+    /// Hammerstad open-end length extension `dL` (metres).
+    pub delta_l_m: f64,
+}
+
+/// Hammerstad microstrip open-end length correction (also used by the
+/// engine-sparams stub gate): the fringing field makes an open microstrip
+/// edge electrically longer than its metal:
+/// `dL = 0.412*h*(eps_eff+0.3)(W/h+0.264) / ((eps_eff-0.258)(W/h+0.8))`.
+pub fn open_end_delta_l(w_m: f64, h_m: f64, e_eff: f64) -> f64 {
+    let u = w_m / h_m;
+    0.412 * h_m * ((e_eff + 0.3) * (u + 0.264)) / ((e_eff - 0.258) * (u + 0.8))
+}
+
+/// Design a rectangular patch for resonance at `f0_hz` on a substrate of
+/// `eps_r`, height `h_m` (Balanis §14.2):
+/// `W = c/(2 f0) * sqrt(2/(eps_r+1))`, `eps_eff` from the Hammerstad
+/// closed form ([`eps_eff`]) at that width, and
+/// `L = c/(2 f0 sqrt(eps_eff)) - 2*dL` with the open-end extension `dL`.
+///
+/// # Panics
+///
+/// Panics if `f0_hz`, `eps_r`, or `h_m` is non-positive.
+pub fn patch_antenna_dims(f0_hz: f64, eps_r: f64, h_m: f64) -> PatchDims {
+    assert!(
+        f0_hz > 0.0 && eps_r > 0.0 && h_m > 0.0,
+        "non-physical patch inputs"
+    );
+    const C: f64 = 299_792_458.0;
+    let width_m = C / (2.0 * f0_hz) * (2.0 / (eps_r + 1.0)).sqrt();
+    let e_eff = eps_eff(width_m, h_m, eps_r);
+    let delta_l_m = open_end_delta_l(width_m, h_m, e_eff);
+    let length_m = C / (2.0 * f0_hz * e_eff.sqrt()) - 2.0 * delta_l_m;
+    PatchDims {
+        width_m,
+        length_m,
+        eps_eff: e_eff,
+        delta_l_m,
+    }
+}
+
+/// Assemble an **edge-fed** rectangular-patch [`Layout`]: a `feed_z0_ohm`
+/// microstrip feed line joining the centre of the patch's radiating edge,
+/// one `PortRef` at the outer feed end. The resonant length `L` runs
+/// along `x` (the feed direction); the radiating edges are the two
+/// `y`-parallel ends. Edge feeding is deliberately unmatched (the edge
+/// resistance of a patch is hundreds of ohms) — resonance shows as a
+/// localized |S11| dip, and matching (inset feed) is the A.1 follow-on.
+///
+/// The feed is half a guided wavelength long so measurement probes fit
+/// on it upstream of the patch.
+pub fn edge_fed_patch(f0_hz: f64, substrate: &Substrate, feed_z0_ohm: f64) -> Layout {
+    const C: f64 = 299_792_458.0;
+    let dims = patch_antenna_dims(f0_hz, substrate.eps_r, substrate.height_m);
+    let feed_w = microstrip_width(feed_z0_ohm, substrate.eps_r, substrate.height_m);
+    let feed_e_eff = eps_eff(feed_w, substrate.height_m, substrate.eps_r);
+    let feed_len = C / (2.0 * f0_hz * feed_e_eff.sqrt());
+
+    let traces = vec![
+        // Feed line along x, centred on y = 0, ending at the patch edge.
+        Polygon::rect(-feed_len, -feed_w / 2.0, feed_len, feed_w),
+        // The patch: resonant length L along x, width W along y.
+        Polygon::rect(0.0, -dims.width_m / 2.0, dims.length_m, dims.width_m),
+    ];
+    let port = PortRef {
+        at: Point2::new(-feed_len, 0.0),
+        width_m: feed_w,
+        ref_impedance_ohm: feed_z0_ohm,
+    };
+    let bbox = BBox::from_polygons(&traces);
+    Layout {
+        substrate: *substrate,
+        traces,
+        ports: vec![port],
+        bbox,
+    }
+}
+
+#[cfg(test)]
+mod hairpin_sections_tests {
+    use super::*;
+
+    fn substrate() -> Substrate {
+        Substrate {
+            eps_r: 4.4,
+            height_m: 1.6e-3,
+            loss_tangent: 0.0,
+            metal_thickness_m: 35e-6,
+        }
+    }
+
+    #[test]
+    fn per_section_gaps_set_each_resonator_pitch() {
+        let p = HairpinSectionParams {
+            substrate: substrate(),
+            arm_length_m: 8e-3,
+            line_width_m: 1e-3,
+            fold_spacing_m: 3e-3,
+            gaps_m: vec![0.4e-3, 0.9e-3],
+            tap_offset_m: 2e-3,
+            feed_width_m: 1e-3,
+            feed_length_m: 8e-3,
+        };
+        let layout = hairpin_bpf_sections(&p);
+        // 3 resonators × 3 rects + 2 feeds.
+        assert_eq!(layout.traces.len(), 11);
+        // Resonator i's left arm is trace 3i; x-bases accumulate each gap.
+        let min_x = |poly: &Polygon| poly.verts.iter().map(|v| v.x).fold(f64::INFINITY, f64::min);
+        let base = |i: usize| min_x(&layout.traces[3 * i]);
+        let pitch0 = p.fold_spacing_m + p.line_width_m + p.gaps_m[0];
+        let pitch1 = p.fold_spacing_m + p.line_width_m + p.gaps_m[1];
+        assert!((base(1) - base(0) - pitch0).abs() < 1e-12);
+        assert!((base(2) - base(1) - pitch1).abs() < 1e-12);
+        // Ports at tap height, outside the end resonators.
+        assert!((layout.ports[0].at.y - p.tap_offset_m).abs() < 1e-12);
+        assert!((layout.ports[1].at.y - p.tap_offset_m).abs() < 1e-12);
+        assert!(layout.ports[0].at.x < base(0));
+        assert!(layout.ports[1].at.x > base(2) + p.fold_spacing_m + p.line_width_m);
+    }
+
+    #[test]
+    fn uniform_gaps_reproduce_hairpin_bpf_resonator_placement() {
+        let gap = 0.6e-3;
+        let sections = HairpinSectionParams {
+            substrate: substrate(),
+            arm_length_m: 8e-3,
+            line_width_m: 1e-3,
+            fold_spacing_m: 3e-3,
+            gaps_m: vec![gap, gap],
+            tap_offset_m: 8e-3 / 3.0,
+            feed_width_m: 1e-3,
+            feed_length_m: 8e-3,
+        };
+        let uniform = HairpinParams {
+            substrate: substrate(),
+            n: 3,
+            arm_length_m: 8e-3,
+            line_width_m: 1e-3,
+            fold_spacing_m: 3e-3,
+            coupling_gap_m: gap,
+            tap_offset_m: 8e-3 / 3.0,
+            feed_width_m: 1e-3,
+            feed_length_m: 8e-3,
+        };
+        let a = hairpin_bpf_sections(&sections);
+        let b = hairpin_bpf(&uniform);
+        assert_eq!(a.traces.len(), b.traces.len());
+        for (ra, rb) in a.traces.iter().zip(&b.traces) {
+            assert_eq!(ra.verts.len(), rb.verts.len());
+            for (va, vb) in ra.verts.iter().zip(&rb.verts) {
+                assert!((va.x - vb.x).abs() < 1e-15);
+                assert!((va.y - vb.y).abs() < 1e-15);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod patch_tests {
+    use super::*;
+
+    #[test]
+    fn patch_dims_match_hand_computed_balanis_values() {
+        // 2.45 GHz on FR-4 (eps_r 4.4, h 1.6 mm) — Balanis worked-example
+        // arithmetic: W = c/(2 f0) sqrt(2/5.4) = 37.26 mm;
+        // eps_eff(W) ~ 4.09; L = c/(2 f0 sqrt(eps_eff)) - 2 dL ~ 28.8 mm.
+        let d = patch_antenna_dims(2.45e9, 4.4, 1.6e-3);
+        assert!((d.width_m - 37.26e-3).abs() < 0.05e-3, "W = {}", d.width_m);
+        assert!((d.eps_eff - 4.09).abs() < 0.03, "eps_eff = {}", d.eps_eff);
+        assert!((d.length_m - 28.8e-3).abs() < 0.3e-3, "L = {}", d.length_m);
+        assert!(d.delta_l_m > 0.5e-3 && d.delta_l_m < 1.0e-3);
+    }
+
+    #[test]
+    fn edge_fed_patch_layout_is_connected_and_ported() {
+        let sub = Substrate {
+            eps_r: 4.4,
+            height_m: 1.6e-3,
+            loss_tangent: 0.0,
+            metal_thickness_m: 35e-6,
+        };
+        let layout = edge_fed_patch(2.45e9, &sub, 50.0);
+        assert_eq!(layout.traces.len(), 2);
+        assert_eq!(layout.ports.len(), 1);
+        // Feed end and patch start meet at x = 0 (connected footprint).
+        assert!(layout.bbox.min.x < 0.0 && layout.bbox.max.x > 20e-3);
+        assert!(layout.ports[0].at.x == layout.bbox.min.x);
+    }
+}
+
+/// Balanis single-slot radiating conductance `G1` (siemens) for a patch of
+/// width `w_m` at free-space wavelength `lambda0_m` (Antenna Theory
+/// eq. 14-8a, piecewise in `W/lambda0`).
+pub fn patch_slot_conductance(w_m: f64, lambda0_m: f64) -> f64 {
+    let u = w_m / lambda0_m;
+    if u < 0.35 {
+        u * u / 90.0
+    } else if u < 2.0 {
+        u / 120.0 - 1.0 / (60.0 * std::f64::consts::PI * std::f64::consts::PI)
+    } else {
+        u / 120.0
+    }
+}
+
+/// Assemble an **inset-fed** rectangular-patch [`Layout`] matched to
+/// `feed_z0_ohm` (A.1, ADR-0191): edge resistance `R_edge = 1/(2 G1)`
+/// from the Balanis slot-conductance model (the mutual term `G12` is
+/// neglected — documented walking-skeleton approximation, it lowers
+/// `R_edge` by ~20 % and the inset only moves as acos(sqrt(...))), inset
+/// depth `x0 = (L/pi) * acos(sqrt(Z0/R_edge))` from the cos^2 cavity
+/// current profile.
+///
+/// Metal is a union of four rectangles: two outer patch bands flanking
+/// the notch, the centre band beyond the inset depth, and the feed line
+/// running through the notch (gap = one feed width each side). One
+/// `PortRef` at the outer feed end; the feed is half a guided wavelength
+/// so measurement probes fit upstream.
+pub fn inset_fed_patch(f0_hz: f64, substrate: &Substrate, feed_z0_ohm: f64) -> Layout {
+    let dims = patch_antenna_dims(f0_hz, substrate.eps_r, substrate.height_m);
+    let lambda0 = 299_792_458.0 / f0_hz;
+    let g1 = patch_slot_conductance(dims.width_m, lambda0);
+    let r_edge = 1.0 / (2.0 * g1);
+    assert!(
+        feed_z0_ohm < r_edge,
+        "inset_fed_patch: Z0 {feed_z0_ohm} >= edge resistance {r_edge} — no inset match exists"
+    );
+    let x_inset = (dims.length_m / std::f64::consts::PI) * (feed_z0_ohm / r_edge).sqrt().acos();
+    inset_fed_patch_with_depth(f0_hz, substrate, feed_z0_ohm, x_inset)
+}
+
+/// [`inset_fed_patch`] with an **explicit** inset depth (metres) — the
+/// design-loop knob (A.3): the closed-form seed's depth comes from the
+/// G1-only slot-conductance model, which overestimates the edge
+/// resistance on thick / high-ε_r substrates (measured in ADR-0191), so
+/// the engine tunes this depth against the measured return loss.
+pub fn inset_fed_patch_with_depth(
+    f0_hz: f64,
+    substrate: &Substrate,
+    feed_z0_ohm: f64,
+    x_inset_m: f64,
+) -> Layout {
+    const C: f64 = 299_792_458.0;
+    let dims = patch_antenna_dims(f0_hz, substrate.eps_r, substrate.height_m);
+    let (w, l) = (dims.width_m, dims.length_m);
+    assert!(
+        x_inset_m > 0.0 && x_inset_m < l / 2.0,
+        "inset depth {x_inset_m} m outside (0, L/2)"
+    );
+    let x_inset = x_inset_m;
+
+    let feed_w = microstrip_width(feed_z0_ohm, substrate.eps_r, substrate.height_m);
+    let feed_e_eff = eps_eff(feed_w, substrate.height_m, substrate.eps_r);
+    let feed_len = C / (2.0 * f0_hz * feed_e_eff.sqrt());
+    let gap = feed_w; // notch gap each side of the feed
+
+    let traces = vec![
+        // Feed line: from the port, through the notch, joining the patch
+        // interior at the inset depth.
+        Polygon::rect(-feed_len, -feed_w / 2.0, feed_len + x_inset, feed_w),
+        // Outer patch band, +y side of the notch.
+        Polygon::rect(0.0, feed_w / 2.0 + gap, l, w / 2.0 - feed_w / 2.0 - gap),
+        // Outer patch band, -y side of the notch.
+        Polygon::rect(0.0, -w / 2.0, l, w / 2.0 - feed_w / 2.0 - gap),
+        // Centre band beyond the inset (between the notch slots' far end
+        // and the patch's far edge).
+        Polygon::rect(
+            x_inset,
+            -(feed_w / 2.0 + gap),
+            l - x_inset,
+            feed_w + 2.0 * gap,
+        ),
+    ];
+    let port = PortRef {
+        at: Point2::new(-feed_len, 0.0),
+        width_m: feed_w,
+        ref_impedance_ohm: feed_z0_ohm,
+    };
+    let bbox = BBox::from_polygons(&traces);
+    Layout {
+        substrate: *substrate,
+        traces,
+        ports: vec![port],
+        bbox,
+    }
+}
+
+#[cfg(test)]
+mod inset_patch_tests {
+    use super::*;
+
+    #[test]
+    fn inset_depth_matches_hand_computed_balanis_arithmetic() {
+        // 2.45 GHz FR-4: W = 37.26 mm, lambda0 = 122.36 mm, W/lambda0 =
+        // 0.3045 < 0.35 -> G1 = 0.3045^2/90 = 1.030e-3 S ->
+        // R_edge = 485.4 ohm; x0 = (L/pi) acos(sqrt(50/485.4))
+        //        = (28.8e-3/pi) * acos(0.3210) = 9.17 mm * 1.2440 = 11.41 mm.
+        let sub = Substrate {
+            eps_r: 4.4,
+            height_m: 1.6e-3,
+            loss_tangent: 0.0,
+            metal_thickness_m: 35e-6,
+        };
+        let g1 = patch_slot_conductance(37.26e-3, 299_792_458.0 / 2.45e9);
+        assert!((g1 - 1.030e-3).abs() < 0.01e-3, "G1 = {g1}");
+        let layout = inset_fed_patch(2.45e9, &sub, 50.0);
+        // Recover the inset from the geometry: the centre band starts at
+        // x_inset (its rect is traces[3]).
+        // Polygon::rect stores vertices; use the bbox of that polygon via
+        // its first vertex x.
+        let x_inset = layout.traces[3].verts[0].x;
+        assert!((x_inset - 11.4e-3).abs() < 0.3e-3, "x_inset = {x_inset}");
+        assert_eq!(layout.ports.len(), 1);
+        assert_eq!(layout.traces.len(), 4);
+    }
+}

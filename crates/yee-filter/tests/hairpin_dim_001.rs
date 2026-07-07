@@ -7,7 +7,11 @@
 //! coefficient reproduces the target `FBW · m_{i,i+1}` to < 1 % relative — i.e.
 //! the gap bisection (shared with edge-coupled, since adjacent hairpins couple
 //! through the edge gap between their arms) inverted `coupling_coefficient`
-//! correctly. Also asserts `gaps_m.len() == N − 1` and `arm_length_m ≈ λ_g/4`.
+//! correctly. Also asserts `gaps_m.len() == N − 1` and the **fold-corrected**
+//! arm length `arm = (λ_g/2 − fold_spacing)/2` (R.4a: the U's midline — arm +
+//! bend + arm — is the half-wave; the original `λ_g/4` form left every
+//! resonator electrically long by the bend path, measured as a wrecked
+//! passband by the first `engine-bpf-verify-001` run).
 
 use yee_filter::{Approximation, FilterSpec, Response, SpecMask, dimension_hairpin, synthesize};
 use yee_layout::{Substrate, coupled_microstrip, coupling_coefficient, eps_eff, microstrip_width};
@@ -66,14 +70,16 @@ fn hairpin_dim_001_inversion_roundtrip() {
         );
     }
 
-    // Arm length must be a quarter guided wavelength at f0 (the U-folded
-    // half-wave is two ≈λ/4 arms): arm_length_m == c / (4·f0·√ε_eff).
+    // Fold-corrected arm length (R.4a): the resonator midline — arm + fold +
+    // arm — is the half-wave, so arm == (λ_g/2 − fold_spacing)/2.
     let e_eff = eps_eff(dims.line_width_m, substrate.height_m, substrate.eps_r);
-    let expected_arm = C / (4.0 * spec.f0_hz * e_eff.sqrt());
+    let halfwave = C / (2.0 * spec.f0_hz * e_eff.sqrt());
+    let expected_arm = (halfwave - dims.fold_spacing_m) / 2.0;
     let arm_rel = (dims.arm_length_m - expected_arm).abs() / expected_arm;
     assert!(
         arm_rel < 0.02,
-        "arm_length_m = {:.6e} m but λ_g/4 = {expected_arm:.6e} m (rel error {arm_rel:.4})",
+        "arm_length_m = {:.6e} m but (λ_g/2 − fold)/2 = {expected_arm:.6e} m \
+         (rel error {arm_rel:.4})",
         dims.arm_length_m
     );
 

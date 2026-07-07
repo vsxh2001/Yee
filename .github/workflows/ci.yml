@@ -159,6 +159,176 @@ jobs:
       - name: cargo clippy (yee-py)
         run: cargo clippy -p yee-py --all-targets -- -D warnings
 
+  studio-build:
+    name: Studio build (Tauri 2 + React, vitest DOM gates)
+    runs-on: ubuntu-latest
+    # S.2/S.3 gate (ADR-0179/0180): typecheck + vite build + vitest DOM
+    # smoke tests for the frontend, and a cargo check of the Tauri shell
+    # against the real webkit2gtk stack. studio/src-tauri is intentionally
+    # outside the root cargo workspace, so this is its only CI coverage.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.92"
+
+      - name: Install Tauri system deps (webkit2gtk)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: studio/src-tauri
+
+      - name: npm install
+        working-directory: studio
+        run: npm install
+
+      - name: Frontend typecheck + build
+        working-directory: studio
+        run: npm run build
+
+      - name: Frontend DOM gates (vitest)
+        working-directory: studio
+        run: npm test
+
+      - name: Tauri shell cargo check
+        working-directory: studio/src-tauri
+        run: cargo check
+
+      # R.5 (ADR-0198): the scripted design flow at the command layer —
+      # spec -> synthesis -> dims -> layout -> coupling-matrix response,
+      # with the .s2p and Gerber artifacts byte-checked against yee-io /
+      # yee-export (gate studio-design-e2e-001).
+      - name: Studio design-flow e2e (byte-checked exports)
+        working-directory: studio/src-tauri
+        run: cargo test --test design_e2e
+
+      # R.5b (ADR-0199): the full-wave verify PIPE at reduced fidelity —
+      # phase-ordered progress streaming and the exact-identity |S21| = 0 dB
+      # case (two bit-identical solves); physics is gated in yee-engine /
+      # yee-filter (gate studio-verify-e2e-001, ~1-2 min debug).
+      - name: Studio verify-flow e2e (pipe, reduced fidelity)
+        working-directory: studio/src-tauri
+        run: cargo test --test verify_e2e
+
+  compute-engine-gates:
+    name: Compute engine gates (yee-compute + yee-engine, release)
+    runs-on: ubuntu-latest
+    # No `needs: lint-test` — same rationale as fdtd-coupling-gate. Runs the
+    # `#[ignore]`'d yee-compute gates (ADR-0175..0177): compute-006 cavity
+    # TE101 vs the analytic Pozar frequency, compute-008 line-eeff vs
+    # Hammerstad-Jensen on the engine, compute-009 FP32 drift, compute-010
+    # NTFF dipole vs the analytic sin θ pattern. GPU-dependent gates
+    # self-skip on the GPU-less runner and bite on the GPU nightly instead;
+    # the fast non-ignored gates (compute-001..005, 007) already run in the
+    # workspace lint-test job. Also runs the yee-engine S.5 gate
+    # engine-verify-001 (ADR-0182): the same line-eeff scenario expressed as
+    # a JobSpec and run through the submit()/JobEvent job protocol.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.92"
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: yee-compute gates (release, include-ignored)
+        run: cargo test -p yee-compute --release -- --include-ignored --nocapture
+
+      # The antenna gates (A.0..A.3) run in their own parallel job below —
+      # skipping them here keeps this job's wall time bounded. This blanket
+      # include-ignored run covers the board-physics gates too: engine-loss-001
+      # + engine-via-001 (R.0/R.1, ADR-0194) and engine-sparams-002 (R.2,
+      # ADR-0195: complex transfer phase vs HJ + passivity-enforced .s2p
+      # round-trip).
+      - name: yee-engine gates incl. engine-verify-001 (release, include-ignored)
+        run: cargo test -p yee-engine --release -- --include-ignored --nocapture --skip antenna_ --skip patch_ --skip inset_ --skip design_loop_
+
+      # F1.3.0/S.8 (ADR-0185): the first synthesized-filter-vs-its-design
+      # full-wave verify — N=5 Butterworth stepped-impedance LPF through the
+      # job protocol, cutoff/passband/stopband held against the closed-form
+      # design targets.
+      - name: engine-filter-verify-001 (yee-filter, release, ignored)
+        run: cargo test -p yee-filter --release --test engine_lpf_verify -- --ignored --nocapture
+
+      # F1.2.1.0/S.11-S.12 (ADR-0188/0189): the closed design loop —
+      # synthesize -> engine-verify -> secant-correct the synthesis f_c ->
+      # repeat, on the DIRECTIONAL (3-probe standing-wave) |S21| observable.
+      # Converges 27% seed error -> 1.0% in four map points (~8 release
+      # solves, ~19 min).
+      - name: engine-refine-001 (yee-filter, release, ignored)
+        run: cargo test -p yee-filter --release --test engine_lpf_refine -- --ignored --nocapture
+
+  bpf-bo-gate:
+    name: BPF BO gate (engine-bpf-bo-001, R.4, release)
+    runs-on: ubuntu-latest
+    # No `needs:` — parallel with the other release gates. The F1.2.1
+    # EM-in-the-loop BO machinery gate (ADR-0197): 1 reference + 12
+    # BO-driven full-wave solves (~35-40 min); asserts BO improves the
+    # seed misfit by >= 2 dB RMS on a live measurement. The fine-grid
+    # passband close-out is R.4c on the GPU nightly.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.92"
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: engine-bpf-bo-001 (yee-filter, release, ignored)
+        run: cargo test -p yee-filter --release --test engine_bpf_bo -- --ignored --nocapture
+
+  antenna-gates:
+    name: Antenna design gates (A.0-A.3, release)
+    runs-on: ubuntu-latest
+    # No `needs:` — parallel with the other release gates. Runs the antenna
+    # track (ADR-0190..0193): A.0 resonance (engine-antenna-001), A.1 inset +
+    # directional S11 (engine-antenna-002), A.2 far-field pattern
+    # (engine-antenna-003), A.3 inset design loop (engine-antenna-004,
+    # ~5 solves). Total ~45 min of release FDTD.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.92"
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: A.0 patch resonance (engine-antenna-001)
+        run: cargo test -p yee-engine --release --test antenna_patch_s11 -- --ignored --nocapture
+
+      - name: A.1 inset + directional S11 (engine-antenna-002)
+        run: cargo test -p yee-engine --release --test antenna_patch_inset -- --ignored --nocapture
+
+      - name: A.2 far-field pattern (engine-antenna-003)
+        run: cargo test -p yee-engine --release --test antenna_patch_pattern -- --ignored --nocapture
+
+      - name: A.3 inset design loop (engine-antenna-004)
+        run: cargo test -p yee-engine --release --test antenna_patch_match_loop -- --ignored --nocapture
+
   fdtd-coupling-gate:
     name: FDTD propagation ε_eff gate (fdtd-line-eeff, release)
     runs-on: ubuntu-latest

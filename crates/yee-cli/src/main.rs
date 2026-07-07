@@ -60,6 +60,16 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Serve the yee-engine job API over HTTP/WebSocket (S.1, ADR-0180).
+    ///
+    /// `GET /healthz` for liveness; `GET /v1/jobs` upgrades to a WebSocket:
+    /// send one JSON `JobSpec`, receive streamed `JobEvent`s (`progress` …
+    /// `done`/`error`). Runs until interrupted.
+    Serve {
+        /// Bind address.
+        #[arg(long, default_value = "127.0.0.1:7332")]
+        addr: std::net::SocketAddr,
+    },
     /// Run validation cases against published benchmarks.
     ///
     /// Invokes the `yee-validation` aggregator and filters by `target`
@@ -487,6 +497,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
         }
         Command::Mesh { input } => Ok(run_mesh(&input)),
+        Command::Serve { addr } => {
+            yee_server::serve_blocking(addr)?;
+            Ok(std::process::ExitCode::SUCCESS)
+        }
         Command::Run { project } => {
             println!("yee run {} — Phase 0 stub.", project.display());
             Ok(ExitCode::SUCCESS)

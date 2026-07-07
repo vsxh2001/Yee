@@ -6,12 +6,12 @@ This file is loaded by Claude Code instances starting work in the Yee repo. It c
 
 ## 1. Project overview
 
-**Yee** is an open, GPU-accelerated electromagnetic simulator written in Rust, with a planar Method-of-Moments (MoM) beachhead, a complementary FDTD volumetric solver, Touchstone I/O, Python bindings, and a desktop GUI. Development is **phase-driven** per `ROADMAP.md`: Phase 0 (walking skeleton) is complete; Phase 1.0 (free-space MoM half-wave dipole) has shipped against the published NEC-4 reference; multiple Phase 1 / Phase 2 sub-projects have landed (multilayer Green's placeholder, wave-port skeleton, FDTD CPML / NTFF / dispersive ADE materials, cuSOLVER LU, Python bindings, mdBook theory chapters, egui+wgpu desktop shell with S-parameter and Smith-chart plots, static plotters export, hardware-gated GPU nightly CI). The current shipped solver accuracy floor is the MoM dipole; everything else is either a hardware-gated path, a Phase-1.x placeholder, or an FDTD building block awaiting an end-to-end driver.
+**Yee** is an open, GPU-accelerated electromagnetic simulator written in Rust, with a planar Method-of-Moments (MoM) beachhead, a complementary FDTD volumetric solver, a portable GPU/CPU execution engine, Touchstone I/O, Python bindings, and multiple UIs. Development is **phase-driven** per `ROADMAP.md`: Phase 0 (walking skeleton) is complete; Phase 1.0 (free-space MoM half-wave dipole) has shipped against the published NEC-4 reference; multiple Phase 1 / Phase 2 sub-projects have landed (multilayer Green's placeholder, wave-port skeleton, FDTD CPML / NTFF / dispersive ADE materials, cuSOLVER LU, Python bindings, mdBook theory chapters, egui+wgpu desktop shell with S-parameter and Smith-chart plots, static plotters export, hardware-gated GPU nightly CI). **The engine + studio track (ADR-0175..0181, `ENGINE-STUDIO-ROADMAP.md`) is complete through E.5/S.4:** `yee-compute` runs FDTD on rayon CPU (bit-exact vs `yee-fdtd`) and wgpu/WGSL FP32 GPU (tolerance-gated; CPML, per-cell materials, PEC masks, drive/probes, dispersive ADE, on-GPU NTFF), certified against analytic references (Pozar cavity −0.063 %, Hammerstad–Jensen ε_eff 0.132 %, sin θ dipole null); it is consumable from Python (`yee.compute`), the Tauri 2 + React studio (`studio/`, in-process `yee-engine` jobs), and over WebSocket (`yee-server`, `yee serve`).
 
 **When starting work on this repo:**
 
 1. Read this file end to end.
-2. Skim `ROADMAP.md` for the phase your task lives in.
+2. Skim `ROADMAP.md` for the phase your task lives in (core solvers). Application phases live in `FILTER-DESIGN-ROADMAP.md`; the GPU/CPU engine + web-studio track (ADR-0175) lives in `ENGINE-STUDIO-ROADMAP.md`.
 3. Skim `TECH_STACK.md` if your task touches a new dependency.
 4. Look for a matching spec under `docs/superpowers/specs/` and plan under `docs/superpowers/plans/`. If none exists and the task is non-trivial, write the spec before any code.
 5. Decide your lane (§6) before opening any file.
@@ -27,17 +27,21 @@ crates/
   yee-mesh/       — Gmsh FFI (gmsh feature)
   yee-mom/        — planar Method of Moments solver
   yee-fdtd/       — FDTD walking skeleton + CPML + NTFF + dispersive ADE materials
+  yee-compute/    — GPU/CPU execution layer: rayon CPU + wgpu/WGSL compute (ADR-0175)
+  yee-engine/     — transport-agnostic simulation job API over yee-compute (S.0, ADR-0179)
+  yee-server/     — axum WebSocket exposure of the job API + `yee serve` (S.1, ADR-0180)
   yee-io/         — Touchstone v1.1 I/O
   yee-cli/        — yee CLI (validate / mesh / run / export / plot)
   yee-py/         — PyO3 0.28 Python bindings (abi3-py310)
   yee-gui/        — egui desktop shell + wgpu 3D viewport
   yee-plotters/   — static PNG/SVG plot export (plotters)
 examples/         — 3 runnable example binaries (half-wave-dipole, microstrip-line, patch-2g4)
+studio/           — Tauri 2 + React studio (own cargo workspace — NOT a root-workspace member; ADR-0179)
 docs/             — mdBook (theory + tutorials) + superpowers/specs + superpowers/plans
 .github/workflows/ — CI + GPU nightly + wheels + docs deploy
 ```
 
-Other root files worth knowing: `ROADMAP.md`, `TECH_STACK.md`, `CONTRIBUTING.md`, `THIRD_PARTY_LICENSES.md`, `rust-toolchain.toml` (pins 1.92), `rustfmt.toml`, `Cargo.toml` (workspace).
+Other root files worth knowing: `ROADMAP.md`, `FILTER-DESIGN-ROADMAP.md`, `ENGINE-STUDIO-ROADMAP.md`, `TECH_STACK.md`, `CONTRIBUTING.md`, `THIRD_PARTY_LICENSES.md`, `rust-toolchain.toml` (pins 1.92), `rustfmt.toml`, `Cargo.toml` (workspace).
 
 `crates/yee-surrogate/` has landed (Phase 3.gp.0/1 + 3.bo.0/1 + 3.al.0 shipped per `ROADMAP.md`). It is wired into the workspace `Cargo.toml` and exposed via `yee-py`'s `yee.surrogate` Python module.
 

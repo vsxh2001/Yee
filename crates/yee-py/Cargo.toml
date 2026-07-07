@@ -17,6 +17,7 @@ yee-mesh      = { workspace = true }
 yee-mom       = { workspace = true }
 yee-fem       = { workspace = true }
 yee-fdtd      = { workspace = true }
+yee-compute   = { workspace = true }
 yee-io        = { workspace = true }
 yee-surrogate = { workspace = true }
 yee-validation = { workspace = true }

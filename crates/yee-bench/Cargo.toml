@@ -15,6 +15,7 @@ yee-core    = { workspace = true }
 yee-mesh    = { workspace = true }
 yee-mom     = { workspace = true }
 yee-fdtd    = { workspace = true }
+yee-compute = { workspace = true }
 yee-surrogate = { workspace = true }
 faer        = { workspace = true }
 num-complex = { workspace = true }
@@ -49,4 +50,8 @@ harness = false
 
 [[bench]]
 name = "lumped_resistor"
+harness = false
+
+[[bench]]
+name = "compute_step"
 harness = false
