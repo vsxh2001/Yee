@@ -24,6 +24,14 @@ pub struct Materials {
     pub pec_mask_ey: Option<Vec<bool>>,
     /// Interior PEC mask for `E_z` (shape of `E_z`).
     pub pec_mask_ez: Option<Vec<bool>>,
+    /// Resistive-sheet surface resistance `R_s` (Ω/square) applied to the
+    /// masked `E_x`/`E_y` edges (R.0b, ADR-0202): instead of the PEC
+    /// `E_tan = 0`, the sheet enforces `E_tan = R_s·K` with
+    /// `K = ẑ × (H_above − H_below)` — conductor loss for planar
+    /// (z-normal) traces at the design frequency,
+    /// `R_s = √(π f_ref μ₀ / σ)`. `None` or `0` → plain PEC (bit-exact).
+    /// `E_z` masks (vias) always stay PEC.
+    pub sheet_r_ohm: Option<f64>,
 }
 
 impl Materials {
@@ -47,6 +55,12 @@ impl Materials {
             if let Some(m) = mask {
                 assert_eq!(m.len(), len, "{name} length mismatch");
             }
+        }
+        if let Some(r) = self.sheet_r_ohm {
+            assert!(
+                r.is_finite() && r >= 0.0,
+                "sheet_r_ohm must be finite and non-negative, got {r}"
+            );
         }
     }
 

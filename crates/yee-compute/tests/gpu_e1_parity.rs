@@ -71,6 +71,7 @@ fn materials() -> Materials {
         pec_mask_ex: Some(mask_ex),
         pec_mask_ey: None,
         pec_mask_ez: None,
+        sheet_r_ohm: None,
     }
 }
 

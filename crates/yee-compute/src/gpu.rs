@@ -233,6 +233,11 @@ impl GpuFdtd {
         dispersive: Option<&DispersiveMap>,
         dft_f_probe: Option<f64>,
     ) -> Result<Self, ComputeError> {
+        if materials.sheet_r_ohm.is_some_and(|r| r > 0.0) {
+            return Err(ComputeError::Unsupported(
+                "resistive-sheet conductor loss (R.0b) is not on the GPU yet",
+            ));
+        }
         let field_lens = [
             len3(spec.ex_dims()),
             len3(spec.ey_dims()),

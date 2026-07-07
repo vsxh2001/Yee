@@ -245,3 +245,4 @@
 - [ADR-0199: R.5b — the studio verifies: full-wave loop + the shared board fixture](decisions/0199-r5b-studio-verify-loop.md)
 - [ADR-0200: R.2b — measured complex Γ of a known one-port, differentially](decisions/0200-r2b-shorted-line-gamma.md)
 - [ADR-0201: R.6 — hairpin seed fidelity: the corner correction lands on-frequency](decisions/0201-r6-hairpin-seed-fidelity.md)
+- [ADR-0202: R.0b — conductor loss: the resistive-sheet trace boundary](decisions/0202-r0b-resistive-sheet-loss.md)

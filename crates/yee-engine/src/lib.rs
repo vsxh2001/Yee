@@ -156,6 +156,13 @@ pub struct MaterialsSpec {
     /// Interior PEC mask for `E_z` (shape of `E_z`).
     #[serde(default)]
     pub pec_mask_ez: Option<Vec<bool>>,
+    /// Resistive-sheet surface resistance `R_s` (Ω/square) on the masked
+    /// `E_x`/`E_y` trace edges (R.0b, ADR-0202): planar conductor loss at
+    /// the design frequency, `R_s = √(π f_ref μ₀/σ)`
+    /// (`yee_voxel::surface_resistance_ohm`). `None`/`0` → lossless PEC.
+    /// CPU-only for now (the GPU backend rejects it; `Auto` falls back).
+    #[serde(default)]
+    pub sheet_r_ohm: Option<f64>,
 }
 
 impl MaterialsSpec {
@@ -208,6 +215,13 @@ impl MaterialsSpec {
                 ));
             }
         }
+        if let Some(r) = self.sheet_r_ohm
+            && !(r.is_finite() && r >= 0.0)
+        {
+            return Err(format!(
+                "materials.sheet_r_ohm must be finite and non-negative, got {r}"
+            ));
+        }
         Ok(Materials {
             eps_r_cells: self.eps_r_cells,
             mu_r_cells: self.mu_r_cells,
@@ -215,6 +229,7 @@ impl MaterialsSpec {
             pec_mask_ex: self.pec_mask_ex,
             pec_mask_ey: self.pec_mask_ey,
             pec_mask_ez: self.pec_mask_ez,
+            sheet_r_ohm: self.sheet_r_ohm,
         })
     }
 }

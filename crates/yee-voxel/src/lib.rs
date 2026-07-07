@@ -236,6 +236,15 @@ pub fn voxelize_microstrip(layout: &Layout, opts: &VoxelOptions) -> MicrostripMo
     }
 }
 
+/// Surface resistance of a good conductor at frequency `f_hz` (R.0b,
+/// ADR-0202): `R_s = sqrt(pi f mu0 / sigma)` ohms per square - the value
+/// the resistive-sheet trace boundary (`MaterialsSpec::sheet_r_ohm`) takes
+/// at the design frequency. Copper at 5 GHz: ~18.4 milli-ohm/sq.
+pub fn surface_resistance_ohm(f_hz: f64, sigma_s_m: f64) -> f64 {
+    const MU0: f64 = 4.0e-7 * std::f64::consts::PI;
+    (std::f64::consts::PI * f_hz * MU0 / sigma_s_m).sqrt()
+}
+
 /// Map a substrate `tan δ` to per-cell conductivity for the engine's
 /// lossy CA/CB update (R.0, ADR-0194): `σ = 2π f_ref ε₀ ε_r tan δ` on
 /// every cell whose ε_r exceeds 1 (the substrate), zero in air. FDTD σ

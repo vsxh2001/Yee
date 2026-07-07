@@ -112,6 +112,7 @@ fn candidate_materials(sc: &Scenario) -> Materials {
         pec_mask_ex: Some(sc.mask_ex.clone()),
         pec_mask_ey: Some(sc.mask_ey.clone()),
         pec_mask_ez: None,
+        sheet_r_ohm: None,
     }
 }
 

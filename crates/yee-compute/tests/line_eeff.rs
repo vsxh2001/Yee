@@ -100,6 +100,7 @@ fn line_eeff_on_engine_matches_hammerstad_jensen() {
             .as_ref()
             .map(|a| a.as_slice().unwrap().to_vec()),
         pec_mask_ez: None,
+        sheet_r_ohm: None,
     };
     assert!(
         materials.eps_r_cells.is_some() && materials.pec_mask_ex.is_some(),

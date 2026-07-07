@@ -325,8 +325,13 @@ impl CpuFdtd {
         self.apply_pec_mask();
     }
 
-    /// Clamp masked E cells to zero (no-op when no masks are attached),
-    /// mirroring `YeeGrid::apply_pec_mask`.
+    /// Apply the interior conductor model to masked E edges, mirroring
+    /// `YeeGrid::apply_pec_mask`: plain PEC clamps `E_tan = 0`; with a
+    /// resistive sheet attached (R.0b, ADR-0202) the masked `E_x`/`E_y`
+    /// edges instead carry the Leontovich sheet relation
+    /// `E_tan = R_s·K`, `K = ẑ × (H_above − H_below)` — planar (z-normal)
+    /// trace loss at the design frequency. `E_z` masks (vias) always stay
+    /// PEC, and `R_s = 0`/`None` reproduces the PEC clamp bit-exactly.
     fn apply_pec_mask(&mut self) {
         for (field, mask) in [
             (&mut self.fields.ex, &self.materials.pec_mask_ex),
@@ -337,6 +342,45 @@ impl CpuFdtd {
                 for (e, &m) in field.iter_mut().zip(mask.iter()) {
                     if m {
                         *e = 0.0;
+                    }
+                }
+            }
+        }
+        let Some(r_s) = self.materials.sheet_r_ohm else {
+            return;
+        };
+        if r_s == 0.0 {
+            return;
+        }
+        let s = self.spec;
+        // E_x(i+1/2, j, k): K_x = H_y(k-1/2) - H_y(k+1/2).
+        if let Some(mask) = &self.materials.pec_mask_ex {
+            let exd = s.ex_dims();
+            let hyd = s.hy_dims();
+            for i in 0..exd.0 {
+                for j in 0..exd.1 {
+                    for k in 1..exd.2 - 1 {
+                        if mask[idx3(exd, i, j, k)] && j < hyd.1 {
+                            self.fields.ex[idx3(exd, i, j, k)] = r_s
+                                * (self.fields.hy[idx3(hyd, i, j, k - 1)]
+                                    - self.fields.hy[idx3(hyd, i, j, k)]);
+                        }
+                    }
+                }
+            }
+        }
+        // E_y(i, j+1/2, k): K_y = H_x(k+1/2) - H_x(k-1/2).
+        if let Some(mask) = &self.materials.pec_mask_ey {
+            let eyd = s.ey_dims();
+            let hxd = s.hx_dims();
+            for i in 0..eyd.0 {
+                for j in 0..eyd.1 {
+                    for k in 1..eyd.2 - 1 {
+                        if mask[idx3(eyd, i, j, k)] && i < hxd.0 {
+                            self.fields.ey[idx3(eyd, i, j, k)] = r_s
+                                * (self.fields.hx[idx3(hxd, i, j, k)]
+                                    - self.fields.hx[idx3(hxd, i, j, k - 1)]);
+                        }
                     }
                 }
             }
