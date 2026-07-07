@@ -126,13 +126,17 @@ fn scripted_design_flow_produces_bytechecked_artifacts() {
 
 #[test]
 fn unrealizable_spec_reports_a_designer_grade_error() {
-    // A narrow FBW on the thick 1.6 mm board: qe = 1/FBW = 10 puts the tap
-    // beyond the fold-shortened arm — the flow must surface the dims'
-    // TapNotRealizable message (with the realizable qe range), not panic.
+    // A narrow FBW on the thick 1.6 mm board with a wide fold: qe = 1/FBW
+    // = 10 puts the tap beyond the fold-shortened arm — the flow must
+    // surface the dims' TapNotRealizable message (with the realizable qe
+    // range), not panic. (The R.6 corner correction lengthens arms, so the
+    // pre-R.6 trigger — fbw 0.10 at the default fold — became realizable;
+    // fold_widths 3.5 re-creates the wall.)
     let mut req = request();
     req.height_m = 1.6e-3;
     req.fbw = 0.10;
-    let err = design_filter_impl(&req).expect_err("narrow-FBW 1.6 mm stack should be rejected");
+    req.fold_widths = 3.5;
+    let err = design_filter_impl(&req).expect_err("narrow-FBW wide-fold stack should be rejected");
     assert!(
         err.contains("realizable range"),
         "unexpected error text: {err}"

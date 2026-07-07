@@ -131,7 +131,7 @@ pub fn verify_filter_impl(
         fold_spacing_m: dims.fold_spacing_m,
         gaps_m: dims.gaps_m.clone(),
         tap_offset_m: dims.tap_offset_m,
-        feed_width_m: dims.line_width_m,
+        feed_width_m: dims.feed_width_m,
         feed_length_m: VERIFY_FEED_LEN_M,
     });
 

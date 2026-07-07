@@ -436,6 +436,10 @@ pub struct HairpinDimensions {
     /// external Q (R.4/F1.2.1; [`tap_offset_from_qe`] with `L = 2·arm`),
     /// metres from the open end.
     pub tap_offset_m: f64,
+    /// Feed-line width for the spec `Z0`, metres (R.6). Equal to
+    /// [`line_width_m`](Self::line_width_m) when the resonators are also
+    /// `Z0` lines; thinner resonators (higher `Zr`) keep a `Z0` feed.
+    pub feed_width_m: f64,
 }
 
 /// Invert the validated coupled-microstrip model to size a **hairpin**
@@ -509,6 +513,68 @@ pub fn dimension_hairpin_with_fold(
     substrate: &Substrate,
     fold_widths: f64,
 ) -> Result<HairpinDimensions, DimError> {
+    dimension_hairpin_opts(
+        project,
+        substrate,
+        &HairpinOptions {
+            fold_widths,
+            ..HairpinOptions::default()
+        },
+    )
+}
+
+/// Geometry options for [`dimension_hairpin_opts`] (R.6).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct HairpinOptions {
+    /// Fold pitch in **resonator line widths** (centre-to-centre; must be
+    /// > 1 or the U's arms merge). Default 2.0.
+    pub fold_widths: f64,
+    /// Resonator-line characteristic impedance, ohms. `None` → the spec
+    /// `Z0`. Higher `Zr` (thinner resonator lines) buys tap room on thick
+    /// stacks: the tap minimum scales with `(Z0/Zr)` and the fold consumes
+    /// fewer millimetres. The feed stays a `Z0` line either way.
+    pub resonator_z_ohm: Option<f64>,
+    /// Corner correction κ in resonator line widths: each of the U's two
+    /// 90° corners shortens the electrical path by ≈ `κ·w` relative to the
+    /// midline, so the arm is lengthened by `κ·w` to compensate:
+    /// `arm = (λ_g/2 − fold)/2 + κ·w`. Default 0.85 — **calibrated from
+    /// the R.4 instrumented seed measurement** (resonance +17 % high on
+    /// h = 0.8 mm FR-4 → a 2.62 mm electrical deficit over two corners of
+    /// a 1.529 mm line, net of open-end lengthening; single data point,
+    /// refined as more stacks are measured — ADR-0201).
+    pub corner_widths: f64,
+}
+
+impl Default for HairpinOptions {
+    fn default() -> Self {
+        Self {
+            fold_widths: 2.0,
+            resonator_z_ohm: None,
+            corner_widths: 0.85,
+        }
+    }
+}
+
+/// [`dimension_hairpin`] with explicit geometry options (R.6): fold pitch,
+/// resonator impedance, and the corner correction. See [`HairpinOptions`]
+/// for the physics of each knob; the doc-comment on
+/// [`dimension_hairpin_with_fold`]'s fold-corrected arm formula applies,
+/// extended by the corner term:
+///
+/// `arm = (λ_g/2 − fold_spacing)/2 + corner_widths·w`
+///
+/// # Errors
+///
+/// All of [`dimension_hairpin`]'s errors, plus
+/// [`DimError::NonPhysicalInput`] when the fold consumes the whole
+/// half-wave (`arm ≤ 0`) or `resonator_z_ohm` is non-positive, and
+/// [`DimError::TapNotRealizable`] when the qe→tap offset falls beyond the
+/// (corner-corrected) arm.
+pub fn dimension_hairpin_opts(
+    project: &FilterProject,
+    substrate: &Substrate,
+    opts: &HairpinOptions,
+) -> Result<HairpinDimensions, DimError> {
     if project.topology != Topology::CoupledResonator {
         return Err(DimError::UnsupportedTopology);
     }
@@ -523,26 +589,35 @@ pub fn dimension_hairpin_with_fold(
     let f0 = project.spec.f0_hz;
     let fbw = project.spec.fbw;
     let z0 = project.spec.z0_ohm;
+    let zr = opts.resonator_z_ohm.unwrap_or(z0);
+    if zr <= 0.0 {
+        return Err(DimError::NonPhysicalInput(
+            "resonator impedance must be positive",
+        ));
+    }
 
-    // 1. Line width from the Hammerstad-Jensen Z0 synthesis.
-    let line_width_m = microstrip_width(z0, eps_r, h_m);
+    // 1. Line widths: resonators at Zr, the feed at the spec Z0.
+    let line_width_m = microstrip_width(zr, eps_r, h_m);
+    let feed_width_m = microstrip_width(z0, eps_r, h_m);
 
     // 2. Fold spacing: intra-hairpin arm pitch (centre-to-centre). At
     //    fold_widths <= 1 the two arms of the U touch and the resonator
     //    degenerates into a solid block (measured as a wrecked response by
     //    an early engine-bpf-verify-001 iteration) — reject it.
-    if fold_widths <= 1.0 {
+    if opts.fold_widths <= 1.0 {
         return Err(DimError::NonPhysicalInput(
             "hairpin fold spacing is centre-to-centre: fold_widths <= 1 merges the two arms",
         ));
     }
-    let fold_spacing_m = fold_widths * line_width_m;
+    let fold_spacing_m = opts.fold_widths * line_width_m;
 
-    // 3. Fold-corrected arm length: the U's midline — arm + fold + arm —
-    //    is the half-wave, so arm = (lambda_g/2 - fold)/2 (doc above).
+    // 3. Fold- and corner-corrected arm length: the U's midline — arm +
+    //    fold + arm — is the half-wave, and each 90° corner shortens the
+    //    electrical path by ~corner_widths·w relative to that midline (the
+    //    R.4 seed measured +17 % without this term).
     let e_eff = eps_eff(line_width_m, h_m, eps_r);
     let halfwave_m = C / (2.0 * f0 * e_eff.sqrt());
-    let arm_length_m = (halfwave_m - fold_spacing_m) / 2.0;
+    let arm_length_m = (halfwave_m - fold_spacing_m) / 2.0 + opts.corner_widths * line_width_m;
     if arm_length_m <= 0.0 {
         return Err(DimError::NonPhysicalInput(
             "hairpin fold spacing consumes the entire half-wave resonator",
@@ -552,7 +627,7 @@ pub fn dimension_hairpin_with_fold(
     // 4. Inter-resonator gaps: target_k[i] = FBW * m[i][i+1] (= yee-synth's
     //    k_{i,i+1}; see module docs), solved by the SAME bisection as
     //    edge-coupled because adjacent hairpins couple through the edge gap
-    //    between their arms.
+    //    between their arms — at the RESONATOR width.
     let mut target_k = Vec::with_capacity(n - 1);
     let mut gaps_m = Vec::with_capacity(n - 1);
     for i in 0..n - 1 {
@@ -562,14 +637,13 @@ pub fn dimension_hairpin_with_fold(
         gaps_m.push(gap);
     }
 
-    // 5. Tapped-feed offset from the synthesized external Q (R.4/F1.2.1).
-    //    The hairpin resonator line is the spec-Z0 width, so Zr = Z0; qe_in
-    //    and qe_out are equal for the symmetric prototypes synthesis emits.
-    //    t runs along the resonator from the open end, so it must land on
-    //    the physical arm (the region [arm, halfwave/2] is the bend).
-    let tap_offset_m = tap_offset_from_qe(project.coupling.qe_in, z0, z0, halfwave_m)?;
+    // 5. Tapped-feed offset from the synthesized external Q (R.4/F1.2.1;
+    //    the (Z0/Zr) factor is where thinner resonators buy tap room). t
+    //    runs along the resonator from the open end, so it must land on
+    //    the physical arm (the region beyond is the bend).
+    let tap_offset_m = tap_offset_from_qe(project.coupling.qe_in, z0, zr, halfwave_m)?;
     if tap_offset_m > arm_length_m {
-        let qe_min = std::f64::consts::FRAC_PI_2;
+        let qe_min = std::f64::consts::FRAC_PI_2 * z0 / zr;
         let qe_max = qe_min
             / (std::f64::consts::PI * arm_length_m / halfwave_m)
                 .cos()
@@ -588,6 +662,7 @@ pub fn dimension_hairpin_with_fold(
         gaps_m,
         target_k,
         tap_offset_m,
+        feed_width_m,
     })
 }
 
@@ -624,7 +699,7 @@ pub fn dimension_hairpin_layout(
         fold_spacing_m: dims.fold_spacing_m,
         gaps_m: dims.gaps_m.clone(),
         tap_offset_m: dims.tap_offset_m,
-        feed_width_m: dims.line_width_m,
+        feed_width_m: dims.feed_width_m,
         feed_length_m: dims.arm_length_m,
     };
     Ok(hairpin_bpf_sections(&params))

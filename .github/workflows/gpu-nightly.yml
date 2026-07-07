@@ -51,3 +51,15 @@ jobs:
       # gate (ADR-0175..0177). include-ignored pulls in the slow ones.
       - name: cargo test (yee-compute, release — wgpu compute gates)
         run: cargo test -p yee-compute --release -- --include-ignored --nocapture
+
+      # R.4c (ADR-0197/0201): the fine-grid BPF BO close-out — the same
+      # engine-bpf-bo-001 harness at dx = 0.1 mm (~8x the CI gate's cells,
+      # 13 solves) on the GPU backend, where sub-0.4 mm coupling gaps
+      # resolve and the designed k/qe become realizable. At this dx the
+      # gate's R.4c asserts activate: passband peak >= -6 dB, centre
+      # +-5 %, BW +-30 % vs the coupling-matrix design.
+      - name: engine-bpf-bo-001 fine grid (R.4c, dx = 0.1 mm, GPU)
+        env:
+          YEE_BPF_BO_DX_MM: "0.1"
+          YEE_BPF_BO_BACKEND: gpu
+        run: cargo test -p yee-filter --release --test engine_bpf_bo -- --ignored --nocapture

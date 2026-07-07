@@ -70,11 +70,14 @@ fn hairpin_dim_001_inversion_roundtrip() {
         );
     }
 
-    // Fold-corrected arm length (R.4a): the resonator midline — arm + fold +
-    // arm — is the half-wave, so arm == (λ_g/2 − fold_spacing)/2.
+    // Fold- and corner-corrected arm length (R.4a + R.6): the resonator
+    // midline — arm + fold + arm — is the half-wave, and each 90° corner
+    // shortens the electrical path by κ·w (κ = 0.85, calibrated against
+    // the R.4 measured seed detune), so
+    // arm == (λ_g/2 − fold_spacing)/2 + 0.85·w.
     let e_eff = eps_eff(dims.line_width_m, substrate.height_m, substrate.eps_r);
     let halfwave = C / (2.0 * spec.f0_hz * e_eff.sqrt());
-    let expected_arm = (halfwave - dims.fold_spacing_m) / 2.0;
+    let expected_arm = (halfwave - dims.fold_spacing_m) / 2.0 + 0.85 * dims.line_width_m;
     let arm_rel = (dims.arm_length_m - expected_arm).abs() / expected_arm;
     assert!(
         arm_rel < 0.02,
@@ -89,4 +92,38 @@ fn hairpin_dim_001_inversion_roundtrip() {
         (dims.line_width_m - expected_w).abs() / expected_w < 1e-12,
         "line_width_m should equal microstrip_width(z0)"
     );
+}
+
+/// R.6: thinner (higher-impedance) resonator lines make the previously
+/// TapNotRealizable thick stack dimension cleanly — the tap minimum scales
+/// with (Z0/Zr) and the fold consumes fewer millimetres.
+#[test]
+fn hairpin_dim_zr_unlocks_the_thick_stack() {
+    let (spec, substrate) = fixture();
+    let project = synthesize(&spec);
+
+    let opts = yee_filter::HairpinOptions {
+        resonator_z_ohm: Some(70.0),
+        ..yee_filter::HairpinOptions::default()
+    };
+    let dims = yee_filter::dimension_hairpin_opts(&project, &substrate, &opts)
+        .expect("Zr = 70 should dimension the thick stack");
+
+    // Thinner resonator line than the Z0 feed.
+    let w_z0 = microstrip_width(spec.z0_ohm, substrate.eps_r, substrate.height_m);
+    assert!(dims.line_width_m < w_z0, "resonator line must be thinner");
+    assert!(
+        (dims.feed_width_m - w_z0).abs() / w_z0 < 1e-12,
+        "feed stays a Z0 line"
+    );
+    // The tap sits on the arm with the feed half-width clear of the bend.
+    assert!(dims.tap_offset_m + dims.feed_width_m / 2.0 <= dims.arm_length_m);
+    // Defaults (Zr = None) reproduce dimension_hairpin_with_fold exactly.
+    let d_default = yee_filter::dimension_hairpin_opts(
+        &project,
+        &substrate,
+        &yee_filter::HairpinOptions::default(),
+    );
+    let d_fold = yee_filter::dimension_hairpin_with_fold(&project, &substrate, 2.0);
+    assert_eq!(format!("{d_default:?}"), format!("{d_fold:?}"));
 }

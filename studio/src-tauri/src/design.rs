@@ -117,7 +117,7 @@ pub fn design_filter_impl(req: &FilterDesignRequest) -> Result<FilterDesignRespo
         fold_spacing_m: dims.fold_spacing_m,
         gaps_m: dims.gaps_m.clone(),
         tap_offset_m: dims.tap_offset_m,
-        feed_width_m: dims.line_width_m,
+        feed_width_m: dims.feed_width_m,
         feed_length_m: dims.arm_length_m,
     });
 

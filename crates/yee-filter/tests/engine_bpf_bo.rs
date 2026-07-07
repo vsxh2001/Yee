@@ -78,15 +78,53 @@ const AIR_ABOVE_CELLS: usize = 34;
 const DRIVE_V0: f64 = 1.0;
 const BW_HZ: f64 = 4.0e9; // drive envelope covers ~3–7 GHz
 const N_STEPS: usize = 13000;
+
+/// Runtime fidelity/backend config (R.4c): the same harness runs
+/// coarse-CPU in CI and fine-GPU on the nightly.
+///
+/// - `YEE_BPF_BO_DX_MM` — cell size in mm (default 0.2). The step count
+///   scales inversely (dt ∝ dx), and the candidate builder's 2·dx gap
+///   floor relaxes automatically — the whole point of the fine grid.
+/// - `YEE_BPF_BO_BACKEND` — `cpu` (default) | `gpu` | `auto`.
+///
+/// At dx < 0.15 mm the R.4c close-out asserts activate (passband peak,
+/// centre, BW — the roadmap criteria that are NOT realizable at the
+/// coarse grid's coupling floor, ADR-0197/0201).
+#[derive(Clone, Copy)]
+struct GateConfig {
+    dx_m: f64,
+    n_steps: usize,
+    backend: BackendChoice,
+}
+
+fn gate_config() -> GateConfig {
+    let dx_mm: f64 = std::env::var("YEE_BPF_BO_DX_MM")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.2);
+    let dx_m = dx_mm * 1e-3;
+    let n_steps = (N_STEPS as f64 * (DX_M / dx_m)).round() as usize;
+    let backend = match std::env::var("YEE_BPF_BO_BACKEND").as_deref() {
+        Ok("gpu") => BackendChoice::Gpu,
+        Ok("auto") => BackendChoice::Auto,
+        _ => BackendChoice::Cpu,
+    };
+    GateConfig {
+        dx_m,
+        n_steps,
+        backend,
+    }
+}
 /// Feed length: long enough to carry a 3-probe triple with clearance.
 const FEED_LEN_M: f64 = 12.0e-3;
 /// Probe-triple spacing (βd ≈ 0.7 rad at f₀ — well-conditioned fit).
 const SPACING_CELLS: usize = 12;
 
-/// BO knob bounds: arm retune (the seed measured ~+17 % high, so the fix
-/// is longer arms), tap retune, gap retune (the gap floor 2·dx is clamped
-/// in `candidate_layout` — finer gaps are not honestly resolvable).
-const BOUNDS: [(f64, f64); 3] = [(0.9, 1.4), (0.5, 1.3), (0.7, 1.1)];
+/// BO knob bounds: arm retune (symmetric — the R.6 corner correction
+/// supplies the length the pre-R.6 seed was missing), tap retune, gap
+/// retune (the gap floor 2·dx is clamped in `candidate_layout` — finer
+/// gaps are not honestly resolvable).
+const BOUNDS: [(f64, f64); 3] = [(0.85, 1.15), (0.5, 1.3), (0.7, 1.1)];
 /// Solve budget: n_initial + n_iters objective calls, one DUT solve each.
 const BO_INITIAL: usize = 5;
 const BO_ITERS: usize = 7;
@@ -119,15 +157,15 @@ fn filter_spec() -> FilterSpec {
 /// Build the knob-scaled hairpin layout. Tap is clamped onto the arm
 /// (feed half-width clear of the bend) and gaps to the 2·dx grid floor,
 /// so every candidate is a physical, resolvable geometry.
-fn candidate_layout(dims: &HairpinDimensions, knobs: &[f64]) -> Layout {
+fn candidate_layout(dims: &HairpinDimensions, knobs: &[f64], dx_m: f64) -> Layout {
     let (arm_scale, tap_scale, gap_scale) = (knobs[0], knobs[1], knobs[2]);
     let arm = dims.arm_length_m * arm_scale;
-    let tap_max = arm - dims.line_width_m / 2.0 - DX_M;
-    let tap = (dims.tap_offset_m * tap_scale).min(tap_max).max(DX_M);
+    let tap_max = arm - dims.line_width_m / 2.0 - dx_m;
+    let tap = (dims.tap_offset_m * tap_scale).min(tap_max).max(dx_m);
     let gaps: Vec<f64> = dims
         .gaps_m
         .iter()
-        .map(|g| (g * gap_scale).max(2.0 * DX_M))
+        .map(|g| (g * gap_scale).max(2.0 * dx_m))
         .collect();
     hairpin_bpf_sections(&HairpinSectionParams {
         substrate: fr4(),
@@ -136,7 +174,7 @@ fn candidate_layout(dims: &HairpinDimensions, knobs: &[f64]) -> Layout {
         fold_spacing_m: dims.fold_spacing_m,
         gaps_m: gaps,
         tap_offset_m: tap,
-        feed_width_m: dims.line_width_m,
+        feed_width_m: dims.feed_width_m,
         feed_length_m: FEED_LEN_M,
     })
 }
@@ -156,11 +194,11 @@ fn reference_layout(seed: &Layout) -> Layout {
 }
 
 /// Voxelize and express one run as a JobSpec; returns (spec, dt).
-fn job_for(layout: &Layout) -> (JobSpec, f64) {
+fn job_for(layout: &Layout, cfg: GateConfig) -> (JobSpec, f64) {
     let model: MicrostripModel = voxelize_microstrip(
         layout,
         &VoxelOptions {
-            dx_m: DX_M,
+            dx_m: cfg.dx_m,
             xy_margin_cells: MARGIN_CELLS,
             air_above_cells: AIR_ABOVE_CELLS,
         },
@@ -221,8 +259,8 @@ fn job_for(layout: &Layout) -> (JobSpec, f64) {
         nx,
         ny,
         nz,
-        dx_m: DX_M,
-        n_steps: N_STEPS,
+        dx_m: cfg.dx_m,
+        n_steps: cfg.n_steps,
         // Side-wall CPML, PEC ground/lid (S.9) — the board-level boundary.
         boundary: BoundarySpec::Cpml {
             npml: 10,
@@ -267,12 +305,13 @@ fn job_for(layout: &Layout) -> (JobSpec, f64) {
         ntff: None,
         materials: Some(materials),
         dt_s: Some(dt),
-        backend: BackendChoice::Cpu,
+        backend: cfg.backend,
     };
     (spec, dt)
 }
 
 fn run(spec: JobSpec) -> Vec<Vec<f64>> {
+    let expected_steps = spec.n_steps;
     let handle = yee_engine::submit(spec);
     let result = handle
         .events()
@@ -282,14 +321,14 @@ fn run(spec: JobSpec) -> Vec<Vec<f64>> {
             _ => None,
         })
         .expect("no Done event");
-    assert_eq!(result.steps_done, N_STEPS);
+    assert_eq!(result.steps_done, expected_steps);
     result.probes
 }
 
 /// Directional |S21|(f) in dB for a DUT probe set against the shared
 /// reference probe set.
-fn s21_db(dut_p: &[Vec<f64>], ref_p: &[Vec<f64>], dt: f64, freqs: &[f64]) -> Vec<f64> {
-    let spacing_m = SPACING_CELLS as f64 * DX_M;
+fn s21_db(dut_p: &[Vec<f64>], ref_p: &[Vec<f64>], dt: f64, dx_m: f64, freqs: &[f64]) -> Vec<f64> {
+    let spacing_m = SPACING_CELLS as f64 * dx_m;
     sparams::directional_transmission_db(
         [&dut_p[3], &dut_p[4], &dut_p[5]],
         [&ref_p[3], &ref_p[4], &ref_p[5]],
@@ -331,7 +370,14 @@ fn bo_closes_the_synthesized_hairpin_toward_its_coupling_matrix() {
 
     // Fixed envelope bbox at the knob extremes → one shared grid for the
     // reference and every BO candidate.
-    let envelope = candidate_layout(&dims, &[BOUNDS[0].1, 1.0, BOUNDS[2].1]);
+    let cfg = gate_config();
+    eprintln!(
+        "engine-bpf-bo-001 config: dx = {:.3} mm, {} steps, backend {:?}",
+        cfg.dx_m * 1e3,
+        cfg.n_steps,
+        cfg.backend
+    );
+    let envelope = candidate_layout(&dims, &[BOUNDS[0].1, 1.0, BOUNDS[2].1], cfg.dx_m);
     let bbox = BBox {
         min: envelope.bbox.min,
         max: envelope.bbox.max,
@@ -341,9 +387,9 @@ fn bo_closes_the_synthesized_hairpin_toward_its_coupling_matrix() {
         l
     };
 
-    let seed = with_bbox(candidate_layout(&dims, &[1.0, 1.0, 1.0]));
+    let seed = with_bbox(candidate_layout(&dims, &[1.0, 1.0, 1.0], cfg.dx_m));
     let reference = reference_layout(&seed);
-    let (ref_spec, dt) = job_for(&reference);
+    let (ref_spec, dt) = job_for(&reference, cfg);
     let ref_p = run(ref_spec);
     assert!(ref_p[3].iter().any(|v| *v != 0.0), "reference probe silent");
 
@@ -356,10 +402,10 @@ fn bo_closes_the_synthesized_hairpin_toward_its_coupling_matrix() {
         .collect();
 
     let measure = |knobs: &[f64]| -> Vec<f64> {
-        let layout = with_bbox(candidate_layout(&dims, knobs));
-        let (spec, dt2) = job_for(&layout);
+        let layout = with_bbox(candidate_layout(&dims, knobs, cfg.dx_m));
+        let (spec, dt2) = job_for(&layout, cfg);
         assert_eq!(dt, dt2, "candidate grid diverged from the reference");
-        s21_db(&run(spec), &ref_p, dt, &freqs)
+        s21_db(&run(spec), &ref_p, dt, cfg.dx_m, &freqs)
     };
 
     let seed_curve = measure(&[1.0, 1.0, 1.0]);
@@ -440,8 +486,33 @@ fn bo_closes_the_synthesized_hairpin_toward_its_coupling_matrix() {
         "engine-bpf-bo-001 FAILED: best-curve dynamic range {dyn_range:.1} dB — \
          measurement not informative"
     );
-    // Recorded, not asserted (the R.4c close-out's targets): passband
-    // centre, BW, and peak — see the module docs for why the passband
-    // cannot form on this stack/resolution.
-    let _ = (fc, bw, peak);
+    // R.4c close-out asserts — ACTIVE ONLY ON THE FINE GRID (the GPU
+    // nightly's dx ≈ 0.1 mm, where sub-0.4 mm gaps resolve and the
+    // designed k/qe become realizable; ADR-0197/0201). At the coarse CI
+    // grid these are recorded, not asserted: the coupling floor buries
+    // the passband there by measurement, not by defect.
+    if cfg.dx_m < 0.15e-3 {
+        assert!(
+            peak >= -6.0,
+            "engine-bpf-bo-001 (R.4c) FAILED: optimized passband peak {peak:.2} dB (need ≥ −6)"
+        );
+        let fc_err = (fc - F0_HZ).abs() / F0_HZ;
+        assert!(
+            fc_err <= 0.05,
+            "engine-bpf-bo-001 (R.4c) FAILED: centre {:.3} GHz vs {:.2} GHz (err {:.1} % > 5 %)",
+            fc / 1e9,
+            F0_HZ / 1e9,
+            fc_err * 100.0
+        );
+        let bw_err = (bw - FBW * F0_HZ).abs() / (FBW * F0_HZ);
+        assert!(
+            bw_err <= 0.30,
+            "engine-bpf-bo-001 (R.4c) FAILED: BW {:.0} MHz vs {:.0} MHz (err {:.0} % > 30 %)",
+            bw / 1e6,
+            FBW * F0_HZ / 1e6,
+            bw_err * 100.0
+        );
+    } else {
+        let _ = (fc, bw, peak);
+    }
 }

@@ -244,3 +244,4 @@
 - [ADR-0198: R.5 — the studio designs: spec → response → byte-checked exports](decisions/0198-r5-studio-design-flow.md)
 - [ADR-0199: R.5b — the studio verifies: full-wave loop + the shared board fixture](decisions/0199-r5b-studio-verify-loop.md)
 - [ADR-0200: R.2b — measured complex Γ of a known one-port, differentially](decisions/0200-r2b-shorted-line-gamma.md)
+- [ADR-0201: R.6 — hairpin seed fidelity: the corner correction lands on-frequency](decisions/0201-r6-hairpin-seed-fidelity.md)

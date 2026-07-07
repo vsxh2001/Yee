@@ -50,12 +50,12 @@ pub use extract::{CouplingExtraction, extract_coupling, extract_q_ringdown};
 /// stepped-impedance line sections.
 pub mod dimension;
 pub use dimension::{
-    ComblineDimensions, DimError, EdgeCoupledDimensions, HairpinDimensions, InterdigitalDimensions,
-    SteppedImpedanceDimensions, SteppedSection, dimension_combline, dimension_combline_layout,
-    dimension_edge_coupled, dimension_edge_coupled_layout, dimension_hairpin,
-    dimension_hairpin_layout, dimension_hairpin_with_fold, dimension_interdigital,
-    dimension_interdigital_layout, dimension_stepped_impedance, dimension_stepped_impedance_layout,
-    tap_offset_from_qe,
+    ComblineDimensions, DimError, EdgeCoupledDimensions, HairpinDimensions, HairpinOptions,
+    InterdigitalDimensions, SteppedImpedanceDimensions, SteppedSection, dimension_combline,
+    dimension_combline_layout, dimension_edge_coupled, dimension_edge_coupled_layout,
+    dimension_hairpin, dimension_hairpin_layout, dimension_hairpin_opts,
+    dimension_hairpin_with_fold, dimension_interdigital, dimension_interdigital_layout,
+    dimension_stepped_impedance, dimension_stepped_impedance_layout, tap_offset_from_qe,
 };
 
 /// Closed-form lumped-element LC ladder synthesis (Filter Phase F2.0):
