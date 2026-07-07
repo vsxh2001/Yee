@@ -266,6 +266,29 @@ jobs:
       - name: engine-refine-001 (yee-filter, release, ignored)
         run: cargo test -p yee-filter --release --test engine_lpf_refine -- --ignored --nocapture
 
+  bpf-bo-gate:
+    name: BPF BO gate (engine-bpf-bo-001, R.4, release)
+    runs-on: ubuntu-latest
+    # No `needs:` — parallel with the other release gates. The F1.2.1
+    # EM-in-the-loop BO machinery gate (ADR-0197): 1 reference + 12
+    # BO-driven full-wave solves (~35-40 min); asserts BO improves the
+    # seed misfit by >= 2 dB RMS on a live measurement. The fine-grid
+    # passband close-out is R.4c on the GPU nightly.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.92"
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: engine-bpf-bo-001 (yee-filter, release, ignored)
+        run: cargo test -p yee-filter --release --test engine_bpf_bo -- --ignored --nocapture
+
   antenna-gates:
     name: Antenna design gates (A.0-A.3, release)
     runs-on: ubuntu-latest

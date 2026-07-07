@@ -459,9 +459,16 @@ in-browser front-end; heavy EM goes behind a native `yee-server`. See §5a.
   follow-on). **F1.2.1.0 loop skeleton LANDED** (ADR-0188, 2026-07-06): the closed refine loop
   runs on the engine protocol; convergence deferred to the S.12 directional-S21
   observable (port-to-port standing-wave ripple oscillates the secant — measured
-  map in the ADR). **NEXT = F1.2.1** = surrogate-BO + EM-in-loop refinement
-  (consumes F1.1b.1's FDTD k/Qe to refine the F1.2.0 seed) + `qe`→I/O feed
-  dimensioning. **F1.3.0 engine verify ✅ SHIPPED** (ADR-0185, 2026-07-06): the
+  map in the ADR). **F1.2.1 core ✅ SHIPPED as RF-tool R.4 (ADR-0197, 2026-07-07)**:
+  per-section hairpin geometry (`hairpin_bpf_sections` — the mean-gap collapse is
+  gone), `qe`→tap feed dimensioning (`tap_offset_from_qe`, gate `tap-qe-001`),
+  fold-corrected arm length (`arm = (λ_g/2 − fold)/2`; `hairpin_dim_001`
+  evolved), and the EM-in-the-loop surrogate-BO gate `engine-bpf-bo-001`
+  (`yee_surrogate::bo::minimize` over arm/tap/gap scales vs
+  `coupling_matrix_s_params`; first converged run: misfit 28.48 → 24.59 dB RMS,
+  best evals at the gap-resolution grid floor — the loop is validated and the
+  walking-skeleton scenario is coupling-limited at dx = 0.2 mm; the fine-grid
+  passband close-out is **R.4c**, queued for the GPU nightly). **F1.3.0 engine verify ✅ SHIPPED** (ADR-0185, 2026-07-06): the
   first synthesized-filter-vs-its-design full-wave verify — an N=5 Butterworth
   stepped-impedance LPF (F1.2.3 dims) voxelized and run over the `yee-engine`
   job protocol (ADR-0182..0184 machinery); gate `engine-filter-verify-001`

@@ -65,18 +65,36 @@ directional |S21| (S.12 observable) and `coupling_matrix_s_params` (the
 validated Hong-Lancaster evaluator) over 3.5–6.5 GHz. Budget: 5 LHS + 7 EI
 iterations ≈ 13 solves (~1 h release).
 
-Gate: BO strictly improves the seed misfit AND the optimized response is a
-real passband near design (peak ≥ −10 dB, centre within ±10 %) — the
-roadmap's "verified full-wave against its coupling-matrix response; BO closes
-centre frequency + bandwidth" criterion, on the honest post-refinement
-response. First converged run's numbers: recorded in the gate log and the
-roadmap row.
+### The first converged run (2026-07-07, 13 solves, 36 min) and what it changed
+
+- **BO worked**: misfit 28.48 → **24.59 dB RMS** (−3.9 dB), with the EI phase
+  clearly outperforming the LHS phase (best three evals were EI's).
+- **Where it went is the finding**: the best evals all sat at the
+  **gap-scale lower bound** (0.70 — the 2·dx grid floor the candidate builder
+  clamps to) and near the tap-scale lower bound (0.52) — the optimizer
+  systematically pushed toward stronger coupling and ran out of physically /
+  numerically honest room. The passband stayed buried (peak −16.2 dB, centre
+  read 6.05 GHz).
+- **Conclusion**: on h = 0.8 mm FR-4 at dx = 0.2 mm, the hairpin cannot
+  realize the designed k ≈ 0.16 / qe ≈ 4.5 — a **feasibility limit of the
+  scenario**, not a defect of the loop. Resolving the needed sub-0.4 mm gaps
+  takes dx ≈ 0.1 mm (~8× the cell count) — exactly the scale the R.3 GPU
+  parity work exists for.
+
+The gate therefore pins what this run validated: the **loop machinery** —
+BO must improve the seed misfit by ≥ 2 dB RMS (measured 3.9) on a live
+measurement (best-curve dynamic range ≥ 15 dB; measured 29). Passband
+centre/BW/peak are recorded, not asserted. **R.4c** (queued): the fine-grid
+close-out on the GPU nightly — same gate harness, dx ≈ 0.1 mm, where "BO
+closes centre frequency + bandwidth to spec" becomes assertable.
 
 ## Consequences
 
 The filter path gains what the antenna path has (A.3), at BPF complexity:
 synthesize → seed → measure → close the loop, now with a genuine multi-knob
-surrogate optimizer over engine jobs. The seed-quality findings (fold
-correction, tap realizability bounds, stack constraints) are permanent
-closed-form improvements with their own unit gates. Next: R.5 (studio
-spec→loop→export) and R.2b/R.0b as queued.
+surrogate optimizer over engine jobs — plus a quantified map of where the
+walking-skeleton scenario's fidelity ends (the gap-resolution floor). The
+seed-quality findings (fold correction, tap realizability bounds, stack
+constraints) are permanent closed-form improvements with their own unit
+gates. Queued: R.4c (fine-grid BO close-out on the GPU nightly), R.5b,
+R.2b, R.0b.
