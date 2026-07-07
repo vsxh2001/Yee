@@ -234,8 +234,10 @@ jobs:
       - name: yee-compute gates (release, include-ignored)
         run: cargo test -p yee-compute --release -- --include-ignored --nocapture
 
+      # The antenna gates (A.0..A.3) run in their own parallel job below —
+      # skipping them here keeps this job's wall time bounded.
       - name: yee-engine gates incl. engine-verify-001 (release, include-ignored)
-        run: cargo test -p yee-engine --release -- --include-ignored --nocapture
+        run: cargo test -p yee-engine --release -- --include-ignored --nocapture --skip antenna_ --skip patch_ --skip inset_ --skip design_loop_
 
       # F1.3.0/S.8 (ADR-0185): the first synthesized-filter-vs-its-design
       # full-wave verify — N=5 Butterworth stepped-impedance LPF through the
@@ -251,6 +253,38 @@ jobs:
       # solves, ~19 min).
       - name: engine-refine-001 (yee-filter, release, ignored)
         run: cargo test -p yee-filter --release --test engine_lpf_refine -- --ignored --nocapture
+
+  antenna-gates:
+    name: Antenna design gates (A.0-A.3, release)
+    runs-on: ubuntu-latest
+    # No `needs:` — parallel with the other release gates. Runs the antenna
+    # track (ADR-0190..0193): A.0 resonance (engine-antenna-001), A.1 inset +
+    # directional S11 (engine-antenna-002), A.2 far-field pattern
+    # (engine-antenna-003), A.3 inset design loop (engine-antenna-004,
+    # ~5 solves). Total ~45 min of release FDTD.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.92"
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: A.0 patch resonance (engine-antenna-001)
+        run: cargo test -p yee-engine --release --test antenna_patch_s11 -- --ignored --nocapture
+
+      - name: A.1 inset + directional S11 (engine-antenna-002)
+        run: cargo test -p yee-engine --release --test antenna_patch_inset -- --ignored --nocapture
+
+      - name: A.2 far-field pattern (engine-antenna-003)
+        run: cargo test -p yee-engine --release --test antenna_patch_pattern -- --ignored --nocapture
+
+      - name: A.3 inset design loop (engine-antenna-004)
+        run: cargo test -p yee-engine --release --test antenna_patch_match_loop -- --ignored --nocapture
 
   fdtd-coupling-gate:
     name: FDTD propagation ε_eff gate (fdtd-line-eeff, release)

@@ -65,14 +65,23 @@ directional/two-run S-parameters) wholesale.
 | **A.0** | Patch synthesis + engine resonance verify: `yee-layout::patch_antenna_dims` (Balanis §14.2 closed forms; unit-gated vs hand-computed W = 37.26 mm / ε_eff = 4.09 / L ≈ 28.8 mm on 2.45 GHz FR-4) + `edge_fed_patch` layout generator; S.7 two-run \|S11\| on the engine | `engine-antenna-001` (release CI): **dip at 2.450 GHz — 0.0 %** from the designed 2.45 GHz (±10 % gate), −5.4 dB vs +2.0 dB band median (≥ 2 dB prominence gate). Off-resonance subtraction artifacts documented; only the localized dip is asserted | **SHIPPED** (ADR-0190) |
 | **A.1** | Inset-fed patch: `inset_fed_patch` (Balanis G₁ slot conductance → R_edge → cos² inset depth; `_with_depth` variant = the A.3 knob) + **single-run directional \|S11\|** (`sparams::directional_reflection_db`, the slotted-line \|Γ\| — no reference run, no A.0 subtraction artifacts) | `engine-antenna-002`: dip **2.425 GHz (−1.0 %)** from design; depth tripwire ≥ 1 dB (measured −1.2 dB). **Honest finding**: the G₁-only model overestimates R_edge on thick/high-ε_r FR-4 (~5 Ω realized at the inset — measured under BOTH the PEC lid and the open top, so the lid was not the cause); the matched-antenna assert moves to A.3 where the loop earns it | **SHIPPED** (ADR-0191) |
 | **A.2** | Per-face CPML (`CpmlConfig::with_faces`, protocol `faces` field; open top + PEC ground = `[[t,t],[t,t],[f,t]]`; GPU rejects asymmetric faces) + **far field over the protocol** (`JobSpec.ntff` → `JobResult.far_field`, validated `NtffState` via the E.5a host adapter, new `with_bounds` for grounded-antenna boxes) | `engine-antenna-003`: the patch's E-plane cut is a genuine broadside beam — 0 dB → −18.2/−11.7 dB at θ = 80°, including the textbook feed-side squint (+1.4 dB at θ = 20°, φ = 180°); broadside beats every θ ≥ 60° direction | **SHIPPED** (ADR-0192) |
-| **A.3** | Antenna design loop: the S.11/S.12 secant machinery on patch length vs measured resonance | — | queued |
+| **A.3** | Antenna design loop: scan + refine the **inset depth** against the measured single-run directional \|S11\| (the A.1 model gap, closed by measurement) | `engine-antenna-004` (5 release solves, own CI job): measured map 0.10·L −6.5 dB → 0.20·L −13.2 dB → **0.25·L −25.7 dB** → 0.30·L −9.3 dB → 0.40·L (closed-form seed) −0.9 dB. The loop turns the seed's unusable −0.9 dB into a **−25.7 dB match** at 2.475 GHz (1.0 % from design); asserts ≤ −15 dB, ≥ 10 dB over seed, ±10 % resonance | **SHIPPED** (ADR-0193) |
 
 Standing decision during S.*: **`yee-studio-web` (Dioxus) is feature-frozen but stays deployed**
 until S.4 concludes (ADR-0175). `yee-gui` (egui EM-analysis shell) is unaffected by this track.
 
 ---
 
-*Last updated: 2026-07-06 (latest) — A.0 SHIPPED (ADR-0190): the antenna track opens —
+*Last updated: 2026-07-07 — ANTENNA TRACK COMPLETE (A.0–A.3, ADR-0190..0193): closed-form
+patch synthesis (resonance verified at 0.0 %), inset feed + single-run directional |S11|
+(the G₁ model gap found and measured), per-face CPML (open top over PEC ground) + far field
+over the job protocol (broadside beam with textbook feed squint), and the design loop that
+closes the model gap by measurement — inset tuned from the seed's −0.9 dB to a **−25.7 dB
+match** (1.0 % off design frequency). The engine now designs BOTH filters (S.8–S.12,
+cutoff to 1.0 %) and antennas (A.0–A.3, match to −25.7 dB) end-to-end. Remaining engine
+follow-ons: GPU parity for the CPU-only pieces (aperture ports, per-face CPML, protocol
+NTFF) on the nightly, multi-knob optimization via yee-surrogate, Touchstone export of
+measured responses. Earlier: A.0 SHIPPED (ADR-0190): the antenna track opens —
 Balanis closed-form patch synthesis in `yee-layout` + `engine-antenna-001`: the measured
 |S11| dip lands at 2.450 GHz, **0.0 %** from the design frequency (−5.4 dB vs +2.0 dB band
 median). Queued: A.1 inset matching + directional S11, A.2 radiation pattern (NTFF over
