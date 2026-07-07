@@ -68,7 +68,9 @@ fn verify_pipe_streams_phases_and_measures_the_identity_case_exactly() {
         .position(|(ph, _, _)| ph == "dut")
         .expect("no dut progress");
     assert!(
-        events[..first_dut].iter().all(|(ph, _, _)| ph == "reference"),
+        events[..first_dut]
+            .iter()
+            .all(|(ph, _, _)| ph == "reference"),
         "phases interleaved"
     );
     assert!(first_dut > 0, "no reference progress");

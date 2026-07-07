@@ -4,7 +4,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { SparamPlot } from "./views";
-import { FilterDesignPanel } from "./App";
+import { AntennaDesignPanel, FilterDesignPanel } from "./App";
 
 describe("SparamPlot", () => {
   it("renders two traces and the band caption for known data", () => {
@@ -37,12 +37,36 @@ describe("SparamPlot", () => {
   });
 });
 
+describe("AntennaDesignPanel", () => {
+  it("renders the spec form with Design action", () => {
+    render(<AntennaDesignPanel />);
+    const panel = screen.getByTestId("antenna-design");
+    expect(panel.textContent).toContain("Antenna design");
+    expect(panel.querySelectorAll("input").length).toBe(4);
+  });
+});
+
+describe("SparamPlot single-trace", () => {
+  it("renders one trace without the dashed overlay", () => {
+    render(
+      <SparamPlot
+        freqsHz={[2e9, 2.5e9, 3e9]}
+        s21Db={[-1, -20, -2]}
+        labels={["measured |S11|", ""]}
+      />,
+    );
+    const figs = screen.getAllByTestId("sparam-plot");
+    const fig = figs[figs.length - 1];
+    expect(fig.querySelectorAll("polyline").length).toBe(1);
+  });
+});
+
 describe("FilterDesignPanel", () => {
   it("renders the spec form with a Design action", () => {
     render(<FilterDesignPanel />);
     const panel = screen.getByTestId("filter-design");
     expect(panel.textContent).toContain("Filter design");
-    expect(screen.getByText("Design")).toBeTruthy();
+    expect(panel.querySelector("button")?.textContent).toBe("Design");
     // The six spec inputs are present.
     expect(panel.querySelectorAll("input").length).toBe(6);
   });

@@ -93,12 +93,7 @@ fn scripted_design_flow_produces_bytechecked_artifacts() {
         resp.freqs_hz
             .iter()
             .enumerate()
-            .min_by(|(_, a), (_, b)| {
-                ((**a) - f)
-                    .abs()
-                    .partial_cmp(&((**b) - f).abs())
-                    .unwrap()
-            })
+            .min_by(|(_, a), (_, b)| ((**a) - f).abs().partial_cmp(&((**b) - f).abs()).unwrap())
             .map(|(i, _)| i)
             .unwrap()
     };

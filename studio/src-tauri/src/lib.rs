@@ -10,12 +10,17 @@
 //! rides WebSocket in `yee-server` (S.1) — the frontend is
 //! transport-agnostic by construction.
 
+pub mod antenna;
 pub mod design;
 pub mod verify;
 
 use tauri::Emitter;
 use yee_engine::{JobEvent, JobResult, JobSpec};
 
+use crate::antenna::{
+    AntennaDesignRequest, AntennaDesignResponse, AntennaVerifyRequest, AntennaVerifyResponse,
+    design_antenna_impl, verify_antenna_impl,
+};
 use crate::design::{FilterDesignRequest, FilterDesignResponse, design_filter_impl};
 use crate::verify::{FilterVerifyRequest, FilterVerifyResponse, verify_filter_impl};
 
@@ -27,10 +32,13 @@ async fn run_job(app: tauri::AppHandle, spec: JobSpec) -> Result<JobResult, Stri
         for event in handle.events() {
             match event {
                 JobEvent::Progress { step, total } => {
-                    let _ = app.emit("job://progress", serde_json::json!({
-                        "step": step,
-                        "total": total,
-                    }));
+                    let _ = app.emit(
+                        "job://progress",
+                        serde_json::json!({
+                            "step": step,
+                            "total": total,
+                        }),
+                    );
                 }
                 JobEvent::Done { result } => return Ok(result),
                 JobEvent::Error { message } => return Err(message),
@@ -66,10 +74,39 @@ async fn verify_filter(
     .map_err(|e| e.to_string())?
 }
 
+/// Run the closed-form antenna design flow (R.5c): patch dims + inset
+/// feed + Gerber artifacts, instant.
+#[tauri::command]
+fn design_antenna(req: AntennaDesignRequest) -> Result<AntennaDesignResponse, String> {
+    design_antenna_impl(&req)
+}
+
+/// Run the full-wave antenna verify (R.5c): one engine solve, the A.1
+/// single-run directional |S11|, progress on `verify://progress`.
+#[tauri::command]
+async fn verify_antenna(
+    app: tauri::AppHandle,
+    req: AntennaVerifyRequest,
+) -> Result<AntennaVerifyResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        verify_antenna_impl(&req, &mut |p| {
+            let _ = app.emit("verify://progress", serde_json::json!(p));
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Build and run the Tauri application.
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![run_job, design_filter, verify_filter])
+        .invoke_handler(tauri::generate_handler![
+            run_job,
+            design_filter,
+            verify_filter,
+            design_antenna,
+            verify_antenna
+        ])
         .run(tauri::generate_context!())
         .expect("error while running yee-studio");
 }

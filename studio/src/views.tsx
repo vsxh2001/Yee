@@ -42,7 +42,7 @@ export function SparamPlot({
   labels = ["|S21|", "|S11|"],
 }: {
   freqsHz: number[];
-  s11Db: number[];
+  s11Db?: number[];
   s21Db: number[];
   labels?: [string, string];
 }) {
@@ -67,16 +67,18 @@ export function SparamPlot({
       <svg viewBox={`0 0 ${w} ${h}`} role="img" aria-label="S-parameters">
         <line x1={pad} y1={pad} x2={w - pad} y2={pad} className="axis" />
         <polyline points={toPoints(s21Db)} className="trace" fill="none" />
-        <polyline
-          points={toPoints(s11Db)}
-          className="trace trace-s11"
-          fill="none"
-          strokeDasharray="4 3"
-        />
+        {s11Db && (
+          <polyline
+            points={toPoints(s11Db)}
+            className="trace trace-s11"
+            fill="none"
+            strokeDasharray="4 3"
+          />
+        )}
       </svg>
       <figcaption>
-        {labels[0]} (solid) · {labels[1]} (dashed) · {fLo.toFixed(2)}–
-        {fHi.toFixed(2)} GHz · floor {floor} dB
+        {labels[0]} (solid){s11Db ? ` · ${labels[1]} (dashed)` : ""} ·{" "}
+        {fLo.toFixed(2)}–{fHi.toFixed(2)} GHz · floor {floor} dB
       </figcaption>
     </figure>
   );

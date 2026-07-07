@@ -71,11 +71,9 @@ fn run_job(
     let handle = yee_engine::submit(spec);
     for event in handle.events() {
         match event {
-            JobEvent::Progress { step, total } => on_progress(VerifyProgress {
-                phase,
-                step,
-                total,
-            }),
+            JobEvent::Progress { step, total } => {
+                on_progress(VerifyProgress { phase, step, total })
+            }
             JobEvent::Done { result } => return Ok((result.probes, result.backend)),
             JobEvent::Error { message } => return Err(message),
         }

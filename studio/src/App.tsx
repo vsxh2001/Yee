@@ -448,6 +448,202 @@ export default function App() {
       )}
 
       <FilterDesignPanel />
+      <AntennaDesignPanel />
     </main>
+  );
+}
+
+// R.5c (ADR-0203): the antenna design + verify panel — Balanis patch dims
+// + inset feed + Gerber artifacts (instant), then a one-solve full-wave
+// |S11| verify (the A.1 observable under the A.2 open-top boundary).
+interface AntennaDesignResponse {
+  width_m: number;
+  length_m: number;
+  eps_eff: number;
+  inset_m: number;
+  gerber_copper: string;
+  gerber_outline: string;
+}
+
+interface AntennaVerifyResponse {
+  freqs_hz: number[];
+  s11_db: number[];
+  f_dip_hz: number;
+  dip_db: number;
+  backend: string;
+}
+
+export function AntennaDesignPanel() {
+  const [f0Ghz, setF0Ghz] = useState(2.45);
+  const [epsR, setEpsR] = useState(4.4);
+  const [heightMm, setHeightMm] = useState(1.6);
+  const [insetFrac, setInsetFrac] = useState(0.25);
+  const [design, setDesign] = useState<AntennaDesignResponse | null>(null);
+  const [verify, setVerify] = useState<AntennaVerifyResponse | null>(null);
+  const [progress, setProgress] = useState<VerifyProgress | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [verifying, setVerifying] = useState(false);
+  const unlisten = useRef<UnlistenFn | null>(null);
+
+  useEffect(() => {
+    return () => {
+      unlisten.current?.();
+    };
+  }, []);
+
+  function specRequest(): Record<string, unknown> {
+    return {
+      f0_hz: f0Ghz * 1e9,
+      eps_r: epsR,
+      height_m: heightMm * 1e-3,
+      inset_frac: insetFrac,
+    };
+  }
+
+  async function runDesign() {
+    setBusy(true);
+    setError(null);
+    setDesign(null);
+    setVerify(null);
+    try {
+      setDesign(
+        await invoke<AntennaDesignResponse>("design_antenna", {
+          req: specRequest(),
+        }),
+      );
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runVerify() {
+    setVerifying(true);
+    setError(null);
+    setVerify(null);
+    setProgress(null);
+    unlisten.current?.();
+    unlisten.current = await listen<VerifyProgress>(
+      "verify://progress",
+      (e) => setProgress(e.payload),
+    );
+    try {
+      setVerify(
+        await invoke<AntennaVerifyResponse>("verify_antenna", {
+          req: { design: specRequest() },
+        }),
+      );
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVerifying(false);
+      unlisten.current?.();
+      unlisten.current = null;
+    }
+  }
+
+  return (
+    <section data-testid="antenna-design">
+      <h2>Antenna design</h2>
+      <p className="sub">
+        inset-fed patch · Balanis dims → layout → full-wave |S11|
+      </p>
+      <section className="controls">
+        <label>
+          f₀ (GHz)
+          <input
+            type="number"
+            step={0.05}
+            value={f0Ghz}
+            disabled={busy || verifying}
+            onChange={(e) => setF0Ghz(Number(e.target.value))}
+          />
+        </label>
+        <label>
+          ε_r
+          <input
+            type="number"
+            step={0.1}
+            value={epsR}
+            disabled={busy || verifying}
+            onChange={(e) => setEpsR(Number(e.target.value))}
+          />
+        </label>
+        <label>
+          h (mm)
+          <input
+            type="number"
+            step={0.1}
+            value={heightMm}
+            disabled={busy || verifying}
+            onChange={(e) => setHeightMm(Number(e.target.value))}
+          />
+        </label>
+        <label>
+          Inset (·L)
+          <input
+            type="number"
+            step={0.01}
+            value={insetFrac}
+            disabled={busy || verifying}
+            onChange={(e) => setInsetFrac(Number(e.target.value))}
+          />
+        </label>
+        <button onClick={runDesign} disabled={busy || verifying}>
+          {busy ? "Designing…" : "Design"}
+        </button>
+      </section>
+
+      {error && <p className="error">{error}</p>}
+
+      {design && (
+        <section>
+          <p className="meta">
+            W = {(design.width_m * 1e3).toFixed(2)} mm · L ={" "}
+            {(design.length_m * 1e3).toFixed(2)} mm · ε_eff ={" "}
+            {design.eps_eff.toFixed(2)} · inset ={" "}
+            {(design.inset_m * 1e3).toFixed(2)} mm
+          </p>
+          <section className="controls">
+            <button
+              onClick={() => download("patch-F_Cu.gbr", design.gerber_copper)}
+            >
+              Export copper .gbr
+            </button>
+            <button
+              onClick={() =>
+                download("patch-Edge_Cuts.gbr", design.gerber_outline)
+              }
+            >
+              Export outline .gbr
+            </button>
+            <button onClick={runVerify} disabled={verifying}>
+              {verifying ? "Verifying…" : "Verify (full-wave)"}
+            </button>
+          </section>
+          {verifying && progress && (
+            <p className="meta">
+              verify: {progress.step} / {progress.total}
+            </p>
+          )}
+          {verify && (
+            <>
+              <p className="meta">
+                dip {(verify.f_dip_hz / 1e9).toFixed(3)} GHz ·{" "}
+                {verify.dip_db.toFixed(1)} dB · ran on{" "}
+                <strong>{verify.backend}</strong>
+              </p>
+              <SparamPlot
+                freqsHz={verify.freqs_hz}
+                s21Db={verify.s11_db}
+                labels={["measured |S11|", ""]}
+              />
+            </>
+          )}
+        </section>
+      )}
+    </section>
   );
 }

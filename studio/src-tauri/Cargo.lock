@@ -5344,6 +5344,7 @@ dependencies = [
  "yee-filter",
  "yee-io",
  "yee-layout",
+ "yee-voxel",
 ]
 
 [[package]]

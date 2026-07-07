@@ -222,6 +222,13 @@ jobs:
         working-directory: studio/src-tauri
         run: cargo test --test verify_e2e
 
+      # R.5c (ADR-0203): the antenna panel — Balanis dims + byte-checked
+      # Gerbers (instant) and the reduced-fidelity verify pipe (gate
+      # studio-antenna-e2e-001, ~1 min debug).
+      - name: Studio antenna-flow e2e (design + pipe)
+        working-directory: studio/src-tauri
+        run: cargo test --test antenna_e2e
+
   compute-engine-gates:
     name: Compute engine gates (yee-compute + yee-engine, release)
     runs-on: ubuntu-latest
