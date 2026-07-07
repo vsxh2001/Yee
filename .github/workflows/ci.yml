@@ -254,6 +254,11 @@ jobs:
       - name: engine-refine-001 (yee-filter, release, ignored)
         run: cargo test -p yee-filter --release --test engine_lpf_refine -- --ignored --nocapture
 
+      # R.0/R.1 (ADR-0194): board physics — dielectric loss vs the Pozar
+      # closed form (0.1%) and the via-shorted-stub differential gate.
+      - name: engine-loss-001 + engine-via-001 (release, ignored)
+        run: cargo test -p yee-engine --release --test board_loss --test board_via -- --ignored --nocapture
+
   antenna-gates:
     name: Antenna design gates (A.0-A.3, release)
     runs-on: ubuntu-latest

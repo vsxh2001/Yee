@@ -237,3 +237,4 @@
 - [ADR-0191: A.1 inset-fed patch — machinery shipped, the match is measurably a model gap](decisions/0191-a1-inset-patch.md)
 - [ADR-0192: A.2 — per-face CPML + far field over the protocol; the patch beams broadside](decisions/0192-a2-radiation-pattern.md)
 - [ADR-0193: A.3 — the antenna design loop delivers a −25.7 dB match](decisions/0193-a3-antenna-design-loop.md)
+- [ADR-0194: R.0+R.1 — dielectric loss (0.1 % vs Pozar) and vias on the board path](decisions/0194-r0-r1-losses-vias.md)
