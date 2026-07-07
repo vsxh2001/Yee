@@ -88,7 +88,16 @@ pub struct CpmlConfig {
     /// Peak CFS shift parameter. Standard: 0.05.
     pub alpha_max: f64,
     /// Per-axis enable mask `[x, y, z]`; a disabled axis carries no CPML.
+    /// Kept in sync with [`CpmlConfig::faces`] by the builders; `faces` is
+    /// the source of truth for the CPU stepper.
     pub axes: [bool; 3],
+    /// Per-face enable `[[x−, x+], [y−, y+], [z−, z+]]` (A.2, ADR-0192):
+    /// a disabled face stays PEC (the outer tangential E is simply never
+    /// written) while the opposite face can absorb — e.g. an antenna's
+    /// open top over a PEC ground is `[[t, t], [t, t], [f, t]]`. The GPU
+    /// backend supports only face-symmetric configs (equal per axis) and
+    /// rejects others with `ComputeError::Unsupported`.
+    pub faces: [[bool; 2]; 3],
 }
 
 impl CpmlConfig {
@@ -107,13 +116,36 @@ impl CpmlConfig {
             kappa_max: 1.0,
             alpha_max: 0.05,
             axes: [true; 3],
+            faces: [[true; 2]; 3],
         }
     }
 
-    /// Set the per-axis enable mask and return `self`.
+    /// Set the per-axis enable mask (both faces of each axis) and return
+    /// `self`.
     #[must_use]
     pub fn with_axes(mut self, axes: [bool; 3]) -> Self {
         self.axes = axes;
+        self.faces = [[axes[0]; 2], [axes[1]; 2], [axes[2]; 2]];
         self
+    }
+
+    /// Set the per-face enable mask `[[x−, x+], [y−, y+], [z−, z+]]` and
+    /// return `self` (A.2). `axes` is kept consistent (an axis counts as
+    /// enabled when either of its faces is).
+    #[must_use]
+    pub fn with_faces(mut self, faces: [[bool; 2]; 3]) -> Self {
+        self.faces = faces;
+        self.axes = [
+            faces[0][0] || faces[0][1],
+            faces[1][0] || faces[1][1],
+            faces[2][0] || faces[2][1],
+        ];
+        self
+    }
+
+    /// True when every axis has both faces equal — the only shape the GPU
+    /// backend's per-axis mask can express.
+    pub fn faces_are_axis_symmetric(&self) -> bool {
+        self.faces.iter().all(|f| f[0] == f[1])
     }
 }

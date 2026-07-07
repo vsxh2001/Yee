@@ -20,7 +20,7 @@
 //!     sources: vec![SourceSpec::GaussianEz { cell: (6, 6, 6), t0_steps: 8.0, sigma_steps: 3.0 }],
 //!     ports: vec![], aperture_ports: vec![],
 //!     probes: vec![ProbeSpec { component: "ez".into(), cell: (8, 6, 6) }],
-//!     slice: None, materials: None, dt_s: None,
+//!     slice: None, ntff: None, materials: None, dt_s: None,
 //!     backend: BackendChoice::Cpu,
 //! };
 //! let handle = yee_engine::submit(spec);
@@ -80,6 +80,14 @@ pub enum BoundarySpec {
         /// the z-min absorber and the line mode is eaten (ADR-0185/0186).
         #[serde(default = "all_axes")]
         axes: [bool; 3],
+        /// Optional per-face enable `[[x−, x+], [y−, y+], [z−, z+]]`
+        /// (A.2, ADR-0192) — overrides `axes` when present. A disabled
+        /// face stays PEC; an antenna's open top over a PEC ground is
+        /// `[[true, true], [true, true], [false, true]]`. CPU-only:
+        /// asymmetric faces on `backend: "gpu"` fail with an error event,
+        /// `"auto"` falls back to CPU.
+        #[serde(default)]
+        faces: Option<[[bool; 2]; 3]>,
     },
 }
 
@@ -245,6 +253,28 @@ pub struct AperturePortSpec {
     pub t0_steps: usize,
 }
 
+/// Far-field request (A.2, ADR-0192): accumulate a surface DFT at `f_hz`
+/// during the run (the validated `yee_fdtd::NtffState` transform) and
+/// return `|E|` for each requested `(θ, φ)` direction (radians, θ from
+/// +z). The integration box sits `margin_cells` inside every face except
+/// optionally the bottom: `k_min` overrides the bottom face for grounded
+/// antennas (e.g. `k_min = 1` hugs the ground plane; documented
+/// equivalence-surface approximation — the bottom face crosses the
+/// substrate). **CPU-only**: `backend: "gpu"` fails with an error event,
+/// `"auto"` falls back to CPU.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NtffSpec {
+    /// DFT frequency (Hz).
+    pub f_hz: f64,
+    /// Box margin from every outer face, in cells (keep ≥ npml + a few).
+    pub margin_cells: usize,
+    /// Optional bottom-face override (`k` index), for grounded antennas.
+    #[serde(default)]
+    pub k_min: Option<usize>,
+    /// Far-field directions `(θ, φ)` in radians.
+    pub directions: Vec<(f64, f64)>,
+}
+
 /// Field-slice request: one z-plane of a component, returned with the
 /// result for visualization (S.3).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -303,6 +333,9 @@ pub struct JobSpec {
     /// Optional final-field slice to return for visualization.
     #[serde(default)]
     pub slice: Option<SliceSpec>,
+    /// Optional far-field accumulation (A.2; CPU-only).
+    #[serde(default)]
+    pub ntff: Option<NtffSpec>,
     /// Optional per-cell materials + interior PEC masks (S.5). `None` is
     /// the S.0 uniform-vacuum behaviour.
     #[serde(default)]
@@ -328,6 +361,9 @@ pub struct JobResult {
     /// The requested final-field slice, if any.
     #[serde(default)]
     pub slice: Option<FieldSlice>,
+    /// `|E_far|` per requested [`NtffSpec::directions`] entry, if any.
+    #[serde(default)]
+    pub far_field: Option<Vec<f64>>,
     /// Steps completed (equals the request unless cancelled).
     pub steps_done: usize,
 }
@@ -556,11 +592,48 @@ fn run_job(mut spec: JobSpec, tx: &Sender<JobEvent>, cancel: &AtomicBool) {
         },
         None => Materials::default(),
     };
+    // NTFF (A.2): validate the box before running; CPU-only.
+    let ntff_bounds = match &spec.ntff {
+        None => None,
+        Some(n) => {
+            let m = n.margin_cells;
+            let k0 = n.k_min.unwrap_or(m);
+            let bounds = (
+                m,
+                spec.nx.saturating_sub(m),
+                m,
+                spec.ny.saturating_sub(m),
+                k0,
+                spec.nz.saturating_sub(m),
+            );
+            if bounds.0 >= bounds.1 || bounds.2 >= bounds.3 || bounds.4 >= bounds.5 {
+                let _ = tx.send(JobEvent::Error {
+                    message: format!(
+                        "ntff box {bounds:?} has non-positive extent on grid \
+                         {}x{}x{}",
+                        spec.nx, spec.ny, spec.nz
+                    ),
+                });
+                return;
+            }
+            if !(n.f_hz.is_finite() && n.f_hz > 0.0) || n.directions.is_empty() {
+                let _ = tx.send(JobEvent::Error {
+                    message: "ntff needs a positive f_hz and at least one direction".into(),
+                });
+                return;
+            }
+            Some(bounds)
+        }
+    };
     let boundary = match spec.boundary {
         BoundarySpec::None => Boundary::None,
         BoundarySpec::Pec => Boundary::PecBox,
-        BoundarySpec::Cpml { npml, axes } => {
-            Boundary::Cpml(CpmlConfig::for_spec(&fdtd_spec, npml).with_axes(axes))
+        BoundarySpec::Cpml { npml, axes, faces } => {
+            let mut config = CpmlConfig::for_spec(&fdtd_spec, npml).with_axes(axes);
+            if let Some(f) = faces {
+                config = config.with_faces(f);
+            }
+            Boundary::Cpml(config)
         }
     };
     let drive = match build_drive(&spec, &fdtd_spec, fdtd_spec.dt) {
@@ -577,7 +650,17 @@ fn run_job(mut spec: JobSpec, tx: &Sender<JobEvent>, cancel: &AtomicBool) {
 
     // GPU path (or auto → GPU when an adapter exists).
     #[cfg(feature = "gpu")]
-    if matches!(spec.backend, BackendChoice::Gpu | BackendChoice::Auto) {
+    if matches!(spec.backend, BackendChoice::Gpu) && spec.ntff.is_some() {
+        // Auto falls through to the CPU path; only an explicit GPU request
+        // fails.
+        let _ = tx.send(JobEvent::Error {
+            message: "ntff far-field is CPU-only (A.2, ADR-0192); use backend \"cpu\" or \"auto\""
+                .into(),
+        });
+        return;
+    }
+    #[cfg(feature = "gpu")]
+    if matches!(spec.backend, BackendChoice::Gpu | BackendChoice::Auto) && spec.ntff.is_none() {
         match yee_compute::GpuFdtd::with_drive(
             fdtd_spec,
             Fields::zero(&fdtd_spec),
@@ -618,6 +701,7 @@ fn run_job(mut spec: JobSpec, tx: &Sender<JobEvent>, cancel: &AtomicBool) {
                                 dt_s,
                                 probes,
                                 slice,
+                                far_field: None,
                                 steps_done: done,
                             },
                         });
@@ -657,10 +741,44 @@ fn run_job(mut spec: JobSpec, tx: &Sender<JobEvent>, cancel: &AtomicBool) {
         boundary,
         drive,
     );
+    // NTFF accumulator (A.2): the validated yee-fdtd transform sampling
+    // the engine's fields through a host-side grid adapter each step
+    // (the compute-010 pattern). The scratch grid mirrors the run's dt.
+    let mut ntff = ntff_bounds.map(|bounds| {
+        let n = spec.ntff.as_ref().expect("bounds imply spec");
+        let mut scratch = yee_fdtd::YeeGrid::vacuum(spec.nx, spec.ny, spec.nz, spec.dx_m);
+        scratch.dt = fdtd_spec.dt;
+        let state = yee_fdtd::NtffState::with_bounds(
+            &scratch,
+            yee_fdtd::NtffParams {
+                f_probe: n.f_hz,
+                box_margin_cells: n.margin_cells,
+                theta_rad: 0.0,
+                phi_rad: 0.0,
+            },
+            bounds,
+        );
+        (scratch, state)
+    });
     let mut done = 0usize;
     while done < total && !cancel.load(Ordering::Relaxed) {
         let n = chunk.min(total - done);
-        engine.step_n(n);
+        match &mut ntff {
+            None => engine.step_n(n),
+            Some((scratch, state)) => {
+                for _ in 0..n {
+                    engine.step_n(1);
+                    let f = engine.fields();
+                    scratch.ex.as_slice_mut().unwrap().copy_from_slice(&f.ex);
+                    scratch.ey.as_slice_mut().unwrap().copy_from_slice(&f.ey);
+                    scratch.ez.as_slice_mut().unwrap().copy_from_slice(&f.ez);
+                    scratch.hx.as_slice_mut().unwrap().copy_from_slice(&f.hx);
+                    scratch.hy.as_slice_mut().unwrap().copy_from_slice(&f.hy);
+                    scratch.hz.as_slice_mut().unwrap().copy_from_slice(&f.hz);
+                    state.sample(scratch, engine.current_time());
+                }
+            }
+        }
         done += n;
         let _ = tx.send(JobEvent::Progress { step: done, total });
     }
@@ -671,12 +789,22 @@ fn run_job(mut spec: JobSpec, tx: &Sender<JobEvent>, cancel: &AtomicBool) {
             return;
         }
     };
+    let far_field = ntff.map(|(_, state)| {
+        spec.ntff
+            .as_ref()
+            .expect("state implies spec")
+            .directions
+            .iter()
+            .map(|&(theta, phi)| state.far_field_at(theta, phi).norm())
+            .collect()
+    });
     let _ = tx.send(JobEvent::Done {
         result: JobResult {
             backend: "cpu".into(),
             dt_s,
             probes: engine.probe_series().to_vec(),
             slice,
+            far_field,
             steps_done: done,
         },
     });
@@ -706,6 +834,7 @@ mod tests {
                 cell: (8, 6, 6),
             }],
             slice: None,
+            ntff: None,
             materials: None,
             dt_s: None,
             backend,
@@ -805,13 +934,26 @@ mod tests {
             legacy,
             BoundarySpec::Cpml {
                 npml: 10,
-                axes: [true; 3]
+                axes: [true; 3],
+                faces: None
+            }
+        );
+        // Pre-A.2 wire format (no `faces` key) still parses: None.
+        let legacy2: BoundarySpec =
+            serde_json::from_str(r#"{"kind":"cpml","npml":10,"axes":[true,true,false]}"#).unwrap();
+        assert_eq!(
+            legacy2,
+            BoundarySpec::Cpml {
+                npml: 10,
+                axes: [true, true, false],
+                faces: None
             }
         );
         // Explicit per-axis enables round-trip.
         let side_walls = BoundarySpec::Cpml {
             npml: 8,
             axes: [true, true, false],
+            faces: Some([[true, true], [true, true], [false, true]]),
         };
         let json = serde_json::to_string(&side_walls).unwrap();
         let back: BoundarySpec = serde_json::from_str(&json).unwrap();

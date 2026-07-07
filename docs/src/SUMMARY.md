@@ -234,3 +234,5 @@
 - [ADR-0188: S.11 EM-in-the-loop refinement — loop landed, convergence blocked on a named artifact](decisions/0188-s11-em-in-loop-refine.md)
 - [ADR-0189: S.12 directional S-parameters — the refine loop converges](decisions/0189-s12-directional-sparams.md)
 - [ADR-0190: A.0 — the antenna track opens; patch resonance verified at 0.0 %](decisions/0190-a0-patch-antenna.md)
+- [ADR-0191: A.1 inset-fed patch — machinery shipped, the match is measurably a model gap](decisions/0191-a1-inset-patch.md)
+- [ADR-0192: A.2 — per-face CPML + far field over the protocol; the patch beams broadside](decisions/0192-a2-radiation-pattern.md)

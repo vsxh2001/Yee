@@ -181,6 +181,7 @@ fn stub_job(with_stub: bool) -> (JobSpec, f64) {
             },
         ],
         slice: None,
+        ntff: None,
         materials: Some(materials),
         dt_s: Some(dt),
         backend: BackendChoice::Cpu,

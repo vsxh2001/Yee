@@ -179,6 +179,30 @@ pub fn directional_transmission_db(
         .collect()
 }
 
+/// **Directional** reflection magnitude in dB from a SINGLE run (A.1,
+/// ADR-0191): at each frequency, DFT three equally spaced probes on the
+/// feed line, split forward/backward waves via [`fit_standing_wave`],
+/// and take `20·log₁₀(|bwd| / |fwd|)` — the classic slotted-line |Γ|.
+/// Needs no reference run and carries none of the two-run subtraction
+/// artifacts (the [`reflection_db`] caveat recorded in ADR-0190): the
+/// forward wave IS the incident wave at the plane. Probe triple ordered
+/// along +x (toward the device) with equal spacing.
+pub fn directional_reflection_db(
+    triple: [&[f64]; 3],
+    dt_s: f64,
+    spacing_m: f64,
+    freqs_hz: &[f64],
+) -> Vec<f64> {
+    freqs_hz
+        .iter()
+        .map(|&f| {
+            let v: Vec<(f64, f64)> = triple.iter().map(|s| single_bin_dft(s, dt_s, f)).collect();
+            let split = fit_standing_wave(v[0], v[1], v[2], spacing_m);
+            20.0 * (cabs(split.bwd) / cabs(split.fwd)).log10()
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,6 +294,31 @@ mod tests {
         assert!(
             (db[0] - 20.0 * 0.5_f64.log10()).abs() < 0.1,
             "directional ratio {} dB, want −6.02",
+            db[0]
+        );
+    }
+
+    #[test]
+    fn directional_reflection_reads_a_known_gamma() {
+        // fwd amplitude 1.0, bwd 0.3 → |Γ| = 0.3 = −10.46 dB.
+        let f0 = 2.0e9;
+        let dt = 1.0 / (f0 * 64.0);
+        let beta = 130.0;
+        let d = 5.0e-3;
+        let series = |x: f64| -> Vec<f64> {
+            (0..1024)
+                .map(|i| {
+                    let t = i as f64 * dt;
+                    let env = (-((t - 512.0 * dt) / (170.0 * dt)).powi(2)).exp();
+                    env * ((TAU * f0 * t - beta * x).sin() + 0.3 * (TAU * f0 * t + beta * x).sin())
+                })
+                .collect()
+        };
+        let triple: Vec<Vec<f64>> = (0..3).map(|m| series(m as f64 * d)).collect();
+        let db = directional_reflection_db([&triple[0], &triple[1], &triple[2]], dt, d, &[f0]);
+        assert!(
+            (db[0] - 20.0 * 0.3_f64.log10()).abs() < 0.1,
+            "|Γ| read {} dB, want −10.46",
             db[0]
         );
     }

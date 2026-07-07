@@ -157,6 +157,7 @@ fn job_for(layout: &Layout) -> (JobSpec, f64) {
         boundary: BoundarySpec::Cpml {
             npml: 10,
             axes: [true, true, false],
+            faces: None,
         },
         sources: vec![],
         ports: vec![],
@@ -199,6 +200,7 @@ fn job_for(layout: &Layout) -> (JobSpec, f64) {
             },
         ],
         slice: None,
+        ntff: None,
         materials: Some(materials),
         dt_s: Some(dt),
         backend: BackendChoice::Cpu,

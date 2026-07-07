@@ -154,6 +154,7 @@ fn line_eeff_over_job_protocol_matches_hammerstad_jensen() {
             },
         ],
         slice: None,
+        ntff: None,
         materials: Some(materials),
         dt_s: Some(dt),
         backend: BackendChoice::Cpu,

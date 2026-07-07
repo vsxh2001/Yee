@@ -17,6 +17,10 @@ gpu     = ["yee-compute/gpu"]
 # default features on, but this crate re-exposes the engine's `gpu`
 # feature as its own default-on passthrough.
 yee-compute = { path = "../yee-compute", version = "0.0.0", default-features = false }
+# NTFF far-field over the protocol (A.2, ADR-0192): the reference
+# near-to-far transform stays yee-fdtd's validated NtffState; the engine
+# samples it through the host-side grid adapter (the compute-010 pattern).
+yee-fdtd    = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }

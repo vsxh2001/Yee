@@ -658,3 +658,129 @@ mod patch_tests {
         assert!(layout.ports[0].at.x == layout.bbox.min.x);
     }
 }
+
+/// Balanis single-slot radiating conductance `G1` (siemens) for a patch of
+/// width `w_m` at free-space wavelength `lambda0_m` (Antenna Theory
+/// eq. 14-8a, piecewise in `W/lambda0`).
+pub fn patch_slot_conductance(w_m: f64, lambda0_m: f64) -> f64 {
+    let u = w_m / lambda0_m;
+    if u < 0.35 {
+        u * u / 90.0
+    } else if u < 2.0 {
+        u / 120.0 - 1.0 / (60.0 * std::f64::consts::PI * std::f64::consts::PI)
+    } else {
+        u / 120.0
+    }
+}
+
+/// Assemble an **inset-fed** rectangular-patch [`Layout`] matched to
+/// `feed_z0_ohm` (A.1, ADR-0191): edge resistance `R_edge = 1/(2 G1)`
+/// from the Balanis slot-conductance model (the mutual term `G12` is
+/// neglected — documented walking-skeleton approximation, it lowers
+/// `R_edge` by ~20 % and the inset only moves as acos(sqrt(...))), inset
+/// depth `x0 = (L/pi) * acos(sqrt(Z0/R_edge))` from the cos^2 cavity
+/// current profile.
+///
+/// Metal is a union of four rectangles: two outer patch bands flanking
+/// the notch, the centre band beyond the inset depth, and the feed line
+/// running through the notch (gap = one feed width each side). One
+/// `PortRef` at the outer feed end; the feed is half a guided wavelength
+/// so measurement probes fit upstream.
+pub fn inset_fed_patch(f0_hz: f64, substrate: &Substrate, feed_z0_ohm: f64) -> Layout {
+    let dims = patch_antenna_dims(f0_hz, substrate.eps_r, substrate.height_m);
+    let lambda0 = 299_792_458.0 / f0_hz;
+    let g1 = patch_slot_conductance(dims.width_m, lambda0);
+    let r_edge = 1.0 / (2.0 * g1);
+    assert!(
+        feed_z0_ohm < r_edge,
+        "inset_fed_patch: Z0 {feed_z0_ohm} >= edge resistance {r_edge} — no inset match exists"
+    );
+    let x_inset = (dims.length_m / std::f64::consts::PI) * (feed_z0_ohm / r_edge).sqrt().acos();
+    inset_fed_patch_with_depth(f0_hz, substrate, feed_z0_ohm, x_inset)
+}
+
+/// [`inset_fed_patch`] with an **explicit** inset depth (metres) — the
+/// design-loop knob (A.3): the closed-form seed's depth comes from the
+/// G1-only slot-conductance model, which overestimates the edge
+/// resistance on thick / high-ε_r substrates (measured in ADR-0191), so
+/// the engine tunes this depth against the measured return loss.
+pub fn inset_fed_patch_with_depth(
+    f0_hz: f64,
+    substrate: &Substrate,
+    feed_z0_ohm: f64,
+    x_inset_m: f64,
+) -> Layout {
+    const C: f64 = 299_792_458.0;
+    let dims = patch_antenna_dims(f0_hz, substrate.eps_r, substrate.height_m);
+    let (w, l) = (dims.width_m, dims.length_m);
+    assert!(
+        x_inset_m > 0.0 && x_inset_m < l / 2.0,
+        "inset depth {x_inset_m} m outside (0, L/2)"
+    );
+    let x_inset = x_inset_m;
+
+    let feed_w = microstrip_width(feed_z0_ohm, substrate.eps_r, substrate.height_m);
+    let feed_e_eff = eps_eff(feed_w, substrate.height_m, substrate.eps_r);
+    let feed_len = C / (2.0 * f0_hz * feed_e_eff.sqrt());
+    let gap = feed_w; // notch gap each side of the feed
+
+    let traces = vec![
+        // Feed line: from the port, through the notch, joining the patch
+        // interior at the inset depth.
+        Polygon::rect(-feed_len, -feed_w / 2.0, feed_len + x_inset, feed_w),
+        // Outer patch band, +y side of the notch.
+        Polygon::rect(0.0, feed_w / 2.0 + gap, l, w / 2.0 - feed_w / 2.0 - gap),
+        // Outer patch band, -y side of the notch.
+        Polygon::rect(0.0, -w / 2.0, l, w / 2.0 - feed_w / 2.0 - gap),
+        // Centre band beyond the inset (between the notch slots' far end
+        // and the patch's far edge).
+        Polygon::rect(
+            x_inset,
+            -(feed_w / 2.0 + gap),
+            l - x_inset,
+            feed_w + 2.0 * gap,
+        ),
+    ];
+    let port = PortRef {
+        at: Point2::new(-feed_len, 0.0),
+        width_m: feed_w,
+        ref_impedance_ohm: feed_z0_ohm,
+    };
+    let bbox = BBox::from_polygons(&traces);
+    Layout {
+        substrate: *substrate,
+        traces,
+        ports: vec![port],
+        bbox,
+    }
+}
+
+#[cfg(test)]
+mod inset_patch_tests {
+    use super::*;
+
+    #[test]
+    fn inset_depth_matches_hand_computed_balanis_arithmetic() {
+        // 2.45 GHz FR-4: W = 37.26 mm, lambda0 = 122.36 mm, W/lambda0 =
+        // 0.3045 < 0.35 -> G1 = 0.3045^2/90 = 1.030e-3 S ->
+        // R_edge = 485.4 ohm; x0 = (L/pi) acos(sqrt(50/485.4))
+        //        = (28.8e-3/pi) * acos(0.3210) = 9.17 mm * 1.2440 = 11.41 mm.
+        let sub = Substrate {
+            eps_r: 4.4,
+            height_m: 1.6e-3,
+            loss_tangent: 0.0,
+            metal_thickness_m: 35e-6,
+        };
+        let g1 = patch_slot_conductance(37.26e-3, 299_792_458.0 / 2.45e9);
+        assert!((g1 - 1.030e-3).abs() < 0.01e-3, "G1 = {g1}");
+        let layout = inset_fed_patch(2.45e9, &sub, 50.0);
+        // Recover the inset from the geometry: the centre band starts at
+        // x_inset (its rect is traces[3]).
+        // Polygon::rect stores vertices; use the bbox of that polygon via
+        // its first vertex x.
+        let x_inset = layout.traces[3].verts[0].x;
+        assert!((x_inset - 11.4e-3).abs() < 0.3e-3, "x_inset = {x_inset}");
+        assert_eq!(layout.ports.len(), 1);
+        assert_eq!(layout.traces.len(), 4);
+    }
+}

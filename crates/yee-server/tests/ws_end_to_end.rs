@@ -32,6 +32,7 @@ fn cavity_spec() -> JobSpec {
             component: "ez".into(),
             k: 6,
         }),
+        ntff: None,
         materials: None,
         dt_s: None,
         backend: BackendChoice::Cpu,

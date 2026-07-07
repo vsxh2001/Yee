@@ -429,6 +429,16 @@ impl GpuFdtd {
         let coeff_arena = make_storage_buffer("yee-compute coeffs", &coeffs, false);
 
         // --- ψ arena + profile buffer (dummies when CPML is off) ---
+        if let Some(config) = &cpml_config
+            && !config.faces_are_axis_symmetric()
+        {
+            // The WGSL kernels carry a per-axis mask only; per-face CPML
+            // (A.2 — e.g. an antenna's open top over a PEC ground) is
+            // CPU-only until the shader gains a face mask.
+            return Err(ComputeError::Unsupported(
+                "per-face CPML is CPU-only (A.2, ADR-0192)",
+            ));
+        }
         let (mut psi_data, profile_data, npml, axes_mask) = match cpml_config {
             None => (vec![0.0f32; 1], vec![0.0f32; 1], 0u32, 0u32),
             Some(config) => {

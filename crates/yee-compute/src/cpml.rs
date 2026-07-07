@@ -73,13 +73,16 @@ pub(crate) fn make_profiles(config: &CpmlConfig, dt: f64) -> (ProfileTriple, Pro
 /// `None` outside the PML / on a disabled axis. Mirrors
 /// `CpmlState::pml_depth` (the "side" flag there is unused and dropped).
 #[inline]
-fn pml_depth(axes: [bool; 3], npml: usize, axis: usize, i: usize, n: usize) -> Option<usize> {
-    if !axes[axis] {
-        return None;
-    }
+fn pml_depth(faces: [[bool; 2]; 3], npml: usize, axis: usize, i: usize, n: usize) -> Option<usize> {
     if i < npml {
+        if !faces[axis][0] {
+            return None;
+        }
         Some(npml - 1 - i)
     } else if i >= n.saturating_sub(npml) && n >= npml {
+        if !faces[axis][1] {
+            return None;
+        }
         let depth = i - (n - npml);
         if depth < npml { Some(depth) } else { None }
     } else {
@@ -102,7 +105,7 @@ pub(crate) struct CpuCpmlState {
     c_h: Vec<f64>,
     kappa_h: Vec<f64>,
     npml: usize,
-    axes: [bool; 3],
+    faces: [[bool; 2]; 3],
 }
 
 impl CpuCpmlState {
@@ -134,7 +137,7 @@ impl CpuCpmlState {
             c_h,
             kappa_h,
             npml: config.npml,
-            axes: config.axes,
+            faces: config.faces,
         }
     }
 
@@ -155,7 +158,7 @@ impl CpuCpmlState {
         let hzd = s.hz_dims();
         let [p_exy, p_exz, p_eyx, p_eyz, p_ezx, p_ezy] = &mut self.psi_e;
         let (b, c, kappa) = (&self.b, &self.c, &self.kappa);
-        let (npml, axes) = (self.npml, self.axes);
+        let (npml, faces) = (self.npml, self.faces);
         let Fields {
             ex,
             ey,
@@ -173,9 +176,9 @@ impl CpuCpmlState {
             .enumerate()
             .for_each(|(i, ((ex_s, pxy_s), pxz_s))| {
                 for j in 1..s.ny {
-                    let dep_y = pml_depth(axes, npml, 1, j, s.ny + 1);
+                    let dep_y = pml_depth(faces, npml, 1, j, s.ny + 1);
                     for k in 1..s.nz {
-                        let dep_z = pml_depth(axes, npml, 2, k, s.nz + 1);
+                        let dep_z = pml_depth(faces, npml, 2, k, s.nz + 1);
                         if dep_y.is_none() && dep_z.is_none() {
                             continue;
                         }
@@ -210,10 +213,10 @@ impl CpuCpmlState {
                 if i == 0 || i >= s.nx {
                     return;
                 }
-                let dep_x = pml_depth(axes, npml, 0, i, s.nx + 1);
+                let dep_x = pml_depth(faces, npml, 0, i, s.nx + 1);
                 for j in 0..s.ny {
                     for k in 1..s.nz {
-                        let dep_z = pml_depth(axes, npml, 2, k, s.nz + 1);
+                        let dep_z = pml_depth(faces, npml, 2, k, s.nz + 1);
                         if dep_x.is_none() && dep_z.is_none() {
                             continue;
                         }
@@ -248,9 +251,9 @@ impl CpuCpmlState {
                 if i == 0 || i >= s.nx {
                     return;
                 }
-                let dep_x = pml_depth(axes, npml, 0, i, s.nx + 1);
+                let dep_x = pml_depth(faces, npml, 0, i, s.nx + 1);
                 for j in 1..s.ny {
-                    let dep_y = pml_depth(axes, npml, 1, j, s.ny + 1);
+                    let dep_y = pml_depth(faces, npml, 1, j, s.ny + 1);
                     if dep_x.is_none() && dep_y.is_none() {
                         continue;
                     }
@@ -294,7 +297,7 @@ impl CpuCpmlState {
         let hzd = s.hz_dims();
         let [p_hxy, p_hxz, p_hyx, p_hyz, p_hzx, p_hzy] = &mut self.psi_h;
         let (b_h, c_h, kappa_h) = (&self.b_h, &self.c_h, &self.kappa_h);
-        let (npml, axes) = (self.npml, self.axes);
+        let (npml, faces) = (self.npml, self.faces);
         let Fields {
             ex,
             ey,
@@ -312,9 +315,9 @@ impl CpuCpmlState {
             .enumerate()
             .for_each(|(i, ((hx_s, pxy_s), pxz_s))| {
                 for j in 0..s.ny {
-                    let dep_y = pml_depth(axes, npml, 1, j, s.ny);
+                    let dep_y = pml_depth(faces, npml, 1, j, s.ny);
                     for k in 0..s.nz {
-                        let dep_z = pml_depth(axes, npml, 2, k, s.nz);
+                        let dep_z = pml_depth(faces, npml, 2, k, s.nz);
                         if dep_y.is_none() && dep_z.is_none() {
                             continue;
                         }
@@ -346,10 +349,10 @@ impl CpuCpmlState {
             .zip(p_hyz.par_chunks_mut(sz))
             .enumerate()
             .for_each(|(i, ((hy_s, pyx_s), pyz_s))| {
-                let dep_x = pml_depth(axes, npml, 0, i, s.nx);
+                let dep_x = pml_depth(faces, npml, 0, i, s.nx);
                 for j in 0..=s.ny {
                     for k in 0..s.nz {
-                        let dep_z = pml_depth(axes, npml, 2, k, s.nz);
+                        let dep_z = pml_depth(faces, npml, 2, k, s.nz);
                         if dep_x.is_none() && dep_z.is_none() {
                             continue;
                         }
@@ -381,9 +384,9 @@ impl CpuCpmlState {
             .zip(p_hzy.par_chunks_mut(sz))
             .enumerate()
             .for_each(|(i, ((hz_s, pzx_s), pzy_s))| {
-                let dep_x = pml_depth(axes, npml, 0, i, s.nx);
+                let dep_x = pml_depth(faces, npml, 0, i, s.nx);
                 for j in 0..s.ny {
-                    let dep_y = pml_depth(axes, npml, 1, j, s.ny);
+                    let dep_y = pml_depth(faces, npml, 1, j, s.ny);
                     if dep_x.is_none() && dep_y.is_none() {
                         continue;
                     }

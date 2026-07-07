@@ -205,6 +205,42 @@ impl NtffState {
         );
 
         let bounds = (m, nx - m, m, ny - m, m, nz - m);
+        Self::with_bounds(grid, params, bounds)
+    }
+
+    /// Build an accumulator with an **explicit** integration box
+    /// `(i_min, i_max, j_min, j_max, k_min, k_max)` (A.2, ADR-0192) —
+    /// e.g. a grounded antenna needs the bottom face just above the
+    /// ground plane (`k_min = 1`) while the other faces keep the standard
+    /// margin. The symmetric [`NtffState::new`] delegates here. The caller
+    /// owns the equivalence-surface caveats (a face crossing a dielectric
+    /// violates the homogeneous-surroundings assumption; standard practice
+    /// for patch antennas, quantified by the gate that uses it).
+    ///
+    /// # Panics
+    ///
+    /// Panics if any axis has non-positive extent or exceeds the grid.
+    pub fn with_bounds(
+        grid: &YeeGrid,
+        params: NtffParams,
+        bounds: (usize, usize, usize, usize, usize, usize),
+    ) -> Self {
+        let (i0, i1, j0, j1, k0, k1) = bounds;
+        assert!(
+            i0 < i1 && j0 < j1 && k0 < k1,
+            "NTFF bounds must have positive extent: {bounds:?}"
+        );
+        assert!(
+            i1 <= grid.nx && j1 <= grid.ny && k1 <= grid.nz,
+            "NTFF bounds {bounds:?} exceed grid {}x{}x{}",
+            grid.nx,
+            grid.ny,
+            grid.nz
+        );
+        assert!(
+            params.f_probe.is_finite() && params.f_probe > 0.0,
+            "NTFF f_probe must be positive and finite",
+        );
 
         let j_face: [Array2<Complex64>; NUM_FACES] = std::array::from_fn(|f| {
             let (_, _, n_u, n_v, _) = face_axes(f, bounds);
