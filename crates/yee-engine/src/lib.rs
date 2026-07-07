@@ -83,9 +83,8 @@ pub enum BoundarySpec {
         /// Optional per-face enable `[[x−, x+], [y−, y+], [z−, z+]]`
         /// (A.2, ADR-0192) — overrides `axes` when present. A disabled
         /// face stays PEC; an antenna's open top over a PEC ground is
-        /// `[[true, true], [true, true], [false, true]]`. CPU-only:
-        /// asymmetric faces on `backend: "gpu"` fail with an error event,
-        /// `"auto"` falls back to CPU.
+        /// `[[true, true], [true, true], [false, true]]`. Both backends
+        /// honor arbitrary face masks (GPU since R.3, ADR-0196).
         #[serde(default)]
         faces: Option<[[bool; 2]; 3]>,
     },
@@ -227,9 +226,8 @@ impl MaterialsSpec {
 /// `yee_fdtd::LumpedRlcPort::aperture` scheme (ported bit-exact, gate
 /// compute-014). This is the dx-stable port a single-cell [`PortSpec`]
 /// cannot approximate on a multi-cell substrate; a naive series stack of
-/// single-cell ports was measured worse and rejected (ADR-0187).
-/// **CPU-only**: an explicit `backend: "gpu"` job with aperture ports
-/// fails with an error event; `auto` falls back to CPU.
+/// single-cell ports was measured worse and rejected (ADR-0187). Runs on
+/// both backends (GPU since R.3, ADR-0196; gate compute-015).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AperturePortSpec {
     /// Port-plane x-index shared by every aperture cell.
@@ -324,8 +322,7 @@ pub struct JobSpec {
     pub sources: Vec<SourceSpec>,
     /// Resistive ports.
     pub ports: Vec<PortSpec>,
-    /// Multi-cell aperture ports (S.10; CPU-only — `gpu` errors, `auto`
-    /// falls back to CPU).
+    /// Multi-cell aperture ports (S.10; both backends since R.3).
     #[serde(default)]
     pub aperture_ports: Vec<AperturePortSpec>,
     /// Probes (recorded every step).

@@ -239,3 +239,4 @@
 - [ADR-0193: A.3 — the antenna design loop delivers a −25.7 dB match](decisions/0193-a3-antenna-design-loop.md)
 - [ADR-0194: R.0+R.1 — dielectric loss (0.1 % vs Pozar) and vias on the board path](decisions/0194-r0-r1-losses-vias.md)
 - [ADR-0195: R.2 — complex S-parameters + Touchstone export from engine measurements](decisions/0195-r2-complex-sparams-touchstone.md)
+- [ADR-0196: R.3 — GPU parity for the design flows (aperture ports + per-face CPML)](decisions/0196-r3-gpu-parity-design-flows.md)

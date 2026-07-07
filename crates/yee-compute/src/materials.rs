@@ -143,8 +143,9 @@ impl CpmlConfig {
         self
     }
 
-    /// True when every axis has both faces equal — the only shape the GPU
-    /// backend's per-axis mask can express.
+    /// True when every axis has both faces equal. Historical note: until
+    /// R.3 this was the only shape the GPU backend could express; both
+    /// backends now honor arbitrary per-face masks.
     pub fn faces_are_axis_symmetric(&self) -> bool {
         self.faces.iter().all(|f| f[0] == f[1])
     }

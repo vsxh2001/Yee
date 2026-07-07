@@ -28,8 +28,9 @@ struct Params {
     ny: u32,
     nz: u32,
     npml: u32,
-    // Per-axis CPML enable: bit0 = x, bit1 = y, bit2 = z.
-    axes_mask: u32,
+    // Per-face CPML enable (R.3): bit 2*axis + side (side 0 = min face,
+    // side 1 = max face).
+    faces_mask: u32,
     has_cpml: u32,
     has_mask: u32,
     has_dispersion: u32,
@@ -157,15 +158,19 @@ fn prof_c_h(d: u32) -> f32 { return profiles[4u * p.npml + d]; }
 fn prof_kappa_h(d: u32) -> f32 { return profiles[5u * p.npml + d]; }
 
 // PML profile depth for absolute index i on an axis of length n, or -1
-// outside the PML / on a disabled axis (mirrors CpuCpmlState's pml_depth).
+// outside the PML / on a disabled face (mirrors CpuCpmlState's pml_depth,
+// per-face since R.3).
 fn pml_depth(axis: u32, i: u32, n: u32) -> i32 {
-    if (((p.axes_mask >> axis) & 1u) == 0u) {
-        return -1;
-    }
     if (i < p.npml) {
+        if (((p.faces_mask >> (2u * axis)) & 1u) == 0u) {
+            return -1;
+        }
         return i32(p.npml - 1u - i);
     }
     if (n >= p.npml && i >= n - p.npml) {
+        if (((p.faces_mask >> (2u * axis + 1u)) & 1u) == 0u) {
+            return -1;
+        }
         let depth = i - (n - p.npml);
         if (depth < p.npml) {
             return i32(depth);
@@ -511,6 +516,68 @@ fn bump_step(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x == 0u) {
         drv_data[0] = drv_data[0] + 1.0;
     }
+}
+
+// ======================= aperture ports (R.3) =======================
+// Appended after the E.2 regions in both buffers, so every accessor above
+// keeps its offset. drv_idx: [n_ap, n_cells x n_ap, cells_start x n_ap,
+// flat E_z field-offsets...]; drv_data: [v_prev x n_ap, vcoef x n_ap,
+// g x n_ap, back x n_ap, v_src (max_steps x n_ap)].
+
+fn ap_base() -> u32 { return 4u + d_nsoft() + d_nports() + d_nprobes(); }
+fn d_nap() -> u32 { return drv_idx[ap_base()]; }
+fn ap_ncells(q: u32) -> u32 { return drv_idx[ap_base() + 1u + q]; }
+fn ap_cell(q: u32, c: u32) -> u32 {
+    let start = drv_idx[ap_base() + 1u + d_nap() + q];
+    return drv_idx[ap_base() + 1u + 2u * d_nap() + start + c];
+}
+fn dd_ap_base() -> u32 {
+    return 1u + 3u * d_nports()
+        + d_maxsteps() * (d_nsoft() + d_nports() + d_nprobes());
+}
+fn dd_ap_vprev(q: u32) -> u32 { return dd_ap_base() + q; }
+fn dd_ap_vcoef(q: u32) -> u32 { return dd_ap_base() + d_nap() + q; }
+fn dd_ap_g(q: u32) -> u32 { return dd_ap_base() + 2u * d_nap() + q; }
+fn dd_ap_back(q: u32) -> u32 { return dd_ap_base() + 3u * d_nap() + q; }
+fn dd_ap_vsrc(step: u32, q: u32) -> u32 {
+    return dd_ap_base() + 4u * d_nap() + step * d_nap() + q;
+}
+
+// Aperture ports (LumpedRlcPort::correct_e_aperture, pure-R arm): modal
+// V*_T = vcoef * sum(E_z) over the aperture cells (vcoef = dz/n_col),
+// semi-implicit midpoint voltage against the cached V_prev, aggregate
+// branch current I = (V_mid - V_src) * g with g = 1/(R + beta) precomputed
+// host-side (0 for an open port), sheet back-action back*I on every cell,
+// then V_prev re-summed from the corrected field — matching the CPU's
+// explicit resum. One invocation per port: ports own disjoint cell sets,
+// and the serial per-port loop keeps the update consistent without
+// cross-invocation synchronization. Dispatched after apply_ports, before
+// record_probes (the reference order).
+@compute @workgroup_size(64)
+fn apply_aperture_ports(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let q = gid.x;
+    if (q >= d_nap()) {
+        return;
+    }
+    let ncells = ap_ncells(q);
+    let vcoef = drv_data[dd_ap_vcoef(q)];
+    var v_sum = 0.0;
+    for (var c = 0u; c < ncells; c++) {
+        v_sum += fields[ap_cell(q, c)];
+    }
+    let v_star = v_sum * vcoef;
+    let v_mid = 0.5 * (v_star + drv_data[dd_ap_vprev(q)]);
+    let v_src = drv_data[dd_ap_vsrc(dd_step(), q)];
+    let i_branch = (v_mid - v_src) * drv_data[dd_ap_g(q)];
+    let back = drv_data[dd_ap_back(q)] * i_branch;
+    var v_post = 0.0;
+    for (var c = 0u; c < ncells; c++) {
+        let idx = ap_cell(q, c);
+        let e = fields[idx] - back;
+        fields[idx] = e;
+        v_post += e;
+    }
+    drv_data[dd_ap_vprev(q)] = v_post * vcoef;
 }
 
 

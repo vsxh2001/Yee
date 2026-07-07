@@ -51,7 +51,9 @@ struct Params {
     ny: u32,
     nz: u32,
     npml: u32,
-    axes_mask: u32,
+    /// Per-face CPML enable (R.3): bit `2·axis + side`, side 0 = min face,
+    /// side 1 = max face.
+    faces_mask: u32,
     has_cpml: u32,
     has_mask: u32,
     has_dispersion: u32,
@@ -73,8 +75,9 @@ pub struct GpuFdtd {
     update_pipelines: [wgpu::ComputePipeline; 6],
     /// Mask clamp pipelines (ex, ey, ez); dispatched only when `has_mask`.
     clamp_pipelines: [wgpu::ComputePipeline; 3],
-    /// Drive pipelines: inject_soft, apply_ports, record_probes, bump_step.
-    drive_pipelines: [wgpu::ComputePipeline; 4],
+    /// Drive pipelines: inject_soft, apply_ports, record_probes,
+    /// bump_step, apply_aperture_ports.
+    drive_pipelines: [wgpu::ComputePipeline; 5],
     has_mask: bool,
     dft_enabled: bool,
     /// accumulate_dft pipeline (E.5b).
@@ -82,7 +85,7 @@ pub struct GpuFdtd {
     field_arena: wgpu::Buffer,
     psi_arena: wgpu::Buffer,
     drive_data: wgpu::Buffer,
-    drive_counts: (usize, usize, usize), // (n_soft, n_ports, n_probes)
+    drive_counts: (usize, usize, usize, usize), // (n_soft, n_ports, n_probes, n_aperture)
     max_steps: usize,
     steps_taken: usize,
     adapter_name: String,
@@ -246,14 +249,6 @@ impl GpuFdtd {
         assert_eq!(fields.hz.len(), field_lens[5], "hz length mismatch");
         materials.validate(&spec);
         drive.validate(&spec);
-        if !drive.aperture_ports.is_empty() {
-            // The aperture-port modal solve (S.10) is CPU-only for now: it
-            // needs a per-port column reduction each step, which does not
-            // fit the current per-cell apply_ports kernel.
-            return Err(ComputeError::Unsupported(
-                "aperture ports are CPU-only (S.10, ADR-0187)",
-            ));
-        }
         assert!(
             drive.is_empty() || max_steps > 0,
             "GpuFdtd::with_drive: a non-empty drive needs max_steps > 0"
@@ -355,6 +350,7 @@ impl GpuFdtd {
             make_pipeline("apply_ports"),
             make_pipeline("record_probes"),
             make_pipeline("bump_step"),
+            make_pipeline("apply_aperture_ports"),
         ];
         let dft_pipeline = make_pipeline("accumulate_dft");
 
@@ -429,17 +425,7 @@ impl GpuFdtd {
         let coeff_arena = make_storage_buffer("yee-compute coeffs", &coeffs, false);
 
         // --- ψ arena + profile buffer (dummies when CPML is off) ---
-        if let Some(config) = &cpml_config
-            && !config.faces_are_axis_symmetric()
-        {
-            // The WGSL kernels carry a per-axis mask only; per-face CPML
-            // (A.2 — e.g. an antenna's open top over a PEC ground) is
-            // CPU-only until the shader gains a face mask.
-            return Err(ComputeError::Unsupported(
-                "per-face CPML is CPU-only (A.2, ADR-0192)",
-            ));
-        }
-        let (mut psi_data, profile_data, npml, axes_mask) = match cpml_config {
+        let (mut psi_data, profile_data, npml, faces_mask) = match cpml_config {
             None => (vec![0.0f32; 1], vec![0.0f32; 1], 0u32, 0u32),
             Some(config) => {
                 let psi_len = 2 * (field_lens[0] + field_lens[1] + field_lens[2])
@@ -450,16 +436,18 @@ impl GpuFdtd {
                     .flatten()
                     .map(|v| v as f32)
                     .collect();
-                let axes_mask = config
-                    .axes
-                    .iter()
-                    .enumerate()
-                    .fold(0u32, |m, (i, &on)| if on { m | (1 << i) } else { m });
+                // Per-face enable bits (R.3): bit 2·axis for the min face,
+                // bit 2·axis + 1 for the max face.
+                let faces_mask = config.faces.iter().enumerate().fold(0u32, |m, (a, sides)| {
+                    let lo = if sides[0] { 1u32 << (2 * a) } else { 0 };
+                    let hi = if sides[1] { 1u32 << (2 * a + 1) } else { 0 };
+                    m | lo | hi
+                });
                 (
                     vec![0.0f32; psi_len],
                     profiles,
                     config.npml as u32,
-                    axes_mask,
+                    faces_mask,
                 )
             }
         };
@@ -503,10 +491,11 @@ impl GpuFdtd {
 
         // --- drive buffers: index table + state/amplitude/probe data.
         // Layout mirrored by the drv_* helpers in fdtd.wgsl. ---
-        let (n_soft, n_ports, n_probes) = (
+        let (n_soft, n_ports, n_probes, n_aperture) = (
             drive.soft_sources.len(),
             drive.ports.len(),
             drive.probes.len(),
+            drive.aperture_ports.len(),
         );
         let mut drv_idx: Vec<u32> = vec![
             n_soft as u32,
@@ -529,6 +518,25 @@ impl GpuFdtd {
                     as u32,
             );
         }
+        // Aperture-port cell table (R.3), append-only so the accessors above
+        // keep their offsets: [n_ap, n_cells ×n_ap, cells_start ×n_ap,
+        // flat E_z field-offsets ...] (starts relative to the cells base).
+        drv_idx.push(n_aperture as u32);
+        for port in &drive.aperture_ports {
+            drv_idx.push(port.cells.len() as u32);
+        }
+        let mut start = 0u32;
+        for port in &drive.aperture_ports {
+            drv_idx.push(start);
+            start += port.cells.len() as u32;
+        }
+        for port in &drive.aperture_ports {
+            for &cell in &port.cells {
+                drv_idx.push(
+                    (EComponent::Ez.arena_offset(&spec) + EComponent::Ez.flat(&spec, cell)) as u32,
+                );
+            }
+        }
         let drive_index = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("yee-compute drive index"),
             size: std::mem::size_of_val(drv_idx.as_slice()) as u64,
@@ -539,9 +547,15 @@ impl GpuFdtd {
 
         // drv_data: [counter, port state ×n, alpha ×n, gamma ×n,
         //            amps (max_steps × n_soft), vsrc (max_steps × n_ports),
-        //            probes (max_steps × n_probes)] — all f64-precomputed.
-        let mut drv_data: Vec<f32> =
-            Vec::with_capacity(1 + 3 * n_ports + max_steps * (n_soft + n_ports + n_probes));
+        //            probes (max_steps × n_probes),
+        //            then the R.3 aperture block: v_prev ×n_ap, vcoef ×n_ap,
+        //            g ×n_ap, back ×n_ap, ap_vsrc (max_steps × n_ap)]
+        //            — all f64-precomputed.
+        let mut drv_data: Vec<f32> = Vec::with_capacity(
+            1 + 3 * n_ports
+                + max_steps * (n_soft + n_ports + n_probes + n_aperture)
+                + 4 * n_aperture,
+        );
         drv_data.push(0.0); // step counter
         drv_data.extend(std::iter::repeat_n(0.0, n_ports)); // e_z_prev
         let area = spec.dx * spec.dy;
@@ -564,6 +578,31 @@ impl GpuFdtd {
             }
         }
         drv_data.extend(std::iter::repeat_n(0.0, max_steps * n_probes));
+        // Aperture-port constants (R.3), mirroring the CPU update exactly:
+        // vcoef = dz/n_col (modal V from the cell sum), g = 1/(R + β) with
+        // β = dt·h/(2ε₀A) (0 for an open port — the CPU's infinite-R arm),
+        // back = dt/(ε₀A) (sheet back-action per unit branch current).
+        drv_data.extend(std::iter::repeat_n(0.0, n_aperture)); // v_prev
+        for port in &drive.aperture_ports {
+            drv_data.push((spec.dz / port.n_columns as f64) as f32);
+        }
+        for port in &drive.aperture_ports {
+            let beta = spec.dt * port.height / (2.0 * EPS0 * port.area);
+            let g = if port.resistance.is_finite() {
+                1.0 / (port.resistance + beta)
+            } else {
+                0.0
+            };
+            drv_data.push(g as f32);
+        }
+        for port in &drive.aperture_ports {
+            drv_data.push((spec.dt / (EPS0 * port.area)) as f32);
+        }
+        for n in 0..max_steps {
+            for port in &drive.aperture_ports {
+                drv_data.push(port.waveform.value(n, spec.dt) as f32);
+            }
+        }
         let drive_data = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("yee-compute drive data"),
             size: std::mem::size_of_val(drv_data.as_slice()) as u64,
@@ -580,7 +619,7 @@ impl GpuFdtd {
             ny: spec.ny as u32,
             nz: spec.nz as u32,
             npml,
-            axes_mask,
+            faces_mask,
             has_cpml: u32::from(cpml_config.is_some()),
             has_mask: u32::from(has_mask),
             has_dispersion: u32::from(dispersive.is_some()),
@@ -650,7 +689,7 @@ impl GpuFdtd {
             field_arena,
             psi_arena,
             drive_data,
-            drive_counts: (n_soft, n_ports, n_probes),
+            drive_counts: (n_soft, n_ports, n_probes, n_aperture),
             max_steps,
             steps_taken: 0,
             adapter_name,
@@ -684,8 +723,8 @@ impl GpuFdtd {
     /// clamps when masks are attached), submitting in [`STEPS_PER_SUBMIT`]
     /// chunks.
     pub fn step_n(&mut self, n: usize) -> Result<(), ComputeError> {
-        let (n_soft, n_ports, n_probes) = self.drive_counts;
-        let has_drive = n_soft + n_ports + n_probes > 0 || self.dft_enabled;
+        let (n_soft, n_ports, n_probes, n_aperture) = self.drive_counts;
+        let has_drive = n_soft + n_ports + n_probes + n_aperture > 0 || self.dft_enabled;
         if has_drive {
             assert!(
                 self.steps_taken + n <= self.max_steps,
@@ -752,6 +791,12 @@ impl GpuFdtd {
                         pass.set_pipeline(&self.drive_pipelines[1]);
                         pass.dispatch_workgroups(lane_groups(n_ports), 1, 1);
                     }
+                    // Aperture ports after the single-cell ports (R.3),
+                    // matching the CPU/reference ordering.
+                    if n_aperture > 0 {
+                        pass.set_pipeline(&self.drive_pipelines[4]);
+                        pass.dispatch_workgroups(lane_groups(n_aperture), 1, 1);
+                    }
                     if n_probes > 0 {
                         pass.set_pipeline(&self.drive_pipelines[2]);
                         pass.dispatch_workgroups(lane_groups(n_probes), 1, 1);
@@ -785,7 +830,7 @@ impl GpuFdtd {
     /// Read back the recorded probe series (one `Vec` per [`Drive::probes`]
     /// entry, `steps_taken` samples each), widened to FP64.
     pub fn read_probes(&mut self) -> Result<Vec<Vec<f64>>, ComputeError> {
-        let (n_soft, n_ports, n_probes) = self.drive_counts;
+        let (n_soft, n_ports, n_probes, _n_aperture) = self.drive_counts;
         if n_probes == 0 {
             return Ok(Vec::new());
         }
