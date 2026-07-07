@@ -31,6 +31,10 @@ thiserror   = { workspace = true }
 # the same pairing as yee-compute's compute-008 gate.
 yee-voxel  = { path = "../yee-voxel", version = "0.0.0" }
 yee-layout = { workspace = true }
+# engine-sparams-002 (R.2) exports an engine-measured response to
+# Touchstone and round-trips it.
+yee-io      = { workspace = true }
+num-complex = { workspace = true }
 
 [lints.rust]
 unsafe_code  = "forbid"

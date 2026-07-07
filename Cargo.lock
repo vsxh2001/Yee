@@ -7767,11 +7767,13 @@ dependencies = [
 name = "yee-engine"
 version = "0.0.0"
 dependencies = [
+ "num-complex",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "yee-compute",
  "yee-fdtd",
+ "yee-io",
  "yee-layout",
  "yee-voxel",
 ]

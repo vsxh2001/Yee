@@ -203,6 +203,62 @@ pub fn directional_reflection_db(
         .collect()
 }
 
+/// **Complex** forward-wave transfer between two probe-triple planes
+/// (R.2, ADR-0195): at each frequency, `fwd_to / fwd_from` as an
+/// `(re, im)` phasor. For a uniform line of length `d` this is
+/// `e^{−αd}·e^{−jβd}` — magnitude gives loss, unwrapped phase gives the
+/// electrical length — and for a DUT between the planes it is the
+/// de-embedded complex S21 (the shared feed phase divides out when the
+/// triples sit at the port reference planes). The building block for
+/// Touchstone export of engine measurements.
+pub fn forward_transfer(
+    from: [&[f64]; 3],
+    to: [&[f64]; 3],
+    dt_s: f64,
+    spacing_m: f64,
+    freqs_hz: &[f64],
+) -> Vec<(f64, f64)> {
+    freqs_hz
+        .iter()
+        .map(|&f| {
+            let a: Vec<(f64, f64)> = from.iter().map(|s| single_bin_dft(s, dt_s, f)).collect();
+            let b: Vec<(f64, f64)> = to.iter().map(|s| single_bin_dft(s, dt_s, f)).collect();
+            let sa = fit_standing_wave(a[0], a[1], a[2], spacing_m);
+            let sb = fit_standing_wave(b[0], b[1], b[2], spacing_m);
+            cdiv(sb.fwd, sa.fwd)
+        })
+        .collect()
+}
+
+/// **Complex** reflection at a probe-triple plane (R.2): `bwd / fwd` as
+/// an `(re, im)` phasor per frequency — the complex Γ whose magnitude
+/// [`directional_reflection_db`] reports.
+///
+/// Interpretation caveat (ADR-0195): this is Γ looking from the plane
+/// toward whatever terminates the line — for a one-port DUT (an antenna,
+/// a shorted stub) that IS the DUT's reflection, which is how A.1/A.3
+/// use it. On a **through** measurement it is the *fixture's* load-port
+/// reflection, not the DUT's S11 — and if the run's time window truncates
+/// the port-to-port multi-bounce ring-down, the steady-state |Γ| ≤ 1
+/// identity breaks at the forward-ripple minima (raw |Γ| > 1 is the
+/// tell). Exporting a measured through-line S11 needs de-embedding /
+/// calibration — queued as R.2b.
+pub fn complex_reflection(
+    triple: [&[f64]; 3],
+    dt_s: f64,
+    spacing_m: f64,
+    freqs_hz: &[f64],
+) -> Vec<(f64, f64)> {
+    freqs_hz
+        .iter()
+        .map(|&f| {
+            let v: Vec<(f64, f64)> = triple.iter().map(|s| single_bin_dft(s, dt_s, f)).collect();
+            let split = fit_standing_wave(v[0], v[1], v[2], spacing_m);
+            cdiv(split.bwd, split.fwd)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,6 +351,38 @@ mod tests {
             (db[0] - 20.0 * 0.5_f64.log10()).abs() < 0.1,
             "directional ratio {} dB, want −6.02",
             db[0]
+        );
+    }
+
+    #[test]
+    fn forward_transfer_recovers_a_known_complex_line() {
+        // Pure forward wave e^{−jβx}: the transfer over d_planes is
+        // e^{−jβ·d_planes} — unit magnitude, phase −β·d_planes.
+        let f0 = 2.0e9;
+        let dt = 1.0 / (f0 * 64.0);
+        let beta = 130.0;
+        let d = 5.0e-3; // triple spacing
+        let d_planes = 40.0e-3;
+        let series = |x: f64| -> Vec<f64> {
+            (0..1024)
+                .map(|i| {
+                    let t = i as f64 * dt;
+                    let env = (-((t - 512.0 * dt) / (170.0 * dt)).powi(2)).exp();
+                    env * (TAU * f0 * t - beta * x).sin()
+                })
+                .collect()
+        };
+        let a: Vec<Vec<f64>> = (0..3).map(|m| series(m as f64 * d)).collect();
+        let b: Vec<Vec<f64>> = (0..3).map(|m| series(d_planes + m as f64 * d)).collect();
+        let t = forward_transfer([&a[0], &a[1], &a[2]], [&b[0], &b[1], &b[2]], dt, d, &[f0]);
+        let mag = cabs(t[0]);
+        let phase = t[0].1.atan2(t[0].0);
+        assert!((mag - 1.0).abs() < 1e-6, "|T| = {mag}");
+        let want = -beta * d_planes; // −5.2 rad → wrapped to +1.083
+        let wrapped = (want + std::f64::consts::PI).rem_euclid(TAU) - std::f64::consts::PI;
+        assert!(
+            (phase - wrapped).abs() < 1e-6,
+            "arg T = {phase}, want {wrapped}"
         );
     }
 

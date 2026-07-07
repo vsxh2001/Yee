@@ -235,7 +235,11 @@ jobs:
         run: cargo test -p yee-compute --release -- --include-ignored --nocapture
 
       # The antenna gates (A.0..A.3) run in their own parallel job below —
-      # skipping them here keeps this job's wall time bounded.
+      # skipping them here keeps this job's wall time bounded. This blanket
+      # include-ignored run covers the board-physics gates too: engine-loss-001
+      # + engine-via-001 (R.0/R.1, ADR-0194) and engine-sparams-002 (R.2,
+      # ADR-0195: complex transfer phase vs HJ + passivity-enforced .s2p
+      # round-trip).
       - name: yee-engine gates incl. engine-verify-001 (release, include-ignored)
         run: cargo test -p yee-engine --release -- --include-ignored --nocapture --skip antenna_ --skip patch_ --skip inset_ --skip design_loop_
 
@@ -253,11 +257,6 @@ jobs:
       # solves, ~19 min).
       - name: engine-refine-001 (yee-filter, release, ignored)
         run: cargo test -p yee-filter --release --test engine_lpf_refine -- --ignored --nocapture
-
-      # R.0/R.1 (ADR-0194): board physics — dielectric loss vs the Pozar
-      # closed form (0.1%) and the via-shorted-stub differential gate.
-      - name: engine-loss-001 + engine-via-001 (release, ignored)
-        run: cargo test -p yee-engine --release --test board_loss --test board_via -- --ignored --nocapture
 
   antenna-gates:
     name: Antenna design gates (A.0-A.3, release)
