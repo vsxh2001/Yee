@@ -11,7 +11,7 @@ This file is loaded by Claude Code instances starting work in the Yee repo. It c
 **When starting work on this repo:**
 
 1. Read this file end to end.
-2. Skim `ROADMAP.md` for the phase your task lives in (core solvers). Application phases live in `FILTER-DESIGN-ROADMAP.md`; the GPU/CPU engine + web-studio track (ADR-0175) lives in `ENGINE-STUDIO-ROADMAP.md`.
+2. Skim `ROADMAP.md` for the phase your task lives in (core solvers). Application phases live in `FILTER-DESIGN-ROADMAP.md`; the GPU/CPU engine + web-studio track (ADR-0175) lives in `ENGINE-STUDIO-ROADMAP.md`; the RF-tool track (R.*) in `RF-TOOL-ROADMAP.md`; the commercial-class full-suite track (FS.*, with market research) in `FULL-SUITE-ROADMAP.md`.
 3. Skim `TECH_STACK.md` if your task touches a new dependency.
 4. Look for a matching spec under `docs/superpowers/specs/` and plan under `docs/superpowers/plans/`. If none exists and the task is non-trivial, write the spec before any code.
 5. Decide your lane (§6) before opening any file.
