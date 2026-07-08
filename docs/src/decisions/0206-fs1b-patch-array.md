@@ -47,8 +47,13 @@ The reason arrays exist: in the array plane (y-z) the 2-element factor
 AF(θ) = cos(π/2·sin θ) multiplies the element pattern (−3 dB at 30°,
 −13.6 dB at 60°, horizon null), while the E-plane cut stays patch-like.
 Asserts: array-plane θ = 60°/75° ≥ 10 dB below broadside on both sides;
-E-plane broadside beats θ = 60° (the A.2 idiom). Measured numbers recorded
-on the first green run.
+E-plane broadside beats θ = 60° (the A.2 idiom).
+
+**GREEN first run** — measured vs AF theory: θ = 30°: **−3.4 dB** (AF
+−3.0); θ = 60°: **−14.2/−13.9 dB** (AF −13.6); θ = 75°: **−21.7/−21.2 dB**;
+the two sides of the cut agree to 0.3 dB (the mirror symmetry is real).
+E-plane: −0.6…−6.7 dB — the gentle patch taper. Pattern multiplication
+confirmed to ~0.6 dB of theory.
 
 ## Consequences and queued follow-ons
 

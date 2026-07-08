@@ -346,6 +346,14 @@ jobs:
       - name: FS.1a.2 quasi-Yagi pattern (engine-antenna-006)
         run: cargo test -p yee-engine --release --test antenna_quasi_yagi_pattern -- --ignored --nocapture
 
+      # FS.1b (ADR-0206): the 2x1 corporate-fed array - S11 (~5 min) and
+      # the pattern-multiplication cut (~15 min with per-step NTFF).
+      - name: FS.1b.1 patch array S11 (engine-antenna-007)
+        run: cargo test -p yee-engine --release --test antenna_patch_array -- --ignored --nocapture
+
+      - name: FS.1b.2 patch array pattern (engine-antenna-008)
+        run: cargo test -p yee-engine --release --test antenna_patch_array_pattern -- --ignored --nocapture
+
   fdtd-coupling-gate:
     name: FDTD propagation ε_eff gate (fdtd-line-eeff, release)
     runs-on: ubuntu-latest

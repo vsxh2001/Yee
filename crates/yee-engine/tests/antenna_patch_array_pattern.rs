@@ -11,6 +11,12 @@
 //! open-top boundary, ground-hugging NTFF box `k_min = 1`), NTFF at the
 //! measured-on-design 2.45 GHz.
 //!
+//! **GREEN first run (2026-07-08)** — measured vs AF theory in the array
+//! plane: θ = 30°: −3.4 dB (AF −3.0); θ = 60°: −14.2/−13.9 dB (AF −13.6);
+//! θ = 75°: −21.7/−21.2 dB; symmetric to 0.3 dB between the two sides.
+//! E-plane: −0.6…−6.7 dB gentle patch taper. Pattern multiplication
+//! confirmed quantitatively (~0.6 dB of AF), not just qualitatively.
+//!
 //! ```bash
 //! cargo test -p yee-engine --release --test antenna_patch_array_pattern -- --ignored --nocapture
 //! ```
