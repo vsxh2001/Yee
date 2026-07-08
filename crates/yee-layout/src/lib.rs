@@ -733,6 +733,323 @@ pub fn edge_fed_patch(f0_hz: f64, substrate: &Substrate, feed_z0_ohm: f64) -> La
     }
 }
 
+/// Quasi-Yagi seed dimensions (FS.1a.1, ADR-0205): the Kaneda/Deal/Qian/
+/// Itoh scaling rules evaluated for a given band and stack. All lengths in
+/// metres; the layout frame puts the feed start at `x = 0, y = 0` with the
+/// beam firing toward `+x`.
+#[derive(Debug, Clone, Copy)]
+pub struct QuasiYagiDims {
+    /// 50 Ω feed width.
+    pub feed_width_m: f64,
+    /// Balun-branch / element strip width (~70.7 Ω branches).
+    pub branch_width_m: f64,
+    /// CPS centre-to-centre separation of the two branches.
+    pub cps_sep_m: f64,
+    /// Driven-dipole tip-to-tip length (≈ 0.46 λ₀/√((ε_r+1)/2)).
+    pub dipole_len_m: f64,
+    /// Director length (≈ 0.65 × dipole).
+    pub director_len_m: f64,
+    /// Ground-edge (reflector) → driven-element spacing (≈ 0.25 λ_diel).
+    pub reflector_gap_m: f64,
+    /// Driven-element → director spacing (≈ 0.20 λ_diel).
+    pub director_gap_m: f64,
+    /// x of the driven-dipole centreline.
+    pub x_dipole_m: f64,
+    /// x of the ground-plane truncation edge — pass through
+    /// `yee_voxel::truncate_ground_at_cell` (the ground *is* the
+    /// reflector; everything at `x < x_gnd_m` is microstrip over ground,
+    /// everything beyond is the CPS/antenna region).
+    pub x_gnd_m: f64,
+}
+
+/// A generated quasi-Yagi: the trace [`Layout`] plus the ground-truncation
+/// plane the voxelizer must apply (the layout alone cannot express a
+/// partial ground — see `yee_voxel::truncate_ground_at_cell`).
+#[derive(Debug, Clone)]
+pub struct QuasiYagi {
+    /// Traces + the single feed port.
+    pub layout: Layout,
+    /// The seed dimensions used.
+    pub dims: QuasiYagiDims,
+}
+
+/// Generate a microstrip-fed **quasi-Yagi** antenna [`Layout`] (FS.1a.1):
+/// 50 Ω feed → T-junction balun whose lower branch takes a U-detour
+/// adding half a branch guided wavelength (the 180° split) → the two
+/// branches continue as a CPS pair past the ground truncation → driven
+/// dipole arms (±y) + one director, the truncated ground edge acting as
+/// the reflector. All axis-aligned rectangles with overlapped joints
+/// (the voxelizer point-samples cell centres; shared-edge-only joints
+/// rasterize inconsistently).
+///
+/// Walking-skeleton fidelity notes (spec 2026-07-08): plain rectangular
+/// corners (no miters — the R.6 corner-correction lesson applies if
+/// measurement shows balun detune), and the published X-band reference
+/// stack (ε_r 10.2, 0.09 mm gaps) is deliberately NOT the target — the
+/// scaling rules are evaluated on the caller's stack and the gate holds
+/// the measured S11 dip against the design `f0`.
+pub fn quasi_yagi(f0_hz: f64, substrate: &Substrate, feed_z0_ohm: f64) -> QuasiYagi {
+    const C: f64 = 299_792_458.0;
+    assert!(
+        f0_hz > 0.0 && substrate.eps_r > 1.0 && substrate.height_m > 0.0,
+        "non-physical quasi-Yagi inputs"
+    );
+    let h = substrate.height_m;
+    let eps_r = substrate.eps_r;
+    let lambda0 = C / f0_hz;
+    // Quasi-static average permittivity for elements printed on the
+    // substrate with air above and no ground beneath (the CPS/antenna
+    // region): ε_avg = (ε_r + 1)/2.
+    let lambda_diel = lambda0 / ((eps_r + 1.0) / 2.0).sqrt();
+
+    let feed_w = microstrip_width(feed_z0_ohm, eps_r, h);
+    let feed_e_eff = eps_eff(feed_w, h, eps_r);
+    let lambda_g_feed = C / (f0_hz * feed_e_eff.sqrt());
+    // ~70.7 Ω branches: reasonable T-split compromise on mm-scale stacks.
+    let branch_w = microstrip_width(feed_z0_ohm * std::f64::consts::SQRT_2, eps_r, h);
+    let branch_e_eff = eps_eff(branch_w, h, eps_r);
+    let lambda_g_branch = C / (f0_hz * branch_e_eff.sqrt());
+
+    let feed_len = 0.75 * lambda_g_feed;
+    let cps_gap = 1.0e-3;
+    let cps_sep = cps_gap + branch_w; // centre-to-centre
+    let dipole_len = 0.46 * lambda_diel;
+    let director_len = 0.65 * dipole_len;
+    let reflector_gap = 0.25 * lambda_diel;
+    let director_gap = 0.20 * lambda_diel;
+    // The balun region (T-bar to ground edge) hosts the U-detour; the
+    // detour adds 2·dy = λg_branch/2 of centreline path.
+    let balun_len = 0.5 * lambda_g_branch + 3.0 * branch_w;
+    let dy = 0.25 * lambda_g_branch;
+
+    let x_t = feed_len;
+    let x_gnd = x_t + branch_w + balun_len;
+    let x_dip = x_gnd + reflector_gap;
+    let x_dir = x_dip + director_gap;
+    let w_arm = branch_w;
+
+    let y_top = cps_sep / 2.0; // top branch centreline
+    let y_bot = -cps_sep / 2.0;
+
+    // Branch rows and the T-bar.
+    let mut traces = vec![
+        // Feed along x, centred on y = 0.
+        Polygon::rect(0.0, -feed_w / 2.0, feed_len + branch_w, feed_w),
+        // T-bar (vertical) spanning both branch centrelines.
+        Polygon::rect(x_t, y_bot - branch_w / 2.0, branch_w, cps_sep + branch_w),
+        // Top branch (A): straight T-bar → dipole plane.
+        Polygon::rect(
+            x_t,
+            y_top - branch_w / 2.0,
+            x_dip + w_arm / 2.0 - x_t,
+            branch_w,
+        ),
+    ];
+    // Bottom branch (B): seg1 → down → bottom run → up → seg3, the
+    // centreline detour adding exactly 2·dy of path.
+    let l1 = 0.25 * balun_len;
+    let l2 = 0.35 * balun_len;
+    let x_a = x_t + branch_w + l1; // seg1 outer end
+    let x_b = x_a + l2; // bottom-run outer end
+    let y_low = y_bot - dy;
+    traces.extend([
+        // seg1 on the branch row.
+        Polygon::rect(x_t, y_bot - branch_w / 2.0, branch_w + l1, branch_w),
+        // down bar.
+        Polygon::rect(
+            x_a - branch_w,
+            y_low - branch_w / 2.0,
+            branch_w,
+            dy + branch_w,
+        ),
+        // bottom run.
+        Polygon::rect(
+            x_a - branch_w,
+            y_low - branch_w / 2.0,
+            l2 + branch_w,
+            branch_w,
+        ),
+        // up bar.
+        Polygon::rect(
+            x_b - branch_w,
+            y_low - branch_w / 2.0,
+            branch_w,
+            dy + branch_w,
+        ),
+        // seg3: back on the branch row, to the dipole plane.
+        Polygon::rect(
+            x_b - branch_w,
+            y_bot - branch_w / 2.0,
+            x_dip + w_arm / 2.0 - (x_b - branch_w),
+            branch_w,
+        ),
+        // Driven arms: from each branch row (overlapping it) out to the
+        // dipole tips at ±dipole_len/2. Both heights equal by symmetry:
+        // dipole_len/2 − cps_sep/2 + branch_w/2.
+        Polygon::rect(
+            x_dip - w_arm / 2.0,
+            y_top - branch_w / 2.0,
+            w_arm,
+            dipole_len / 2.0 - (y_top - branch_w / 2.0),
+        ),
+        Polygon::rect(
+            x_dip - w_arm / 2.0,
+            -dipole_len / 2.0,
+            w_arm,
+            (y_bot + branch_w / 2.0) - (-dipole_len / 2.0),
+        ),
+        // Director.
+        Polygon::rect(
+            x_dir - w_arm / 2.0,
+            -director_len / 2.0,
+            w_arm,
+            director_len,
+        ),
+    ]);
+
+    let port = PortRef {
+        at: Point2::new(0.0, 0.0),
+        width_m: feed_w,
+        ref_impedance_ohm: feed_z0_ohm,
+    };
+    let bbox = BBox::from_polygons(&traces);
+    let layout = Layout {
+        substrate: *substrate,
+        traces,
+        ports: vec![port],
+        bbox,
+    };
+    QuasiYagi {
+        layout,
+        dims: QuasiYagiDims {
+            feed_width_m: feed_w,
+            branch_width_m: branch_w,
+            cps_sep_m: cps_sep,
+            dipole_len_m: dipole_len,
+            director_len_m: director_len,
+            reflector_gap_m: reflector_gap,
+            director_gap_m: director_gap,
+            x_dipole_m: x_dip,
+            x_gnd_m: x_gnd,
+        },
+    }
+}
+
+#[cfg(test)]
+mod quasi_yagi_tests {
+    use super::*;
+
+    fn fr4() -> Substrate {
+        Substrate {
+            eps_r: 4.4,
+            height_m: 1.6e-3,
+            loss_tangent: 0.0,
+            metal_thickness_m: 35e-6,
+        }
+    }
+
+    fn aabb(p: &Polygon) -> (f64, f64, f64, f64) {
+        let (mut x0, mut y0, mut x1, mut y1) = (
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        );
+        for v in &p.verts {
+            x0 = x0.min(v.x);
+            y0 = y0.min(v.y);
+            x1 = x1.max(v.x);
+            y1 = y1.max(v.y);
+        }
+        (x0, y0, x1, y1)
+    }
+
+    fn overlaps(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> bool {
+        // Positive-area overlap (shared edges alone rasterize
+        // inconsistently, so joints must genuinely overlap).
+        a.0 < b.2 - 1e-12 && b.0 < a.2 - 1e-12 && a.1 < b.3 - 1e-12 && b.1 < a.3 - 1e-12
+    }
+
+    #[test]
+    fn feed_chain_is_connected_and_director_is_parasitic() {
+        let qy = quasi_yagi(5.8e9, &fr4(), 50.0);
+        let boxes: Vec<_> = qy.layout.traces.iter().map(aabb).collect();
+        let n = boxes.len();
+        // Union-find over positive-area overlaps.
+        let mut comp: Vec<usize> = (0..n).collect();
+        fn root(comp: &mut [usize], mut i: usize) -> usize {
+            while comp[i] != i {
+                comp[i] = comp[comp[i]];
+                i = comp[i];
+            }
+            i
+        }
+        for i in 0..n {
+            for j in (i + 1)..n {
+                if overlaps(boxes[i], boxes[j]) {
+                    let (ri, rj) = (root(&mut comp, i), root(&mut comp, j));
+                    comp[ri] = rj;
+                }
+            }
+        }
+        let feed_root = root(&mut comp, 0);
+        for i in 1..n - 1 {
+            assert_eq!(
+                root(&mut comp, i),
+                feed_root,
+                "trace {i} disconnected from the feed chain"
+            );
+        }
+        // The director (last trace) is deliberately parasitic.
+        assert_ne!(
+            root(&mut comp, n - 1),
+            feed_root,
+            "director must NOT touch the driven structure"
+        );
+    }
+
+    #[test]
+    fn geometry_ordering_and_dipole_length() {
+        let qy = quasi_yagi(5.8e9, &fr4(), 50.0);
+        let d = qy.dims;
+        // Feed → T → ground edge → dipole → director along +x.
+        assert!(d.x_gnd_m > 0.0 && d.x_dipole_m > d.x_gnd_m);
+        assert!((d.x_dipole_m - d.x_gnd_m - d.reflector_gap_m).abs() < 1e-12);
+        // Every balun/feed rect stays over the ground (microstrip needs
+        // its return plane); only arms + director may cross the edge.
+        let boxes: Vec<_> = qy.layout.traces.iter().map(aabb).collect();
+        let n = boxes.len();
+        for (i, b) in boxes.iter().enumerate().take(n - 3) {
+            assert!(
+                b.2 <= d.x_gnd_m + d.branch_width_m / 2.0 + d.reflector_gap_m + 1e-12,
+                "trace {i} extends past the dipole plane"
+            );
+        }
+        // Balun detour fully over ground.
+        for (i, b) in boxes.iter().enumerate().take(8).skip(3) {
+            if i < 7 {
+                assert!(
+                    b.2 <= d.x_gnd_m + 1e-12,
+                    "balun trace {i} crosses the ground edge (x1 = {}, x_gnd = {})",
+                    b.2,
+                    d.x_gnd_m
+                );
+            }
+        }
+        // Dipole tip-to-tip = designed length (arms are traces n-3, n-2).
+        let up = boxes[n - 3];
+        let dn = boxes[n - 2];
+        assert!((up.3 - d.dipole_len_m / 2.0).abs() < 1e-12, "upper tip");
+        assert!((dn.1 + d.dipole_len_m / 2.0).abs() < 1e-12, "lower tip");
+        // Director shorter than the driven element, further out.
+        assert!(d.director_len_m < d.dipole_len_m);
+        assert!(boxes[n - 1].0 > d.x_dipole_m);
+        // Port sits on the feed.
+        let p = &qy.layout.ports[0];
+        assert!(p.at.x.abs() < 1e-12 && p.at.y.abs() < 1e-12);
+    }
+}
+
 #[cfg(test)]
 mod hairpin_sections_tests {
     use super::*;
