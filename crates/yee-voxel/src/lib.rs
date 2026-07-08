@@ -136,10 +136,38 @@ pub fn voxelize_microstrip_open(
     voxelize_with_ground_level(layout, opts, air_below_cells)
 }
 
+/// Voxelize a **finite board** (FS.2b.1, ADR-0207): the dielectric slab
+/// AND the ground sheet extend only `board_margin_m` beyond the layout
+/// bbox instead of filling the whole domain — a real PCB floating in
+/// air, lifted `air_below_cells` above the domain floor. This is the
+/// fixture absolute far-field products need: with the substrate bounded,
+/// the NTFF equivalence box encloses the entire antenna and passes
+/// through homogeneous air on every face (the measured motivation: the
+/// whole-domain slab forced the box through dielectric and the patch
+/// read a non-physical 22 dBi). Pair with all-six-face CPML and
+/// `AperturePortSpec::k_lo = model.k_gnd`.
+pub fn voxelize_finite_board(
+    layout: &Layout,
+    opts: &VoxelOptions,
+    board_margin_m: f64,
+    air_below_cells: usize,
+) -> MicrostripModel {
+    voxelize_inner(layout, opts, air_below_cells, Some(board_margin_m))
+}
+
 fn voxelize_with_ground_level(
     layout: &Layout,
     opts: &VoxelOptions,
     k_gnd: usize,
+) -> MicrostripModel {
+    voxelize_inner(layout, opts, k_gnd, None)
+}
+
+fn voxelize_inner(
+    layout: &Layout,
+    opts: &VoxelOptions,
+    k_gnd: usize,
+    board_margin_m: Option<f64>,
 ) -> MicrostripModel {
     let dx = opts.dx_m;
     assert!(
@@ -207,8 +235,26 @@ fn voxelize_with_ground_level(
     // `k = 0 .. n_sub` (i.e. `0 ..= k_top − 1`); air `ε_r = 1.0` elsewhere is the
     // array default. Filling from `k = 0` (the cell directly above the ground
     // plane) leaves NO air series gap at the ground — see the z-stack note above.
+    // Finite board: dielectric + ground live only inside the board rect
+    // (cell-centre / node-position tests against the physical bounds).
+    let board = board_margin_m.map(|m| {
+        (
+            layout.bbox.min.x - m,
+            layout.bbox.min.y - m,
+            layout.bbox.max.x + m,
+            layout.bbox.max.y + m,
+        )
+    });
+    let on_board = |x: f64, y: f64| match board {
+        None => true,
+        Some((bx0, by0, bx1, by1)) => x >= bx0 && x <= bx1 && y >= by0 && y <= by1,
+    };
     for i in 0..nx {
         for j in 0..ny {
+            let (xc, yc) = (x0 + (i as f64 + 0.5) * dx, y0 + (j as f64 + 0.5) * dx);
+            if !on_board(xc, yc) {
+                continue;
+            }
             for k in k_gnd..k_top {
                 eps[(i, j, k)] = eps_r_sub;
             }
@@ -219,6 +265,9 @@ fn voxelize_with_ground_level(
     // (k = k_top, where the `Ex` node ((i+0.5)dx, j·dx) lies under a trace).
     for i in 0..nx {
         for j in 0..=ny {
+            if !on_board(x0 + (i as f64 + 0.5) * dx, y0 + j as f64 * dx) {
+                continue;
+            }
             pec_ex[(i, j, k_gnd)] = true;
             let x = x0 + (i as f64 + 0.5) * dx;
             let y = y0 + j as f64 * dx;
@@ -232,6 +281,9 @@ fn voxelize_with_ground_level(
     // `Ey` node at (i·dx, (j+0.5)dx).
     for i in 0..=nx {
         for j in 0..ny {
+            if !on_board(x0 + i as f64 * dx, y0 + (j as f64 + 0.5) * dx) {
+                continue;
+            }
             pec_ey[(i, j, k_gnd)] = true;
             let x = x0 + i as f64 * dx;
             let y = y0 + (j as f64 + 0.5) * dx;

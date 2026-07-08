@@ -38,13 +38,14 @@ use yee_engine::{
     farfield,
 };
 use yee_layout::{Layout, Substrate, inset_fed_patch, patch_array_2x1};
-use yee_voxel::{VoxelOptions, voxelize_microstrip};
+use yee_voxel::{VoxelOptions, voxelize_finite_board};
 
 const F0_HZ: f64 = 2.45e9;
 const EPS_R: f64 = 4.4;
 const H_M: f64 = 1.6e-3;
 const MARGIN_CELLS: usize = 34;
 const AIR_ABOVE_CELLS: usize = 34;
+const AIR_BELOW_CELLS: usize = 34;
 const Z0_OHM: f64 = 50.0;
 const BW_HZ: f64 = 2.0e9;
 const N_STEPS: usize = 9000;
@@ -53,13 +54,18 @@ const NTFF_MARGIN: usize = 15;
 /// One antenna → broadside gain in dBi at `F0_HZ`.
 fn measure_gain_dbi(layout: &Layout, label: &str) -> f64 {
     let dx = auto_dx(layout, F0_HZ + BW_HZ / 2.0);
-    let model = voxelize_microstrip(
+    // FS.2b.1 fixture: a FINITE board (bbox + 15 mm) lifted into air, so
+    // the NTFF box encloses the whole antenna and passes through
+    // homogeneous air on every face.
+    let model = voxelize_finite_board(
         layout,
         &VoxelOptions {
             dx_m: dx,
             xy_margin_cells: MARGIN_CELLS,
             air_above_cells: AIR_ABOVE_CELLS,
         },
+        15.0e-3,
+        AIR_BELOW_CELLS,
     );
     let (nx, ny, nz) = model.dims;
     let dt = model.grid.dt;
@@ -100,10 +106,11 @@ fn measure_gain_dbi(layout: &Layout, label: &str) -> f64 {
         nz,
         dx_m: dx,
         n_steps: N_STEPS,
+        // All six faces absorb — the finite board floats in open space.
         boundary: BoundarySpec::Cpml {
             npml: 10,
             axes: [true, true, true],
-            faces: Some([[true, true], [true, true], [false, true]]),
+            faces: Some([[true, true], [true, true], [true, true]]),
         },
         sources: vec![],
         ports: vec![],
@@ -111,7 +118,7 @@ fn measure_gain_dbi(layout: &Layout, label: &str) -> f64 {
             i: model.port_cells[0].0,
             j_lo,
             j_hi,
-            k_lo: 0,
+            k_lo: model.k_gnd,
             k_top,
             resistance_ohm: Z0_OHM,
             v0: 1.0,
@@ -125,7 +132,7 @@ fn measure_gain_dbi(layout: &Layout, label: &str) -> f64 {
         ntff: Some(NtffSpec {
             f_hz: F0_HZ,
             margin_cells: NTFF_MARGIN,
-            k_min: Some(1),
+            k_min: None,
             directions: vec![(0.0, 0.0)],
         }),
         materials: Some(materials),
