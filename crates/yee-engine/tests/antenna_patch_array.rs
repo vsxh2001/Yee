@@ -9,6 +9,11 @@
 //! floor-ground stack (patches radiate up), A.2 open-top boundary,
 //! single-run directional |S11| (the A.1 machinery).
 //!
+//! **GREEN first run (2026-07-08)**: dip **2.450 GHz / −21.1 dB — 0.0 %**
+//! from design (the 25 MHz raster hit f₀ exactly); the 0.5 λ₀ mutual-
+//! coupling detune is below the raster. Asserts pinned: err ≤ 5 %,
+//! depth ≤ −10 dB.
+//!
 //! ```bash
 //! cargo test -p yee-engine --release --test antenna_patch_array -- --ignored --nocapture
 //! ```
@@ -193,15 +198,17 @@ fn antenna_patch_array_matches_at_the_designed_resonance() {
     );
 
     assert!(
-        rel_err <= 0.10,
-        "engine-antenna-007 FAILED: dip at {:.3} GHz, designed {:.2} GHz (err {:.1} % > 10 %)",
+        rel_err <= 0.05,
+        "engine-antenna-007 FAILED: dip at {:.3} GHz, designed {:.2} GHz (err {:.1} % > 5 %; \
+         measured 0.0 % at ship time)",
         f_dip / 1e9,
         F0_HZ / 1e9,
         rel_err * 100.0
     );
-    // Tripwire until measured (A.1 idiom), pinned after the first green run.
+    // Measured-then-pinned: first green run read −21.1 dB; −10 dB is the
+    // 2× floor and the practical usable-match bar.
     assert!(
-        dip_db <= -1.0,
-        "engine-antenna-007 FAILED: dip only {dip_db:.1} dB — no measurable array resonance"
+        dip_db <= -10.0,
+        "engine-antenna-007 FAILED: dip only {dip_db:.1} dB (measured −21.1 at ship time)"
     );
 }

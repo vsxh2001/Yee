@@ -249,3 +249,4 @@
 - [ADR-0203: R.5c — the studio designs antennas too](decisions/0203-r5c-studio-antenna-panel.md)
 - [ADR-0204: FS.0a — push-button meshing: the rulebook + the convergence loop](decisions/0204-fs0a-automesh-convergence.md)
 - [ADR-0205: FS.1a.0 — truncated ground: the quasi-Yagi unblock](decisions/0205-fs1a-quasi-yagi-truncated-ground.md)
+- [ADR-0206: FS.1b — the 2×1 corporate-fed patch array](decisions/0206-fs1b-patch-array.md)
