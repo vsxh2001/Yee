@@ -354,6 +354,11 @@ jobs:
       - name: FS.1b.2 patch array pattern (engine-antenna-008)
         run: cargo test -p yee-engine --release --test antenna_patch_array_pattern -- --ignored --nocapture
 
+      # FS.2b (ADR-0207): absolute gain in dBi on the finite-board
+      # fixture (engine-gain-001, 2 solves + NTFF, ~22 min).
+      - name: FS.2b gain in dBi (engine-gain-001)
+        run: cargo test -p yee-engine --release --test antenna_gain -- --ignored --nocapture
+
   fdtd-coupling-gate:
     name: FDTD propagation ε_eff gate (fdtd-line-eeff, release)
     runs-on: ubuntu-latest

@@ -60,9 +60,28 @@ Lossless matched through line, both ports recording:
    the whole domain, so the equivalence box intersects dielectric where
    the strongest guided fields live and free-space η₀ misprices them.
 
+## FS.2b.1 — the finite board: root cause CONFIRMED, gain gate GREEN
+
+`yee_voxel::voxelize_finite_board` bounds the dielectric slab and the
+ground sheet to bbox + margin (gate voxel_003: cell-exact bounds,
+huge-margin ≡ infinite bit-identically). Re-measured on the finite board
+(bbox + 15 mm, lifted stack, all-face CPML, box fully in air):
+
+- single patch **5.42 dBi** (textbook 5–7); the pattern amplitude
+  dropped **16.7 dB** while p_acc stayed identical (2.517e-23 →
+  2.535e-23) — the 22 dBi excess was entirely the dielectric-crossing
+  equivalence box, as hypothesized;
+- 2×1 array **7.63 dBi**; differential **+2.21 dB** (ideal 3 minus
+  mutual coupling). Asserts pinned: single [4, 7.5] dBi, differential
+  [1.5, 3.5] dB.
+
+FS.2b is complete: the pipeline now produces absolute commercial-grade
+far-field numbers — gain in dBi certified by an analytic Hertzian pin, a
+textbook patch window, and a bias-cancelling array differential.
+
 ## Queued
 
-**FS.2b.1**: finite-extent substrate in the voxelizer (real boards end;
-the NTFF box then passes through air — the openEMS practice), then
-re-measure engine-gain-001. FS.2c: efficiency + full-sphere export. GPU
-port-record readback.
+FS.2c: radiation efficiency + full-sphere export. GPU port-record
+readback. Consider migrating the A-track pattern gates to the
+finite-board fixture (their relative asserts are unaffected but the
+fixture is more physical).

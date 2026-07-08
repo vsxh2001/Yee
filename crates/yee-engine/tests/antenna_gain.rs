@@ -8,22 +8,20 @@
 //! 2. the FS.1b 2×1 corporate array — pattern multiplication adds
 //!    ~+3 dB of directivity over the single element.
 //!
-//! **STATUS: RED, measured, root-cause hypothesis (ADR-0207) — awaiting
-//! FS.2b.1.** First run: single patch **22.15 dBi**, array 23.92 dBi —
-//! absolute levels ~13 dB above physics (the aperture-size diffraction
-//! cap for this patch is ~3–6 dBi), while the DIFFERENTIAL (1.77 dB, in
-//! [1.5, 4.5]) and every relative pattern gate stay healthy. The
-//! engine-scale-001 Hertzian pin then certified the NTFF transform to
-//! 3–5 % in free space and the FS.2a identity certified the port power —
-//! isolating the excess to the fixture: `voxelize_microstrip` fills the
-//! substrate slab across the WHOLE domain, so the equivalence box
-//! necessarily intersects dielectric exactly where the strongest guided
-//! fields live, and the transform propagates those samples with
-//! free-space η₀. Queued fix (FS.2b.1): finite-extent substrate in the
-//! voxelizer (real boards end!), then re-measure. The differential
-//! remains asserted; the absolute window assert is the design contract
-//! and stays red until then. Test fn named `antenna_…` so the blanket CI
-//! step skips it.
+//! **GREEN (2026-07-08), root cause confirmed quantitatively.** The
+//! first run on the whole-domain substrate slab read 22.15 dBi; the
+//! engine-scale-001 Hertzian pin certified the NTFF transform (3–5 %)
+//! and FS.2a certified the port power, isolating the excess to the
+//! fixture; on the FS.2b.1 **finite board** (substrate + ground end
+//! 15 mm beyond the bbox, lifted stack, box fully in air) the same
+//! measurement reads:
+//!
+//! - single patch **5.42 dBi** — dead-centre textbook (5–7 for thin
+//!   FR-4); |F| dropped 16.7 dB while p_acc stayed identical
+//!   (2.517e-23 → 2.535e-23 — the excess was ENTIRELY the
+//!   dielectric-crossing box);
+//! - 2×1 array **7.63 dBi**, differential **+2.21 dB** (ideal 3 dB
+//!   minus real mutual coupling).
 //!
 //! ```bash
 //! cargo test -p yee-engine --release --test antenna_gain -- --ignored --nocapture
@@ -182,14 +180,18 @@ fn broadside_gain_lands_in_the_textbook_window_and_the_array_adds_3db() {
 
     // Absolute window, loose until measured (textbook thin-FR-4 patch is
     // ~5–7 dBi; the staircase + open-boundary chain earns some slack).
+    // Measured-then-pinned: 5.42 dBi on the finite board.
     assert!(
-        (3.0..=9.0).contains(&g_single),
-        "engine-gain-001 FAILED: single-patch broadside gain {g_single:.2} dBi outside [3, 9]"
+        (4.0..=7.5).contains(&g_single),
+        "engine-gain-001 FAILED: single-patch broadside gain {g_single:.2} dBi outside \
+         [4, 7.5] (measured 5.42 at ship time)"
     );
     // The sharp assert: pattern multiplication adds ~3 dB of directivity;
     // the shared machinery cancels in the difference.
+    // Measured-then-pinned: +2.21 dB.
     assert!(
-        (1.5..=4.5).contains(&diff),
-        "engine-gain-001 FAILED: array-gain differential {diff:.2} dB outside [1.5, 4.5]"
+        (1.5..=3.5).contains(&diff),
+        "engine-gain-001 FAILED: array-gain differential {diff:.2} dB outside [1.5, 3.5] \
+         (measured 2.21 at ship time)"
     );
 }
