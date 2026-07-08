@@ -797,10 +797,17 @@ pub fn quasi_yagi(f0_hz: f64, substrate: &Substrate, feed_z0_ohm: f64) -> QuasiY
     let h = substrate.height_m;
     let eps_r = substrate.eps_r;
     let lambda0 = C / f0_hz;
-    // Quasi-static average permittivity for elements printed on the
-    // substrate with air above and no ground beneath (the CPS/antenna
-    // region): ε_avg = (ε_r + 1)/2.
-    let lambda_diel = lambda0 / ((eps_r + 1.0) / 2.0).sqrt();
+    // Effective permittivity of the dipole/director elements. The
+    // half-space quasi-static value ε_avg = (ε_r+1)/2 assumes the
+    // substrate fills a half-space; a resonant dipole on a THIN substrate
+    // (h ≪ λ) is loaded far less. FDTD-calibrated (ADR-0205, the R.6
+    // single-point-calibration pattern): the (ε_r+1)/2 seed on FR-4
+    // 1.6 mm measured its λ/2 resonance 29 % HIGH (7.5 vs 5.8 GHz),
+    // giving ε_eff = 2.7·(5.8/7.5)² = 1.61; the linear-in-(ε_r−1) form
+    // below reproduces that measurement and degrades gracefully toward
+    // ε → 1 for air. Re-verified blind after calibration (the gate).
+    let eps_dipole = 1.0 + 0.18 * (eps_r - 1.0);
+    let lambda_diel = lambda0 / eps_dipole.sqrt();
 
     let feed_w = microstrip_width(feed_z0_ohm, eps_r, h);
     let feed_e_eff = eps_eff(feed_w, h, eps_r);
