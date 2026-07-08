@@ -1,18 +1,27 @@
 //! Gate `engine-antenna-005` (FS.1a.1, ADR-0205): the **quasi-Yagi** — the
 //! first non-broadside, truncated-ground antenna through the pipeline.
 //! `yee_layout::quasi_yagi` synthesizes the Kaneda/Deal topology from
-//! scaling rules (T-junction balun with a λg/2 U-detour, CPS pair past the
-//! ground edge, driven dipole + director); the ground truncation
-//! (`yee_voxel::truncate_ground_at_cell`, FS.1a.0) makes the ground edge
-//! the reflector. Grid seeded by the FS.0a rulebook (`automesh::auto_dx`)
-//! — no hand-set dx. Measured with the single-run directional |S11| (the
-//! A.1 machinery).
+//! scaling rules; the FS.1a.0 ground truncation makes the ground edge the
+//! reflector; grid seeded by the FS.0a rulebook (no hand-set dx); measured
+//! with the single-run directional |S11| (the A.1 machinery).
 //!
-//! Asserts (walking-skeleton honest scope, A.1 idiom): the |S11| dip sits
-//! within ±10 % of the designed 5.8 GHz with a depth tripwire; the match
-//! itself is the design-loop's job (A.3 idiom) if the seed reads shallow.
+//! **STATUS: RED, measured, root-caused (ADR-0205) — awaiting FS.1a.1b.**
+//! Two instrumented runs (133/140 s) measured |S11| ≈ 0 dB across the
+//! band: the dipole is not driven. Root cause is the z-stack, not the
+//! layout: `voxelize_microstrip` puts the ground at `k = 0` **on the
+//! domain floor**, and the antenna boundary keeps that bottom face PEC —
+//! so past the truncation the *boundary* still provides an infinite image
+//! plane 1.6 mm under the dipole, annihilating its radiation resistance.
+//! Fixing it needs open space below the substrate: a lifted voxel stack
+//! (air + CPML below a mid-domain ground sheet) and a `k_lo` on
+//! `AperturePortSpec` (which currently drives `k = 0 .. k_top`,
+//! ground-at-floor hard-wired) across the protocol and both backends —
+//! queued as FS.1a.1b. The 7.15–7.5 GHz dip both runs saw is a feed-
+//! structure resonance (it moved only 5 % when the dipole grew 29 %).
 //!
-//! `#[ignore]`'d (one multi-minute release FDTD run):
+//! The test fn is named `antenna_…` so the blanket CI engine-gates step
+//! skips it (the antenna gates run as their own explicit CI job; this one
+//! joins that job when FS.1a.1b turns it green).
 //!
 //! ```bash
 //! cargo test -p yee-engine --release --test antenna_quasi_yagi -- --ignored --nocapture
@@ -40,7 +49,7 @@ const SPACING_CELLS: usize = 10;
 
 #[test]
 #[ignore = "slow: one multi-minute release FDTD run; engine-antenna-005 gate (FS.1a.1) — run with --release --ignored"]
-fn quasi_yagi_resonates_at_the_designed_frequency() {
+fn antenna_quasi_yagi_resonates_at_the_designed_frequency() {
     let sub = Substrate {
         eps_r: EPS_R,
         height_m: H_M,

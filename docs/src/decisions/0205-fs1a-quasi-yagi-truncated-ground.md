@@ -31,11 +31,38 @@ default path stays bit-identical by construction.
 - The documented no-op leaves both masks **bit-identical** to an
   untruncated build.
 
-## Queued (same spec)
+## FS.1a.1 measured negative result (2026-07-08) — the floor IS a ground
 
-- **FS.1a.1**: `yee_layout::quasi_yagi` generator (Kaneda/Deal topology on
-  the FR-4-class stack; the published X-band reference's 0.09 mm CPS gaps
-  are uniform-dx infeasible until FS.0b) + full-wave S11 gate
-  `engine-antenna-005`.
-- **FS.1a.2**: end-fire pattern + front-to-back gate via the A.2 NTFF
-  machinery — the wrong-phase-balun detector.
+`yee_layout::quasi_yagi` shipped (scaling-rule seeds, unit-gated topology:
+connectivity by union-find over positive-area overlaps, parasitic director,
+balun detour over ground) and the full-wave gate ran twice (133/140 s per
+run, auto_dx-seeded):
+
+1. First run: the λ/2-looking dip sat at 7.500 GHz (+29 %); calibrating
+   the dipole permittivity down to the measured 1.61
+   (`eps_dipole = 1 + 0.18·(ε_r−1)`, the R.6 single-point pattern — the
+   half-space (ε_r+1)/2 badly overestimates thin-substrate loading; kept,
+   it is real physics) moved the dip only to 7.150 GHz — **that dip is a
+   feed-structure resonance, not the dipole**.
+2. Both runs: |S11| ≈ 0 dB across 4–7.6 GHz — the dipole is never driven.
+
+Root cause is the **z-stack, not the layout**: `voxelize_microstrip` puts
+the ground at `k = 0` on the domain floor, and the antenna boundary keeps
+the bottom face PEC. Past the truncation the *boundary* still provides an
+infinite image plane 1.6 mm (0.03 λ) under the dipole, annihilating its
+radiation resistance — the FS.1a.0 mask truncation is necessary but not
+sufficient. Gate `engine-antenna-005` stays in-tree, `#[ignore]`'d and
+named `antenna_…` so the blanket CI step skips it; it turns green with:
+
+## Queued: FS.1a.1b — the lifted stack (open space below the ground)
+
+- A voxelizer variant with `air_below_cells`: ground sheet at
+  `k_gnd = air_below_cells` mid-domain, substrate above it, all-six-face
+  CPML; `MicrostripModel` records `k_gnd`;
+  `truncate_ground_at_cell` operates at `k_gnd` instead of the hard-wired 0.
+- `AperturePortSpec::k_lo` (serde-default 0 for full back-compat): the
+  drive/measure column becomes `k_lo .. k_top` on **both** backends (cpu.rs
+  loop + the R.3 WGSL kernel); compute-015 parity re-certified with the
+  default proving bit-exactness.
+- Then re-run engine-antenna-005; FS.1a.2 (end-fire/front-to-back NTFF
+  gate) follows.
