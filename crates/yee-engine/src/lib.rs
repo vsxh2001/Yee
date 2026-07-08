@@ -36,6 +36,7 @@
 
 pub mod automesh;
 pub mod board;
+pub mod farfield;
 pub mod sparams;
 
 use std::sync::Arc;
