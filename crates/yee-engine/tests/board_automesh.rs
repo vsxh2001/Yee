@@ -15,7 +15,9 @@
 //! ```
 
 use yee_engine::automesh::{auto_dx, converge_two_port};
-use yee_engine::board::{TwoPortBoardOptions, reference_through_line};
+use yee_engine::board::{TwoPortBoardOptions, reference_through_line, two_port_board_job};
+use yee_engine::sparams::{fit_standing_wave, single_bin_dft};
+use yee_engine::{JobEvent, submit};
 use yee_layout::{BBox, Layout, Point2, Polygon, PortRef, Substrate, eps_eff, open_end_delta_l};
 
 const EPS_R: f64 = 4.4;
@@ -56,6 +58,84 @@ fn stub_layout() -> Layout {
             },
         ],
         bbox,
+    }
+}
+
+/// Manual diagnostic (not a gate): one pass of the automesh scenario at
+/// `YEE_AUTOMESH_DX_MM` (default 0.267), dumping the raw three-probe
+/// wave-split (|fwd|, |bwd|, fitted β vs closed-form, fit residual) for
+/// reference and DUT at every bin — the forensic view of the pass-2
+/// measurement blowup.
+#[test]
+#[ignore = "manual diagnostic: 2 release solves, dumps raw wave-splits"]
+fn automesh_pass_fit_diagnostics() {
+    let dx = std::env::var("YEE_AUTOMESH_DX_MM")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.267)
+        * 1e-3;
+    let layout = stub_layout();
+    let reference = reference_through_line(&layout);
+
+    // The same settings the convergence loop uses at this dx (constant
+    // physical window/margins/absorber relative to the auto_dx pass 0).
+    let dx0 = auto_dx(&layout, 6.0e9);
+    let mut opts = TwoPortBoardOptions::for_band(F0_HZ, 0.8 * F0_HZ);
+    opts.dx_m = dx;
+    opts.n_steps = (9000.0 * 0.3e-3 / dx).round() as usize;
+    opts.margin_cells = (34.0 * dx0 / dx).round() as usize;
+    opts.air_above_cells = (34.0 * dx0 / dx).round() as usize;
+    opts.npml = (10.0 * dx0 / dx).round() as usize;
+
+    let run = |l: &Layout| -> (Vec<Vec<f64>>, f64, f64) {
+        let job = two_port_board_job(l, &opts).expect("job build failed");
+        let (dt, spacing) = (job.dt_s, job.spacing_m);
+        let handle = submit(job.spec);
+        for event in handle.events() {
+            match event {
+                JobEvent::Done { result } => return (result.probes, dt, spacing),
+                JobEvent::Error { message } => panic!("job failed: {message}"),
+                _ => {}
+            }
+        }
+        panic!("engine stream ended without a result");
+    };
+    let (ref_p, dt, spacing) = run(&reference);
+    let (dut_p, _, _) = run(&layout);
+
+    let e_eff = eps_eff(W_M, H_M, EPS_R);
+    eprintln!(
+        "automesh-diag: dx = {:.3} mm, spacing = {:.3} mm, npml = {}, margin = {}",
+        dx * 1e3,
+        spacing * 1e3,
+        opts.npml,
+        opts.margin_cells
+    );
+    eprintln!(
+        "  f/GHz | ref: |fwd|      |bwd|    beta_fit beta_hj resid | dut: |fwd|      |bwd|    beta_fit resid | S21 dB"
+    );
+    for n in 0..=25 {
+        let f = 3.5e9 + n as f64 * 100.0e6;
+        let d: Vec<(f64, f64)> = (3..6).map(|k| single_bin_dft(&dut_p[k], dt, f)).collect();
+        let r: Vec<(f64, f64)> = (3..6).map(|k| single_bin_dft(&ref_p[k], dt, f)).collect();
+        let rs = fit_standing_wave(r[0], r[1], r[2], spacing);
+        let ds = fit_standing_wave(d[0], d[1], d[2], spacing);
+        let mag = |c: (f64, f64)| (c.0 * c.0 + c.1 * c.1).sqrt();
+        let beta_hj = 2.0 * std::f64::consts::PI * f * e_eff.sqrt() / C0_M_S;
+        eprintln!(
+            "  {:5.2} | {:.3e} {:.3e} {:7.1} {:7.1} {:.3} | {:.3e} {:.3e} {:7.1} {:.3} | {:6.2}",
+            f / 1e9,
+            mag(rs.fwd),
+            mag(rs.bwd),
+            rs.beta_rad_m,
+            beta_hj,
+            rs.residual,
+            mag(ds.fwd),
+            mag(ds.bwd),
+            ds.beta_rad_m,
+            ds.residual,
+            20.0 * (mag(ds.fwd) / mag(rs.fwd)).log10(),
+        );
     }
 }
 

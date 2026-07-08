@@ -190,6 +190,7 @@ pub fn converge_two_port(
     let margin_m = opts.margin_cells as f64 * opts.dx_m;
     let air_above_m = opts.air_above_cells as f64 * opts.dx_m;
     let npml_m = opts.npml as f64 * opts.dx_m;
+    let spacing_m = opts.spacing_cells as f64 * opts.dx_m;
     let mut passes: Vec<ConvergencePass> = Vec::new();
     let mut final_delta = f64::INFINITY;
     for _ in 0..max_passes {
@@ -198,6 +199,9 @@ pub fn converge_two_port(
         opts.margin_cells = (margin_m / opts.dx_m).round() as usize;
         opts.air_above_cells = (air_above_m / opts.dx_m).round() as usize;
         opts.npml = (npml_m / opts.dx_m).round() as usize;
+        // The probe-triple span is measurement geometry: βd must stay put
+        // or the standing-wave fit's conditioning changes pass to pass.
+        opts.spacing_cells = (spacing_m / opts.dx_m).round() as usize;
         let s21_db = measure(layout, reference, &opts, freqs_hz)?;
         if let Some(prev) = passes.last() {
             final_delta = s21_db
