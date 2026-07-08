@@ -247,3 +247,4 @@
 - [ADR-0201: R.6 — hairpin seed fidelity: the corner correction lands on-frequency](decisions/0201-r6-hairpin-seed-fidelity.md)
 - [ADR-0202: R.0b — conductor loss: the resistive-sheet trace boundary](decisions/0202-r0b-resistive-sheet-loss.md)
 - [ADR-0203: R.5c — the studio designs antennas too](decisions/0203-r5c-studio-antenna-panel.md)
+- [ADR-0204: FS.0a — push-button meshing: the rulebook + the convergence loop](decisions/0204-fs0a-automesh-convergence.md)

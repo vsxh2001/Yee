@@ -34,6 +34,7 @@
 //! assert!(done);
 //! ```
 
+pub mod automesh;
 pub mod board;
 pub mod sparams;
 

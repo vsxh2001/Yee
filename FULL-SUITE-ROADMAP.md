@@ -17,10 +17,11 @@ analysis against Yee's shipped state, and the prioritized phase plan.
 
 > Method note: a 5-angle research sweep (solver technologies, workflows,
 > deliverables, meshing/GPU, pricing/practitioner-minimal-set) gathered and
-> extracted the claims below with sources. The adversarial verification pass
-> was rate-limited before completion, so these are **sourced but not
-> panel-verified** — re-verify opportunistically. They cohere with each other
-> and with practitioner folklore.
+> extracted the claims below with sources. A partial adversarial verification
+> pass (2026-07-08) confirmed the two gprMax GPU claims **3-0 with exact
+> source quotes**; the remaining claims are **sourced but not panel-verified**
+> (further verification deliberately stopped — cost). They cohere with each
+> other and with practitioner folklore.
 
 **The open-source GPU gap is real and unfilled:**
 - Mainline openEMS has no upstream GPU path; the only visible attempt is an
@@ -35,6 +36,12 @@ analysis against Yee's shipped state, and the prioritized phase plan.
   the c. 2019 open-source bar, and it found consumer GeForce cards
   cost-effective because **FDTD is memory-bandwidth-bound**
   ([Comput. Phys. Commun. 2019](https://www.sciencedirect.com/science/article/pii/S0010465518303990)).
+  **Both claims panel-VERIFIED 3-0** against the paper's own text ("up to
+  1194 Mcells/s and 3405 Mcells/s on NVIDIA Kepler and Pascal architectures
+  … up to 30 times faster than the parallelised (OpenMP) CPU solver"; the
+  GeForce "cost–performance benefit … is especially notable" while the
+  Tesla P100 wins on absolute performance "due to its use of high-bandwidth
+  memory").
 
 **Usability, not physics, is the #1 adoption barrier for open EM tools:**
 - Manual mesh creation and boundary setup are called the biggest barrier to
@@ -48,6 +55,21 @@ analysis against Yee's shipped state, and the prioritized phase plan.
   "switch to a NEC MoM code" (#130).
 - Naive FDTD cannot serve the RFIC/MMIC segment: no efficient lossy
   thick-metal model, and sub-µm cells blow up runtime (#94).
+- The second sweep (2026-07-08) strengthened this axis from both sides.
+  Open side: an EM-consulting review states openEMS reaches **numerical
+  accuracy comparable to the commercial tools** for antenna problems at zero
+  cost, with its main deficit being **less versatile/advanced meshing**
+  ([EpsilonForge](https://www.epsilonforge.com/post/commercial-electromagnetic-software/))
+  — solver accuracy is not the gap; meshing is. Commercial side: **adaptive
+  mesh refinement is branded as the source of HFSS's "gold-standard
+  accuracy"** (solve → refine → repeat until converged), it rides a *suite*
+  of initial meshers (Classic, TAU, Phi) each specialized per geometry
+  class, and the flagship TAU mesher is known to degrade on high-aspect-ratio
+  **planar/PCB** geometry where Classic does better
+  ([SemiWiki: the HFSS mesh evolution](https://semiwiki.com/eda/306866-a-mesh-by-any-other-name-the-hfss-mesh-evolution/)).
+  Push-button convergence is *the* accuracy product commercially — and even
+  HFSS finds planar RF stackups a hard meshing case. FS.0 is aimed exactly
+  here.
 
 **The licensing wedge:**
 - Commercial pricing (dated forum data, order-of-magnitude only): HFSS
@@ -59,8 +81,21 @@ analysis against Yee's shipped state, and the prioritized phase plan.
   IoT antenna work (#94).
 - openEMS's scriptability already enables GDSII-driven flows benchmarked to
   110 GHz (#94) — scriptability is a strength to preserve, not replace.
+- Firmer price anchors (2026-07-08 sweep, reseller-published): CST Studio
+  Suite HF **perpetual from ~$62,500**, **quarterly lease from ~$3,500**
+  (~$14k/yr — the cheapest published commercial entry)
+  ([Fidelis/Dassault reseller](https://www.fidelisfea.com/post/how-much-does-cst-studio-suite-cost-and-whats-included));
+  and the freemium pattern: **Sonnet Lite** ships the full engine
+  capacity-capped at 16 MB solver memory — full accuracy, toy problems only
+  ([edaboard](https://www.edaboard.com/threads/free-electromagnetic-simulators-rather-than-commercial-ones.180440/)).
 
 ### 1.2 Commercial landscape (domain knowledge — re-verify before quoting)
+
+> 2026-07-08: the second sweep independently sourced (not yet panel-verified)
+> the solver positioning of the three flagship rows — HFSS as FEM-first,
+> CST differentiating on FIT time-domain broadband solves (hence its
+> transient/EMC niche), FEKO as MoM/hybrid for antennas-on-platforms and RCS
+> ([EpsilonForge](https://www.epsilonforge.com/post/commercial-electromagnetic-software/)).
 
 | Tool | Solvers | Known for | The workflow moat |
 |---|---|---|---|

@@ -37,6 +37,11 @@ pub struct TwoPortBoardOptions {
     pub z0_ohm: f64,
     /// Probe-triple spacing in cells (choose βd well inside (0, π)).
     pub spacing_cells: usize,
+    /// CPML absorber depth in cells (inside the margin). Callers that vary
+    /// `dx_m` across runs (the automesh convergence loop) must scale this
+    /// with 1/dx so the absorber keeps its physical thickness — a
+    /// cells-thin CPML at fine dx reflects long wavelengths.
+    pub npml: usize,
     /// Backend to run on.
     pub backend: BackendChoice,
 }
@@ -53,6 +58,7 @@ impl TwoPortBoardOptions {
             bw_hz,
             z0_ohm: 50.0,
             spacing_cells: 12,
+            npml: 10,
             backend: BackendChoice::Cpu,
         }
     }
@@ -195,7 +201,7 @@ pub fn two_port_board_job(
         n_steps: opts.n_steps,
         // Side-wall CPML, PEC ground/lid (S.9) — the board-level boundary.
         boundary: BoundarySpec::Cpml {
-            npml: 10,
+            npml: opts.npml,
             axes: [true, true, false],
             faces: None,
         },
