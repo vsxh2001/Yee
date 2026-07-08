@@ -132,6 +132,7 @@ fn antenna_quasi_yagi_beam_fires_end_on() {
             f0_hz: F0_HZ,
             bw_hz: BW_HZ,
             t0_steps,
+            record: false,
         }],
         probes: vec![],
         slice: None,

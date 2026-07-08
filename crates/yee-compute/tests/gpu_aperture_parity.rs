@@ -101,6 +101,7 @@ fn aperture(i: usize, resistance: f64, v0: f64, dt: f64) -> AperturePort {
             bw,
             t0_steps,
         },
+        record: false,
     }
 }
 

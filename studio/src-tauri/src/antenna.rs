@@ -216,6 +216,7 @@ pub fn verify_antenna_impl(
             f0_hz: f0,
             bw_hz,
             t0_steps,
+            record: false,
         }],
         probes: vec![
             mk_probe(i_a),

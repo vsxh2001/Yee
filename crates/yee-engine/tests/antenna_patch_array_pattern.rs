@@ -136,6 +136,7 @@ fn antenna_patch_array_narrows_the_beam_in_the_array_plane() {
             f0_hz: F0_HZ,
             bw_hz: BW_HZ,
             t0_steps,
+            record: false,
         }],
         probes: vec![],
         slice: None,

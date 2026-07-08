@@ -177,6 +177,7 @@ fn measure_alpha(r_s: f64) -> f64 {
                 f0_hz: F0_HZ,
                 bw_hz: bw,
                 t0_steps,
+                record: false,
             },
             AperturePortSpec {
                 i: load_cell.0,
@@ -189,6 +190,7 @@ fn measure_alpha(r_s: f64) -> f64 {
                 f0_hz: F0_HZ,
                 bw_hz: bw,
                 t0_steps,
+                record: false,
             },
         ],
         probes: vec![

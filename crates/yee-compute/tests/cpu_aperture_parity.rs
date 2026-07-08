@@ -87,6 +87,7 @@ fn aperture_port_is_bit_exact_against_reference() {
                 bw,
                 t0_steps,
             },
+            record: false,
         }],
         probes: vec![Probe {
             component: EComponent::Ez,

@@ -158,6 +158,7 @@ fn dielectric_attenuation_matches_the_pozar_closed_form() {
                 f0_hz: F0_HZ,
                 bw_hz: bw,
                 t0_steps,
+                record: false,
             },
             AperturePortSpec {
                 i: load_cell.0,
@@ -170,6 +171,7 @@ fn dielectric_attenuation_matches_the_pozar_closed_form() {
                 f0_hz: F0_HZ,
                 bw_hz: bw,
                 t0_steps,
+                record: false,
             },
         ],
         probes: vec![

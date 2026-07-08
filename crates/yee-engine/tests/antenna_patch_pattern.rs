@@ -124,6 +124,7 @@ fn patch_radiates_a_broadside_beam() {
             f0_hz: F0_HZ,
             bw_hz: BW_HZ,
             t0_steps,
+            record: false,
         }],
         probes: vec![],
         slice: None,

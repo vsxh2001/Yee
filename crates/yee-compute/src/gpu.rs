@@ -238,6 +238,11 @@ impl GpuFdtd {
                 "resistive-sheet conductor loss (R.0b) is not on the GPU yet",
             ));
         }
+        if drive.aperture_ports.iter().any(|p| p.record) {
+            return Err(ComputeError::Unsupported(
+                "aperture-port (v, i) recording (FS.2a) is not on the GPU yet",
+            ));
+        }
         let field_lens = [
             len3(spec.ex_dims()),
             len3(spec.ey_dims()),

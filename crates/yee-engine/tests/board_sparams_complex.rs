@@ -192,6 +192,7 @@ fn complex_transfer_phase_matches_theory_and_exports_to_touchstone() {
                 f0_hz: F0_HZ,
                 bw_hz: bw,
                 t0_steps,
+                record: false,
             },
             AperturePortSpec {
                 i: load_cell.0,
@@ -204,6 +205,7 @@ fn complex_transfer_phase_matches_theory_and_exports_to_touchstone() {
                 f0_hz: F0_HZ,
                 bw_hz: bw,
                 t0_steps,
+                record: false,
             },
         ],
         probes: vec![

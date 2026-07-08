@@ -131,6 +131,7 @@ fn inset_fed_patch_is_matched_at_the_designed_resonance() {
             f0_hz: F0_HZ,
             bw_hz: BW_HZ,
             t0_steps,
+            record: false,
         }],
         probes: vec![
             ProbeSpec {

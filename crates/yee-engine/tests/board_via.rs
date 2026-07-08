@@ -173,6 +173,7 @@ fn job(with_stub: bool, with_via: bool) -> (JobSpec, f64) {
                 f0_hz: F0_HZ,
                 bw_hz: bw,
                 t0_steps,
+                record: false,
             },
             AperturePortSpec {
                 i: load_cell.0,
@@ -185,6 +186,7 @@ fn job(with_stub: bool, with_via: bool) -> (JobSpec, f64) {
                 f0_hz: F0_HZ,
                 bw_hz: bw,
                 t0_steps,
+                record: false,
             },
         ],
         probes: vec![ProbeSpec {

@@ -182,6 +182,7 @@ fn job_for(layout: &Layout) -> (JobSpec, f64) {
                 f0_hz: F_DRIVE_HZ,
                 bw_hz: BW_HZ,
                 t0_steps,
+                record: false,
             },
             // Passive matched load (v0 = 0 → pure resistor branch).
             AperturePortSpec {
@@ -195,6 +196,7 @@ fn job_for(layout: &Layout) -> (JobSpec, f64) {
                 f0_hz: F_DRIVE_HZ,
                 bw_hz: BW_HZ,
                 t0_steps,
+                record: false,
             },
         ],
         probes: vec![

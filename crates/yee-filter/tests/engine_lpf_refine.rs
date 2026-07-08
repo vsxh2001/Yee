@@ -173,6 +173,7 @@ fn job_for(layout: &Layout) -> (JobSpec, f64) {
                 f0_hz: F_DRIVE_HZ,
                 bw_hz: BW_HZ,
                 t0_steps,
+                record: false,
             },
             AperturePortSpec {
                 i: load_cell.0,
@@ -185,6 +186,7 @@ fn job_for(layout: &Layout) -> (JobSpec, f64) {
                 f0_hz: F_DRIVE_HZ,
                 bw_hz: BW_HZ,
                 t0_steps,
+                record: false,
             },
         ],
         probes: vec![

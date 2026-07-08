@@ -281,6 +281,7 @@ fn job_for(layout: &Layout, cfg: GateConfig) -> (JobSpec, f64) {
                 f0_hz: F0_HZ,
                 bw_hz: BW_HZ,
                 t0_steps,
+                record: false,
             },
             AperturePortSpec {
                 i: load_cell.0,
@@ -293,6 +294,7 @@ fn job_for(layout: &Layout, cfg: GateConfig) -> (JobSpec, f64) {
                 f0_hz: F0_HZ,
                 bw_hz: BW_HZ,
                 t0_steps,
+                record: false,
             },
         ],
         probes: vec![

@@ -193,6 +193,7 @@ pub fn two_port_board_job(
         f0_hz: opts.f0_hz,
         bw_hz: opts.bw_hz,
         t0_steps,
+        record: false,
     };
     let spec = JobSpec {
         nx,

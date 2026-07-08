@@ -273,6 +273,12 @@ pub struct AperturePortSpec {
     pub bw_hz: f64,
     /// Pulse centre, in steps.
     pub t0_steps: usize,
+    /// Record the per-step `(v_terminal, i_branch)` pair for this port
+    /// (FS.2a, ADR-0207) — the accepted-power observables, returned in
+    /// [`JobResult::port_records`]. CPU-only; the GPU backend rejects
+    /// recording ports with `Unsupported` (Auto falls back).
+    #[serde(default)]
+    pub record: bool,
 }
 
 /// Far-field request (A.2, ADR-0192): accumulate a surface DFT at `f_hz`
@@ -385,6 +391,11 @@ pub struct JobResult {
     /// `|E_far|` per requested [`NtffSpec::directions`] entry, if any.
     #[serde(default)]
     pub far_field: Option<Vec<f64>>,
+    /// Per-step `(v_src, v_terminal, i_branch)` per aperture port,
+    /// present when any port set [`AperturePortSpec::record`] (FS.2a;
+    /// empty inner vec for non-recording ports).
+    #[serde(default)]
+    pub port_records: Option<Vec<Vec<(f64, f64, f64)>>>,
     /// Steps completed (equals the request unless cancelled).
     pub steps_done: usize,
 }
@@ -536,6 +547,7 @@ fn build_drive(spec: &JobSpec, fdtd_spec: &FdtdSpec, dt: f64) -> Result<Drive, S
                 bw: a.bw_hz,
                 t0_steps: a.t0_steps,
             },
+            record: a.record,
         });
     }
     for p in &spec.probes {
@@ -729,6 +741,7 @@ fn run_job(mut spec: JobSpec, tx: &Sender<JobEvent>, cancel: &AtomicBool) {
                                 probes,
                                 slice,
                                 far_field: None,
+                                port_records: None,
                                 steps_done: done,
                             },
                         });
@@ -832,6 +845,11 @@ fn run_job(mut spec: JobSpec, tx: &Sender<JobEvent>, cancel: &AtomicBool) {
             probes: engine.probe_series().to_vec(),
             slice,
             far_field,
+            port_records: if engine.aperture_records().iter().any(|r| !r.is_empty()) {
+                Some(engine.aperture_records().to_vec())
+            } else {
+                None
+            },
             steps_done: done,
         },
     });

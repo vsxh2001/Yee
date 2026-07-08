@@ -58,6 +58,10 @@ pub struct CpuFdtd {
     aperture_state: Vec<f64>,
     /// Recorded probe series, one inner `Vec` per [`Drive::probes`] entry.
     probe_series: Vec<Vec<f64>>,
+    /// Per-step `(v_src, v_terminal, i_branch)` per aperture port (empty
+    /// inner `Vec` when `AperturePort::record` is false) — FS.2a,
+    /// ADR-0207.
+    aperture_records: Vec<Vec<(f64, f64, f64)>>,
 }
 
 impl CpuFdtd {
@@ -118,6 +122,7 @@ impl CpuFdtd {
         let port_state = vec![0.0; drive.ports.len()];
         let aperture_state = vec![0.0; drive.aperture_ports.len()];
         let probe_series = vec![Vec::new(); drive.probes.len()];
+        let aperture_records = vec![Vec::new(); drive.aperture_ports.len()];
         Self {
             spec,
             fields,
@@ -130,6 +135,7 @@ impl CpuFdtd {
             port_state,
             aperture_state,
             probe_series,
+            aperture_records,
         }
     }
 
@@ -214,11 +220,12 @@ impl CpuFdtd {
                 // back-action referenced to the physical area A.
                 let s = self.spec;
                 let dz = s.dz;
-                for (port, v_prev) in self
+                for ((port, v_prev), record) in self
                     .drive
                     .aperture_ports
                     .iter()
                     .zip(&mut self.aperture_state)
+                    .zip(&mut self.aperture_records)
                 {
                     let v_src = port.waveform.value(n_step, dt);
                     let n_col = port.n_columns as f64;
@@ -234,6 +241,9 @@ impl CpuFdtd {
                     } else {
                         (v_term_mid - v_src) / (port.resistance + beta)
                     };
+                    if port.record {
+                        record.push((v_src, v_term_mid, i_branch));
+                    }
                     let back = (dt / (EPS0 * port.area)) * i_branch;
                     for &cell in &port.cells {
                         self.fields.ez[EComponent::Ez.flat(&s, cell)] -= back;
@@ -264,6 +274,16 @@ impl CpuFdtd {
     /// one sample per completed step).
     pub fn probe_series(&self) -> &[Vec<f64>] {
         &self.probe_series
+    }
+
+    /// Per-step `(v_src, v_terminal, i_branch)` records, one inner slice
+    /// per [`Drive::aperture_ports`] entry (empty unless the port set
+    /// [`AperturePort::record`]). Sign convention: positive `i_branch`
+    /// flows FROM the aperture INTO the branch (`i = (v_term − v_src) /
+    /// (R + β)`), so a passive load reads `v_term·i ≥ 0` and the EMF's
+    /// supplied power is `−v_src·i`.
+    pub fn aperture_records(&self) -> &[Vec<(f64, f64, f64)>] {
+        &self.aperture_records
     }
 
     /// One full step injecting a Gaussian-in-time soft pulse on `E_z` at

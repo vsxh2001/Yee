@@ -169,6 +169,10 @@ pub struct AperturePort {
     pub resistance: f64,
     /// Series EMF waveform (`v0 = 0` for a passive matched load).
     pub waveform: Waveform,
+    /// Record the per-step `(v_src, v_terminal, i_branch)` triple
+    /// (FS.2a, ADR-0207) — the accepted-power observables. CPU-only for
+    /// now; the GPU backend rejects recording ports (`Unsupported`).
+    pub record: bool,
 }
 
 /// Per-step field sample recorded after each full step.

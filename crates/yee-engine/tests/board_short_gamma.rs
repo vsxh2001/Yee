@@ -196,6 +196,7 @@ fn measure_short(d_m: f64) -> (f64, f64, f64) {
             f0_hz: F0_HZ,
             bw_hz: BW_HZ,
             t0_steps,
+            record: false,
         }],
         probes: vec![
             mk_probe(i_a0),
