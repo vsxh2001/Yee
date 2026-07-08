@@ -209,6 +209,7 @@ pub fn verify_antenna_impl(
             i: model.port_cells[0].0,
             j_lo,
             j_hi,
+            k_lo: 0,
             k_top,
             resistance_ohm: 50.0,
             v0: 1.0,

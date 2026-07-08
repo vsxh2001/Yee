@@ -124,6 +124,7 @@ fn inset_fed_patch_is_matched_at_the_designed_resonance() {
             i: model.port_cells[0].0,
             j_lo,
             j_hi,
+            k_lo: 0,
             k_top,
             resistance_ohm: Z0_OHM,
             v0: DRIVE_V0,

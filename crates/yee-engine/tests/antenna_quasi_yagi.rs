@@ -5,7 +5,11 @@
 //! reflector; grid seeded by the FS.0a rulebook (no hand-set dx); measured
 //! with the single-run directional |S11| (the A.1 machinery).
 //!
-//! **STATUS: RED, measured, root-caused (ADR-0205) — awaiting FS.1a.1b.**
+//! **FS.1a.1b applied**: the lifted stack (`voxelize_microstrip_open`,
+//! air + CPML below the mid-domain ground sheet) + `AperturePortSpec::k_lo`
+//! replace the floor-ground fixture whose PEC bottom face acted as an
+//! infinite image plane — the measured root cause of the first two runs'
+//! |S11| ≈ 0 dB (dipole never driven; recorded in ADR-0205):
 //! Two instrumented runs (133/140 s) measured |S11| ≈ 0 dB across the
 //! band: the dipole is not driven. Root cause is the z-stack, not the
 //! layout: `voxelize_microstrip` puts the ground at `k = 0` **on the
@@ -35,13 +39,14 @@ use yee_engine::{
     sparams,
 };
 use yee_layout::{Substrate, quasi_yagi};
-use yee_voxel::{VoxelOptions, truncate_ground_at_cell, voxelize_microstrip};
+use yee_voxel::{VoxelOptions, truncate_ground_at_cell, voxelize_microstrip_open};
 
 const F0_HZ: f64 = 5.8e9;
 const EPS_R: f64 = 4.4;
 const H_M: f64 = 1.6e-3;
 const MARGIN_CELLS: usize = 34;
 const AIR_ABOVE_CELLS: usize = 34;
+const AIR_BELOW_CELLS: usize = 34;
 const Z0_OHM: f64 = 50.0;
 const BW_HZ: f64 = 4.0e9;
 const N_STEPS: usize = 9000;
@@ -72,13 +77,17 @@ fn antenna_quasi_yagi_resonates_at_the_designed_frequency() {
         dims.x_gnd_m * 1e3,
     );
 
-    let mut model = voxelize_microstrip(
+    // Lifted stack (FS.1a.1b): air + absorber BELOW the ground sheet, so
+    // past the truncation the antenna sees open space underneath instead
+    // of the domain floor's image plane.
+    let mut model = voxelize_microstrip_open(
         layout,
         &VoxelOptions {
             dx_m: dx,
             xy_margin_cells: MARGIN_CELLS,
             air_above_cells: AIR_ABOVE_CELLS,
         },
+        AIR_BELOW_CELLS,
     );
     let (nx, ny, nz) = model.dims;
     let dt = model.grid.dt;
@@ -131,14 +140,13 @@ fn antenna_quasi_yagi_resonates_at_the_designed_frequency() {
         nz,
         dx_m: dx,
         n_steps: N_STEPS,
-        // Open top (the A.1/A.2 antenna boundary): side walls + top absorb,
-        // the ground face stays PEC (the truncated ground needs its image
-        // plane only where the mask says so; the face itself is the k = 0
-        // boundary under the CPML-free bottom).
+        // All six faces absorb: the lifted stack frees the bottom face,
+        // so the only PEC in the domain is the masked (truncated) ground
+        // sheet and the traces — true open-space radiation.
         boundary: BoundarySpec::Cpml {
             npml: 10,
             axes: [true, true, true],
-            faces: Some([[true, true], [true, true], [false, true]]),
+            faces: Some([[true, true], [true, true], [true, true]]),
         },
         sources: vec![],
         ports: vec![],
@@ -146,6 +154,7 @@ fn antenna_quasi_yagi_resonates_at_the_designed_frequency() {
             i: model.port_cells[0].0,
             j_lo,
             j_hi,
+            k_lo: model.k_gnd,
             k_top,
             resistance_ohm: Z0_OHM,
             v0: 1.0,

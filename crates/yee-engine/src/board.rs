@@ -186,6 +186,7 @@ pub fn two_port_board_job(
         i,
         j_lo,
         j_hi,
+        k_lo: 0,
         k_top,
         resistance_ohm: opts.z0_ohm,
         v0,

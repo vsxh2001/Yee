@@ -90,6 +90,10 @@ pub struct VoxelOptions {
 /// A material-assigned FDTD model produced from a planar microstrip layout.
 #[derive(Debug)]
 pub struct MicrostripModel {
+    /// Ground-sheet layer index (`E_z` edge below the substrate): `0` for
+    /// the classic floor-ground stack ([`voxelize_microstrip`]); the
+    /// `air_below_cells` of a lifted stack ([`voxelize_microstrip_open`]).
+    pub k_gnd: usize,
     /// The Yee grid with per-cell `ε_r` and tangential `Ex`+`Ey` PEC masks attached.
     pub grid: YeeGrid,
     /// Grid cell dimensions `(nx, ny, nz)`.
@@ -114,6 +118,29 @@ pub struct MicrostripModel {
 /// resulting grid would have a zero dimension (an empty / degenerate bounding
 /// box with no margin).
 pub fn voxelize_microstrip(layout: &Layout, opts: &VoxelOptions) -> MicrostripModel {
+    voxelize_with_ground_level(layout, opts, 0)
+}
+
+/// Voxelize with a **lifted** z-stack (FS.1a.1b, ADR-0205): `air_below_cells`
+/// air layers under the ground sheet, so the domain floor is free air (an
+/// absorber can sit there) and the ground is a finite PEC sheet mid-domain —
+/// what a truncated-ground antenna (quasi-Yagi) needs, where the classic
+/// floor-ground stack lets the PEC bottom boundary act as an infinite image
+/// plane no mask truncation can remove. `air_below_cells = 0` is exactly
+/// [`voxelize_microstrip`]. Pair with `AperturePortSpec::k_lo = model.k_gnd`.
+pub fn voxelize_microstrip_open(
+    layout: &Layout,
+    opts: &VoxelOptions,
+    air_below_cells: usize,
+) -> MicrostripModel {
+    voxelize_with_ground_level(layout, opts, air_below_cells)
+}
+
+fn voxelize_with_ground_level(
+    layout: &Layout,
+    opts: &VoxelOptions,
+    k_gnd: usize,
+) -> MicrostripModel {
     let dx = opts.dx_m;
     assert!(
         dx.is_finite() && dx > 0.0,
@@ -151,7 +178,9 @@ pub fn voxelize_microstrip(layout: &Layout, opts: &VoxelOptions) -> MicrostripMo
     // ε_eff ≈ 2.5 vs analytic 3.33 until this gap was closed, after which it
     // measured 3.31, ADR-0108.)
     let n_sub = ((layout.substrate.height_m / dx).round() as usize).max(1);
-    let k_top = n_sub; // ground (k=0) + n_sub dielectric cells -> top-metal layer
+    // Ground sheet at k_gnd (0 in the classic stack; air_below_cells in the
+    // lifted stack) + n_sub dielectric cells -> top-metal layer.
+    let k_top = k_gnd + n_sub;
     let nz = k_top + 1 + opts.air_above_cells;
 
     let eps_r_sub = layout.substrate.eps_r;
@@ -180,7 +209,7 @@ pub fn voxelize_microstrip(layout: &Layout, opts: &VoxelOptions) -> MicrostripMo
     // plane) leaves NO air series gap at the ground — see the z-stack note above.
     for i in 0..nx {
         for j in 0..ny {
-            for k in 0..n_sub {
+            for k in k_gnd..k_top {
                 eps[(i, j, k)] = eps_r_sub;
             }
         }
@@ -190,7 +219,7 @@ pub fn voxelize_microstrip(layout: &Layout, opts: &VoxelOptions) -> MicrostripMo
     // (k = k_top, where the `Ex` node ((i+0.5)dx, j·dx) lies under a trace).
     for i in 0..nx {
         for j in 0..=ny {
-            pec_ex[(i, j, 0)] = true;
+            pec_ex[(i, j, k_gnd)] = true;
             let x = x0 + (i as f64 + 0.5) * dx;
             let y = y0 + j as f64 * dx;
             if in_trace(x, y) {
@@ -203,7 +232,7 @@ pub fn voxelize_microstrip(layout: &Layout, opts: &VoxelOptions) -> MicrostripMo
     // `Ey` node at (i·dx, (j+0.5)dx).
     for i in 0..=nx {
         for j in 0..ny {
-            pec_ey[(i, j, 0)] = true;
+            pec_ey[(i, j, k_gnd)] = true;
             let x = x0 + i as f64 * dx;
             let y = y0 + (j as f64 + 0.5) * dx;
             if in_trace(x, y) {
@@ -229,6 +258,7 @@ pub fn voxelize_microstrip(layout: &Layout, opts: &VoxelOptions) -> MicrostripMo
         .with_pec_mask_ey(pec_ey);
 
     MicrostripModel {
+        k_gnd,
         grid,
         dims: (nx, ny, nz),
         dx_m: dx,
@@ -334,6 +364,7 @@ pub fn truncate_ground_at_cell(model: &mut MicrostripModel, i_ground_end: usize)
     if i_ground_end >= nx {
         return;
     }
+    let kg = model.k_gnd;
     let ex = model
         .grid
         .pec_mask_ex
@@ -341,7 +372,7 @@ pub fn truncate_ground_at_cell(model: &mut MicrostripModel, i_ground_end: usize)
         .expect("truncate_ground_at_cell: model has no Ex PEC mask");
     for i in i_ground_end..nx {
         for j in 0..=ny {
-            ex[(i, j, 0)] = false;
+            ex[(i, j, kg)] = false;
         }
     }
     let ey = model
@@ -351,7 +382,7 @@ pub fn truncate_ground_at_cell(model: &mut MicrostripModel, i_ground_end: usize)
         .expect("truncate_ground_at_cell: model has no Ey PEC mask");
     for i in (i_ground_end + 1)..=nx {
         for j in 0..ny {
-            ey[(i, j, 0)] = false;
+            ey[(i, j, kg)] = false;
         }
     }
 }

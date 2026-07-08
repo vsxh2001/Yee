@@ -253,8 +253,15 @@ pub struct AperturePortSpec {
     pub j_lo: usize,
     /// Width band end (exclusive).
     pub j_hi: usize,
-    /// Substrate column height in cells: `E_z` edges `k = 0 .. k_top`
-    /// (ground at `k = 0`, trace at `k_top`).
+    /// Ground level in cells (FS.1a.1b, ADR-0205): the drive/measure
+    /// column spans `E_z` edges `k = k_lo .. k_top`. `0` (the serde
+    /// default — full wire back-compat) is the classic ground-on-the-
+    /// domain-floor stack; a lifted stack (`voxelize_microstrip_open`)
+    /// passes its `k_gnd`.
+    #[serde(default)]
+    pub k_lo: usize,
+    /// Trace level in cells: the column's top `E_z` edge (exclusive
+    /// bound is the trace plane; ground sheet at `k = k_lo`).
     pub k_top: usize,
     /// Aggregate branch resistance (Ohm).
     pub resistance_ohm: f64,
@@ -499,6 +506,12 @@ fn build_drive(spec: &JobSpec, fdtd_spec: &FdtdSpec, dt: f64) -> Result<Drive, S
                 "aperture_ports[{n}]: outside the E_z grid {ez_dims:?}"
             ));
         }
+        if a.k_lo >= a.k_top {
+            return Err(format!(
+                "aperture_ports[{n}]: k_lo {} must sit below k_top {}",
+                a.k_lo, a.k_top
+            ));
+        }
         if !(a.resistance_ohm > 0.0 && a.resistance_ohm.is_finite()) {
             return Err(format!(
                 "aperture_ports[{n}]: resistance must be positive and finite (got {})",
@@ -506,10 +519,10 @@ fn build_drive(spec: &JobSpec, fdtd_spec: &FdtdSpec, dt: f64) -> Result<Drive, S
             ));
         }
         let cells: Vec<(usize, usize, usize)> = (a.j_lo..a.j_hi)
-            .flat_map(|j| (0..a.k_top).map(move |k| (a.i, j, k)))
+            .flat_map(|j| (a.k_lo..a.k_top).map(move |k| (a.i, j, k)))
             .collect();
         let n_columns = a.j_hi - a.j_lo;
-        let height = a.k_top as f64 * fdtd_spec.dz;
+        let height = (a.k_top - a.k_lo) as f64 * fdtd_spec.dz;
         let area = n_columns as f64 * fdtd_spec.dy * height;
         drive.aperture_ports.push(AperturePort {
             cells,

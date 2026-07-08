@@ -117,6 +117,7 @@ fn patch_radiates_a_broadside_beam() {
             i: model.port_cells[0].0,
             j_lo,
             j_hi,
+            k_lo: 0,
             k_top,
             resistance_ohm: Z0_OHM,
             v0: DRIVE_V0,

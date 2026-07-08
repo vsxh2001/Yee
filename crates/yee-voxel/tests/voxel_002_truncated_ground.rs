@@ -8,7 +8,9 @@
 //! default. Milliseconds, no time-stepping.
 
 use yee_layout::{BBox, Layout, Point2, Polygon, PortRef, Substrate};
-use yee_voxel::{VoxelOptions, truncate_ground_at_cell, voxelize_microstrip};
+use yee_voxel::{
+    VoxelOptions, truncate_ground_at_cell, voxelize_microstrip, voxelize_microstrip_open,
+};
 
 const W: f64 = 3.0e-3;
 const L: f64 = 20.0e-3;
@@ -128,4 +130,43 @@ fn voxel_002_full_ground_is_the_untruncated_default() {
         noop.grid.pec_mask_ey.as_ref().unwrap(),
         "no-op truncation must leave Ey bit-identical"
     );
+}
+
+#[test]
+fn voxel_002_lifted_stack_puts_ground_mid_domain() {
+    let layout = line_layout();
+    let air_below = 6;
+    let mut model = voxelize_microstrip_open(&layout, &opts(), air_below);
+    let (nx, ny, nz) = model.dims;
+    assert_eq!(model.k_gnd, air_below);
+    // n_sub = round(1.6/0.5) = 3: trace plane sits n_sub above the ground.
+    let k_top = model.port_cells[0].2;
+    assert_eq!(k_top, air_below + 3);
+    assert_eq!(nz, k_top + 1 + 8);
+
+    let ex = model.grid.pec_mask_ex.as_ref().unwrap();
+    let eps = model.grid.eps_r_cells.as_ref().unwrap();
+    for j in 0..=ny {
+        // Domain floor is free air (no PEC), ground sheet at k_gnd.
+        assert!(!ex[(nx / 2, j, 0)], "floor must be open (j = {j})");
+        assert!(
+            ex[(nx / 2, j, air_below)],
+            "ground sheet at k_gnd (j = {j})"
+        );
+    }
+    // Dielectric fills k_gnd..k_top; air below and above.
+    assert_eq!(
+        eps[(nx / 2, ny / 2, air_below - 1)],
+        1.0,
+        "air below ground"
+    );
+    assert_eq!(eps[(nx / 2, ny / 2, air_below)], 4.4, "substrate base");
+    assert_eq!(eps[(nx / 2, ny / 2, k_top - 1)], 4.4, "substrate top");
+    assert_eq!(eps[(nx / 2, ny / 2, k_top)], 1.0, "air above trace plane");
+
+    // Truncation operates at k_gnd on the lifted stack too.
+    let g = nx / 2;
+    truncate_ground_at_cell(&mut model, g);
+    let ex = model.grid.pec_mask_ex.as_ref().unwrap();
+    assert!(ex[(g - 1, 0, air_below)] && !ex[(g, 0, air_below)]);
 }
