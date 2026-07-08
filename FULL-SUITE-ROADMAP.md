@@ -171,7 +171,7 @@ decisions; specs+plans in `docs/superpowers/`.
 
 | Phase | Scope (walking skeleton first) | Gate sketch | Status |
 |---|---|---|---|
-| **FS.0** | **Auto-mesh + convergence**: (a) graded/nonuniform grid support in yee-compute (the kernel is uniform-dx today — this is the enabling physics step, own sub-phases); (b) mesh rules from Layout (λ/20 bulk, refine at edges/gaps, substrate-height floor); (c) the convergence loop: solve → halve dx in flagged regions → re-solve until ‖ΔS‖ < tol — the FDTD analog of HFSS adaptive passes, runnable because GPU makes re-solves cheap | graded-grid kernel bit-exact vs uniform on a uniform spec; ε_eff/S-param gates reproduced on auto-meshed scenarios within tolerance; convergence loop reaches the R.4c answer without hand-set dx | queued — **top priority** |
+| **FS.0** | **Auto-mesh + convergence**. **FS.0a (walking skeleton) SHIPPED** (ADR-0204): `yee_engine::automesh` — `auto_dx` rulebook (λ/20-in-dielectric, h/3, min_feature/2, clamped) + `converge_two_port` adaptive-pass loop (dx/√2 per pass, everything cell-denominated held constant in metres, **linear** ΔS criterion per HFSS's ΔS convention, unconverged reported honestly). Three measured lessons: dB criteria blow up at deep notches (15.35 dB at a converged notch); constant-physics rescaling is necessary hygiene but wasn't the bug; the single-ratio observable's launch-equality assumption fails (+10…15 dB plane-A inequality from stub-reflection source re-pumping) — the loop measures the launch-normalized double ratio `\|T_dut\|/\|T_ref\|`, `T = fwd_B/fwd_A`. **FS.0b (queued)**: graded/nonuniform kernel (Taflove ch. 11, bit-exact-on-uniform gate) + refine-where-flagged rules — the measured motivation: the residual 0.198 pass-to-pass movement is all in the stub's staircase-limited open-end skirt, and the next uniform pass costs ~2.4 h | `engine-automesh-001` (release, in the blanket yee-engine CI gates step): the S.6 stub-notch board with **no hand-set dx anywhere** — auto_dx seeds 0.533 mm (h/3 binding), notch trajectory 5.100→4.900→4.850 GHz / −31.8→−35.1→−34.2 dB, converged err **3.0 %** (≤ 5 %) at ≥ 20 dB depth, loop verdict asserted at tol 0.20 (measured 0.1978) | **FS.0a SHIPPED**, FS.0b queued — **top priority** |
 | **FS.1** | **Antenna catalog**: FS.1a quasi-Yagi (one voxelizer option: truncated ground extent; Deal/Itoh closed-form seeds); FS.1b patch arrays (corporate feed generator + array-factor design response); FS.1c thin-wire subcell model (Holland/Noble) unlocking wire dipoles/Yagis/helices honestly on the grid | per-topology: closed-form seed + full-wave S11 + pattern gate (the A-track template); thin-wire vs the MoM NEC-4 dipole | queued |
 | **FS.2** | **Far-field products**: gain in dBi (input-power normalization via port incident power), radiation efficiency (accepted vs radiated), full-sphere pattern export (CSV/FFS-like), polarization split; studio pattern view (polar SVG) | gain of the validated dipole vs 2.15 dBi; efficiency = 1 lossless sanity; pattern export byte-checked | queued |
 | **FS.3** | **Layout import**: Gerber (RS-274X subset) and DXF → `Layout` polygons; round-trip gate with our own writer; then "import → verify → export" studio flow | import(export(L)) ≡ L byte-semantics; an imported reference board measures within tolerance of its native-built twin | queued |
@@ -188,6 +188,11 @@ the R.4c coupling-floor problem becomes cheap instead of 8× cells). FS.1/FS.2
 ride the existing uniform grid and can proceed in parallel lanes with FS.0's
 kernel work. FS.7 needs the user-side GPU runner.
 
-*Last updated: 2026-07-07 — opened with the (partially rate-limited) market
-research; re-run the verification pass when session budget allows and upgrade
-§1.1 claims from "sourced" to "verified".*
+*Last updated: 2026-07-08 — FS.0a SHIPPED (ADR-0204: auto_dx rulebook +
+convergence loop, gate engine-automesh-001 green with three measured
+lessons — linear ΔS criterion, constant-physics rescaling, and the
+launch-normalized double-ratio observable). §1.1 upgraded with the partial
+verification results (the two gprMax GPU claims panel-verified 3-0; CST
+pricing anchors, HFSS AMR-centrality, openEMS meshing-gap claims added as
+sourced); further verification deliberately stopped (session budget) — the
+remaining claims stay "sourced but not panel-verified".*
