@@ -54,15 +54,28 @@ radiation resistance — the FS.1a.0 mask truncation is necessary but not
 sufficient. Gate `engine-antenna-005` stays in-tree, `#[ignore]`'d and
 named `antenna_…` so the blanket CI step skips it; it turns green with:
 
-## Queued: FS.1a.1b — the lifted stack (open space below the ground)
+## FS.1a.1b — the lifted stack: SHIPPED, gate GREEN (same day)
 
-- A voxelizer variant with `air_below_cells`: ground sheet at
-  `k_gnd = air_below_cells` mid-domain, substrate above it, all-six-face
-  CPML; `MicrostripModel` records `k_gnd`;
-  `truncate_ground_at_cell` operates at `k_gnd` instead of the hard-wired 0.
-- `AperturePortSpec::k_lo` (serde-default 0 for full back-compat): the
-  drive/measure column becomes `k_lo .. k_top` on **both** backends (cpu.rs
-  loop + the R.3 WGSL kernel); compute-015 parity re-certified with the
-  default proving bit-exactness.
-- Then re-run engine-antenna-005; FS.1a.2 (end-fire/front-to-back NTFF
-  gate) follows.
+- `voxelize_microstrip_open(layout, opts, air_below_cells)`: ground sheet
+  at `k_gnd = air_below_cells` mid-domain, free air (and a bottom
+  absorber's room) beneath, dielectric `k_gnd..k_top`;
+  `MicrostripModel.k_gnd`; `truncate_ground_at_cell` operates at `k_gnd`.
+  `air_below_cells = 0` ≡ the classic stack (which delegates).
+- `AperturePortSpec::k_lo` (serde default 0, validated `< k_top`): the
+  drive/measure column spans `k_lo..k_top`. The compute-side
+  `AperturePort` was already cell-list based, so **no kernel change on
+  either backend** — the assumption lived only in the engine translation
+  and the voxelizer. All 15 construction sites pass `k_lo: 0`; every
+  existing path is bit-identical.
+- Gate re-run on the lifted stack + all-six-face CPML (the only PEC left
+  is the masked ground sheet + traces): **dip 5.950 GHz / −20.9 dB vs the
+  designed 5.80 GHz → 2.6 % error** (gate ≤ 10 %, depth pinned ≤ −10 dB),
+  broadband |S11| baseline −3…−4 dB (real radiated power), matched band
+  ≈ 5.8–6.4 GHz. The ε = 1.61 dipole calibration verified blind — the
+  mode landed where it predicted once the antenna could radiate.
+
+## Queued: FS.1a.2
+
+End-fire pattern + front-to-back NTFF gate (the A.2 machinery) — the
+wrong-phase-balun detector and the quasi-Yagi's purpose made
+machine-checkable.

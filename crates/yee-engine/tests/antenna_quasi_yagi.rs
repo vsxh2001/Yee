@@ -23,9 +23,12 @@
 //! queued as FS.1a.1b. The 7.15–7.5 GHz dip both runs saw is a feed-
 //! structure resonance (it moved only 5 % when the dipole grew 29 %).
 //!
-//! The test fn is named `antenna_…` so the blanket CI engine-gates step
-//! skips it (the antenna gates run as their own explicit CI job; this one
-//! joins that job when FS.1a.1b turns it green).
+//! **GREEN (measured 2026-07-08)**: dip **5.950 GHz / −20.9 dB** vs the
+//! designed 5.80 GHz → **2.6 %** error, broadband |S11| baseline −3…−4 dB
+//! (real radiation), matched band ≈ 5.8–6.4 GHz below −10 dB. The ε = 1.61
+//! dipole calibration verified blind. The test fn is named `antenna_…` so
+//! the blanket CI engine-gates step skips it; it runs in the antenna CI
+//! job.
 //!
 //! ```bash
 //! cargo test -p yee-engine --release --test antenna_quasi_yagi -- --ignored --nocapture
@@ -228,10 +231,11 @@ fn antenna_quasi_yagi_resonates_at_the_designed_frequency() {
         F0_HZ / 1e9,
         rel_err * 100.0
     );
-    // Tripwire (A.1 idiom): the scaling-rule seed must be measurably
-    // resonant; closing the match is a design-loop follow-on if shallow.
+    // Measured-then-pinned (house pattern): the first green run read
+    // −20.9 dB; −10 dB (≈ 2× linear margin) also IS the practical
+    // "usable match" bar for an antenna.
     assert!(
-        dip_db <= -1.0,
-        "engine-antenna-005 FAILED: dip only {dip_db:.1} dB — no measurable resonance"
+        dip_db <= -10.0,
+        "engine-antenna-005 FAILED: dip only {dip_db:.1} dB (measured −20.9 at ship time)"
     );
 }

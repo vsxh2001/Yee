@@ -336,6 +336,11 @@ jobs:
       - name: A.3 inset design loop (engine-antenna-004)
         run: cargo test -p yee-engine --release --test antenna_patch_match_loop -- --ignored --nocapture
 
+      # FS.1a (ADR-0205): the quasi-Yagi on the lifted truncated-ground
+      # stack (engine-antenna-005, one ~4 min release solve).
+      - name: FS.1a quasi-Yagi (engine-antenna-005)
+        run: cargo test -p yee-engine --release --test antenna_quasi_yagi -- --ignored --nocapture
+
   fdtd-coupling-gate:
     name: FDTD propagation ε_eff gate (fdtd-line-eeff, release)
     runs-on: ubuntu-latest
