@@ -86,6 +86,7 @@ fn automesh_pass_fit_diagnostics() {
     opts.margin_cells = (34.0 * dx0 / dx).round() as usize;
     opts.air_above_cells = (34.0 * dx0 / dx).round() as usize;
     opts.npml = (10.0 * dx0 / dx).round() as usize;
+    opts.spacing_cells = (12.0 * dx0 / dx).round() as usize;
 
     let run = |l: &Layout| -> (Vec<Vec<f64>>, f64, f64) {
         let job = two_port_board_job(l, &opts).expect("job build failed");
@@ -112,29 +113,33 @@ fn automesh_pass_fit_diagnostics() {
         opts.margin_cells
     );
     eprintln!(
-        "  f/GHz | ref: |fwd|      |bwd|    beta_fit beta_hj resid | dut: |fwd|      |bwd|    beta_fit resid | S21 dB"
+        "  f/GHz | refA|fwd| dutA|fwd| dutA/refA_dB | refB|fwd| dutB|fwd| B-ratio_dB | double-ratio S21 dB | beta_hj refB_beta dutB_resid"
     );
     for n in 0..=25 {
         let f = 3.5e9 + n as f64 * 100.0e6;
-        let d: Vec<(f64, f64)> = (3..6).map(|k| single_bin_dft(&dut_p[k], dt, f)).collect();
-        let r: Vec<(f64, f64)> = (3..6).map(|k| single_bin_dft(&ref_p[k], dt, f)).collect();
-        let rs = fit_standing_wave(r[0], r[1], r[2], spacing);
-        let ds = fit_standing_wave(d[0], d[1], d[2], spacing);
         let mag = |c: (f64, f64)| (c.0 * c.0 + c.1 * c.1).sqrt();
+        let split = |p: &[Vec<f64>], k0: usize| {
+            let v: Vec<(f64, f64)> = (k0..k0 + 3).map(|k| single_bin_dft(&p[k], dt, f)).collect();
+            fit_standing_wave(v[0], v[1], v[2], spacing)
+        };
+        let (ra, rb) = (split(&ref_p, 0), split(&ref_p, 3));
+        let (da, db) = (split(&dut_p, 0), split(&dut_p, 3));
         let beta_hj = 2.0 * std::f64::consts::PI * f * e_eff.sqrt() / C0_M_S;
+        let t_ref = mag(rb.fwd) / mag(ra.fwd);
+        let t_dut = mag(db.fwd) / mag(da.fwd);
         eprintln!(
-            "  {:5.2} | {:.3e} {:.3e} {:7.1} {:7.1} {:.3} | {:.3e} {:.3e} {:7.1} {:.3} | {:6.2}",
+            "  {:5.2} | {:.3e} {:.3e} {:6.2} | {:.3e} {:.3e} {:6.2} | {:6.2} | {:7.1} {:7.1} {:.3}",
             f / 1e9,
-            mag(rs.fwd),
-            mag(rs.bwd),
-            rs.beta_rad_m,
+            mag(ra.fwd),
+            mag(da.fwd),
+            20.0 * (mag(da.fwd) / mag(ra.fwd)).log10(),
+            mag(rb.fwd),
+            mag(db.fwd),
+            20.0 * (mag(db.fwd) / mag(rb.fwd)).log10(),
+            20.0 * (t_dut / t_ref).log10(),
             beta_hj,
-            rs.residual,
-            mag(ds.fwd),
-            mag(ds.bwd),
-            ds.beta_rad_m,
-            ds.residual,
-            20.0 * (mag(ds.fwd) / mag(rs.fwd)).log10(),
+            rb.beta_rad_m,
+            db.residual,
         );
     }
 }

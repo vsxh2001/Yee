@@ -118,7 +118,17 @@ pub struct Converged {
 }
 
 /// Run one two-port measurement (reference + DUT) at the given options;
-/// returns the directional |S21| curve.
+/// returns the |S21| curve from the **launch-normalized double ratio**
+/// `|T_dut| / |T_ref|` with `T = fwd_B/fwd_A` per run
+/// ([`sparams::forward_transfer`], the R.2-validated observable).
+///
+/// Deliberately NOT the single ratio `fwd_B(dut)/fwd_B(ref)`: that assumes
+/// both runs launch the same incident wave, and the automesh forensics
+/// (ADR-0204) measured that assumption failing at fine dx — the DUT read a
+/// clean-fit, non-physical +10.7 dB because its launch differed from the
+/// reference's. Normalizing each run by its own plane-A forward wave
+/// cancels the launch exactly; the reference division then removes the
+/// plane-A→plane-B line factor.
 fn measure(
     layout: &Layout,
     reference: &Layout,
@@ -143,13 +153,22 @@ fn measure(
     if dt != dt2 {
         return Err("passes diverged in dt".into());
     }
-    Ok(sparams::directional_transmission_db(
-        [&dut_p[3], &dut_p[4], &dut_p[5]],
-        [&ref_p[3], &ref_p[4], &ref_p[5]],
-        dt,
-        spacing,
-        freqs_hz,
-    ))
+    let transfer = |p: &[Vec<f64>]| {
+        sparams::forward_transfer(
+            [&p[0], &p[1], &p[2]],
+            [&p[3], &p[4], &p[5]],
+            dt,
+            spacing,
+            freqs_hz,
+        )
+    };
+    let t_dut = transfer(&dut_p);
+    let t_ref = transfer(&ref_p);
+    Ok(t_dut
+        .iter()
+        .zip(&t_ref)
+        .map(|(d, r)| 20.0 * (d.0.hypot(d.1) / r.0.hypot(r.1)).log10())
+        .collect())
 }
 
 /// The adaptive-pass loop (FDTD flavour of HFSS's adaptive refinement):
