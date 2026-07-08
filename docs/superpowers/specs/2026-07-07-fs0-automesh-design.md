@@ -47,9 +47,17 @@ manual meshing is the #1 practitioner-cited barrier to open-EM adoption).
 1. Convergence must be judged on **linear** |ΔS| (HFSS's ΔS convention),
    not dB — a converged deep notch still swings tens of dB per bin.
 2. The loop must hold the fixture's physical sizes (CPML margin, air
-   height, absorber depth) constant in metres as dx shrinks — the
-   first version scaled them in cells and the fine pass read a
-   non-physical +10.7 dB broadband |S21|.
+   height, absorber depth, probe spacing) constant in metres as dx
+   shrinks — hygiene, though measured NOT to be the cause of the fine-pass
+   blowup (doubling the boundary cell counts changed nothing).
+3. The measured root cause of the fine pass's non-physical +10.7 dB: the
+   single-ratio observable `fwd_B(dut)/fwd_B(ref)` assumes both runs
+   launch the same incident wave, and the stub's broadband reflection
+   re-pumping the imperfectly matched aperture source broke that
+   assumption (+10…15 dB at plane A). The loop measures the
+   launch-normalized double ratio `|T_dut|/|T_ref|`, `T = fwd_B/fwd_A`
+   per run (`sparams::forward_transfer`), which cancels the launch
+   exactly.
 
 ## Consequences
 

@@ -24,7 +24,7 @@ know, as code:
    (`Converged::converged = false`), never hidden. Each pass holds the
    **physics constant and varies only the discretization** — see lesson 2.
 
-## Two measured lessons (instrumented gate runs, 2026-07-08)
+## Three measured lessons (instrumented gate + forensic runs, 2026-07-08)
 
 1. **The convergence criterion is LINEAR |ΔS|, not dB.** The first gate run
    converged the notch physics (4.900 GHz across two consecutive passes) yet
@@ -35,16 +35,29 @@ know, as code:
    staircased FDTD at walking-skeleton fidelity: **0.10** (HFSS's reference
    point is ~0.02; FS.0b's graded grid is the path toward it).
 2. **Every pass must solve the same physical problem.** The board fixture
-   sizes its CPML margin, air-under-lid height, and CPML absorber depth in
-   *cells*; the first loop version left those counts fixed, so refining
-   dx 0.533 → 0.267 mm silently halved the physical margin/lid/absorber
-   (18.1 → 9.1 mm; CPML 5.3 → 2.7 mm). The per-bin dump showed the fine
-   pass reading a non-physical broadband |S21| up to **+10.7 dB**: the stub
-   junction scatters into the lowered lid's parallel-plate environment and
-   the thinned absorber, the clean reference line doesn't, and the
-   DUT/reference ratio explodes. Fix: the loop rescales `margin_cells`,
-   `air_above_cells`, and the new `TwoPortBoardOptions::npml` each pass to
-   hold their **metre** sizes constant; only dx/dt/n_steps vary.
+   sizes its CPML margin, air-under-lid height, absorber depth, and probe
+   spacing in *cells*; the loop rescales all of them (`margin_cells`,
+   `air_above_cells`, the newly exposed `TwoPortBoardOptions::npml`,
+   `spacing_cells`) to hold their **metre** sizes constant — only dx/dt/
+   n_steps vary. Honest attribution: this is hygiene, not the observed
+   bug's cause — a re-run with doubled margin/absorber cell counts
+   reproduced the pass-2 blowup to within 0.01 dB, exonerating the
+   boundaries.
+3. **The measurement must not assume the two runs launch the same wave.**
+   The real cause of the pass-2 blowup (a clean-fit, non-physical
+   broadband |S21| up to **+10.7 dB**): the S.12 single-ratio observable
+   `fwd_B(dut)/fwd_B(ref)` assumes launch equality, and the wave-split
+   forensics measured it failing — fit residuals ≤ 0.016 and β on the HJ
+   dispersion on both sides, but the DUT's **plane-A** forward wave sat
+   +10…+15 dB above the reference's. The shunt stub reflects strongly
+   across the whole band (|Γ| ≈ 0.7 even at the passband shoulders), and
+   that reflection re-pumps the imperfectly matched aperture source. The
+   loop now measures the **launch-normalized double ratio**
+   `|T_dut|/|T_ref|`, `T = fwd_B/fwd_A` per run
+   (`sparams::forward_transfer`, the R.2-validated observable): each run
+   normalizes by its own incident wave, so the launch cancels exactly.
+   With it, the same dx = 0.267 mm pass reads **−3.2 dB shoulders (TL
+   theory −2.9), a −33.0 dB notch at 5.00 GHz** — physical everywhere.
 
 ## Gate `engine-automesh-001` (release, up to 6 solves)
 
