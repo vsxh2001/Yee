@@ -309,6 +309,53 @@ pub fn with_via_at_cell(model: &mut MicrostripModel, i: usize, j: usize, k_top: 
     model.grid.pec_mask_ez = Some(mask);
 }
 
+/// Truncate the ground plane to the strip of the first `i_ground_end` grid
+/// columns (FS.1a.0, ADR-0205): the `k = 0` tangential-E PEC then covers
+/// exactly `x ∈ [grid x₀, grid x₀ + i_ground_end·dx]` and the rest of the
+/// bottom layer is open substrate. This is the quasi-Yagi's defining
+/// structural feature — the truncated ground *is* the reflector element —
+/// and follows the [`with_via_at_cell`] post-processing idiom (cell-index
+/// frame; callers map layout-frame x through the same
+/// `x₀ = bbox.min.x − margin` origin the voxelizer used).
+///
+/// Edge rule, documented so the boundary is exact: the ground edge sits on
+/// the plane `x = x₀ + i_ground_end·dx`. `Ex` nodes (centred at
+/// `(i + 0.5)·dx`) stay PEC for `i < i_ground_end`; `Ey` nodes (at `i·dx`,
+/// on-or-inside the edge) stay PEC for `i ≤ i_ground_end`. Trace masks at
+/// `k_top` are untouched. `i_ground_end ≥ nx` is a no-op (full ground) so
+/// callers can pass a clamped layout coordinate without special-casing.
+///
+/// # Panics
+///
+/// Panics if the model was built without the `Ex`/`Ey` PEC masks (every
+/// [`voxelize_microstrip`] model has them).
+pub fn truncate_ground_at_cell(model: &mut MicrostripModel, i_ground_end: usize) {
+    let (nx, ny, _) = model.dims;
+    if i_ground_end >= nx {
+        return;
+    }
+    let ex = model
+        .grid
+        .pec_mask_ex
+        .as_mut()
+        .expect("truncate_ground_at_cell: model has no Ex PEC mask");
+    for i in i_ground_end..nx {
+        for j in 0..=ny {
+            ex[(i, j, 0)] = false;
+        }
+    }
+    let ey = model
+        .grid
+        .pec_mask_ey
+        .as_mut()
+        .expect("truncate_ground_at_cell: model has no Ey PEC mask");
+    for i in (i_ground_end + 1)..=nx {
+        for j in 0..ny {
+            ey[(i, j, 0)] = false;
+        }
+    }
+}
+
 /// Test whether point `p` lies inside polygon `poly` via the standard
 /// even-odd ray-cast (crossing-number) rule.
 ///
