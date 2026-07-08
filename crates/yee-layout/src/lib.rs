@@ -942,6 +942,237 @@ pub fn quasi_yagi(f0_hz: f64, substrate: &Substrate, feed_z0_ohm: f64) -> QuasiY
     }
 }
 
+/// 2×1 patch-array seed dimensions (FS.1b, ADR-0206). Lengths in metres;
+/// layout frame: patch left edges at `x = 0`, array symmetric about
+/// `y = 0`, port at the −x end of the feed spine.
+#[derive(Debug, Clone, Copy)]
+pub struct PatchArrayDims {
+    /// Single-element dims (Balanis, the A.0-certified closed form).
+    pub patch: PatchDims,
+    /// Centre-to-centre element spacing (0.5 λ₀).
+    pub spacing_m: f64,
+    /// 50 Ω line width.
+    pub feed_width_m: f64,
+    /// λg/4 impedance-transformer width (≈ 70.7 Ω).
+    pub xfmr_width_m: f64,
+    /// Transformer length (λg at 70.7 Ω / 4).
+    pub xfmr_len_m: f64,
+    /// Inset depth used on each element (the A.3-measured 0.25·L).
+    pub inset_m: f64,
+    /// x of the corporate junction / vertical tree centreline.
+    pub x_junction_m: f64,
+}
+
+/// A generated 2×1 array: the layout plus its seed dims.
+#[derive(Debug, Clone)]
+pub struct PatchArray {
+    /// Traces + the single feed port.
+    pub layout: Layout,
+    /// The seed dimensions used.
+    pub dims: PatchArrayDims,
+}
+
+/// Generate a **2×1 corporate-fed patch array** (FS.1b): two inset-fed
+/// patches side by side along y (H-plane pair) at 0.5 λ₀ spacing, fed in
+/// phase through a symmetric corporate tree — 50 Ω spine → junction → two
+/// λg/4 **70.7 Ω transformers** along ±y (each transforms the branch's
+/// 50 Ω to 100 Ω; the two in parallel present 50 Ω at the junction) →
+/// 50 Ω branches → each element's inset (the A.3-measured 0.25·L depth).
+/// Phase balance is exact by mirror symmetry, so the tree's corner path
+/// errors (the R.6 κ effect) can only detune the common match — which the
+/// S11 gate measures.
+pub fn patch_array_2x1(f0_hz: f64, substrate: &Substrate, feed_z0_ohm: f64) -> PatchArray {
+    const C: f64 = 299_792_458.0;
+    let patch = patch_antenna_dims(f0_hz, substrate.eps_r, substrate.height_m);
+    let (w, l) = (patch.width_m, patch.length_m);
+    let lambda0 = C / f0_hz;
+    let d = 0.5 * lambda0; // centre-to-centre spacing
+    let inset = 0.25 * l; // the A.3-measured 50 Ω depth on this stack
+
+    let h = substrate.height_m;
+    let w50 = microstrip_width(feed_z0_ohm, substrate.eps_r, h);
+    let w_x = microstrip_width(feed_z0_ohm * std::f64::consts::SQRT_2, substrate.eps_r, h);
+    let e_x = eps_eff(w_x, h, substrate.eps_r);
+    let l_x = C / (f0_hz * e_x.sqrt()) / 4.0; // λg/4 at 70.7 Ω
+    let e50 = eps_eff(w50, h, substrate.eps_r);
+    let spine_len = C / (2.0 * f0_hz * e50.sqrt()); // λg/2: probe room
+
+    // Vertical tree centreline, left of the patches with room for the
+    // horizontal per-element runs.
+    let x_v = -(4.0 * w50);
+    let x_port = x_v - spine_len;
+    let gap = w50; // inset notch gap each side of a feed (A.1 convention)
+
+    let mut traces = vec![
+        // Feed spine along x, centred on y = 0, overlapping the tree.
+        Polygon::rect(x_port, -w50 / 2.0, spine_len + w_x, w50),
+    ];
+    for sgn in [1.0_f64, -1.0] {
+        let yc = sgn * d / 2.0; // this element's centreline
+        // λg/4 transformer from the junction outward.
+        let y_lo = if sgn > 0.0 { -w50 / 2.0 } else { -l_x };
+        traces.push(Polygon::rect(x_v - w_x / 2.0, y_lo, w_x, l_x + w50 / 2.0));
+        // 50 Ω vertical from the transformer end to the element row.
+        let seg = d / 2.0 - l_x + w50;
+        let y_lo = if sgn > 0.0 {
+            l_x - w50 / 2.0
+        } else {
+            -(l_x - w50 / 2.0) - seg
+        };
+        traces.push(Polygon::rect(x_v - w50 / 2.0, y_lo, w50, seg));
+        // Horizontal 50 Ω feed into the element's inset.
+        traces.push(Polygon::rect(
+            x_v - w50 / 2.0,
+            yc - w50 / 2.0,
+            inset - (x_v - w50 / 2.0),
+            w50,
+        ));
+        // The element (the 3 non-feed rects of the A.1 inset construction,
+        // translated to yc).
+        traces.push(Polygon::rect(
+            0.0,
+            yc + w50 / 2.0 + gap,
+            l,
+            w / 2.0 - w50 / 2.0 - gap,
+        ));
+        traces.push(Polygon::rect(
+            0.0,
+            yc - w / 2.0,
+            l,
+            w / 2.0 - w50 / 2.0 - gap,
+        ));
+        traces.push(Polygon::rect(
+            inset,
+            yc - (w50 / 2.0 + gap),
+            l - inset,
+            w50 + 2.0 * gap,
+        ));
+    }
+
+    let port = PortRef {
+        at: Point2::new(x_port, 0.0),
+        width_m: w50,
+        ref_impedance_ohm: feed_z0_ohm,
+    };
+    let bbox = BBox::from_polygons(&traces);
+    PatchArray {
+        layout: Layout {
+            substrate: *substrate,
+            traces,
+            ports: vec![port],
+            bbox,
+        },
+        dims: PatchArrayDims {
+            patch,
+            spacing_m: d,
+            feed_width_m: w50,
+            xfmr_width_m: w_x,
+            xfmr_len_m: l_x,
+            inset_m: inset,
+            x_junction_m: x_v,
+        },
+    }
+}
+
+#[cfg(test)]
+mod patch_array_tests {
+    use super::*;
+
+    fn fr4() -> Substrate {
+        Substrate {
+            eps_r: 4.4,
+            height_m: 1.6e-3,
+            loss_tangent: 0.0,
+            metal_thickness_m: 35e-6,
+        }
+    }
+
+    fn aabb(p: &Polygon) -> (f64, f64, f64, f64) {
+        let (mut x0, mut y0, mut x1, mut y1) = (
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        );
+        for v in &p.verts {
+            x0 = x0.min(v.x);
+            y0 = y0.min(v.y);
+            x1 = x1.max(v.x);
+            y1 = y1.max(v.y);
+        }
+        (x0, y0, x1, y1)
+    }
+
+    #[test]
+    fn array_is_mirror_symmetric_and_connected() {
+        let pa = patch_array_2x1(2.45e9, &fr4(), 50.0);
+        let boxes: Vec<_> = pa.layout.traces.iter().map(aabb).collect();
+        // Mirror symmetry about y = 0: every box's mirror is present.
+        for b in &boxes {
+            let mirrored = (b.0, -b.3, b.2, -b.1);
+            assert!(
+                boxes.iter().any(|c| (c.0 - mirrored.0).abs() < 1e-12
+                    && (c.1 - mirrored.1).abs() < 1e-12
+                    && (c.2 - mirrored.2).abs() < 1e-12
+                    && (c.3 - mirrored.3).abs() < 1e-12),
+                "no mirror partner for {b:?}"
+            );
+        }
+        // Single connected component. Unlike the quasi-Yagi joints (drawn
+        // segments that must genuinely overlap), the patch bands reuse the
+        // certified inset construction whose rects share EXACT edges (same
+        // arithmetic expressions) — contiguous metal under rasterization.
+        // So connectivity here = closed-interval touch with positive
+        // shared length (corner-point contact does not count).
+        let overlaps = |a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)| {
+            let x_touch = a.0 <= b.2 + 1e-12 && b.0 <= a.2 + 1e-12;
+            let y_touch = a.1 <= b.3 + 1e-12 && b.1 <= a.3 + 1e-12;
+            let x_len = a.2.min(b.2) - a.0.max(b.0);
+            let y_len = a.3.min(b.3) - a.1.max(b.1);
+            x_touch && y_touch && (x_len > 1e-12 || y_len > 1e-12)
+        };
+        let n = boxes.len();
+        let mut comp: Vec<usize> = (0..n).collect();
+        fn root(comp: &mut [usize], mut i: usize) -> usize {
+            while comp[i] != i {
+                comp[i] = comp[comp[i]];
+                i = comp[i];
+            }
+            i
+        }
+        for i in 0..n {
+            for j in (i + 1)..n {
+                if overlaps(boxes[i], boxes[j]) {
+                    let (ri, rj) = (root(&mut comp, i), root(&mut comp, j));
+                    comp[ri] = rj;
+                }
+            }
+        }
+        let r0 = root(&mut comp, 0);
+        for i in 1..n {
+            assert_eq!(root(&mut comp, i), r0, "trace {i} disconnected");
+        }
+    }
+
+    #[test]
+    fn seed_dims_match_the_closed_forms() {
+        let pa = patch_array_2x1(2.45e9, &fr4(), 50.0);
+        let d = pa.dims;
+        let single = patch_antenna_dims(2.45e9, 4.4, 1.6e-3);
+        assert!((d.patch.length_m - single.length_m).abs() < 1e-12);
+        assert!((d.spacing_m - 0.5 * 299_792_458.0 / 2.45e9).abs() < 1e-12);
+        // λg/4 at 70.7 Ω.
+        let w_x = microstrip_width(50.0 * std::f64::consts::SQRT_2, 4.4, 1.6e-3);
+        let lg = 299_792_458.0 / (2.45e9 * eps_eff(w_x, 1.6e-3, 4.4).sqrt());
+        assert!((d.xfmr_len_m - lg / 4.0).abs() < 1e-12);
+        assert!((d.inset_m - 0.25 * single.length_m).abs() < 1e-12);
+        // Elements clear the tree: junction left of the patches.
+        assert!(d.x_junction_m < 0.0);
+        // The transformer must end before the element row.
+        assert!(d.xfmr_len_m < d.spacing_m / 2.0);
+    }
+}
+
 #[cfg(test)]
 mod quasi_yagi_tests {
     use super::*;
