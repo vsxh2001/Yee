@@ -74,8 +74,12 @@ named `antenna_…` so the blanket CI step skips it; it turns green with:
   ≈ 5.8–6.4 GHz. The ε = 1.61 dipole calibration verified blind — the
   mode landed where it predicted once the antenna could radiate.
 
-## Queued: FS.1a.2
+## FS.1a.2 — end-fire pattern gate: SHIPPED, GREEN first run
 
-End-fire pattern + front-to-back NTFF gate (the A.2 machinery) — the
-wrong-phase-balun detector and the quasi-Yagi's purpose made
-machine-checkable.
+`engine-antenna-006` (azimuth NTFF cut at the measured 5.95 GHz, lifted
+stack — the box's bottom face sits in free air below the ground sheet):
+**F/B = 12.3 dB** (pinned ≥ 6), main lobe toward the director (−1.9 dB at
+±30°, −6.4 dB at 60°), minimum exactly over the reflector at φ = 180°.
+The balun's 180° split verified by radiation physics, not just match.
+FS.1a is complete: truncated ground → generator → S11 → pattern, all
+gated, both antenna gates in the antenna CI job.

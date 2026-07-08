@@ -341,6 +341,11 @@ jobs:
       - name: FS.1a quasi-Yagi (engine-antenna-005)
         run: cargo test -p yee-engine --release --test antenna_quasi_yagi -- --ignored --nocapture
 
+      # FS.1a.2 (ADR-0205): the end-fire pattern + F/B gate
+      # (engine-antenna-006, one ~9 min release solve with per-step NTFF).
+      - name: FS.1a.2 quasi-Yagi pattern (engine-antenna-006)
+        run: cargo test -p yee-engine --release --test antenna_quasi_yagi_pattern -- --ignored --nocapture
+
   fdtd-coupling-gate:
     name: FDTD propagation ε_eff gate (fdtd-line-eeff, release)
     runs-on: ubuntu-latest

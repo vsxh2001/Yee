@@ -14,7 +14,11 @@
 //! Azimuth cut (θ = 90°, the substrate plane): the beam must point
 //! toward **+x** (φ = 0, the director side): forward beats backward
 //! (φ = 180°, over the ground/reflector) and both broadside directions
-//! (φ = ±90°).
+//! (φ = ±90°); F/B pinned ≥ 6 dB.
+//!
+//! **GREEN first run (2026-07-08)**: F/B **12.3 dB**, main lobe −1.9 dB
+//! at ±30°, −6.4 dB at 60°, pattern minimum exactly at φ = 180° — the
+//! balun's 180° split works and the ground edge reflects.
 //!
 //! ```bash
 //! cargo test -p yee-engine --release --test antenna_quasi_yagi_pattern -- --ignored --nocapture
@@ -176,9 +180,12 @@ fn antenna_quasi_yagi_beam_fires_end_on() {
         "engine-antenna-006 FAILED: no forward radiation captured"
     );
     // End-fire: forward beats backward and both broadside directions.
+    // Measured-then-pinned: the first green run read F/B = 12.3 dB (real
+    // quasi-Yagi territory); 6 dB is the 2× floor.
     assert!(
-        fwd > bwd,
-        "engine-antenna-006 FAILED: beam not end-fire (fwd {fwd:.3e} vs bwd {bwd:.3e})"
+        20.0 * (fwd / bwd).log10() >= 6.0,
+        "engine-antenna-006 FAILED: front-to-back only {:.1} dB (measured 12.3 at ship time)",
+        20.0 * (fwd / bwd).log10()
     );
     for &n in &[3usize, 9] {
         assert!(
