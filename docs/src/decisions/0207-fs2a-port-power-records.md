@@ -38,9 +38,31 @@ Lossless matched through line, both ports recording:
 - passive-branch sample-wise sanity `v_term·i ≥ 0` (a load only
   dissipates).
 
+## FS.2b (same ADR): the absolute-scale forensic — three measured results
+
+1. **`farfield::gain_dbi` shipped** (normalization chain audited and
+   documented in the module: NTFF = continuous-transform pattern
+   amplitude; accepted density = per-frequency circuit-side identity;
+   every 1/π and DFT scale cancels in G = 4π|F|²/(η₀·p_acc)).
+2. **Gate `engine-scale-001` GREEN — the NTFF absolute scale is right.**
+   Soft `E_z += s` is an exactly-known Hertzian moment
+   (I·dl = ε₀·dx³·S(ω)/dt); measured NTFF/analytic = **1.048 (θ = 90°) /
+   1.029 (45°)**, reproducible to 3 decimals across dx ∈ {1.5, 2, 2.5} mm
+   × f ∈ {1.8, 2.45, 3.2} GHz. Lesson: the first attempt used a BASEBAND
+   Gaussian and measured ±40 % direction-dependent scatter — near-DC
+   energy survives the CPML and leaks into the single-bin DFT; the
+   zero-DC `SourceSpec::GaussianPulseEz` was added for it.
+3. **Gate `engine-gain-001` RED, root-cause hypothesis.** Patch read
+   22.15 dBi (physics caps it at ~3–6), array 23.92, while the
+   differential (1.77 dB) and all relative patterns stay healthy. With
+   the transform and the port power both independently certified, the
+   excess isolates to the fixture: the voxelizer's substrate slab spans
+   the whole domain, so the equivalence box intersects dielectric where
+   the strongest guided fields live and free-space η₀ misprices them.
+
 ## Queued
 
-FS.2b: audit the NtffState |E| normalization, `farfield::gain_dbi`,
-patch 5–8 dBi textbook window + the 2×1-vs-single array-gain
-differential. FS.2c: efficiency + full-sphere export. GPU port-record
-readback.
+**FS.2b.1**: finite-extent substrate in the voxelizer (real boards end;
+the NTFF box then passes through air — the openEMS practice), then
+re-measure engine-gain-001. FS.2c: efficiency + full-sphere export. GPU
+port-record readback.

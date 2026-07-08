@@ -111,6 +111,23 @@ pub enum SourceSpec {
         /// Pulse width, in steps.
         sigma_steps: f64,
     },
+    /// Soft **modulated** Gaussian on `E_z` (FS.2b): zero-DC drive for
+    /// absolute far-field references — a baseband Gaussian's near-DC
+    /// content rings in a CPML box far past any practical window and
+    /// leaks into single-bin far-field DFTs (measured: ±40 % scatter in
+    /// the engine-scale-001 Hertzian ratios before this variant).
+    GaussianPulseEz {
+        /// Source cell.
+        cell: (usize, usize, usize),
+        /// Peak amplitude (field units per step).
+        v0: f64,
+        /// Carrier (Hz).
+        f0_hz: f64,
+        /// FWHM bandwidth (Hz).
+        bw_hz: f64,
+        /// Pulse centre, in steps.
+        t0_steps: usize,
+    },
 }
 
 /// Resistive drive port description.
@@ -489,6 +506,22 @@ fn build_drive(spec: &JobSpec, fdtd_spec: &FdtdSpec, dt: f64) -> Result<Drive, S
                 waveform: Waveform::Gaussian {
                     t0: t0_steps * dt,
                     sigma: sigma_steps * dt,
+                },
+            }),
+            SourceSpec::GaussianPulseEz {
+                cell,
+                v0,
+                f0_hz,
+                bw_hz,
+                t0_steps,
+            } => drive.soft_sources.push(SoftSource {
+                component: EComponent::Ez,
+                cell,
+                waveform: Waveform::GaussianPulse {
+                    v0,
+                    f0: f0_hz,
+                    bw: bw_hz,
+                    t0_steps,
                 },
             }),
         }

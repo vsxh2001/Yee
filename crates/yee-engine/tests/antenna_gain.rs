@@ -8,10 +8,22 @@
 //! 2. the FS.1b 2×1 corporate array — pattern multiplication adds
 //!    ~+3 dB of directivity over the single element.
 //!
-//! The **differential** (array − single) is the sharp assert: it cancels
-//! the shared normalization chain (NTFF convention, port accounting,
-//! staircase bias), leaving the array-gain identity. The absolute
-//! windows stay loose until measured, then get pinned (house pattern).
+//! **STATUS: RED, measured, root-cause hypothesis (ADR-0207) — awaiting
+//! FS.2b.1.** First run: single patch **22.15 dBi**, array 23.92 dBi —
+//! absolute levels ~13 dB above physics (the aperture-size diffraction
+//! cap for this patch is ~3–6 dBi), while the DIFFERENTIAL (1.77 dB, in
+//! [1.5, 4.5]) and every relative pattern gate stay healthy. The
+//! engine-scale-001 Hertzian pin then certified the NTFF transform to
+//! 3–5 % in free space and the FS.2a identity certified the port power —
+//! isolating the excess to the fixture: `voxelize_microstrip` fills the
+//! substrate slab across the WHOLE domain, so the equivalence box
+//! necessarily intersects dielectric exactly where the strongest guided
+//! fields live, and the transform propagates those samples with
+//! free-space η₀. Queued fix (FS.2b.1): finite-extent substrate in the
+//! voxelizer (real boards end!), then re-measure. The differential
+//! remains asserted; the absolute window assert is the design contract
+//! and stays red until then. Test fn named `antenna_…` so the blanket CI
+//! step skips it.
 //!
 //! ```bash
 //! cargo test -p yee-engine --release --test antenna_gain -- --ignored --nocapture
