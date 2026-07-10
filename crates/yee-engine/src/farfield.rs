@@ -63,6 +63,64 @@ pub fn gain_dbi(e_far_mag: f64, p_acc: f64) -> f64 {
     10.0 * g.log10()
 }
 
+/// A midpoint-rule (θ, φ) sphere raster for [`radiation_efficiency`]:
+/// `θ_i = (i+0.5)·π/n_theta`, `φ_j = j·2π/n_phi`, row-major θ-outer —
+/// pass straight to `NtffSpec::directions`.
+pub fn sphere_grid(n_theta: usize, n_phi: usize) -> Vec<(f64, f64)> {
+    let mut dirs = Vec::with_capacity(n_theta * n_phi);
+    for i in 0..n_theta {
+        let theta = (i as f64 + 0.5) * std::f64::consts::PI / n_theta as f64;
+        for j in 0..n_phi {
+            let phi = j as f64 * std::f64::consts::TAU / n_phi as f64;
+            dirs.push((theta, phi));
+        }
+    }
+    dirs
+}
+
+/// Radiation efficiency `η = ∮|F|²dΩ / (η₀·p_acc)` (FS.2c): the gain
+/// theorem `∮G dΩ = 4π·η` evaluated by midpoint quadrature over a
+/// [`sphere_grid`]-ordered |F| raster. `1` for a lossless antenna (up to
+/// the NTFF scale, quadrature, and absorber leakage); drops with
+/// substrate/conductor loss.
+///
+/// # Panics
+///
+/// Panics if `e_far` is not `n_theta·n_phi` long or `p_acc ≤ 0`.
+pub fn radiation_efficiency(e_far: &[f64], n_theta: usize, n_phi: usize, p_acc: f64) -> f64 {
+    assert_eq!(e_far.len(), n_theta * n_phi, "raster shape mismatch");
+    assert!(p_acc > 0.0 && p_acc.is_finite(), "p_acc must be positive");
+    let d_theta = std::f64::consts::PI / n_theta as f64;
+    let d_phi = std::f64::consts::TAU / n_phi as f64;
+    let mut integral = 0.0;
+    for i in 0..n_theta {
+        let theta = (i as f64 + 0.5) * d_theta;
+        let w = theta.sin() * d_theta * d_phi;
+        for j in 0..n_phi {
+            let f = e_far[i * n_phi + j];
+            integral += f * f * w;
+        }
+    }
+    integral / (ETA0 * p_acc)
+}
+
+/// Render a full-sphere pattern as CSV (`theta_deg,phi_deg,e_far,gain_dbi`
+/// header + one row per direction) — the FS.2c export artifact. Stable
+/// formatting (`{:.6e}`) so exports are byte-checkable.
+pub fn pattern_csv(directions: &[(f64, f64)], e_far: &[f64], p_acc: f64) -> String {
+    let mut out = String::from("theta_deg,phi_deg,e_far,gain_dbi\n");
+    for (&(theta, phi), &f) in directions.iter().zip(e_far) {
+        out.push_str(&format!(
+            "{:.3},{:.3},{:.6e},{:.3}\n",
+            theta.to_degrees(),
+            phi.to_degrees(),
+            f,
+            gain_dbi(f, p_acc),
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,5 +153,30 @@ mod tests {
     #[should_panic(expected = "accepted power density must be positive")]
     fn passive_record_is_rejected() {
         gain_dbi(1.0, 0.0);
+    }
+
+    #[test]
+    fn isotropic_radiator_has_unit_efficiency() {
+        // G = 1 everywhere → η = 1; the midpoint rule integrates sin θ
+        // exactly enough that 24×24 is well under 0.1 %.
+        let (nt, np) = (24, 24);
+        let p = 0.015;
+        let f_mag = (ETA0 * p / (4.0 * std::f64::consts::PI)).sqrt();
+        let e: Vec<f64> = vec![f_mag; nt * np];
+        let eta = radiation_efficiency(&e, nt, np, p);
+        assert!((eta - 1.0).abs() < 1e-3, "η = {eta}");
+    }
+
+    #[test]
+    fn sphere_grid_shape_and_csv_are_stable() {
+        let dirs = sphere_grid(3, 4);
+        assert_eq!(dirs.len(), 12);
+        assert!((dirs[0].0.to_degrees() - 30.0).abs() < 1e-9);
+        let e = vec![1.0e-11; 12];
+        let csv = pattern_csv(&dirs, &e, 1.0e-23);
+        assert!(csv.starts_with("theta_deg,phi_deg,e_far,gain_dbi\n"));
+        assert_eq!(csv.lines().count(), 13);
+        // Byte-stability: same inputs, same bytes.
+        assert_eq!(csv, pattern_csv(&dirs, &e, 1.0e-23));
     }
 }
