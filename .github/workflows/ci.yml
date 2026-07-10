@@ -359,6 +359,11 @@ jobs:
       - name: FS.2b gain in dBi (engine-gain-001)
         run: cargo test -p yee-engine --release --test antenna_gain -- --ignored --nocapture
 
+      # FS.2c (ADR-0207): radiation efficiency + full-sphere export
+      # (engine-eff-001, 2 solves + 192-direction NTFF, ~16 min).
+      - name: FS.2c efficiency (engine-eff-001)
+        run: cargo test -p yee-engine --release --test antenna_efficiency -- --ignored --nocapture
+
   fdtd-coupling-gate:
     name: FDTD propagation ε_eff gate (fdtd-line-eeff, release)
     runs-on: ubuntu-latest

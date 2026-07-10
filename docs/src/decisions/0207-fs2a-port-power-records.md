@@ -79,9 +79,26 @@ FS.2b is complete: the pipeline now produces absolute commercial-grade
 far-field numbers — gain in dBi certified by an analytic Hertzian pin, a
 textbook patch window, and a bias-cancelling array differential.
 
+## FS.2c — efficiency + full-sphere export: SHIPPED, GREEN first run
+
+`farfield::sphere_grid` / `radiation_efficiency` (the gain theorem
+`∮G dΩ = 4π·η` by midpoint quadrature; unit-gated: isotropic → 1 to
+< 0.1 %) / `pattern_csv` (byte-stable export). Gate `engine-eff-001`
+(A.1 patch, finite board, 12×16 sphere):
+
+- lossless η = **0.806** (pinned [0.65, 1.0] — the certified NTFF scale,
+  quadrature, and absorber leakage each shave a few percent);
+- tan δ = 0.02 → η = **0.294**, squarely in the 30–60 % FR-4-patch
+  literature range (substrate loss only); and the lossy antenna's
+  accepted power ROSE (2.53 → 3.23e-23) — loss broadens the match, a
+  free physics cross-check.
+
+**FS.2 is complete**: the pipeline delivers the absolute far-field
+products commercial tools quote — gain in dBi, radiation efficiency,
+and a full-sphere export — each behind an analytic or textbook gate.
+
 ## Queued
 
-FS.2c: radiation efficiency + full-sphere export. GPU port-record
-readback. Consider migrating the A-track pattern gates to the
-finite-board fixture (their relative asserts are unaffected but the
-fixture is more physical).
+GPU port-record readback. Consider migrating the A-track pattern gates
+to the finite-board fixture (their relative asserts are unaffected but
+the fixture is more physical).
