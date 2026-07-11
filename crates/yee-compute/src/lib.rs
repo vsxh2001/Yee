@@ -22,6 +22,13 @@
 //! `docs/superpowers/specs/2026-07-05-gpu-engine-web-studio-design.md` and
 //! `docs/superpowers/specs/2026-07-06-e1-cpml-materials-design.md`.
 //!
+//! FS.0b.0 (ADR-0208) adds per-axis nonuniform primal spacings to the CPU
+//! backend ([`GradedSpacings`] + [`CpuFdtd::set_spacings`]): H updates
+//! divide by the primal cell width, E updates by the dual spacing, gated
+//! bit-exact on uniform arrays (`compute-018`) and by a measured graded
+//! interface-reflection floor (`compute-019`). CPU-only — the GPU backend
+//! has no spacings input yet.
+//!
 //! # Example
 //!
 //! ```
@@ -55,7 +62,7 @@ pub use engine::FdtdEngine;
 pub use error::ComputeError;
 pub use fields::Fields;
 pub use materials::{Boundary, CpmlConfig, Materials};
-pub use spec::FdtdSpec;
+pub use spec::{FdtdSpec, GradedSpacings};
 
 #[cfg(feature = "gpu")]
 pub use gpu::GpuFdtd;
