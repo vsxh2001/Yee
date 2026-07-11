@@ -157,6 +157,7 @@ fn line_eeff_over_job_protocol_matches_hammerstad_jensen() {
         ntff: None,
         materials: Some(materials),
         dt_s: Some(dt),
+        spacings: None,
         backend: BackendChoice::Cpu,
     };
 

@@ -20,7 +20,7 @@
 //!     sources: vec![SourceSpec::GaussianEz { cell: (6, 6, 6), t0_steps: 8.0, sigma_steps: 3.0 }],
 //!     ports: vec![], aperture_ports: vec![],
 //!     probes: vec![ProbeSpec { component: "ez".into(), cell: (8, 6, 6) }],
-//!     slice: None, ntff: None, materials: None, dt_s: None,
+//!     slice: None, ntff: None, materials: None, dt_s: None, spacings: None,
 //!     backend: BackendChoice::Cpu,
 //! };
 //! let handle = yee_engine::submit(spec);
@@ -109,6 +109,38 @@ pub enum SourceSpec {
         /// Pulse width, in steps.
         sigma_steps: f64,
     },
+}
+
+/// Per-axis nonuniform **primal cell widths** (FS.0b.0, ADR-0208) — the
+/// serde mirror of `yee_compute::GradedSpacings`. Lengths must equal
+/// `nx`/`ny`/`nz` (metres); every width must be positive and finite.
+/// `None` on [`JobSpec::spacings`] is the uniform `dx_m` grid, and the
+/// pre-FS.0b wire format (no `spacings` key) still deserializes.
+///
+/// Walking-skeleton scope: **CPU-only** (`backend: "gpu"` is rejected,
+/// `"auto"` falls back to CPU); spacing must be uniform inside the CPML
+/// layers of every absorbing face; `ntff` is not supported on a graded
+/// grid. `dx_m` stays the nominal spacing feeding the CPML σ_max recipe —
+/// keep the absorbing-layer spacing equal to it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GradedSpacings {
+    /// Primal cell widths along x (length `nx`, metres).
+    pub dx: Vec<f64>,
+    /// Primal cell widths along y (length `ny`, metres).
+    pub dy: Vec<f64>,
+    /// Primal cell widths along z (length `nz`, metres).
+    pub dz: Vec<f64>,
+}
+
+impl GradedSpacings {
+    /// Translate to the compute-layer type.
+    fn to_compute(&self) -> yee_compute::GradedSpacings {
+        yee_compute::GradedSpacings {
+            dx: self.dx.clone(),
+            dy: self.dy.clone(),
+            dz: self.dz.clone(),
+        }
+    }
 }
 
 /// Resistive drive port description.
@@ -343,6 +375,13 @@ pub struct JobSpec {
     /// positive and at most the Courant limit for `dx_m`.
     #[serde(default)]
     pub dt_s: Option<f64>,
+    /// Optional per-axis graded primal spacings (FS.0b.0; CPU-only — see
+    /// [`GradedSpacings`]). `None` is the uniform `dx_m` grid. When set,
+    /// the default time step comes from the **minimum** spacing per axis
+    /// (0.9× the graded Courant limit), and `dt_s` is validated against
+    /// that limit.
+    #[serde(default)]
+    pub spacings: Option<GradedSpacings>,
     /// Backend selection.
     pub backend: BackendChoice,
 }
@@ -440,7 +479,12 @@ pub fn submit(spec: JobSpec) -> JobHandle {
     JobHandle { events: rx, cancel }
 }
 
-fn build_drive(spec: &JobSpec, fdtd_spec: &FdtdSpec, dt: f64) -> Result<Drive, String> {
+fn build_drive(
+    spec: &JobSpec,
+    fdtd_spec: &FdtdSpec,
+    dt: f64,
+    graded: Option<&yee_compute::GradedSpacings>,
+) -> Result<Drive, String> {
     let mut drive = Drive::default();
     for s in &spec.sources {
         match *s {
@@ -493,8 +537,28 @@ fn build_drive(spec: &JobSpec, fdtd_spec: &FdtdSpec, dt: f64) -> Result<Drive, S
             .flat_map(|j| (0..a.k_top).map(move |k| (a.i, j, k)))
             .collect();
         let n_columns = a.j_hi - a.j_lo;
-        let height = a.k_top as f64 * fdtd_spec.dz;
-        let area = n_columns as f64 * fdtd_spec.dy * height;
+        // Physical aperture geometry: spacing sums on a graded grid, the
+        // scalar products on the uniform one (FS.0b.0).
+        let (height, area) = match graded {
+            None => {
+                let height = a.k_top as f64 * fdtd_spec.dz;
+                (height, n_columns as f64 * fdtd_spec.dy * height)
+            }
+            Some(g) => {
+                if a.j_hi > g.dy.len() {
+                    return Err(format!(
+                        "aperture_ports[{n}]: j band [{}, {}) exceeds the {} primal \
+                         y cells on a graded grid",
+                        a.j_lo,
+                        a.j_hi,
+                        g.dy.len()
+                    ));
+                }
+                let height: f64 = g.dz[..a.k_top].iter().sum();
+                let width: f64 = g.dy[a.j_lo..a.j_hi].iter().sum();
+                (height, width * height)
+            }
+        };
         drive.aperture_ports.push(AperturePort {
             cells,
             n_columns,
@@ -570,8 +634,27 @@ fn run_job(mut spec: JobSpec, tx: &Sender<JobEvent>, cancel: &AtomicBool) {
         return;
     }
     let mut fdtd_spec = FdtdSpec::vacuum(spec.nx, spec.ny, spec.nz, spec.dx_m);
+    // Graded spacings (FS.0b.0): validate, then retime the default dt from
+    // the minimum spacing per axis (same 0.9× Courant recipe as the scalar
+    // path — bit-identical for constant arrays).
+    let graded = spec.spacings.as_ref().map(GradedSpacings::to_compute);
+    if let Some(g) = &graded {
+        if let Err(message) = g.validate(&fdtd_spec) {
+            let _ = tx.send(JobEvent::Error { message });
+            return;
+        }
+        fdtd_spec.dt = 0.9 * g.courant_limit();
+        if spec.ntff.is_some() {
+            let _ = tx.send(JobEvent::Error {
+                message: "ntff far-field on a graded grid is not supported (FS.0b.0)".into(),
+            });
+            return;
+        }
+    }
     if let Some(dt) = spec.dt_s {
-        let limit = fdtd_spec.courant_limit();
+        let limit = graded
+            .as_ref()
+            .map_or_else(|| fdtd_spec.courant_limit(), |g| g.courant_limit());
         if !(dt.is_finite() && dt > 0.0 && dt <= limit) {
             let _ = tx.send(JobEvent::Error {
                 message: format!("dt_s = {dt} s is outside (0, {limit:.6e}] (Courant limit)"),
@@ -631,10 +714,18 @@ fn run_job(mut spec: JobSpec, tx: &Sender<JobEvent>, cancel: &AtomicBool) {
             if let Some(f) = faces {
                 config = config.with_faces(f);
             }
+            // FS.0b.0 scope: spacing must be uniform inside the CPML layers
+            // of every absorbing face.
+            if let Some(g) = &graded
+                && let Err(message) = g.validate_cpml_layers(npml, config.faces)
+            {
+                let _ = tx.send(JobEvent::Error { message });
+                return;
+            }
             Boundary::Cpml(config)
         }
     };
-    let drive = match build_drive(&spec, &fdtd_spec, fdtd_spec.dt) {
+    let drive = match build_drive(&spec, &fdtd_spec, fdtd_spec.dt, graded.as_ref()) {
         Ok(d) => d,
         Err(message) => {
             let _ = tx.send(JobEvent::Error { message });
@@ -657,8 +748,23 @@ fn run_job(mut spec: JobSpec, tx: &Sender<JobEvent>, cancel: &AtomicBool) {
         });
         return;
     }
+    // Graded grids are CPU-only in FS.0b.0: an explicit GPU request fails
+    // with the Unsupported message (the R.3 idiom), auto falls back to CPU.
     #[cfg(feature = "gpu")]
-    if matches!(spec.backend, BackendChoice::Gpu | BackendChoice::Auto) && spec.ntff.is_none() {
+    if matches!(spec.backend, BackendChoice::Gpu) && graded.is_some() {
+        let _ = tx.send(JobEvent::Error {
+            message: yee_compute::ComputeError::Unsupported(
+                "graded grid (FS.0b) is not on the GPU yet",
+            )
+            .to_string(),
+        });
+        return;
+    }
+    #[cfg(feature = "gpu")]
+    if matches!(spec.backend, BackendChoice::Gpu | BackendChoice::Auto)
+        && spec.ntff.is_none()
+        && graded.is_none()
+    {
         match yee_compute::GpuFdtd::with_drive(
             fdtd_spec,
             Fields::zero(&fdtd_spec),
@@ -739,6 +845,11 @@ fn run_job(mut spec: JobSpec, tx: &Sender<JobEvent>, cancel: &AtomicBool) {
         boundary,
         drive,
     );
+    // Attach the graded spacings (already validated above, so the panicking
+    // compute-layer asserts cannot fire from a malformed job spec).
+    if let Some(g) = &graded {
+        engine.set_spacings(g);
+    }
     // NTFF accumulator (A.2): the validated yee-fdtd transform sampling
     // the engine's fields through a host-side grid adapter each step
     // (the compute-010 pattern). The scratch grid mirrors the run's dt.
@@ -835,6 +946,7 @@ mod tests {
             ntff: None,
             materials: None,
             dt_s: None,
+            spacings: None,
             backend,
         }
     }
@@ -973,7 +1085,7 @@ mod tests {
             .unwrap()
             .into_materials(&fdtd_spec)
             .unwrap();
-        let drive = build_drive(&spec, &fdtd_spec, fdtd_spec.dt).unwrap();
+        let drive = build_drive(&spec, &fdtd_spec, fdtd_spec.dt, None).unwrap();
         let mut direct = CpuFdtd::with_drive(
             fdtd_spec,
             Fields::zero(&fdtd_spec),
@@ -1009,6 +1121,123 @@ mod tests {
         let mut spec = cavity_spec(BackendChoice::Cpu);
         spec.nx = 0;
         assert!(expect_error(spec).contains("invalid grid"));
+    }
+
+    /// Constant spacings arrays for a spec's grid (uniform `dx_m`).
+    fn constant_spacings(spec: &JobSpec) -> GradedSpacings {
+        GradedSpacings {
+            dx: vec![spec.dx_m; spec.nx],
+            dy: vec![spec.dx_m; spec.ny],
+            dz: vec![spec.dx_m; spec.nz],
+        }
+    }
+
+    #[test]
+    fn spacings_round_trip_and_default() {
+        // Full round trip with graded spacings attached.
+        let mut spec = cavity_spec(BackendChoice::Cpu);
+        spec.spacings = Some(constant_spacings(&spec));
+        let json = serde_json::to_string(&spec).unwrap();
+        let back: JobSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(spec, back);
+        // Pre-FS.0b specs (no spacings key) still deserialize to None.
+        let legacy = serde_json::to_string(&cavity_spec(BackendChoice::Cpu))
+            .unwrap()
+            .replace(",\"spacings\":null", "");
+        assert!(!legacy.contains("spacings"), "replace missed the key");
+        let back: JobSpec = serde_json::from_str(&legacy).unwrap();
+        assert!(back.spacings.is_none());
+    }
+
+    /// FS.0b.0 gate at the protocol level: constant spacings arrays equal
+    /// to `dx_m` are bit-identical to the scalar path — including the
+    /// default dt (0.9× Courant from the minimum spacing).
+    #[test]
+    fn constant_spacings_match_scalar_path_bit_exactly() {
+        let scalar = run_to_done(cavity_spec(BackendChoice::Cpu));
+        let mut spec = cavity_spec(BackendChoice::Cpu);
+        spec.spacings = Some(constant_spacings(&spec));
+        let graded = run_to_done(spec);
+        assert!(
+            scalar.dt_s == graded.dt_s,
+            "graded default dt diverged: {} vs {}",
+            scalar.dt_s,
+            graded.dt_s
+        );
+        assert_eq!(graded.backend, "cpu");
+        assert!(scalar.probes[0].iter().any(|v| *v != 0.0));
+        for (n, (a, b)) in scalar.probes[0].iter().zip(&graded.probes[0]).enumerate() {
+            assert!(a == b, "step {n}: scalar {a:e} != graded {b:e}");
+        }
+    }
+
+    #[test]
+    fn malformed_spacings_error_instead_of_panicking() {
+        // Wrong array length.
+        let mut spec = cavity_spec(BackendChoice::Cpu);
+        let mut g = constant_spacings(&spec);
+        g.dy.pop();
+        spec.spacings = Some(g);
+        assert!(expect_error(spec).contains("spacings.dy"));
+        // Non-positive width.
+        let mut spec = cavity_spec(BackendChoice::Cpu);
+        let mut g = constant_spacings(&spec);
+        g.dz[3] = -1.0e-3;
+        spec.spacings = Some(g);
+        assert!(expect_error(spec).contains("spacings.dz[3]"));
+        // Grading inside an absorbing CPML layer (FS.0b.0 scope rule).
+        let mut spec = cavity_spec(BackendChoice::Cpu);
+        spec.boundary = BoundarySpec::Cpml {
+            npml: 4,
+            axes: [true; 3],
+            faces: None,
+        };
+        let mut g = constant_spacings(&spec);
+        g.dx[1] = 0.5 * spec.dx_m;
+        spec.spacings = Some(g);
+        assert!(expect_error(spec).contains("CPML layer"));
+        // dt_s above the graded (minimum-spacing) Courant limit, even
+        // though it satisfies the scalar dx_m limit.
+        let mut spec = cavity_spec(BackendChoice::Cpu);
+        let mut g = constant_spacings(&spec);
+        for d in &mut g.dx {
+            *d *= 0.25; // fine axis tightens the limit
+        }
+        spec.spacings = Some(g);
+        let scalar_limit = FdtdSpec::vacuum(spec.nx, spec.ny, spec.nz, spec.dx_m).courant_limit();
+        spec.dt_s = Some(0.9 * scalar_limit);
+        assert!(expect_error(spec).contains("Courant"));
+        // NTFF on a graded grid is FS.0b.0-unsupported.
+        let mut spec = cavity_spec(BackendChoice::Cpu);
+        spec.spacings = Some(constant_spacings(&spec));
+        spec.ntff = Some(NtffSpec {
+            f_hz: 10.0e9,
+            margin_cells: 3,
+            k_min: None,
+            directions: vec![(0.0, 0.0)],
+        });
+        assert!(expect_error(spec).contains("graded"));
+    }
+
+    /// Graded grids are CPU-only (FS.0b.0): an explicit GPU request fails
+    /// with the Unsupported message before any adapter query; auto falls
+    /// back to the CPU backend.
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn graded_gpu_request_is_rejected_and_auto_falls_back() {
+        let mut spec = cavity_spec(BackendChoice::Gpu);
+        spec.spacings = Some(constant_spacings(&spec));
+        let message = expect_error(spec);
+        assert!(
+            message.contains("graded grid (FS.0b) is not on the GPU yet"),
+            "unexpected message: {message}"
+        );
+
+        let mut spec = cavity_spec(BackendChoice::Auto);
+        spec.spacings = Some(constant_spacings(&spec));
+        let result = run_to_done(spec);
+        assert_eq!(result.backend, "cpu");
+        assert!(result.probes[0].iter().any(|v| *v != 0.0));
     }
 
     #[test]

@@ -216,6 +216,7 @@ fn complex_transfer_phase_matches_theory_and_exports_to_touchstone() {
         ntff: None,
         materials: Some(materials),
         dt_s: Some(dt),
+        spacings: None,
         backend: BackendChoice::Cpu,
     };
 

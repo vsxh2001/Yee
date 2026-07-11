@@ -35,6 +35,7 @@ fn cavity_spec() -> JobSpec {
         ntff: None,
         materials: None,
         dt_s: None,
+        spacings: None,
         backend: BackendChoice::Cpu,
     }
 }

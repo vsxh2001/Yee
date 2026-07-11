@@ -134,6 +134,7 @@ fn patch_radiates_a_broadside_beam() {
         }),
         materials: Some(materials),
         dt_s: Some(dt),
+        spacings: None,
         backend: BackendChoice::Cpu,
     };
 
