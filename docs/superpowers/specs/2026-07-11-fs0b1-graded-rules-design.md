@@ -49,8 +49,11 @@ pub fn auto_spacings(
 
 **Rules** (the FS.0a rulebook generalized per axis):
 
-- **Coarse ceiling everywhere:** `coarse = auto_dx(layout, f_max_hz)` —
-  λ/20-in-dielectric, h/3, feature/2, clamped to [1 µm, 1 mm] (unchanged).
+- **Coarse ceiling everywhere:** `coarse = auto_dx_bulk(layout, f_max_hz)`
+  — λ/20-in-dielectric and h/3, clamped to [1 µm, 1 mm]. Deliberately
+  **without** the uniform rulebook's feature/2 term: on a graded grid the
+  feature rule moves into the local fine bands, so a single narrow gap no
+  longer drags the whole domain to `feature/2` — that IS the payoff.
 - **Fine spacing:** `fine = min(min_feature/2, coarse/2)`. The
   `min_feature/2` term is the FS.0a feature rule where a small feature/gap
   binds below the ceiling; the `coarse/2` term guarantees at least one
