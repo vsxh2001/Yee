@@ -53,3 +53,16 @@ error paths (no ports, imperial, no copper).
 
 The React import panel; D03 flashes, arcs, DXF; the FULL-SUITE gate (an
 imported reference board measures within tolerance of its native twin).
+
+## FS.3.1c addendum (2026-07-11): studio import panel
+
+`ImportPanel` in `studio/src/App.tsx`: file pickers + paste area for the
+copper (and optional Edge.Cuts) Gerber, stackup + single-port fields
+(Gerber carries neither), one `import_gerber` call. The response renders
+the parsed-layout SVG preview, polygon/bbox stats, layout-JSON and
+copper-echo exports, and an **echo badge** — the UI face of
+`studio-import-e2e-001`: green iff `echoIsLossless(input, echo)`, which
+is strict byte equality (a trailing-newline difference is NOT lossless;
+"byte-provable" means bytes, not semantics — pinned in the vitest gate).
+DOM gates in `studio/src/import.test.tsx` (form shape; Import action
+gated on non-empty copper). Flashes/arcs/DXF remain FS.3.2+.

@@ -449,6 +449,7 @@ export default function App() {
 
       <FilterDesignPanel />
       <AntennaDesignPanel />
+      <ImportPanel />
     </main>
   );
 }
@@ -642,6 +643,224 @@ export function AntennaDesignPanel() {
               />
             </>
           )}
+        </section>
+      )}
+    </section>
+  );
+}
+
+// FS.3.1c (ADR-0209): the board-import panel — paste (or pick) a copper
+// Gerber + optional Edge.Cuts outline, supply the stackup and one port
+// (Gerber carries neither), and get back the parsed preview plus the
+// byte-provable copper echo from `import_gerber`. The echo badge is the
+// UI face of gate studio-import-e2e-001: green means what the engine
+// understood re-exports byte-identically to what was pasted.
+interface ImportResponse {
+  trace_count: number;
+  bbox_w_m: number;
+  bbox_h_m: number;
+  svg: string;
+  gerber_copper_echo: string;
+  outline_m: [number, number][] | null;
+  layout_json: string;
+}
+
+// Byte-provable losslessness: the echo must equal the input exactly.
+// Exported for the vitest gate.
+export function echoIsLossless(input: string, echo: string): boolean {
+  return input === echo;
+}
+
+export function ImportPanel() {
+  const [copper, setCopper] = useState("");
+  const [outline, setOutline] = useState("");
+  const [epsR, setEpsR] = useState(4.4);
+  const [heightMm, setHeightMm] = useState(1.6);
+  const [lossTangent, setLossTangent] = useState(0.0);
+  const [portXMm, setPortXMm] = useState(0.0);
+  const [portYMm, setPortYMm] = useState(0.0);
+  const [portWMm, setPortWMm] = useState(3.0);
+  const [resp, setResp] = useState<ImportResponse | null>(null);
+  const [lossless, setLossless] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function pickFile(setter: (text: string) => void, file: File | null) {
+    if (file) setter(await file.text());
+  }
+
+  async function runImport() {
+    setBusy(true);
+    setError(null);
+    setResp(null);
+    try {
+      const r = await invoke<ImportResponse>("import_gerber", {
+        req: {
+          copper_gerber: copper,
+          outline_gerber: outline.trim() ? outline : null,
+          eps_r: epsR,
+          height_m: heightMm * 1e-3,
+          loss_tangent: lossTangent,
+          ports: [
+            {
+              x_m: portXMm * 1e-3,
+              y_m: portYMm * 1e-3,
+              width_m: portWMm * 1e-3,
+              z0_ohm: 50.0,
+            },
+          ],
+        },
+      });
+      setResp(r);
+      setLossless(echoIsLossless(copper, r.gerber_copper_echo));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section data-testid="board-import">
+      <h2>Import board</h2>
+      <p className="sub">
+        Gerber copper (+ optional Edge.Cuts) → parsed layout · byte-provable
+        echo
+      </p>
+      <section className="controls">
+        <label>
+          Copper .gbr
+          <input
+            type="file"
+            accept=".gbr,.gtl"
+            disabled={busy}
+            onChange={(e) => pickFile(setCopper, e.target.files?.[0] ?? null)}
+          />
+        </label>
+        <label>
+          Outline .gbr (optional)
+          <input
+            type="file"
+            accept=".gbr,.gm1"
+            disabled={busy}
+            onChange={(e) => pickFile(setOutline, e.target.files?.[0] ?? null)}
+          />
+        </label>
+      </section>
+      <textarea
+        aria-label="Copper Gerber text"
+        placeholder="…or paste the copper Gerber here"
+        value={copper}
+        disabled={busy}
+        rows={6}
+        onChange={(e) => setCopper(e.target.value)}
+      />
+      <section className="controls">
+        <label>
+          ε_r
+          <input
+            type="number"
+            step={0.1}
+            value={epsR}
+            disabled={busy}
+            onChange={(e) => setEpsR(Number(e.target.value))}
+          />
+        </label>
+        <label>
+          h (mm)
+          <input
+            type="number"
+            step={0.1}
+            value={heightMm}
+            disabled={busy}
+            onChange={(e) => setHeightMm(Number(e.target.value))}
+          />
+        </label>
+        <label>
+          tan δ
+          <input
+            type="number"
+            step={0.005}
+            value={lossTangent}
+            disabled={busy}
+            onChange={(e) => setLossTangent(Number(e.target.value))}
+          />
+        </label>
+        <label>
+          Port x (mm)
+          <input
+            type="number"
+            step={0.1}
+            value={portXMm}
+            disabled={busy}
+            onChange={(e) => setPortXMm(Number(e.target.value))}
+          />
+        </label>
+        <label>
+          Port y (mm)
+          <input
+            type="number"
+            step={0.1}
+            value={portYMm}
+            disabled={busy}
+            onChange={(e) => setPortYMm(Number(e.target.value))}
+          />
+        </label>
+        <label>
+          Port width (mm)
+          <input
+            type="number"
+            step={0.1}
+            value={portWMm}
+            disabled={busy}
+            onChange={(e) => setPortWMm(Number(e.target.value))}
+          />
+        </label>
+        <button onClick={runImport} disabled={busy || !copper.trim()}>
+          {busy ? "Importing…" : "Import"}
+        </button>
+      </section>
+
+      {error && <p className="error">{error}</p>}
+
+      {resp && (
+        <section>
+          <p className="meta">
+            {resp.trace_count} polygons · board{" "}
+            {(resp.bbox_w_m * 1e3).toFixed(2)} ×{" "}
+            {(resp.bbox_h_m * 1e3).toFixed(2)} mm
+            {resp.outline_m ? ` · outline ${resp.outline_m.length} corners` : ""}{" "}
+            ·{" "}
+            <strong
+              data-testid="echo-badge"
+              className={lossless ? "ok" : "warn"}
+            >
+              {lossless
+                ? "echo byte-identical (lossless)"
+                : "echo differs from input"}
+            </strong>
+          </p>
+          <figure
+            className="plot"
+            data-testid="import-preview"
+            // Trusted content: the SVG is generated by our own layout
+            // renderer from the parsed polygons, never from raw input.
+            dangerouslySetInnerHTML={{ __html: resp.svg }}
+          />
+          <section className="controls">
+            <button
+              onClick={() => download("imported-layout.json", resp.layout_json)}
+            >
+              Export layout .json
+            </button>
+            <button
+              onClick={() =>
+                download("imported-echo-F_Cu.gbr", resp.gerber_copper_echo)
+              }
+            >
+              Export copper echo .gbr
+            </button>
+          </section>
         </section>
       )}
     </section>
