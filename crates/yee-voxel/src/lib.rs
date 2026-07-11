@@ -318,6 +318,234 @@ fn voxelize_inner(
     }
 }
 
+// ===========================================================================
+// Graded (nonuniform) voxelization — FS.0b.1, ADR-0210
+// ===========================================================================
+
+/// Per-axis graded grid description for [`voxelize_microstrip_graded`]
+/// (FS.0b.1, ADR-0210): primal cell widths (the `yee_compute` /
+/// `yee_engine` `GradedSpacings` convention, ADR-0208) plus the domain
+/// origin and the z-stack layer indices a rule generator
+/// (`yee_engine::automesh::auto_spacings`) computed. The voxelizer
+/// rasterizes against the **true** cell centres and node planes these
+/// arrays imply — cumulative sums from `x0_m`/`y0_m`/`z = 0`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GradedVoxelGrid {
+    /// Primal cell widths along x (length `nx`, metres).
+    pub dx_m: Vec<f64>,
+    /// Primal cell widths along y (length `ny`, metres).
+    pub dy_m: Vec<f64>,
+    /// Primal cell widths along z (length `nz`, metres).
+    pub dz_m: Vec<f64>,
+    /// Layout-frame x of grid node 0 (typically `bbox.min.x − margin`).
+    pub x0_m: f64,
+    /// Layout-frame y of grid node 0.
+    pub y0_m: f64,
+    /// Ground-sheet layer index (`0` for the classic floor-ground stack).
+    pub k_gnd: usize,
+    /// Trace-plane layer index; the substrate fills cells
+    /// `k = k_gnd .. k_top` (the ADR-0108 no-air-gap z-stack).
+    pub k_top: usize,
+}
+
+/// A material-assigned graded model produced from a planar microstrip
+/// layout by [`voxelize_microstrip_graded`].
+///
+/// Deliberately **not** a `yee_fdtd::YeeGrid`: that type carries a scalar
+/// `dx` and a dt derived from it, both meaningless on a graded grid. The
+/// raw arrays feed `yee_engine::MaterialsSpec` directly and the node
+/// coordinates support probe/port placement by physical position.
+#[derive(Debug, Clone)]
+pub struct GradedMicrostripModel {
+    /// Grid cell dimensions `(nx, ny, nz)`.
+    pub dims: (usize, usize, usize),
+    /// Per-cell relative permittivity, shape `[nx+1, ny+1, nz+1]`.
+    pub eps_r_cells: Array3<f64>,
+    /// Tangential `E_x` PEC mask (ground + traces), shape `[nx, ny+1, nz+1]`.
+    pub pec_mask_ex: Array3<bool>,
+    /// Tangential `E_y` PEC mask (ground + traces), shape `[nx+1, ny, nz+1]`.
+    pub pec_mask_ey: Array3<bool>,
+    /// Each layout port mapped to its `(i, j, k_top)` grid cell by
+    /// coordinate lookup.
+    pub port_cells: Vec<(usize, usize, usize)>,
+    /// Ground-sheet layer index (echoes [`GradedVoxelGrid::k_gnd`]).
+    pub k_gnd: usize,
+    /// Trace-plane layer index (echoes [`GradedVoxelGrid::k_top`]).
+    pub k_top: usize,
+    /// Layout-frame x of every grid node plane (length `nx + 1`).
+    pub x_nodes_m: Vec<f64>,
+    /// Layout-frame y of every grid node plane (length `ny + 1`).
+    pub y_nodes_m: Vec<f64>,
+    /// z of every grid node plane, ground plane at the `k_gnd` node
+    /// (length `nz + 1`, starting at `0.0`).
+    pub z_nodes_m: Vec<f64>,
+}
+
+impl GradedMicrostripModel {
+    /// The x-index of the primal cell containing layout-frame `x_m`
+    /// (largest `i` with `x_nodes_m[i] ≤ x_m`, clamped to the grid) —
+    /// the graded generalization of `floor((x − x0)/dx)`.
+    pub fn cell_at_x(&self, x_m: f64) -> usize {
+        cell_containing(&self.x_nodes_m, x_m)
+    }
+
+    /// The y-index of the primal cell containing layout-frame `y_m`.
+    pub fn cell_at_y(&self, y_m: f64) -> usize {
+        cell_containing(&self.y_nodes_m, y_m)
+    }
+}
+
+/// Largest cell index `i` with `nodes[i] ≤ v`, clamped to `[0, n − 1]`
+/// (`nodes` has length `n + 1`).
+fn cell_containing(nodes: &[f64], v: f64) -> usize {
+    let n_cells = nodes.len() - 1;
+    nodes[..n_cells].partition_point(|&x| x <= v).max(1) - 1
+}
+
+/// Node coordinates (length `n + 1`) and cell centres (length `n`) from an
+/// origin and primal widths.
+///
+/// Computed per **maximal run of identical widths** as
+/// `origin + (base + m·d)` / `origin + (base + (m + 0.5)·d)`, so a constant
+/// array reproduces the uniform voxelizer's `x0 + i·dx` and
+/// `x0 + (i + 0.5)·dx` coordinates **bit-exactly** (the FS.0b.0
+/// degenerate-by-construction discipline; a naive running sum differs by an
+/// ulp, which flips point-in-polygon at trace edges that sit exactly on
+/// node planes — measured, gate `voxel-graded-001`).
+fn axis_coords(origin: f64, widths: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    let n = widths.len();
+    let mut nodes = Vec::with_capacity(n + 1);
+    let mut centres = Vec::with_capacity(n);
+    let mut base = 0.0_f64;
+    nodes.push(origin + base);
+    let mut s = 0;
+    while s < n {
+        let d = widths[s];
+        let mut e = s + 1;
+        while e < n && widths[e] == d {
+            e += 1;
+        }
+        for m in 0..(e - s) {
+            centres.push(origin + (base + (m as f64 + 0.5) * d));
+            nodes.push(origin + (base + (m as f64 + 1.0) * d));
+        }
+        base += (e - s) as f64 * d;
+        s = e;
+    }
+    (nodes, centres)
+}
+
+/// Voxelize a planar microstrip [`Layout`] onto a **graded** grid
+/// (FS.0b.1, ADR-0210): the same rasterization as [`voxelize_microstrip`]
+/// — PEC ground sheet at `k_gnd`, dielectric cells `k_gnd .. k_top`,
+/// trace PEC at `k_top` where a polygon covers the cell centre, air above
+/// — but against per-axis coordinate arrays instead of a scalar `dx`:
+/// cell centres are `node[i] + d[i]/2`, `E_x`/`E_y` node positions use the
+/// true staggered coordinates, and port cells are found by coordinate
+/// lookup. With constant spacing arrays the produced masks are
+/// bit-identical to the uniform voxelizer's (gate `voxel-graded-001`).
+///
+/// # Panics
+///
+/// Panics if any spacing array is empty or contains a non-positive /
+/// non-finite width, or if `k_top` does not satisfy
+/// `k_gnd < k_top < nz` (the trace plane needs an air layer above it).
+pub fn voxelize_microstrip_graded(
+    layout: &Layout,
+    grid: &GradedVoxelGrid,
+) -> GradedMicrostripModel {
+    for (axis, arr) in [
+        ("dx_m", &grid.dx_m),
+        ("dy_m", &grid.dy_m),
+        ("dz_m", &grid.dz_m),
+    ] {
+        assert!(!arr.is_empty(), "GradedVoxelGrid::{axis} must be non-empty");
+        assert!(
+            arr.iter().all(|d| d.is_finite() && *d > 0.0),
+            "GradedVoxelGrid::{axis} widths must be positive and finite"
+        );
+    }
+    let (nx, ny, nz) = (grid.dx_m.len(), grid.dy_m.len(), grid.dz_m.len());
+    assert!(
+        grid.k_gnd < grid.k_top && grid.k_top < nz,
+        "GradedVoxelGrid: need k_gnd ({}) < k_top ({}) < nz ({nz})",
+        grid.k_gnd,
+        grid.k_top
+    );
+
+    let (x_nodes, xc) = axis_coords(grid.x0_m, &grid.dx_m);
+    let (y_nodes, yc) = axis_coords(grid.y0_m, &grid.dy_m);
+    let (z_nodes, _) = axis_coords(0.0, &grid.dz_m);
+
+    let mut eps = Array3::<f64>::from_elem((nx + 1, ny + 1, nz + 1), 1.0);
+    let mut pec_ex = Array3::<bool>::from_elem((nx, ny + 1, nz + 1), false);
+    let mut pec_ey = Array3::<bool>::from_elem((nx + 1, ny, nz + 1), false);
+
+    let in_trace = |x: f64, y: f64| {
+        layout
+            .traces
+            .iter()
+            .any(|p| point_in_polygon(Point2 { x, y }, p))
+    };
+
+    // Substrate dielectric on the E_z edges spanning the ground-to-trace
+    // gap, `k = k_gnd .. k_top` — the ADR-0108 no-air-gap z-stack.
+    let eps_r_sub = layout.substrate.eps_r;
+    for i in 0..nx {
+        for j in 0..ny {
+            for k in grid.k_gnd..grid.k_top {
+                eps[(i, j, k)] = eps_r_sub;
+            }
+        }
+    }
+
+    // Tangential Ex PEC: ground (whole k_gnd layer) + traces at k_top,
+    // Ex node at (cell-centre x, node y).
+    for i in 0..nx {
+        for j in 0..=ny {
+            pec_ex[(i, j, grid.k_gnd)] = true;
+            if in_trace(xc[i], y_nodes[j]) {
+                pec_ex[(i, j, grid.k_top)] = true;
+            }
+        }
+    }
+
+    // Tangential Ey PEC: ground + traces, Ey node at (node x, cell-centre y).
+    for i in 0..=nx {
+        for j in 0..ny {
+            pec_ey[(i, j, grid.k_gnd)] = true;
+            if in_trace(x_nodes[i], yc[j]) {
+                pec_ey[(i, j, grid.k_top)] = true;
+            }
+        }
+    }
+
+    let port_cells = layout
+        .ports
+        .iter()
+        .map(|port| {
+            (
+                cell_containing(&x_nodes, port.at.x),
+                cell_containing(&y_nodes, port.at.y),
+                grid.k_top,
+            )
+        })
+        .collect();
+
+    GradedMicrostripModel {
+        dims: (nx, ny, nz),
+        eps_r_cells: eps,
+        pec_mask_ex: pec_ex,
+        pec_mask_ey: pec_ey,
+        port_cells,
+        k_gnd: grid.k_gnd,
+        k_top: grid.k_top,
+        x_nodes_m: x_nodes,
+        y_nodes_m: y_nodes,
+        z_nodes_m: z_nodes,
+    }
+}
+
 /// Surface resistance of a good conductor at frequency `f_hz` (R.0b,
 /// ADR-0202): `R_s = sqrt(pi f mu0 / sigma)` ohms per square - the value
 /// the resistive-sheet trace boundary (`MaterialsSpec::sheet_r_ohm`) takes
