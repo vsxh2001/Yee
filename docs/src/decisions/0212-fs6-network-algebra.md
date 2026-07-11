@@ -1,4 +1,4 @@
-# ADR-0212: FS.6.0 — two-port network algebra (S↔T, cascade, de-embed)
+# ADR-0212: FS.6.0/6.1 — two-port network algebra (S↔T, cascade, de-embed, renormalize)
 
 **Date:** 2026-07-11 · **Status:** accepted · **Track:** FS.6 (`FULL-SUITE-ROADMAP.md`)
 **Spec:** `docs/superpowers/specs/2026-07-11-fs6-network-algebra-design.md`
@@ -39,10 +39,29 @@ impedances cascade to their sum** (the ABCD identity
 reflections throughout, so this exercises the det-S terms the matched
 cases cannot); `cascade_files` happy path + all three rejection paths.
 
+## FS.6.1 (same date): renormalization + right de-embed
+
+- `renormalize(s, z_old, z_new)` — both ports real z₀ → real z₀′. With
+  `r = (z_new − z_old)/(z_new + z_old)` the Kurokawa power-wave transform
+  reduces to the Möbius form **`S′ = (S − rI)(I − rS)⁻¹`** because the
+  scalar port-normalization factors cancel when every port changes
+  identically. Complex reference impedances (where the port factors do
+  NOT cancel and convention wars begin) are out of scope until a consumer
+  needs them.
+- `deembed_right(measured, fixture)` = `t_to_s(T_m · T_f⁻¹)`.
+- `renormalize_file(&File, z_new)`; `cascade_files` **stays strict** about
+  z₀ — the caller renormalizes explicitly first. Silent renormalization
+  hides unit mistakes; an explicit two-step reads as intent.
+
+Gate `net-002` GREEN first run: same-z₀ renormalization bit-exact
+identity; series-impedance closed form at 50 Ω renormalized to 75 Ω
+equals the direct 75 Ω construction to 1e-13; 50→75→50 round-trip 1e-14;
+right de-embed recovers the DUT; `renormalize_file` unblocks the strict
+`cascade_files` rejection and round-trips through the File layer.
+
 ## Consequences
 
-- FS.6.1: renormalization (z₀ → z₀′), right-side de-embed, CLI
-  (`yee net cascade a.s2p b.s2p`) and studio exposure.
-- Matching-network synthesis (L-section/stub from a measured Γ) can now be
-  *verified* by cascading the synthesized match against the antenna's
-  measured S and asserting the improved S11 — the roadmap's FS.6 gate.
+- FS.6.2: CLI (`yee net cascade a.s2p b.s2p`) and studio exposure;
+  matching-network synthesis (L-section/stub from a measured Γ), verified
+  by cascading the synthesized match against the antenna's measured S and
+  asserting the improved S11 — the roadmap's FS.6 full-wave gate.

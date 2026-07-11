@@ -20,7 +20,10 @@
 pub mod network;
 pub mod touchstone;
 
-pub use network::{cascade, cascade_files, deembed_left, s_to_t, t_to_s};
+pub use network::{
+    cascade, cascade_files, deembed_left, deembed_right, renormalize, renormalize_file, s_to_t,
+    t_to_s,
+};
 pub use touchstone::File;
 
 /// I/O-layer errors.

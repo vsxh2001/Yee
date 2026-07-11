@@ -16,7 +16,10 @@
 use num_complex::Complex64;
 use yee_io::network::TwoPort;
 use yee_io::touchstone::{File, Format, FreqUnit};
-use yee_io::{Error, cascade, cascade_files, deembed_left, s_to_t, t_to_s};
+use yee_io::{
+    Error, cascade, cascade_files, deembed_left, deembed_right, renormalize, renormalize_file,
+    s_to_t, t_to_s,
+};
 
 fn c(re: f64, im: f64) -> Complex64 {
     Complex64::new(re, im)
@@ -115,6 +118,59 @@ fn net_001_series_impedances_cascade_to_their_sum() {
     let (z1, z2) = (c(20.0, 35.0), c(5.0, -60.0));
     let out = cascade(&series(z1, z0), &series(z2, z0)).unwrap();
     assert_close(&out, &series(z1 + z2, z0), 1e-13, "series(Z1).series(Z2)");
+}
+
+#[test]
+fn net_002_deembed_right_recovers_dut() {
+    let (fixture, dut) = (series(c(12.0, -20.0), 50.0), messy());
+    let measured = cascade(&dut, &fixture).unwrap();
+    let recovered = deembed_right(&measured, &fixture).unwrap();
+    assert_close(&recovered, &dut, 1e-12, "deembed_right(D.F, F)");
+}
+
+#[test]
+fn net_002_renormalize_matches_closed_form() {
+    // Same-impedance renormalization is the identity, bit-exact.
+    let s = messy();
+    assert_eq!(renormalize(&s, 50.0, 50.0).unwrap(), s);
+
+    // A series impedance has a closed form at ANY reference impedance:
+    // renormalizing the 50-ohm construction to 75 ohm must equal the
+    // direct 75-ohm construction.
+    let z = c(20.0, 35.0);
+    let re75 = renormalize(&series(z, 50.0), 50.0, 75.0).unwrap();
+    assert_close(&re75, &series(z, 75.0), 1e-13, "series Z at 75 ohm");
+
+    // Round-trip 50 -> 75 -> 50 is the identity.
+    let back = renormalize(&renormalize(&s, 50.0, 75.0).unwrap(), 75.0, 50.0).unwrap();
+    assert_close(&back, &s, 1e-14, "50 -> 75 -> 50 round-trip");
+
+    // Non-positive impedance is an explicit rejection.
+    assert!(matches!(renormalize(&s, 50.0, 0.0), Err(Error::Network(_))));
+}
+
+#[test]
+fn net_002_renormalize_file_unblocks_strict_cascade() {
+    let grid: Vec<f64> = (1..=5).map(|k| k as f64 * 1.0e9).collect();
+    let a = two_port_file(0.9, 50.0, grid.clone());
+    let b75 = two_port_file(0.8, 75.0, grid);
+    // Strict path rejects the z0 mismatch...
+    assert!(matches!(cascade_files(&a, &b75), Err(Error::Network(_))));
+    // ...explicit renormalization unblocks it.
+    let b50 = renormalize_file(&b75, 50.0).unwrap();
+    assert_eq!(b50.z0, 50.0);
+    let out = cascade_files(&a, &b50).unwrap();
+    assert_eq!(out.freq_hz, a.freq_hz);
+    // And the renormalization itself round-trips through the File layer.
+    let b75_again = renormalize_file(&b50, 75.0).unwrap();
+    for (sa, sb) in b75.data.iter().zip(&b75_again.data) {
+        assert_close(
+            &[sa[0], sa[1], sa[2], sa[3]],
+            &[sb[0], sb[1], sb[2], sb[3]],
+            1e-14,
+            "file renormalize round-trip",
+        );
+    }
 }
 
 fn two_port_file(scale: f64, z0: f64, freq_hz: Vec<f64>) -> File {

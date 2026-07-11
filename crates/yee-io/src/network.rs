@@ -103,6 +103,70 @@ pub fn deembed_left(fixture: &TwoPort, measured: &TwoPort) -> Result<TwoPort> {
     t_to_s(&mat_mul(&t_f, &s_to_t(measured)?))
 }
 
+/// Remove a known fixture from the **right** (output side) of a measured
+/// cascade: given `measured = dut · fixture`, recover `dut` as
+/// `t_to_s(T_measured · T_fixture⁻¹)`.
+pub fn deembed_right(measured: &TwoPort, fixture: &TwoPort) -> Result<TwoPort> {
+    let t_f = mat_inv(&s_to_t(fixture)?, "fixture transfer matrix")?;
+    t_to_s(&mat_mul(&s_to_t(measured)?, &t_f))
+}
+
+/// Renormalize a 2-port S-matrix from real reference impedance `z_old`
+/// (both ports) to real `z_new` (both ports).
+///
+/// With `r = (z_new − z_old)/(z_new + z_old)` the Kurokawa power-wave
+/// transform reduces to the Möbius form `S′ = (S − rI)(I − rS)⁻¹`: the
+/// scalar port-normalization factors cancel when every port changes
+/// identically. (The 1-port case is the classic bilinear identity
+/// `(Z−z₀)/(Z+z₀) ↦ (Z−z₁)/(Z+z₁)`.) Rejects non-positive impedances and
+/// a singular `I − rS` (only reachable for non-passive data).
+pub fn renormalize(s: &TwoPort, z_old: f64, z_new: f64) -> Result<TwoPort> {
+    if !(z_old > 0.0 && z_new > 0.0) {
+        return Err(Error::Network(format!(
+            "reference impedances must be positive, got {z_old} and {z_new} ohm"
+        )));
+    }
+    let r = (z_new - z_old) / (z_new + z_old);
+    if r == 0.0 {
+        return Ok(*s);
+    }
+    let [s11, s12, s21, s22] = *s;
+    // (I − rS)⁻¹, then (S − rI)·that.
+    let m = [
+        Complex64::new(1.0, 0.0) - r * s11,
+        -r * s12,
+        -r * s21,
+        Complex64::new(1.0, 0.0) - r * s22,
+    ];
+    let m_inv = mat_inv(&m, "I - rS (non-passive data?)")?;
+    let s_shift = [s11 - r, s12, s21, s22 - r];
+    Ok(mat_mul(&s_shift, &m_inv))
+}
+
+/// Renormalize every frequency point of a 2-port Touchstone [`File`] to a
+/// new reference impedance. [`cascade_files`] stays strict about z₀ —
+/// renormalize explicitly first; silent renormalization hides unit
+/// mistakes.
+pub fn renormalize_file(f: &File, z_new: f64) -> Result<File> {
+    if f.n_ports != 2 {
+        return Err(Error::Network(format!(
+            "renormalize_file needs a 2-port, got {}-port",
+            f.n_ports
+        )));
+    }
+    let mut data = Vec::with_capacity(f.data.len());
+    for (k, s) in f.data.iter().enumerate() {
+        let sp = renormalize(&[s[0], s[1], s[2], s[3]], f.z0, z_new)
+            .map_err(|e| Error::Network(format!("at {} Hz (point {k}): {e}", f.freq_hz[k])))?;
+        data.push(sp.to_vec());
+    }
+    Ok(File {
+        z0: z_new,
+        data,
+        ..f.clone()
+    })
+}
+
 /// Cascade two 2-port Touchstone [`File`]s frequency-by-frequency.
 ///
 /// FS.6.0 requires **identical** frequency grids (relative tolerance

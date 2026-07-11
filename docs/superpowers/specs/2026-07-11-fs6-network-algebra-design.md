@@ -48,6 +48,26 @@ algebra's natural consumers are Touchstone `File`s):
 7. `cascade_files`: happy path on synthetic 2-port `File`s + the three
    rejection paths.
 
+## FS.6.1 addendum — renormalization + right de-embed (same date)
+
+- `renormalize(s, z_old, z_new)`: both ports real `z_old` → real `z_new`.
+  With `r = (z_new − z_old)/(z_new + z_old)`, the Kurokawa power-wave
+  transform reduces to the Möbius form `S′ = (S − rI)(I − rS)⁻¹` — the
+  scalar port-scaling factors cancel when both ports change identically.
+  1-port sanity: `(Z−z₀)/(Z+z₀) ↦ (Z−z₁)/(Z+z₁)` is the classic bilinear
+  identity.
+- `deembed_right(measured, fixture)`: `measured = DUT · fixture` ⇒
+  `T_DUT = T_m · T_f⁻¹`.
+- `renormalize_file(&File, z_new)`: per-frequency renormalize, updates
+  `File::z0`. `cascade_files` stays strict — callers renormalize
+  explicitly first; silent renormalization hides unit mistakes.
+
+Gates (extend `net-001`): renormalize to the same z₀ = identity;
+series-impedance S at 50 Ω renormalized to 75 Ω equals the direct 75 Ω
+construction (closed form both sides); round-trip 50→75→50 = identity to
+1e-14; de-embed-right recovers the DUT; `renormalize_file` + then
+`cascade_files` succeeds where the strict path rejected.
+
 ## Lane
 
 `crates/yee-io/**`, `docs/**`, `FULL-SUITE-ROADMAP.md`.
