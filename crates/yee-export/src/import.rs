@@ -167,6 +167,71 @@ fn parse_coords(s: &str, x: &mut f64, y: &mut f64) -> Result<(), ()> {
     if saw_any { Ok(()) } else { Err(()) }
 }
 
+/// Parse a **stroked outline** Gerber (FS.3.1a) — the Edge.Cuts dialect
+/// [`crate::layout_to_gerber_outline`] emits: same header family, one
+/// thin aperture, then a single `D02` move + `D01` draw chain OUTSIDE any
+/// region. Returns the path vertices in order with the explicit closing
+/// vertex dropped. Regions (`G36`) in an outline file are rejected — a
+/// board profile is a cut path, not copper.
+pub fn gerber_to_outline(gerber: &str) -> Result<Vec<Point2>, GerberImportError> {
+    let mut path: Vec<Point2> = Vec::new();
+    let (mut cur_x, mut cur_y) = (0.0_f64, 0.0_f64);
+    for raw in gerber.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(ext) = line.strip_prefix('%').and_then(|l| l.strip_suffix("*%")) {
+            if ext.starts_with("FSLA") || ext == "MOMM" || ext.starts_with("AD") {
+                continue;
+            }
+            if ext == "MOIN" {
+                return Err(GerberImportError::ImperialUnits);
+            }
+            return Err(GerberImportError::UnsupportedCommand(line.into()));
+        }
+        let Some(word) = line.strip_suffix('*') else {
+            return Err(GerberImportError::UnsupportedCommand(line.into()));
+        };
+        match word {
+            _ if word.starts_with("G04") => continue,
+            "M02" => break,
+            "G36" | "G37" => {
+                return Err(GerberImportError::UnsupportedCommand(line.into()));
+            }
+            _ if word.starts_with('D') && word[1..].chars().all(|c| c.is_ascii_digit()) => {
+                continue;
+            }
+            _ => {}
+        }
+        let (coords, op) = if let Some(c) = word.strip_suffix("D01") {
+            (c, 1)
+        } else if let Some(c) = word.strip_suffix("D02") {
+            (c, 2)
+        } else {
+            return Err(GerberImportError::UnsupportedCommand(line.into()));
+        };
+        parse_coords(coords, &mut cur_x, &mut cur_y)
+            .map_err(|_| GerberImportError::BadCoordinate(line.into()))?;
+        match op {
+            2 => {
+                path.clear();
+                path.push(Point2::new(cur_x, cur_y));
+            }
+            _ => {
+                if path.is_empty() {
+                    return Err(GerberImportError::DrawBeforeMove);
+                }
+                path.push(Point2::new(cur_x, cur_y));
+            }
+        }
+    }
+    if path.len() > 1 && path[path.len() - 1] == path[0] {
+        path.pop();
+    }
+    Ok(path)
+}
+
 /// Wrap imported polygons into a [`Layout`]. Gerber carries no stackup or
 /// port information — the caller provides both (the studio's import flow
 /// asks the user; gates pass the known originals).

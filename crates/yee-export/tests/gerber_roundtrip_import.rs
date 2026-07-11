@@ -12,7 +12,10 @@
 //! Plus the explicit-rejection paths: imperial units, out-of-subset
 //! commands, draw-before-move, unclosed regions. Instant, non-ignored.
 
-use yee_export::{GerberImportError, GerberOptions, gerber_to_polygons, layout_to_gerber};
+use yee_export::{
+    GerberImportError, GerberOptions, OutlineOptions, gerber_to_outline, gerber_to_polygons,
+    layout_to_gerber, layout_to_gerber_outline,
+};
 use yee_layout::{HairpinSectionParams, Layout, Substrate, hairpin_bpf_sections};
 use yee_layout::{inset_fed_patch, patch_array_2x1, quasi_yagi};
 
@@ -111,6 +114,40 @@ fn out_of_subset_inputs_are_rejected_explicitly() {
     // Stroked draws outside a region (the outline layer) are FS.3.1.
     assert!(matches!(
         gerber_to_polygons("X1Y1D02*\nX2Y2D01*\nM02*\n"),
+        Err(GerberImportError::UnsupportedCommand(_))
+    ));
+}
+
+#[test]
+fn gerber_rt_002_outline_corners_are_exact() {
+    // FS.3.1a: the Edge.Cuts stroked path round-trips — corners equal
+    // bbox ± margin exactly (4.6 quantum), path closed-and-dropped.
+    for (name, layout) in cases() {
+        let opts = OutlineOptions::default();
+        let gerber = layout_to_gerber_outline(&layout, &opts);
+        let path = gerber_to_outline(&gerber).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(path.len(), 4, "{name}: outline is a rectangle");
+        let m = opts.margin_mm * 1.0e-3;
+        let (min, max) = (layout.bbox.min, layout.bbox.max);
+        let expect = [
+            (min.x - m, min.y - m),
+            (max.x + m, min.y - m),
+            (max.x + m, max.y + m),
+            (min.x - m, max.y + m),
+        ];
+        for (p, (ex, ey)) in path.iter().zip(expect) {
+            assert!(
+                (p.x - ex).abs() < 0.5e-9 && (p.y - ey).abs() < 0.5e-9,
+                "{name}: corner ({}, {}) vs expected ({ex}, {ey})",
+                p.x,
+                p.y
+            );
+        }
+    }
+    // An outline file is not copper: regions are rejected, and the copper
+    // importer still rejects stroked draws — the two dialects stay apart.
+    assert!(matches!(
+        gerber_to_outline("G36*\nX1Y1D02*\nG37*\nM02*\n"),
         Err(GerberImportError::UnsupportedCommand(_))
     ));
 }

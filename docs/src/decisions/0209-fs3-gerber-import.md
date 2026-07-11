@@ -26,8 +26,17 @@ and `export(import(export(L)))` is **byte-identical** to `export(L)` —
 the strongest cheap proof of losslessness over the dialect, in the
 ADR-0198 artifact philosophy. Rejection paths unit-pinned.
 
-## Queued (FS.3.1)
+## FS.3.1a — outline import: SHIPPED
 
-Stroked-path import (the outline layer), D03 flashes, arcs, DXF; the
-studio import → verify → export flow with the FULL-SUITE gate (an
-imported reference board measures within tolerance of its native twin).
+`gerber_to_outline` parses the Edge.Cuts stroked-path dialect
+(`layout_to_gerber_outline`'s output): one move + draw chain, closing
+vertex dropped; regions in an outline file rejected (a profile is a cut
+path, not copper), and the copper importer keeps rejecting stroked draws
+— the two dialects stay strictly apart. Gate `gerber-rt-002`: corners
+equal bbox ± margin exactly on all four generator layouts.
+
+## Queued (FS.3.1b+)
+
+D03 flashes, arcs, DXF; the studio import → verify → export flow with
+the FULL-SUITE gate (an imported reference board measures within
+tolerance of its native twin).
