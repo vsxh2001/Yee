@@ -17,8 +17,10 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod network;
 pub mod touchstone;
 
+pub use network::{cascade, cascade_files, deembed_left, s_to_t, t_to_s};
 pub use touchstone::File;
 
 /// I/O-layer errors.
@@ -51,6 +53,11 @@ pub enum Error {
     /// Feature flag not enabled in this build.
     #[error("io feature `{0}` not enabled; rebuild with that feature on")]
     NotEnabled(&'static str),
+    /// Network-algebra operation rejected (FS.6): incompatible operands
+    /// (port count, frequency grid, z₀) or a singular conversion
+    /// (`|s21| = 0` has no transfer matrix).
+    #[error("network algebra: {0}")]
+    Network(String),
 }
 
 /// I/O-layer result alias.

@@ -254,3 +254,4 @@
 - [ADR-0208: FS.0b.0 — graded grid in the CPU kernel, bit-exact on uniform](decisions/0208-fs0b-graded-grid.md)
 - [ADR-0209: FS.3.0 — Gerber import: the writer dialect, byte-stable](decisions/0209-fs3-gerber-import.md)
 - [ADR-0211: FS.5a — Monte-Carlo yield: deterministic, model-agnostic](decisions/0211-fs5a-yield-mc.md)
+- [ADR-0212: FS.6.0 — two-port network algebra (S↔T, cascade, de-embed)](decisions/0212-fs6-network-algebra.md)

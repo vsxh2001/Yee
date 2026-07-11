@@ -29,6 +29,7 @@ pub fn io_to_py(err: yee_io::Error) -> PyErr {
             PyRuntimeError::new_err(format!("yee-io feature `{feature}` not enabled"))
         }
         yee_io::Error::InvalidFile(msg) => PyValueError::new_err(msg),
+        yee_io::Error::Network(msg) => PyValueError::new_err(format!("network algebra: {msg}")),
     }
 }
 
