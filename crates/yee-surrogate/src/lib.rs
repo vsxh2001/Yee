@@ -24,12 +24,14 @@ pub mod al;
 pub mod bo;
 pub mod gp;
 pub mod nsga2;
+pub mod spacemap;
 pub mod yield_mc;
 
 pub use al::{AlConfig, AlResult, active_learn};
 pub use bo::{BoConfig, BoResult, ei, minimize};
 pub use gp::{GaussianProcess, GpSurrogate, MlFitConfig};
 pub use nsga2::{Nsga2Config, Nsga2Result, minimize as nsga2_minimize};
+pub use spacemap::{ExtractConfig, SpaceMapConfig, SpaceMapResult, extract, space_map};
 pub use yield_mc::{ToleranceSpec, YieldEstimate, yield_estimate};
 
 use num_complex::Complex64;

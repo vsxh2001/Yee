@@ -255,3 +255,4 @@
 - [ADR-0209: FS.3.0 — Gerber import: the writer dialect, byte-stable](decisions/0209-fs3-gerber-import.md)
 - [ADR-0211: FS.5a — Monte-Carlo yield: deterministic, model-agnostic](decisions/0211-fs5a-yield-mc.md)
 - [ADR-0212: FS.6.0 — two-port network algebra (S↔T, cascade, de-embed)](decisions/0212-fs6-network-algebra.md)
+- [ADR-0213: FS.5b.0 — aggressive space mapping (Broyden ASM, deterministic)](decisions/0213-fs5b-space-mapping.md)
