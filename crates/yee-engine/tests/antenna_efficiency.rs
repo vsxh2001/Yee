@@ -145,6 +145,7 @@ fn measure_efficiency(tan_d: f64, label: &str) -> (f64, String) {
         }),
         materials: Some(materials),
         dt_s: Some(dt),
+        spacings: None,
         backend: BackendChoice::Cpu,
     };
 

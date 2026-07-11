@@ -227,6 +227,7 @@ pub fn verify_antenna_impl(
         ntff: None,
         materials: Some(materials),
         dt_s: Some(dt),
+        spacings: None,
         backend: BackendChoice::Cpu,
     };
 

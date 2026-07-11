@@ -135,6 +135,7 @@ fn measure_gain_dbi(layout: &Layout, label: &str) -> f64 {
         }),
         materials: Some(materials),
         dt_s: Some(dt),
+        spacings: None,
         backend: BackendChoice::Cpu,
     };
 

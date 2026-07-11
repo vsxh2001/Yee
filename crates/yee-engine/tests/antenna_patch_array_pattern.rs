@@ -148,6 +148,7 @@ fn antenna_patch_array_narrows_the_beam_in_the_array_plane() {
         }),
         materials: Some(materials),
         dt_s: Some(dt),
+        spacings: None,
         backend: BackendChoice::Cpu,
     };
 

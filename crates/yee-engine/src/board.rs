@@ -225,6 +225,7 @@ pub fn two_port_board_job(
         ntff: None,
         materials: Some(materials),
         dt_s: Some(dt),
+        spacings: None,
         backend: opts.backend,
     };
     Ok(TwoPortBoardJob {

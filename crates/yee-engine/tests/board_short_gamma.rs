@@ -207,6 +207,7 @@ fn measure_short(d_m: f64) -> (f64, f64, f64) {
         ntff: None,
         materials: Some(materials),
         dt_s: Some(dt),
+        spacings: None,
         backend: BackendChoice::Cpu,
     };
 

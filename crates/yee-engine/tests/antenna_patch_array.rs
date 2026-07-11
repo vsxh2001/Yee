@@ -157,6 +157,7 @@ fn antenna_patch_array_matches_at_the_designed_resonance() {
         ntff: None,
         materials: Some(materials),
         dt_s: Some(dt),
+        spacings: None,
         backend: BackendChoice::Cpu,
     };
 

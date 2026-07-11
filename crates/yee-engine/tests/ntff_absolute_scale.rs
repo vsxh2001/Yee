@@ -94,6 +94,7 @@ fn ntff_magnitude_matches_the_analytic_hertzian_dipole() {
         }),
         materials: None,
         dt_s: None,
+        spacings: None,
         backend: BackendChoice::Cpu,
     };
 

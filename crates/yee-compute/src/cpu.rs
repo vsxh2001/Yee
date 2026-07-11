@@ -22,7 +22,7 @@ use crate::dispersive::{CpuDispersiveState, DispersiveMap};
 use crate::drive::{Drive, EComponent};
 use crate::fields::Fields;
 use crate::materials::{Boundary, Materials};
-use crate::spec::{FdtdSpec, idx3, len3};
+use crate::spec::{FdtdSpec, GradedSpacings, SpacingArrays, idx3, len3};
 
 /// Lossy CA/CB coefficients for the Yee E-update (Taflove §3.7), identical
 /// to `yee_fdtd::update::ca_cb`.
@@ -62,6 +62,12 @@ pub struct CpuFdtd {
     /// inner `Vec` when `AperturePort::record` is false) — FS.2a,
     /// ADR-0207.
     aperture_records: Vec<Vec<(f64, f64, f64)>>,
+    /// Per-axis primal/dual spacings the kernels divide by (FS.0b.0). The
+    /// uniform constructors fill these with the scalar `spec.dx/dy/dz`, so
+    /// the uniform path is bit-exact by construction (gate `compute-018`).
+    spacings: SpacingArrays,
+    /// True once [`CpuFdtd::set_spacings`] attached a graded grid.
+    graded: bool,
 }
 
 impl CpuFdtd {
@@ -123,6 +129,7 @@ impl CpuFdtd {
         let aperture_state = vec![0.0; drive.aperture_ports.len()];
         let probe_series = vec![Vec::new(); drive.probes.len()];
         let aperture_records = vec![Vec::new(); drive.aperture_ports.len()];
+        let spacings = SpacingArrays::uniform(&spec);
         Self {
             spec,
             fields,
@@ -136,7 +143,47 @@ impl CpuFdtd {
             aperture_state,
             probe_series,
             aperture_records,
+            spacings,
+            graded: false,
         }
+    }
+
+    /// Attach per-axis nonuniform primal spacings (FS.0b.0, ADR-0208): the
+    /// H updates divide by the primal cell width at the H sample, the E
+    /// updates by the dual spacing (average of the two adjacent primal
+    /// cells; the single adjacent primal at the domain edges). Constant
+    /// arrays equal to the scalar `spec.dx/dy/dz` are bit-exact against the
+    /// uniform path (gate `compute-018`). Call before stepping.
+    ///
+    /// # Panics
+    ///
+    /// Panics on invalid spacings (wrong lengths, non-positive widths),
+    /// grading inside an absorbing CPML layer, or when a dispersive map is
+    /// attached (the ADE E-step is uniform-only in FS.0b.0). Untrusted
+    /// callers should pre-flight with [`GradedSpacings::validate`] /
+    /// [`GradedSpacings::validate_cpml_layers`].
+    pub fn set_spacings(&mut self, graded: &GradedSpacings) {
+        if let Err(e) = graded.validate(&self.spec) {
+            panic!("set_spacings: {e}");
+        }
+        if let Some(cpml) = &self.cpml
+            && let Err(e) = graded.validate_cpml_layers(cpml.npml, cpml.faces)
+        {
+            panic!("set_spacings: {e}");
+        }
+        assert!(
+            self.dispersive.is_none(),
+            "set_spacings: dispersive ADE materials are uniform-grid only (FS.0b.0)"
+        );
+        assert!(
+            self.spec.dt <= graded.courant_limit(),
+            "set_spacings: dt = {} s exceeds the graded Courant limit {} s \
+             (use the minimum spacing per axis)",
+            self.spec.dt,
+            graded.courant_limit()
+        );
+        self.spacings = SpacingArrays::graded(graded);
+        self.graded = true;
     }
 
     /// Attach an ADE dispersive-material map (E.5c). Replaces the standard
@@ -152,6 +199,10 @@ impl CpuFdtd {
         assert!(
             self.materials.eps_r_cells.is_none() && self.materials.sigma_cells.is_none(),
             "dispersive map is exclusive with per-cell eps/sigma (reference semantics)"
+        );
+        assert!(
+            !self.graded,
+            "dispersive ADE materials are uniform-grid only (FS.0b.0)"
         );
         map.validate(&self.spec);
         let state = CpuDispersiveState::new(&self.spec);
@@ -198,15 +249,20 @@ impl CpuFdtd {
             }
             self.boundary_e();
             if !self.drive.ports.is_empty() {
-                // Verbatim `LumpedRlcPort::{correct_e, update_pure_resistor}`.
+                // Verbatim `LumpedRlcPort::{correct_e, update_pure_resistor}`,
+                // with the local cell sizes at the port cell (dual transverse
+                // spacings × primal dz): bit-equal to `s.dx*s.dy` / `s.dz` on
+                // a uniform grid (compute-018).
                 let s = self.spec;
-                let area = s.dx * s.dy;
                 for (port, e_z_prev) in self.drive.ports.iter().zip(&mut self.port_state) {
+                    let (ci, cj, ck) = port.cell;
+                    let area = self.spacings.x.dual[ci] * self.spacings.y.dual[cj];
+                    let dz_c = self.spacings.z.primal[ck];
                     let flat = EComponent::Ez.flat(&s, port.cell);
                     let e1_star = self.fields.ez[flat];
                     let e0 = *e_z_prev;
                     let v_src = port.waveform.value(n_step, dt);
-                    let alpha = dt * s.dz / (2.0 * EPS0 * port.resistance * area);
+                    let alpha = dt * dz_c / (2.0 * EPS0 * port.resistance * area);
                     let gamma = dt / (EPS0 * port.resistance * area);
                     let e1 = (e1_star - alpha * e0 + gamma * v_src) / (1.0 + alpha);
                     self.fields.ez[flat] = e1;
@@ -217,9 +273,11 @@ impl CpuFdtd {
                 // Verbatim `LumpedRlcPort::correct_e_aperture` (pure-R arm):
                 // modal V = ∫E_z·dz averaged over the width columns, aggregate
                 // branch current with β = dt·h/(2·ε₀·A), sheet-current
-                // back-action referenced to the physical area A.
+                // back-action referenced to the physical area A. The height
+                // integral uses each cell's primal dz (bit-equal to `s.dz` on
+                // a uniform grid, compute-018).
                 let s = self.spec;
-                let dz = s.dz;
+                let dzp = &self.spacings.z.primal;
                 for ((port, v_prev), record) in self
                     .drive
                     .aperture_ports
@@ -231,7 +289,7 @@ impl CpuFdtd {
                     let n_col = port.n_columns as f64;
                     let mut v_sum = 0.0;
                     for &cell in &port.cells {
-                        v_sum += self.fields.ez[EComponent::Ez.flat(&s, cell)] * dz;
+                        v_sum += self.fields.ez[EComponent::Ez.flat(&s, cell)] * dzp[cell.2];
                     }
                     let v_term_star = v_sum / n_col;
                     let v_term_mid = 0.5 * (v_term_star + *v_prev);
@@ -250,7 +308,7 @@ impl CpuFdtd {
                     }
                     let mut v_sum_post = 0.0;
                     for &cell in &port.cells {
-                        v_sum_post += self.fields.ez[EComponent::Ez.flat(&s, cell)] * dz;
+                        v_sum_post += self.fields.ez[EComponent::Ez.flat(&s, cell)] * dzp[cell.2];
                     }
                     *v_prev = v_sum_post / n_col;
                 }
@@ -324,6 +382,7 @@ impl CpuFdtd {
                 &self.spec,
                 &mut self.fields,
                 self.materials.mu_r_cells.as_deref(),
+                &self.spacings,
             );
         } else if self.pec_box {
             apply_pec_box(&self.spec, &mut self.fields);
@@ -338,6 +397,7 @@ impl CpuFdtd {
                 &self.spec,
                 &mut self.fields,
                 self.materials.eps_r_cells.as_deref(),
+                &self.spacings,
             );
         } else if self.pec_box {
             apply_pec_box(&self.spec, &mut self.fields);
@@ -412,6 +472,13 @@ impl CpuFdtd {
         let celld = (s.nx + 1, s.ny + 1, s.nz + 1);
         let coeff_scalar = s.dt / (MU0 * s.mu_r);
         let mu_r_cells = self.materials.mu_r_cells.as_deref();
+        // H samples sit at cell centres: curl-E differences span one PRIMAL
+        // cell (FS.0b.0). Uniform fill == the old scalar divisors bit-exact.
+        let (dxp, dyp, dzp) = (
+            self.spacings.x.primal.as_slice(),
+            self.spacings.y.primal.as_slice(),
+            self.spacings.z.primal.as_slice(),
+        );
         let exd = s.ex_dims();
         let eyd = s.ey_dims();
         let ezd = s.ez_dims();
@@ -441,19 +508,20 @@ impl CpuFdtd {
                     let ey_row = row(ey, idx3(eyd, i, j, 0), s.nz + 1);
                     let ez_row0 = row(ez, idx3(ezd, i, j, 0), s.nz);
                     let ez_row1 = row(ez, idx3(ezd, i, j + 1, 0), s.nz);
+                    let dy_j = dyp[j];
                     match mu_r_cells {
                         None => {
                             for k in 0..s.nz {
-                                let dey_dz = (ey_row[k + 1] - ey_row[k]) / s.dz;
-                                let dez_dy = (ez_row1[k] - ez_row0[k]) / s.dy;
+                                let dey_dz = (ey_row[k + 1] - ey_row[k]) / dzp[k];
+                                let dez_dy = (ez_row1[k] - ez_row0[k]) / dy_j;
                                 hx_row[k] += coeff_scalar * (dey_dz - dez_dy);
                             }
                         }
                         Some(m) => {
                             let m_row = row(m, idx3(celld, i, j, 0), s.nz);
                             for k in 0..s.nz {
-                                let dey_dz = (ey_row[k + 1] - ey_row[k]) / s.dz;
-                                let dez_dy = (ez_row1[k] - ez_row0[k]) / s.dy;
+                                let dey_dz = (ey_row[k + 1] - ey_row[k]) / dzp[k];
+                                let dez_dy = (ez_row1[k] - ez_row0[k]) / dy_j;
                                 let coeff = s.dt / (MU0 * m_row[k]);
                                 hx_row[k] += coeff * (dey_dz - dez_dy);
                             }
@@ -466,6 +534,7 @@ impl CpuFdtd {
         hy.par_chunks_mut(hyd.1 * hyd.2)
             .enumerate()
             .for_each(|(i, slab)| {
+                let dx_i = dxp[i];
                 for j in 0..=s.ny {
                     let hy_row = &mut slab[j * hyd.2..(j + 1) * hyd.2];
                     let ez_row0 = row(ez, idx3(ezd, i, j, 0), s.nz);
@@ -474,16 +543,16 @@ impl CpuFdtd {
                     match mu_r_cells {
                         None => {
                             for k in 0..s.nz {
-                                let dez_dx = (ez_row1[k] - ez_row0[k]) / s.dx;
-                                let dex_dz = (ex_row[k + 1] - ex_row[k]) / s.dz;
+                                let dez_dx = (ez_row1[k] - ez_row0[k]) / dx_i;
+                                let dex_dz = (ex_row[k + 1] - ex_row[k]) / dzp[k];
                                 hy_row[k] += coeff_scalar * (dez_dx - dex_dz);
                             }
                         }
                         Some(m) => {
                             let m_row = row(m, idx3(celld, i, j, 0), s.nz);
                             for k in 0..s.nz {
-                                let dez_dx = (ez_row1[k] - ez_row0[k]) / s.dx;
-                                let dex_dz = (ex_row[k + 1] - ex_row[k]) / s.dz;
+                                let dez_dx = (ez_row1[k] - ez_row0[k]) / dx_i;
+                                let dex_dz = (ex_row[k + 1] - ex_row[k]) / dzp[k];
                                 let coeff = s.dt / (MU0 * m_row[k]);
                                 hy_row[k] += coeff * (dez_dx - dex_dz);
                             }
@@ -496,25 +565,27 @@ impl CpuFdtd {
         hz.par_chunks_mut(hzd.1 * hzd.2)
             .enumerate()
             .for_each(|(i, slab)| {
+                let dx_i = dxp[i];
                 for j in 0..s.ny {
                     let hz_row = &mut slab[j * hzd.2..(j + 1) * hzd.2];
                     let ex_row0 = row(ex, idx3(exd, i, j, 0), s.nz + 1);
                     let ex_row1 = row(ex, idx3(exd, i, j + 1, 0), s.nz + 1);
                     let ey_row0 = row(ey, idx3(eyd, i, j, 0), s.nz + 1);
                     let ey_row1 = row(ey, idx3(eyd, i + 1, j, 0), s.nz + 1);
+                    let dy_j = dyp[j];
                     match mu_r_cells {
                         None => {
                             for k in 0..=s.nz {
-                                let dex_dy = (ex_row1[k] - ex_row0[k]) / s.dy;
-                                let dey_dx = (ey_row1[k] - ey_row0[k]) / s.dx;
+                                let dex_dy = (ex_row1[k] - ex_row0[k]) / dy_j;
+                                let dey_dx = (ey_row1[k] - ey_row0[k]) / dx_i;
                                 hz_row[k] += coeff_scalar * (dex_dy - dey_dx);
                             }
                         }
                         Some(m) => {
                             let m_row = row(m, idx3(celld, i, j, 0), s.nz + 1);
                             for k in 0..=s.nz {
-                                let dex_dy = (ex_row1[k] - ex_row0[k]) / s.dy;
-                                let dey_dx = (ey_row1[k] - ey_row0[k]) / s.dx;
+                                let dex_dy = (ex_row1[k] - ex_row0[k]) / dy_j;
+                                let dey_dx = (ey_row1[k] - ey_row0[k]) / dx_i;
                                 let coeff = s.dt / (MU0 * m_row[k]);
                                 hz_row[k] += coeff * (dex_dy - dey_dx);
                             }
@@ -530,6 +601,13 @@ impl CpuFdtd {
         let coeff_scalar = s.dt / (EPS0 * s.eps_r);
         let eps_r_cells = self.materials.eps_r_cells.as_deref();
         let sigma_cells = self.materials.sigma_cells.as_deref();
+        // E nodes sit between H samples at cell centres: curl-H differences
+        // span the DUAL spacing (FS.0b.0). Uniform fill == scalar divisors.
+        let (dxd, dyd, dzd) = (
+            self.spacings.x.dual.as_slice(),
+            self.spacings.y.dual.as_slice(),
+            self.spacings.z.dual.as_slice(),
+        );
         let exd = s.ex_dims();
         let eyd = s.ey_dims();
         let ezd = s.ez_dims();
@@ -593,9 +671,10 @@ impl CpuFdtd {
                     let hz_row0 = row(hz, idx3(hzd, i, j - 1, 0), s.nz + 1);
                     let hz_row1 = row(hz, idx3(hzd, i, j, 0), s.nz + 1);
                     let hy_row = row(hy, idx3(hyd, i, j, 0), s.nz);
+                    let dy_j = dyd[j];
                     let curl = |k: usize| {
-                        let dhz_dy = (hz_row1[k] - hz_row0[k]) / s.dy;
-                        let dhy_dz = (hy_row[k] - hy_row[k - 1]) / s.dz;
+                        let dhz_dy = (hz_row1[k] - hz_row0[k]) / dy_j;
+                        let dhy_dz = (hy_row[k] - hy_row[k - 1]) / dzd[k];
                         dhz_dy - dhy_dz
                     };
                     e_rows!(ex_row, curl, idx3(celld, i, j, 0), 1..s.nz);
@@ -609,14 +688,15 @@ impl CpuFdtd {
                 if i == 0 || i >= s.nx {
                     return;
                 }
+                let dx_i = dxd[i];
                 for j in 0..s.ny {
                     let ey_row = &mut slab[j * eyd.2..(j + 1) * eyd.2];
                     let hx_row = row(hx, idx3(hxd, i, j, 0), s.nz);
                     let hz_row0 = row(hz, idx3(hzd, i - 1, j, 0), s.nz + 1);
                     let hz_row1 = row(hz, idx3(hzd, i, j, 0), s.nz + 1);
                     let curl = |k: usize| {
-                        let dhx_dz = (hx_row[k] - hx_row[k - 1]) / s.dz;
-                        let dhz_dx = (hz_row1[k] - hz_row0[k]) / s.dx;
+                        let dhx_dz = (hx_row[k] - hx_row[k - 1]) / dzd[k];
+                        let dhz_dx = (hz_row1[k] - hz_row0[k]) / dx_i;
                         dhx_dz - dhz_dx
                     };
                     e_rows!(ey_row, curl, idx3(celld, i, j, 0), 1..s.nz);
@@ -630,15 +710,17 @@ impl CpuFdtd {
                 if i == 0 || i >= s.nx {
                     return;
                 }
+                let dx_i = dxd[i];
                 for j in 1..s.ny {
                     let ez_row = &mut slab[j * ezd.2..(j + 1) * ezd.2];
                     let hy_row0 = row(hy, idx3(hyd, i - 1, j, 0), s.nz);
                     let hy_row1 = row(hy, idx3(hyd, i, j, 0), s.nz);
                     let hx_row0 = row(hx, idx3(hxd, i, j - 1, 0), s.nz);
                     let hx_row1 = row(hx, idx3(hxd, i, j, 0), s.nz);
+                    let dy_j = dyd[j];
                     let curl = |k: usize| {
-                        let dhy_dx = (hy_row1[k] - hy_row0[k]) / s.dx;
-                        let dhx_dy = (hx_row1[k] - hx_row0[k]) / s.dy;
+                        let dhy_dx = (hy_row1[k] - hy_row0[k]) / dx_i;
+                        let dhx_dy = (hx_row1[k] - hx_row0[k]) / dy_j;
                         dhy_dx - dhx_dy
                     };
                     e_rows!(ez_row, curl, idx3(celld, i, j, 0), 0..s.nz);

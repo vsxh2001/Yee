@@ -184,6 +184,7 @@ fn antenna_quasi_yagi_resonates_at_the_designed_frequency() {
         ntff: None,
         materials: Some(materials),
         dt_s: Some(dt),
+        spacings: None,
         backend: BackendChoice::Cpu,
     };
 

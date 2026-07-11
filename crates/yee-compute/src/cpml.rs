@@ -14,7 +14,7 @@ use yee_core::units::{EPS0, MU0};
 
 use crate::fields::Fields;
 use crate::materials::CpmlConfig;
-use crate::spec::{FdtdSpec, idx3, len3};
+use crate::spec::{FdtdSpec, SpacingArrays, idx3, len3};
 
 /// One profile triple `(b, c, κ)`, each of length `npml`.
 pub(crate) type ProfileTriple = (Vec<f64>, Vec<f64>, Vec<f64>);
@@ -104,8 +104,8 @@ pub(crate) struct CpuCpmlState {
     b_h: Vec<f64>,
     c_h: Vec<f64>,
     kappa_h: Vec<f64>,
-    npml: usize,
-    faces: [[bool; 2]; 3],
+    pub(crate) npml: usize,
+    pub(crate) faces: [[bool; 2]; 3],
 }
 
 impl CpuCpmlState {
@@ -147,9 +147,20 @@ impl CpuCpmlState {
         s: &FdtdSpec,
         fields: &mut Fields,
         eps_r_cells: Option<&[f64]>,
+        sp: &SpacingArrays,
     ) {
         let celld = (s.nx + 1, s.ny + 1, s.nz + 1);
         let coeff_scalar = s.dt / (EPS0 * s.eps_r);
+        // Same primal/dual mapping as the bulk kernel (FS.0b.0): E-side
+        // curl-H differences span the DUAL spacing. FS.0b.0 requires uniform
+        // spacing inside absorbing layers, but the divisions still go through
+        // the arrays so a graded interior remains consistent in the
+        // transverse PML corrections.
+        let (dxd, dyd, dzd) = (
+            sp.x.dual.as_slice(),
+            sp.y.dual.as_slice(),
+            sp.z.dual.as_slice(),
+        );
         let exd = s.ex_dims();
         let eyd = s.ey_dims();
         let ezd = s.ez_dims();
@@ -182,8 +193,8 @@ impl CpuCpmlState {
                         if dep_y.is_none() && dep_z.is_none() {
                             continue;
                         }
-                        let dhz_dy = (hz[idx3(hzd, i, j, k)] - hz[idx3(hzd, i, j - 1, k)]) / s.dy;
-                        let dhy_dz = (hy[idx3(hyd, i, j, k)] - hy[idx3(hyd, i, j, k - 1)]) / s.dz;
+                        let dhz_dy = (hz[idx3(hzd, i, j, k)] - hz[idx3(hzd, i, j - 1, k)]) / dyd[j];
+                        let dhy_dz = (hy[idx3(hyd, i, j, k)] - hy[idx3(hyd, i, j, k - 1)]) / dzd[k];
                         let coeff = match eps_r_cells {
                             None => coeff_scalar,
                             Some(e) => s.dt / (EPS0 * e[idx3(celld, i, j, k)]),
@@ -220,8 +231,8 @@ impl CpuCpmlState {
                         if dep_x.is_none() && dep_z.is_none() {
                             continue;
                         }
-                        let dhx_dz = (hx[idx3(hxd, i, j, k)] - hx[idx3(hxd, i, j, k - 1)]) / s.dz;
-                        let dhz_dx = (hz[idx3(hzd, i, j, k)] - hz[idx3(hzd, i - 1, j, k)]) / s.dx;
+                        let dhx_dz = (hx[idx3(hxd, i, j, k)] - hx[idx3(hxd, i, j, k - 1)]) / dzd[k];
+                        let dhz_dx = (hz[idx3(hzd, i, j, k)] - hz[idx3(hzd, i - 1, j, k)]) / dxd[i];
                         let coeff = match eps_r_cells {
                             None => coeff_scalar,
                             Some(e) => s.dt / (EPS0 * e[idx3(celld, i, j, k)]),
@@ -258,8 +269,8 @@ impl CpuCpmlState {
                         continue;
                     }
                     for k in 0..s.nz {
-                        let dhy_dx = (hy[idx3(hyd, i, j, k)] - hy[idx3(hyd, i - 1, j, k)]) / s.dx;
-                        let dhx_dy = (hx[idx3(hxd, i, j, k)] - hx[idx3(hxd, i, j - 1, k)]) / s.dy;
+                        let dhy_dx = (hy[idx3(hyd, i, j, k)] - hy[idx3(hyd, i - 1, j, k)]) / dxd[i];
+                        let dhx_dy = (hx[idx3(hxd, i, j, k)] - hx[idx3(hxd, i, j - 1, k)]) / dyd[j];
                         let coeff = match eps_r_cells {
                             None => coeff_scalar,
                             Some(e) => s.dt / (EPS0 * e[idx3(celld, i, j, k)]),
@@ -286,9 +297,16 @@ impl CpuCpmlState {
         s: &FdtdSpec,
         fields: &mut Fields,
         mu_r_cells: Option<&[f64]>,
+        sp: &SpacingArrays,
     ) {
         let celld = (s.nx + 1, s.ny + 1, s.nz + 1);
         let coeff_scalar = s.dt / (MU0 * s.mu_r);
+        // H-side curl-E differences span one PRIMAL cell (FS.0b.0).
+        let (dxp, dyp, dzp) = (
+            sp.x.primal.as_slice(),
+            sp.y.primal.as_slice(),
+            sp.z.primal.as_slice(),
+        );
         let exd = s.ex_dims();
         let eyd = s.ey_dims();
         let ezd = s.ez_dims();
@@ -321,8 +339,8 @@ impl CpuCpmlState {
                         if dep_y.is_none() && dep_z.is_none() {
                             continue;
                         }
-                        let dey_dz = (ey[idx3(eyd, i, j, k + 1)] - ey[idx3(eyd, i, j, k)]) / s.dz;
-                        let dez_dy = (ez[idx3(ezd, i, j + 1, k)] - ez[idx3(ezd, i, j, k)]) / s.dy;
+                        let dey_dz = (ey[idx3(eyd, i, j, k + 1)] - ey[idx3(eyd, i, j, k)]) / dzp[k];
+                        let dez_dy = (ez[idx3(ezd, i, j + 1, k)] - ez[idx3(ezd, i, j, k)]) / dyp[j];
                         let coeff = match mu_r_cells {
                             None => coeff_scalar,
                             Some(m) => s.dt / (MU0 * m[idx3(celld, i, j, k)]),
@@ -356,8 +374,8 @@ impl CpuCpmlState {
                         if dep_x.is_none() && dep_z.is_none() {
                             continue;
                         }
-                        let dez_dx = (ez[idx3(ezd, i + 1, j, k)] - ez[idx3(ezd, i, j, k)]) / s.dx;
-                        let dex_dz = (ex[idx3(exd, i, j, k + 1)] - ex[idx3(exd, i, j, k)]) / s.dz;
+                        let dez_dx = (ez[idx3(ezd, i + 1, j, k)] - ez[idx3(ezd, i, j, k)]) / dxp[i];
+                        let dex_dz = (ex[idx3(exd, i, j, k + 1)] - ex[idx3(exd, i, j, k)]) / dzp[k];
                         let coeff = match mu_r_cells {
                             None => coeff_scalar,
                             Some(m) => s.dt / (MU0 * m[idx3(celld, i, j, k)]),
@@ -391,8 +409,8 @@ impl CpuCpmlState {
                         continue;
                     }
                     for k in 0..=s.nz {
-                        let dex_dy = (ex[idx3(exd, i, j + 1, k)] - ex[idx3(exd, i, j, k)]) / s.dy;
-                        let dey_dx = (ey[idx3(eyd, i + 1, j, k)] - ey[idx3(eyd, i, j, k)]) / s.dx;
+                        let dex_dy = (ex[idx3(exd, i, j + 1, k)] - ex[idx3(exd, i, j, k)]) / dyp[j];
+                        let dey_dx = (ey[idx3(eyd, i + 1, j, k)] - ey[idx3(eyd, i, j, k)]) / dxp[i];
                         let coeff = match mu_r_cells {
                             None => coeff_scalar,
                             Some(m) => s.dt / (MU0 * m[idx3(celld, i, j, k)]),

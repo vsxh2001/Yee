@@ -309,6 +309,7 @@ fn job_for(layout: &Layout, cfg: GateConfig) -> (JobSpec, f64) {
         ntff: None,
         materials: Some(materials),
         dt_s: Some(dt),
+        spacings: None,
         backend: cfg.backend,
     };
     (spec, dt)

@@ -197,6 +197,7 @@ fn job(with_stub: bool, with_via: bool) -> (JobSpec, f64) {
         ntff: None,
         materials: Some(materials),
         dt_s: Some(dt),
+        spacings: None,
         backend: BackendChoice::Cpu,
     };
     (spec, dt)

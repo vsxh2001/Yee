@@ -144,6 +144,7 @@ fn antenna_quasi_yagi_beam_fires_end_on() {
         }),
         materials: Some(materials),
         dt_s: Some(dt),
+        spacings: None,
         backend: BackendChoice::Cpu,
     };
 
