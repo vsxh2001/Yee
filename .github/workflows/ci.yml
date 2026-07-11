@@ -270,7 +270,7 @@ jobs:
       # ADR-0195: complex transfer phase vs HJ + passivity-enforced .s2p
       # round-trip).
       - name: yee-engine gates incl. engine-verify-001 (release, include-ignored)
-        run: cargo test -p yee-engine --release -- --include-ignored --nocapture --skip antenna_ --skip patch_ --skip inset_ --skip design_loop_
+        run: cargo test -p yee-engine --release -- --include-ignored --nocapture --skip antenna_ --skip patch_ --skip inset_ --skip design_loop_ --skip graded_
 
       # F1.3.0/S.8 (ADR-0185): the first synthesized-filter-vs-its-design
       # full-wave verify — N=5 Butterworth stepped-impedance LPF through the
@@ -286,6 +286,29 @@ jobs:
       # solves, ~19 min).
       - name: engine-refine-001 (yee-filter, release, ignored)
         run: cargo test -p yee-filter --release --test engine_lpf_refine -- --ignored --nocapture
+
+  engine-graded-gate:
+    name: Graded-mesh notch gate (engine-graded-001, FS.0b.1, release)
+    runs-on: ubuntu-latest
+    # No `needs:` — parallel with the other release gates. FS.0b.1
+    # (ADR-0210): the S.6 stub board on an auto_spacings graded grid
+    # reproduces the uniform-converged notch (err <= 2 %, depth <= -20 dB)
+    # at < 0.25x the uniform pass-2 cells (measured 0.190). Two release
+    # FDTD solves, ~10-12 min.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.92"
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: engine-graded-001 (yee-engine, release, ignored)
+        run: cargo test -p yee-engine --release --test engine_graded_notch -- --ignored --nocapture
 
   bpf-bo-gate:
     name: BPF BO gate (engine-bpf-bo-001, R.4, release)
