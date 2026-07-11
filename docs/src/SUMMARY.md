@@ -253,6 +253,7 @@
 - [ADR-0207: FS.2a — aperture-port power records: the gain denominator](decisions/0207-fs2a-port-power-records.md)
 - [ADR-0208: FS.0b.0 — graded grid in the CPU kernel, bit-exact on uniform](decisions/0208-fs0b-graded-grid.md)
 - [ADR-0209: FS.3.0 — Gerber import: the writer dialect, byte-stable](decisions/0209-fs3-gerber-import.md)
+- [ADR-0210: FS.0b.1 — graded mesh rules + graded voxelization: the payoff step](decisions/0210-fs0b1-graded-rules.md)
 - [ADR-0211: FS.5a — Monte-Carlo yield: deterministic, model-agnostic](decisions/0211-fs5a-yield-mc.md)
 - [ADR-0212: FS.6.0 — two-port network algebra (S↔T, cascade, de-embed)](decisions/0212-fs6-network-algebra.md)
 - [ADR-0213: FS.5b.0 — aggressive space mapping (Broyden ASM, deterministic)](decisions/0213-fs5b-space-mapping.md)
