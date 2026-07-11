@@ -35,8 +35,21 @@ path, not copper), and the copper importer keeps rejecting stroked draws
 — the two dialects stay strictly apart. Gate `gerber-rt-002`: corners
 equal bbox ± margin exactly on all four generator layouts.
 
-## Queued (FS.3.1b+)
+## FS.3.1b — the studio import command: SHIPPED
 
-D03 flashes, arcs, DXF; the studio import → verify → export flow with
-the FULL-SUITE gate (an imported reference board measures within
-tolerance of its native twin).
+`import_gerber` (command) / `import_gerber_impl` (pure core): copper
+Gerber + optional outline + user-supplied substrate/ports → trace count,
+bbox, SVG preview, outline corners, the layout as JSON (verify-flow
+ready), and — the trust primitive — a **byte-provable echo**: the
+response re-exports what was understood, so the UI can show
+"round-trip: byte-identical" before the user runs a verify on an
+imported board. `GerberImportError::NoCopper` added at the source (the
+empty-file case previously panicked in `BBox::from_polygons`). Gate
+`studio-import-e2e-001` (instant, in CI): echo byte-identical on the
+A.1 patch export, outline enclosing the bbox, layout JSON deserializes;
+error paths (no ports, imperial, no copper).
+
+## Queued (FS.3.1c+)
+
+The React import panel; D03 flashes, arcs, DXF; the FULL-SUITE gate (an
+imported reference board measures within tolerance of its native twin).

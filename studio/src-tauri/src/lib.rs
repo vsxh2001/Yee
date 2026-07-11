@@ -12,6 +12,7 @@
 
 pub mod antenna;
 pub mod design;
+pub mod import;
 pub mod verify;
 
 use tauri::Emitter;
@@ -22,6 +23,7 @@ use crate::antenna::{
     design_antenna_impl, verify_antenna_impl,
 };
 use crate::design::{FilterDesignRequest, FilterDesignResponse, design_filter_impl};
+use crate::import::{ImportRequest, ImportResponse, import_gerber_impl};
 use crate::verify::{FilterVerifyRequest, FilterVerifyResponse, verify_filter_impl};
 
 /// Run a simulation job on the engine, streaming progress events.
@@ -97,6 +99,13 @@ async fn verify_antenna(
     .map_err(|e| e.to_string())?
 }
 
+/// Import a Gerber board (FS.3.1b): copper (+ optional outline) plus
+/// user-supplied substrate/ports → layout preview + byte-provable echo.
+#[tauri::command]
+fn import_gerber(req: ImportRequest) -> Result<ImportResponse, String> {
+    import_gerber_impl(&req)
+}
+
 /// Build and run the Tauri application.
 pub fn run() {
     tauri::Builder::default()
@@ -105,7 +114,8 @@ pub fn run() {
             design_filter,
             verify_filter,
             design_antenna,
-            verify_antenna
+            verify_antenna,
+            import_gerber
         ])
         .run(tauri::generate_context!())
         .expect("error while running yee-studio");

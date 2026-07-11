@@ -229,6 +229,12 @@ jobs:
         working-directory: studio/src-tauri
         run: cargo test --test antenna_e2e
 
+      # FS.3.1b (ADR-0209): the import flow - byte-provable Gerber
+      # round-trip through the command layer (instant, no solves).
+      - name: Studio import-flow e2e (byte-provable round-trip)
+        working-directory: studio/src-tauri
+        run: cargo test --test import_e2e
+
   compute-engine-gates:
     name: Compute engine gates (yee-compute + yee-engine, release)
     runs-on: ubuntu-latest

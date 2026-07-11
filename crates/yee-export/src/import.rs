@@ -25,6 +25,9 @@ pub enum GerberImportError {
     UnclosedRegion,
     /// A coordinate word failed to parse, with the offending text.
     BadCoordinate(String),
+    /// The file parsed but contained no copper regions — a `Layout`
+    /// needs at least one polygon (its bbox is undefined otherwise).
+    NoCopper,
 }
 
 impl std::fmt::Display for GerberImportError {
@@ -35,6 +38,7 @@ impl std::fmt::Display for GerberImportError {
             Self::DrawBeforeMove => write!(f, "D01 draw before any D02 move in a region"),
             Self::UnclosedRegion => write!(f, "file ended inside an open G36 region"),
             Self::BadCoordinate(w) => write!(f, "malformed coordinate word: {w:?}"),
+            Self::NoCopper => write!(f, "no copper regions found in the Gerber"),
         }
     }
 }
@@ -241,6 +245,9 @@ pub fn gerber_to_layout(
     ports: Vec<PortRef>,
 ) -> Result<Layout, GerberImportError> {
     let traces = gerber_to_polygons(gerber)?;
+    if traces.is_empty() {
+        return Err(GerberImportError::NoCopper);
+    }
     let bbox = yee_layout::BBox::from_polygons(&traces);
     Ok(Layout {
         substrate,
