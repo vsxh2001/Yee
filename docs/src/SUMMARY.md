@@ -259,3 +259,4 @@
 - [ADR-0213: FS.5b.0 — aggressive space mapping (Broyden ASM, deterministic)](decisions/0213-fs5b-space-mapping.md)
 - [ADR-0214: FS.0b.2-GPU — graded grid on the wgpu/WGSL backend, bit-for-bit on uniform](decisions/0214-fs0b2-gpu-graded.md)
 - [ADR-0215: FS.4.0 — multilayer stackups: type + voxelizer + stripline gate](decisions/0215-fs4-stackup.md)
+- [ADR-0216: FS.0b.2b — the convergence loop on graded grids](decisions/0216-fs0b2b-graded-convergence.md)

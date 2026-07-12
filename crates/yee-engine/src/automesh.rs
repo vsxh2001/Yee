@@ -12,7 +12,7 @@
 
 use yee_layout::Layout;
 
-use crate::board::{TwoPortBoardOptions, two_port_board_job};
+use crate::board::{self, TwoPortBoardOptions, two_port_board_job};
 use crate::{JobEvent, sparams};
 
 /// Speed of light in vacuum, m/s.
@@ -135,6 +135,12 @@ pub struct GradedMeshOptions {
     /// length scale is the substrate height, the
     /// [`GradedMeshOptions::for_board`] default.
     pub guard_m: f64,
+    /// Resolution multiplier in `(0, 1]` applied to both the coarse
+    /// ceiling and the fine band spacing (1.0 = the rulebook values).
+    /// This is [`converge_two_port_graded`]'s one refinement knob: the
+    /// rest of the options are metre-denominated fixture geometry that
+    /// must stay constant across passes (ADR-0204).
+    pub scale: f64,
 }
 
 impl GradedMeshOptions {
@@ -150,6 +156,7 @@ impl GradedMeshOptions {
             npml: 10,
             growth: 1.3,
             guard_m: layout.substrate.height_m,
+            scale: 1.0,
         }
     }
 }
@@ -249,8 +256,17 @@ pub fn auto_spacings(
             return Err(format!("{name} must be positive and finite (got {v})"));
         }
     }
-    let coarse = auto_dx_bulk(layout, f_max_hz);
-    let fine = (min_feature_m(layout) / 2.0).min(coarse / 2.0).max(1e-6);
+    if !(opts.scale.is_finite() && opts.scale > 0.0 && opts.scale <= 1.0) {
+        return Err(format!("scale {} outside (0, 1]", opts.scale));
+    }
+    // The scale multiplies the *unscaled* rule outputs uniformly, so a
+    // convergence pass refines feature bands and bulk alike — deriving
+    // fine from the scaled coarse instead would let a static
+    // min_feature/2 term pin the fine bands while the bulk refines.
+    let coarse = (auto_dx_bulk(layout, f_max_hz) * opts.scale).max(1e-6);
+    let fine = ((min_feature_m(layout) / 2.0).min(auto_dx_bulk(layout, f_max_hz) / 2.0)
+        * opts.scale)
+        .max(1e-6);
 
     // Fine intervals per axis: every trace-AABB edge ± guard, plus every
     // inter-trace axis gap (the min_feature_m pair idiom).
@@ -449,10 +465,16 @@ fn mesh_z(h: f64, coarse: f64, growth: f64, air_above_m: f64) -> (Vec<f64>, usiz
 /// One convergence pass: the dx it ran at and its |S21| curve (dB).
 #[derive(Debug, Clone)]
 pub struct ConvergencePass {
-    /// Cell size of this pass, metres.
+    /// Cell size of this pass, metres. For a graded pass
+    /// ([`converge_two_port_graded`]) this is the pass's **coarse**
+    /// ceiling; its fine spacing is `coarse`-proportional (one `scale`
+    /// knob moves both).
     pub dx_m: f64,
     /// Directional |S21| in dB at each requested frequency.
     pub s21_db: Vec<f64>,
+    /// Total grid cells of this pass (one solve; the pass runs two).
+    /// Reported so the graded loop's cell economics are measurable.
+    pub cells: usize,
 }
 
 /// The convergence-loop result.
@@ -485,27 +507,31 @@ pub struct Converged {
 /// reference's. Normalizing each run by its own plane-A forward wave
 /// cancels the launch exactly; the reference division then removes the
 /// plane-A→plane-B line factor.
+/// One solve's `(probes, dt, spacing_m, cells)`.
+type SolveProbes = (Vec<Vec<f64>>, f64, f64, usize);
+
 fn measure(
     layout: &Layout,
     reference: &Layout,
     opts: &TwoPortBoardOptions,
     freqs_hz: &[f64],
-) -> Result<Vec<f64>, String> {
-    let run = |l: &Layout| -> Result<(Vec<Vec<f64>>, f64, f64), String> {
+) -> Result<(Vec<f64>, usize), String> {
+    let run = |l: &Layout| -> Result<SolveProbes, String> {
         let job = two_port_board_job(l, opts)?;
         let (dt, spacing) = (job.dt_s, job.spacing_m);
+        let cells = job.spec.nx * job.spec.ny * job.spec.nz;
         let handle = crate::submit(job.spec);
         for event in handle.events() {
             match event {
-                JobEvent::Done { result } => return Ok((result.probes, dt, spacing)),
+                JobEvent::Done { result } => return Ok((result.probes, dt, spacing, cells)),
                 JobEvent::Error { message } => return Err(message),
                 _ => {}
             }
         }
         Err("engine stream ended without a result".into())
     };
-    let (ref_p, dt, spacing) = run(reference)?;
-    let (dut_p, dt2, _) = run(layout)?;
+    let (ref_p, dt, spacing, cells) = run(reference)?;
+    let (dut_p, dt2, _, _) = run(layout)?;
     if dt != dt2 {
         return Err("passes diverged in dt".into());
     }
@@ -520,11 +546,63 @@ fn measure(
     };
     let t_dut = transfer(&dut_p);
     let t_ref = transfer(&ref_p);
-    Ok(t_dut
-        .iter()
-        .zip(&t_ref)
-        .map(|(d, r)| 20.0 * (d.0.hypot(d.1) / r.0.hypot(r.1)).log10())
-        .collect())
+    Ok((
+        t_dut
+            .iter()
+            .zip(&t_ref)
+            .map(|(d, r)| 20.0 * (d.0.hypot(d.1) / r.0.hypot(r.1)).log10())
+            .collect(),
+        cells,
+    ))
+}
+
+/// The double-ratio |S21| curve of one graded pass: both jobs come from
+/// [`board::two_port_board_jobs_graded`] (one DUT-derived grid), each run
+/// is normalized by its own plane-A forward wave (the ADR-0204 lesson,
+/// identical to the uniform [`measure`]).
+fn measure_graded(
+    dut: &Layout,
+    f_max_hz: f64,
+    opts: &board::GradedBoardOptions,
+    freqs_hz: &[f64],
+) -> Result<(Vec<f64>, usize), String> {
+    let (dut_job, ref_job) = board::two_port_board_jobs_graded(dut, f_max_hz, opts)?;
+    let (dt, spacing, cells) = (dut_job.dt_s, dut_job.spacing_m, dut_job.cells);
+    if ref_job.dt_s != dt {
+        return Err("DUT and reference diverged in dt on one grid".into());
+    }
+    let run = |spec: crate::JobSpec| -> Result<Vec<Vec<f64>>, String> {
+        let handle = crate::submit(spec);
+        for event in handle.events() {
+            match event {
+                JobEvent::Done { result } => return Ok(result.probes),
+                JobEvent::Error { message } => return Err(message),
+                _ => {}
+            }
+        }
+        Err("engine stream ended without a result".into())
+    };
+    let ref_p = run(ref_job.spec)?;
+    let dut_p = run(dut_job.spec)?;
+    let transfer = |p: &[Vec<f64>]| {
+        sparams::forward_transfer(
+            [&p[0], &p[1], &p[2]],
+            [&p[3], &p[4], &p[5]],
+            dt,
+            spacing,
+            freqs_hz,
+        )
+    };
+    let t_dut = transfer(&dut_p);
+    let t_ref = transfer(&ref_p);
+    Ok((
+        t_dut
+            .iter()
+            .zip(&t_ref)
+            .map(|(d, r)| 20.0 * (d.0.hypot(d.1) / r.0.hypot(r.1)).log10())
+            .collect(),
+        cells,
+    ))
 }
 
 /// The adaptive-pass loop (FDTD flavour of HFSS's adaptive refinement):
@@ -577,7 +655,7 @@ pub fn converge_two_port(
         // The probe-triple span is measurement geometry: βd must stay put
         // or the standing-wave fit's conditioning changes pass to pass.
         opts.spacing_cells = (spacing_m / opts.dx_m).round() as usize;
-        let s21_db = measure(layout, reference, &opts, freqs_hz)?;
+        let (s21_db, cells) = measure(layout, reference, &opts, freqs_hz)?;
         if let Some(prev) = passes.last() {
             final_delta = s21_db
                 .iter()
@@ -588,6 +666,7 @@ pub fn converge_two_port(
         passes.push(ConvergencePass {
             dx_m: opts.dx_m,
             s21_db,
+            cells,
         });
         if final_delta <= tol {
             return Ok(Converged {
@@ -597,6 +676,77 @@ pub fn converge_two_port(
             });
         }
         opts.dx_m /= std::f64::consts::SQRT_2;
+    }
+    Ok(Converged {
+        passes,
+        final_delta,
+        converged: false,
+    })
+}
+
+/// The graded flavour of [`converge_two_port`] (FS.0b.2b, ADR-0216):
+/// each pass derives its grid from the FS.0b.1 rulebook
+/// ([`auto_spacings`] via [`board::two_port_board_jobs_graded`]) and the
+/// refinement knob is [`GradedMeshOptions::scale`] (× 1/√2 per pass),
+/// which moves the coarse ceiling and the fine bands together.
+///
+/// Constant-physics hygiene across passes comes in two parts: the
+/// metre-denominated mesh options (margins, air height, guard) are simply
+/// never touched, and the two quantities the fixture denominates in
+/// coarse cells are rescaled here — `mesh.npml` (the absorber must keep
+/// its physical thickness; a cells-thin CPML at fine spacing reflects
+/// long wavelengths) and `spacing_cells` (the probe-triple βd must stay
+/// put or the standing-wave fit's conditioning changes pass to pass).
+/// `n_steps: None` keeps the fixture's physical-window rule, which
+/// scales with the pass's fine spacing automatically.
+///
+/// Convergence is the identical criterion to the uniform loop: max
+/// per-frequency Δ|S21| in **linear** magnitude ≤ `tol`, unconverged
+/// reported honestly. `ConvergencePass::dx_m` records each pass's coarse
+/// ceiling; `ConvergencePass::cells` records the graded payoff.
+pub fn converge_two_port_graded(
+    dut: &Layout,
+    f_max_hz: f64,
+    mut opts: board::GradedBoardOptions,
+    freqs_hz: &[f64],
+    tol: f64,
+    max_passes: usize,
+) -> Result<Converged, String> {
+    assert!(max_passes >= 2, "convergence needs at least two passes");
+    assert!(tol > 0.0 && tol.is_finite(), "tol must be positive");
+    let lin = |db: f64| 10.0_f64.powf(db / 20.0);
+    // Physical sizes of the two coarse-cell-denominated fixture knobs at
+    // the starting scale.
+    let coarse0 = (auto_dx_bulk(dut, f_max_hz) * opts.mesh.scale).max(1e-6);
+    let npml_m = opts.mesh.npml as f64 * coarse0;
+    let spacing_m = opts.spacing_cells as f64 * coarse0;
+    let mut passes: Vec<ConvergencePass> = Vec::new();
+    let mut final_delta = f64::INFINITY;
+    for _ in 0..max_passes {
+        let coarse = (auto_dx_bulk(dut, f_max_hz) * opts.mesh.scale).max(1e-6);
+        opts.mesh.npml = (npml_m / coarse).round().max(1.0) as usize;
+        opts.spacing_cells = (spacing_m / coarse).round().max(1.0) as usize;
+        let (s21_db, cells) = measure_graded(dut, f_max_hz, &opts, freqs_hz)?;
+        if let Some(prev) = passes.last() {
+            final_delta = s21_db
+                .iter()
+                .zip(&prev.s21_db)
+                .map(|(a, b)| (lin(*a) - lin(*b)).abs())
+                .fold(0.0_f64, f64::max);
+        }
+        passes.push(ConvergencePass {
+            dx_m: coarse,
+            s21_db,
+            cells,
+        });
+        if final_delta <= tol {
+            return Ok(Converged {
+                passes,
+                final_delta,
+                converged: true,
+            });
+        }
+        opts.mesh.scale /= std::f64::consts::SQRT_2;
     }
     Ok(Converged {
         passes,
@@ -721,6 +871,29 @@ mod tests {
                     fine * 1e3
                 );
             }
+        }
+    }
+
+    #[test]
+    fn scale_refines_coarse_and_fine_together() {
+        let l = stub_like_layout();
+        let mut opts = GradedMeshOptions::for_board(&l, 6.0e9);
+        let s1 = auto_spacings(&l, 6.0e9, &opts).unwrap();
+        opts.scale = 0.5;
+        let s2 = auto_spacings(&l, 6.0e9, &opts).unwrap();
+        assert!((s2.coarse_m - s1.coarse_m / 2.0).abs() < 1e-15);
+        assert!((s2.fine_m - s1.fine_m / 2.0).abs() < 1e-15);
+        // Refinement is genuine: strictly more cells on every axis.
+        assert!(s2.dx.len() > s1.dx.len());
+        assert!(s2.dy.len() > s1.dy.len());
+        assert!(s2.dz.len() > s1.dz.len());
+
+        for bad in [0.0, -0.5, 1.5, f64::NAN] {
+            opts.scale = bad;
+            assert!(
+                auto_spacings(&l, 6.0e9, &opts).is_err(),
+                "scale {bad} must be rejected"
+            );
         }
     }
 
