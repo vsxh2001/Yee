@@ -129,6 +129,27 @@ fn graded_push_button_meshing_converges_to_the_tl_notch() {
         "  final Δ|S| = {:.4} (linear), converged = {}",
         result.final_delta, result.converged
     );
+    // Full per-bin dump of every pass (forensic view: localizes where a
+    // large linear delta lives — notch bin, skirt, or band edge).
+    let lin = |db: f64| 10.0_f64.powf(db / 20.0);
+    for (i, f) in freqs.iter().enumerate() {
+        let cols: Vec<String> = result
+            .passes
+            .iter()
+            .map(|p| format!("{:8.2}", p.s21_db[i]))
+            .collect();
+        let deltas: Vec<String> = result
+            .passes
+            .windows(2)
+            .map(|w| format!("{:.4}", (lin(w[0].s21_db[i]) - lin(w[1].s21_db[i])).abs()))
+            .collect();
+        eprintln!(
+            "    {:.2} GHz: {} dB | Δlin {}",
+            f / 1e9,
+            cols.join(" "),
+            deltas.join(" ")
+        );
+    }
 
     let last = result.passes.last().unwrap();
     let (i_min, &db_min) = last
