@@ -4,9 +4,12 @@
 //! 45°-mitered outer corners (Douville & James) — measured through the
 //! certified graded two-port fixture. The miter physics is the reference:
 //! chopping the outer corner removes the bend's excess capacitance, so
-//! the mitered line must transmit at least as well as the square one,
-//! with the gap growing toward higher frequency (corner reflection ∝ f
-//! for an excess-C discontinuity).
+//! the mitered line must transmit at least as well as the square one —
+//! at every bin. (The first run measured the advantage U-shaped across
+//! the band — +0.021 linear at the edges, ~0 near 4.45 GHz — because the
+//! four bends' reflections interfere with path-length-dependent phase;
+//! a naive \"advantage grows with f\" excess-C assert is mis-specified
+//! for a multi-bend line.)
 //!
 //! `#[ignore]`'d (4 release FDTD solves):
 //!
@@ -100,39 +103,44 @@ fn graded_miter_bends_transmit_better_than_square() {
         );
     }
     let (mean_sq, mean_mi) = (mean(&sq), mean(&mi));
-    // Frequency trend: the corner is an excess-C discontinuity, so its
-    // reflection grows with f — compare the miter advantage in the lowest
-    // vs highest 10 bins.
-    let gap_lo = mean(&mi[..10]) - mean(&sq[..10]);
-    let gap_hi = mean(&mi[36..]) - mean(&sq[36..]);
+    let min_gap = mi
+        .iter()
+        .zip(&sq)
+        .map(|(m, s)| m - s)
+        .fold(f64::INFINITY, f64::min);
     eprintln!(
         "  mean |S21|: square {:.4} ({:.2} dB), mitered {:.4} ({:.2} dB); \
-         miter advantage lo/hi band {:+.4}/{:+.4} lin",
+         min per-bin miter advantage {:+.4} lin",
         mean_sq,
         db(mean_sq),
         mean_mi,
         db(mean_mi),
-        gap_lo,
-        gap_hi
+        min_gap
     );
 
-    // (a) The miter physics, band-mean in linear magnitude.
+    // Measured 2026-07-12 (first run, 621 s release): square mean 0.9665
+    // (−0.30 dB), mitered 0.9738 (−0.23 dB) — gap 0.0073; min per-bin
+    // advantage +0.000 (4.45 GHz, the interference null); mitered worst
+    // in-band −0.27 dB.
+    // (a) The miter physics, band-mean in linear magnitude, at half the
+    // measured margin.
     assert!(
-        mean_mi >= mean_sq,
-        "engine-miter-001 FAILED: mitered mean |S21| {mean_mi:.4} below square {mean_sq:.4}"
+        mean_mi >= mean_sq + 0.004,
+        "engine-miter-001 FAILED: mitered mean |S21| {mean_mi:.4} vs square {mean_sq:.4} \
+         (need +0.004 linear margin)"
     );
-    // (b) The mitered line stays a decent through-line across the band.
+    // (b) The mitered line stays a clean through-line across the band.
     let worst_mi = mi.iter().cloned().fold(f64::INFINITY, f64::min);
     assert!(
-        db(worst_mi) >= -6.0,
-        "engine-miter-001 FAILED: mitered worst in-band |S21| {:.2} dB < -6 dB",
+        db(worst_mi) >= -1.0,
+        "engine-miter-001 FAILED: mitered worst in-band |S21| {:.2} dB < -1 dB",
         db(worst_mi)
     );
-    // (c) The advantage grows with frequency (excess-C reflection ∝ f);
-    // small slack for measurement ripple.
+    // (c) Mitering never hurts, bin by bin (ripple slack: the measured
+    // minimum sits at the four-bend interference null, ~0.000).
     assert!(
-        gap_hi >= gap_lo - 0.02,
-        "engine-miter-001 FAILED: miter advantage shrank with frequency \
-         (lo {gap_lo:+.4} vs hi {gap_hi:+.4})"
+        min_gap >= -0.005,
+        "engine-miter-001 FAILED: mitered worse than square somewhere in-band \
+         (min per-bin gap {min_gap:+.4})"
     );
 }

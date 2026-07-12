@@ -36,13 +36,23 @@ removes the bend's excess capacitance and its reflection.
    job; `graded_` test-name prefix keeps it out of the blanket step):
    square vs mitered double-jog through the graded fixture, double-ratio
    |S21| on the ADR-0216 criterion band (3.5–5.75 GHz). Asserts:
-   (a) mitered band-mean |S21| ≥ square; (b) mitered worst in-band |S21|
-   ≥ −6 dB; (c) the miter advantage does not shrink with frequency
-   (excess-C reflection ∝ f), 0.02 linear slack.
+   (a) mitered band-mean ≥ square + 0.004 linear; (b) mitered worst
+   in-band |S21| ≥ −1 dB; (c) mitered ≥ square at **every bin**
+   (0.005 ripple slack).
 
-## Measured
+## Measured (first run GREEN, 621 s release, grid 1.20 M cells)
 
-(pinned from the first green run — see the gate's `--nocapture` output)
+- Square corners: band-mean |S21| **0.9665** (−0.30 dB).
+- Mitered (f = 0.7): band-mean **0.9738** (−0.23 dB) — better at every
+  bin; worst in-band −0.27 dB.
+- The miter advantage is **U-shaped** across the band (+0.021 linear at
+  both band edges, ~0.000 near 4.45 GHz): the four bends' reflections
+  interfere with path-length-dependent phase, so the naive single-bend
+  excess-C intuition ("advantage grows ∝ f") is mis-specified for a
+  multi-bend line — the original assert (c) survived its first run only
+  via slack and was replaced by the per-bin form above. Lesson recorded:
+  for multi-discontinuity DUTs, assert bin-wise dominance or means, not
+  frequency trends.
 
 ## Non-goals
 
