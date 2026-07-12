@@ -330,7 +330,8 @@ fn fem_eig_003_strict_absorption_floor_gate() {
     assert!(
         result.gate_a_floor_ok,
         "fem-eig-003 gate (A) FAILED: |S_{{11}}(f)| dB band [{:.2}, {:.2}] outside \
-         the Engquist-Majda window [-45, -35] dB: {}",
+         the v3.5.2 window [FEM_EIG_003_S11_DB_MIN, FEM_EIG_003_S11_DB_MAX] = \
+         [-200, -40] dB: {}",
         result.s11_db_min, result.s11_db_max, result.notes,
     );
     assert_eq!(

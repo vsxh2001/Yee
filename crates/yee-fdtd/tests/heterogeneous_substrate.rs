@@ -17,16 +17,17 @@
 //!
 //! ## Geometry
 //!
-//! - Grid: `80 × 80 × 80` cells, `dx = 1 mm`. CPML (npml = 10) on all
-//!   six outer faces.
-//! - Substrate slab: 20 cells thick at `i ∈ [50, 70)` (so 20 mm × 80 mm
-//!   × 80 mm bulk dielectric, treated as a half-space at the
-//!   measurement frequency because the back face is well behind the
-//!   reflected-wavefront measurement window).
+//! - Grid: `120 × 120 × 120` cells, `dx = 1 mm`. CPML (npml = 10) on
+//!   all six outer faces.
+//! - Substrate slab: 60 cells thick at `i ∈ [50, 110)` (bulk
+//!   dielectric, treated as a half-space at the measurement frequency
+//!   because the back face is well behind the reflected-wavefront
+//!   measurement window; the slab stops one cell short of the high-x
+//!   CPML inner edge).
 //! - Per-cell ε_r map: 2.2 inside the slab, 1.0 everywhere else
 //!   (including the CPML region — see note below).
-//! - Source: soft Gaussian-in-time pulse on `E_z` at `(20, 40, 40)`.
-//! - Probe: `E_z` at `(30, 40, 40)`, 10 cells from the source and 20
+//! - Source: soft Gaussian-in-time pulse on `E_z` at `(20, 60, 60)`.
+//! - Probe: `E_z` at `(30, 60, 60)`, 10 cells from the source and 20
 //!   cells from the slab front face.
 //!
 //! ## CPML / per-cell-ε interaction
@@ -35,8 +36,8 @@
 //! its correction term by the *scalar* `grid.eps_r`, not the per-cell
 //! map. To keep the CPML self-consistent, we leave ε_r = 1.0 in all
 //! cells inside the CPML layer (i.e. the slab does not extend into
-//! the CPML), which matches the geometry above (slab at i ∈ [50, 70)
-//! ⊂ [10, 70) interior region for npml = 10). A future Phase
+//! the CPML), which matches the geometry above (slab at i ∈ [50, 110)
+//! ⊂ [10, 110) interior region for npml = 10). A future Phase
 //! 2.fdtd.7.z+1 refactor of `CpmlState::update_e` to consume the
 //! per-cell map removes this constraint; until then, callers are
 //! responsible for keeping per-cell ε_r = scalar `eps_r` in the
