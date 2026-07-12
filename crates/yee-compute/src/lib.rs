@@ -26,8 +26,15 @@
 //! backend ([`GradedSpacings`] + [`CpuFdtd::set_spacings`]): H updates
 //! divide by the primal cell width, E updates by the dual spacing, gated
 //! bit-exact on uniform arrays (`compute-018`) and by a measured graded
-//! interface-reflection floor (`compute-019`). CPU-only — the GPU backend
-//! has no spacings input yet.
+//! interface-reflection floor (`compute-019`). FS.0b.2 (ADR-0214) brings
+//! the same capability to the GPU backend (`GpuFdtd::set_spacings`): the
+//! WGSL kernels multiply by per-cell **inverse** primal/dual spacings from
+//! a packed storage buffer whose uniform fill is bit-equal to the retired
+//! scalar `inv_dx/dy/dz` uniforms, gated bit-for-bit on uniform arrays
+//! against the GPU's own scalar path (`compute-020`) and cross-backend on
+//! the compute-019 taper scenario (`compute-021`). NTFF-DFT + graded and
+//! z-taper-straddling aperture ports are rejected with
+//! [`ComputeError::Unsupported`].
 //!
 //! # Example
 //!

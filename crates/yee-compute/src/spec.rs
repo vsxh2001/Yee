@@ -255,6 +255,29 @@ impl SpacingArrays {
             z: AxisSpacings::from_primal(graded.dz.clone()),
         }
     }
+
+    /// Packed **inverse**-spacing vector for the GPU backend (FS.0b.2,
+    /// ADR-0214): the six arrays in the fixed order the shader re-derives
+    /// from `nx/ny/nz` — `inv_xp | inv_yp | inv_zp | inv_xd | inv_yd |
+    /// inv_zd`. Inverses are computed in f64 and narrowed once, exactly how
+    /// the pre-FS.0b.2 scalar `Params.inv_dx = (1.0 / spec.dx) as f32` was
+    /// produced, so a uniform fill is bit-equal to the old scalars and the
+    /// GPU's uniform path is unchanged bit-for-bit (gate `compute-020`).
+    #[cfg(feature = "gpu")]
+    pub(crate) fn inverse_f32(&self) -> Vec<f32> {
+        [
+            &self.x.primal,
+            &self.y.primal,
+            &self.z.primal,
+            &self.x.dual,
+            &self.y.dual,
+            &self.z.dual,
+        ]
+        .into_iter()
+        .flatten()
+        .map(|d| (1.0 / d) as f32)
+        .collect()
+    }
 }
 
 /// Flat row-major index into an array of shape `dims`, matching `ndarray`'s

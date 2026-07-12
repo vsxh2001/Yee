@@ -34,9 +34,6 @@ struct Params {
     has_cpml: u32,
     has_mask: u32,
     has_dispersion: u32,
-    inv_dx: f32,
-    inv_dy: f32,
-    inv_dz: f32,
     // ω·Δt for the on-GPU NTFF DFT accumulator (E.5b); 0.0 disables it.
     dft_omega_dt: f32,
 }
@@ -57,6 +54,25 @@ struct Params {
 // round-trips; the `bump_step` dispatch advances the counter between steps.
 @group(0) @binding(6) var<storage, read> drv_idx: array<u32>;
 @group(0) @binding(7) var<storage, read_write> drv_data: array<f32>;
+// Graded spacings (FS.0b.2, ADR-0214): packed INVERSE primal/dual arrays,
+//   inv_sp: inv_xp[nx] | inv_yp[ny] | inv_zp[nz]
+//         | inv_xd[nx+1] | inv_yd[ny+1] | inv_zd[nz+1]
+// H updates multiply curl-E differences by the inverse PRIMAL cell width at
+// the H sample; E updates multiply curl-H differences by the inverse DUAL
+// spacing — the FS.0b.0 CPU divisor mapping (cpu.rs), verbatim. The host
+// fills this with f64-computed 1/d narrowed once, so the uniform fill is
+// bit-equal to the pre-FS.0b.2 scalar Params.inv_* values (compute-020).
+// NOTE: 8th storage buffer per stage — the WebGPU default limit exactly;
+// the next buffer must be packed into an existing arena.
+@group(0) @binding(8) var<storage, read> inv_sp: array<f32>;
+
+// ---- inverse-spacing accessors (p = primal, d = dual) ----
+fn inv_xp(i: u32) -> f32 { return inv_sp[i]; }
+fn inv_yp(j: u32) -> f32 { return inv_sp[p.nx + j]; }
+fn inv_zp(k: u32) -> f32 { return inv_sp[p.nx + p.ny + k]; }
+fn inv_xd(i: u32) -> f32 { return inv_sp[p.nx + p.ny + p.nz + i]; }
+fn inv_yd(j: u32) -> f32 { return inv_sp[2u * p.nx + p.ny + p.nz + 1u + j]; }
+fn inv_zd(k: u32) -> f32 { return inv_sp[2u * p.nx + 2u * p.ny + p.nz + 2u + k]; }
 
 // ---- component lengths ----
 fn len_ex() -> u32 { return p.nx * (p.ny + 1u) * (p.nz + 1u); }
@@ -189,8 +205,8 @@ fn update_hx(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (i > p.nx || j >= p.ny || k >= p.nz) {
         return;
     }
-    let dey_dz = (ey_at(i, j, k + 1u) - ey_at(i, j, k)) * p.inv_dz;
-    let dez_dy = (ez_at(i, j + 1u, k) - ez_at(i, j, k)) * p.inv_dy;
+    let dey_dz = (ey_at(i, j, k + 1u) - ey_at(i, j, k)) * inv_zp(k);
+    let dez_dy = (ez_at(i, j + 1u, k) - ez_at(i, j, k)) * inv_yp(j);
     let coeff = ch_at(icell(i, j, k));
     let idx = ihx(i, j, k);
     var h = fields[off_hx() + idx] + coeff * (dey_dz - dez_dy);
@@ -221,8 +237,8 @@ fn update_hy(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (i >= p.nx || j > p.ny || k >= p.nz) {
         return;
     }
-    let dez_dx = (ez_at(i + 1u, j, k) - ez_at(i, j, k)) * p.inv_dx;
-    let dex_dz = (ex_at(i, j, k + 1u) - ex_at(i, j, k)) * p.inv_dz;
+    let dez_dx = (ez_at(i + 1u, j, k) - ez_at(i, j, k)) * inv_xp(i);
+    let dex_dz = (ex_at(i, j, k + 1u) - ex_at(i, j, k)) * inv_zp(k);
     let coeff = ch_at(icell(i, j, k));
     let idx = ihy(i, j, k);
     var h = fields[off_hy() + idx] + coeff * (dez_dx - dex_dz);
@@ -253,8 +269,8 @@ fn update_hz(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (i >= p.nx || j >= p.ny || k > p.nz) {
         return;
     }
-    let dex_dy = (ex_at(i, j + 1u, k) - ex_at(i, j, k)) * p.inv_dy;
-    let dey_dx = (ey_at(i + 1u, j, k) - ey_at(i, j, k)) * p.inv_dx;
+    let dex_dy = (ex_at(i, j + 1u, k) - ex_at(i, j, k)) * inv_yp(j);
+    let dey_dx = (ey_at(i + 1u, j, k) - ey_at(i, j, k)) * inv_xp(i);
     let coeff = ch_at(icell(i, j, k));
     let idx = ihz(i, j, k);
     var h = fields[off_hz() + idx] + coeff * (dex_dy - dey_dx);
@@ -288,8 +304,8 @@ fn update_ex(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (i >= p.nx || j == 0u || j >= p.ny || k == 0u || k >= p.nz) {
         return;
     }
-    let dhz_dy = (hz_at(i, j, k) - hz_at(i, j - 1u, k)) * p.inv_dy;
-    let dhy_dz = (hy_at(i, j, k) - hy_at(i, j, k - 1u)) * p.inv_dz;
+    let dhz_dy = (hz_at(i, j, k) - hz_at(i, j - 1u, k)) * inv_yd(j);
+    let dhy_dz = (hy_at(i, j, k) - hy_at(i, j, k - 1u)) * inv_zd(k);
     let cellc = icell(i, j, k);
     let idx = iex(i, j, k);
     if (p.has_dispersion != 0u) {
@@ -327,8 +343,8 @@ fn update_ey(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (i == 0u || i >= p.nx || j >= p.ny || k == 0u || k >= p.nz) {
         return;
     }
-    let dhx_dz = (hx_at(i, j, k) - hx_at(i, j, k - 1u)) * p.inv_dz;
-    let dhz_dx = (hz_at(i, j, k) - hz_at(i - 1u, j, k)) * p.inv_dx;
+    let dhx_dz = (hx_at(i, j, k) - hx_at(i, j, k - 1u)) * inv_zd(k);
+    let dhz_dx = (hz_at(i, j, k) - hz_at(i - 1u, j, k)) * inv_xd(i);
     let cellc = icell(i, j, k);
     let idx = iey(i, j, k);
     if (p.has_dispersion != 0u) {
@@ -366,8 +382,8 @@ fn update_ez(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (i == 0u || i >= p.nx || j == 0u || j >= p.ny || k >= p.nz) {
         return;
     }
-    let dhy_dx = (hy_at(i, j, k) - hy_at(i - 1u, j, k)) * p.inv_dx;
-    let dhx_dy = (hx_at(i, j, k) - hx_at(i, j - 1u, k)) * p.inv_dy;
+    let dhy_dx = (hy_at(i, j, k) - hy_at(i - 1u, j, k)) * inv_xd(i);
+    let dhx_dy = (hx_at(i, j, k) - hx_at(i, j - 1u, k)) * inv_yd(j);
     let cellc = icell(i, j, k);
     let idx = iez(i, j, k);
     if (p.has_dispersion != 0u) {
