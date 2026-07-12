@@ -43,8 +43,10 @@ removes the bend's excess capacitance and its reflection.
 ## Measured (first run GREEN, 621 s release, grid 1.20 M cells)
 
 - Square corners: band-mean |S21| **0.9665** (−0.30 dB).
-- Mitered (f = 0.7): band-mean **0.9738** (−0.23 dB) — better at every
-  bin; worst in-band −0.27 dB.
+- Mitered (f = 0.7): band-mean **0.9738** (−0.23 dB); worst in-band
+  −0.27 dB; never worse than square beyond ripple at any bin (certified
+  min per-bin gap **−0.0006** linear, at the 4.45 GHz interference
+  null — inside the assert's 0.005 slack).
 - The miter advantage is **U-shaped** across the band (+0.021 linear at
   both band edges, ~0.000 near 4.45 GHz): the four bends' reflections
   interfere with path-length-dependent phase, so the naive single-bend
