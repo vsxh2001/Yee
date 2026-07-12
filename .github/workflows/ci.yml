@@ -309,6 +309,13 @@ jobs:
 
       - name: engine-graded-001 (yee-engine, release, ignored)
         run: cargo test -p yee-engine --release --test engine_graded_notch -- --ignored --nocapture
+      # FS.3.2a (ADR-0217): first non-axis-aligned polygon edges under
+      # full-wave test — mitered vs square double-jog bends on the graded
+      # fixture (4 release solves; the `graded_` test-name prefix keeps it
+      # out of the blanket engine-gates step).
+      # HELD until the first local green run pins the measured numbers.
+      # - name: engine-miter-001 (yee-engine, release, ignored)
+      #   run: cargo test -p yee-engine --release --test engine_miter -- --ignored --nocapture
       # engine-automesh-002 (FS.0b.2b, ADR-0216) runs in heavy-weekly.yml:
       # its 3-pass graded convergence loop is ~90 min local / multi-hour on
       # a hosted runner — too heavy per-PR.

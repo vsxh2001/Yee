@@ -972,6 +972,136 @@ pub struct PatchArray {
     pub dims: PatchArrayDims,
 }
 
+/// Corner style for [`double_jog`] (FS.3.2a, ADR-0217).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MiterStyle {
+    /// Plain square corners (the full w×w corner metal).
+    Square,
+    /// The outer corner of each bend chopped by a 45° edge (Douville &
+    /// James): the cut legs run `f·w` along each outer edge. `f` must be
+    /// in `(0, 1)`; ~0.7 is near the published optimum for w/h ≈ 1.9.
+    Mitered {
+        /// Cut-leg fraction of the trace width.
+        f: f64,
+    },
+}
+
+/// Generate a **double-jog through line** (FS.3.2a): port 1 → x-feed →
+/// 90° up-bend → y-riser (`jog_dy_m`) → x-run (`gap_x_m` between the
+/// risers) → 90° down-bend → x-feed → port 2. Both ports face ±x at the
+/// same y, so the standard two-port fixtures (uniform and graded) apply
+/// unchanged, and [`MiterStyle::Mitered`] corners carry the repo's first
+/// **non-axis-aligned polygon edges** into a full-wave measurement.
+///
+/// Construction notes:
+/// - Straight segments are rects that **overlap** each corner region by
+///   `0.2·w` (the voxelizer point-samples cell centres; shared-edge-only
+///   joints rasterize inconsistently — the quasi-Yagi lesson). The
+///   overlap is capped well inside the un-cut corner metal: the miter
+///   cut spans `f·w` from the outer edges, and the overlaps stay `≥
+///   (1−f−0.2)·w` clear of it for the default f = 0.7.
+/// - Each corner is its **own polygon** (square rect or 5-vertex mitered
+///   pentagon), so the automesh rulebook's per-polygon AABBs put fine
+///   bands at every bend (a single-outline polygon would present one
+///   blob AABB and leave the bends unrefined).
+pub fn double_jog(
+    substrate: &Substrate,
+    w_m: f64,
+    run_x_m: f64,
+    gap_x_m: f64,
+    jog_dy_m: f64,
+    style: MiterStyle,
+) -> Layout {
+    assert!(
+        w_m > 0.0 && run_x_m > 0.0 && gap_x_m > 0.0 && jog_dy_m > w_m,
+        "non-physical double-jog inputs (need jog_dy > w)"
+    );
+    if let MiterStyle::Mitered { f } = style {
+        assert!(f > 0.0 && f < 1.0, "miter fraction {f} outside (0, 1)");
+        assert!(
+            f <= 0.8,
+            "miter fraction {f} leaves < 0.2·w of corner metal — the segment \
+             overlaps would intrude into the cut"
+        );
+    }
+    let w = w_m;
+    let ov = 0.2 * w;
+    let xa = run_x_m; // riser-A left edge
+    let xb = xa + w + gap_x_m; // riser-B left edge
+    let dy = jog_dy_m; // mid-run bottom edge
+    let end = xb + w + run_x_m;
+
+    // The four corner regions, outer-corner cut per style. Bends: A turns
+    // +x→+y (outer corner bottom-right), B +y→+x (top-left), C +x→−y
+    // (top-right), D −y→+x (bottom-left).
+    let corner = |x0: f64, y0: f64, outer: (f64, f64)| -> Polygon {
+        match style {
+            MiterStyle::Square => Polygon::rect(x0, y0, w, w),
+            MiterStyle::Mitered { f } => {
+                let c = f * w;
+                let (cx, cy) = outer;
+                // Start from the rect's verts and replace the outer
+                // corner with the two cut points, each `c` along an
+                // adjacent edge toward the corner's rect interior.
+                let mut verts = Vec::with_capacity(5);
+                for v in Polygon::rect(x0, y0, w, w).verts {
+                    if (v.x - cx).abs() < 1e-15 && (v.y - cy).abs() < 1e-15 {
+                        // The two edge directions from the outer corner
+                        // back into the rect: ±x and ±y toward centre.
+                        let sx = if cx > x0 + w / 2.0 { -1.0 } else { 1.0 };
+                        let sy = if cy > y0 + w / 2.0 { -1.0 } else { 1.0 };
+                        // Order the pair to preserve the rect winding:
+                        // the vertex reached first along the incoming
+                        // edge keeps that edge's axis.
+                        if sy > 0.0 && sx < 0.0 || sy < 0.0 && sx > 0.0 {
+                            verts.push(Point2::new(cx + sx * c, cy));
+                            verts.push(Point2::new(cx, cy + sy * c));
+                        } else {
+                            verts.push(Point2::new(cx, cy + sy * c));
+                            verts.push(Point2::new(cx + sx * c, cy));
+                        }
+                    } else {
+                        verts.push(v);
+                    }
+                }
+                Polygon { verts }
+            }
+        }
+    };
+
+    let traces = vec![
+        // Straights, each overlapping its corner(s) by `ov`.
+        Polygon::rect(0.0, 0.0, xa + ov, w),
+        Polygon::rect(xa, w - ov, w, dy - w + 2.0 * ov),
+        Polygon::rect(xa + w - ov, dy, gap_x_m + 2.0 * ov, w),
+        Polygon::rect(xb, w - ov, w, dy - w + 2.0 * ov),
+        Polygon::rect(xb + w - ov, 0.0, run_x_m + ov, w),
+        // Corners A, B, C, D.
+        corner(xa, 0.0, (xa + w, 0.0)),
+        corner(xa, dy, (xa, dy + w)),
+        corner(xb, dy, (xb + w, dy + w)),
+        corner(xb, 0.0, (xb, 0.0)),
+    ];
+    let bbox = BBox::from_polygons(&traces);
+    Layout {
+        substrate: *substrate,
+        traces,
+        ports: vec![
+            PortRef {
+                at: Point2::new(0.5e-3, w / 2.0),
+                width_m: w,
+                ref_impedance_ohm: 50.0,
+            },
+            PortRef {
+                at: Point2::new(end - 0.5e-3, w / 2.0),
+                width_m: w,
+                ref_impedance_ohm: 50.0,
+            },
+        ],
+        bbox,
+    }
+}
+
 /// Generate a **2×1 corporate-fed patch array** (FS.1b): two inset-fed
 /// patches side by side along y (H-plane pair) at 0.5 λ₀ spacing, fed in
 /// phase through a symmetric corporate tree — 50 Ω spine → junction → two
