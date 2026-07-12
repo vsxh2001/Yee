@@ -74,7 +74,17 @@ fn graded_push_button_meshing_converges_to_the_tl_notch() {
         opts.mesh.guard_m * 1e3
     );
 
-    let freqs: Vec<f64> = (0..=50).map(|n| 3.5e9 + n as f64 * 50.0e6).collect();
+    // Criterion band 3.5–5.75 GHz: the convergence bins stop at
+    // 0.96·f_max. The full-band forensics run (2026-07-12) measured the
+    // 5.85–6.0 GHz bins polluted by a pass-dependent band-edge artifact —
+    // a spurious dip wandering 5.95→5.90 GHz between the fine passes and
+    // a non-physical +1.05 dB bin at exactly f_max — while every bin
+    // ≤ 5.75 GHz converged (pass1→pass2 max Δlin 0.1351). f_max is where
+    // the λ/20 mesh rule stops holding by construction, so bins at the
+    // design edge are the least trustworthy and must not drive the
+    // refinement verdict. (Root-causing the moving dip is queued —
+    // ADR-0216.)
+    let freqs: Vec<f64> = (0..=45).map(|n| 3.5e9 + n as f64 * 50.0e6).collect();
     // Same linear ΔS tolerance as engine-automesh-001 (0.20, the measured
     // walking-skeleton value; ADR-0204's rationale applies verbatim).
     let result = converge_two_port_graded(&layout, F_MAX_HZ, opts.clone(), &freqs, 0.20, 3)

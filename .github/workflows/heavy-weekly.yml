@@ -1,0 +1,38 @@
+# Weekly heavy release gates: full multi-pass convergence runs that are
+# too slow for per-PR CI (the per-PR jobs cover the same subsystems with
+# single-pass gates — engine-graded-001, engine-automesh-001).
+#
+# Runs Sunday 04:00 UTC + on demand (workflow_dispatch).
+
+name: heavy-weekly
+
+on:
+  schedule:
+    - cron: "0 4 * * 0"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  graded-convergence-gate:
+    name: Graded convergence gate (engine-automesh-002, FS.0b.2b, release)
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    # ADR-0216: converge_two_port_graded on the S.6 stub board — 3 passes
+    # x 2 solves (finest 9.9 M cells, 20k steps): ~90 min on a fast local
+    # box, budgeted generously for hosted runners.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.92"
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: engine-automesh-002 (yee-engine, release, ignored)
+        run: cargo test -p yee-engine --release --test automesh_graded -- --ignored --nocapture
