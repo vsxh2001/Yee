@@ -422,8 +422,10 @@ pub struct JobSpec {
     /// positive and at most the Courant limit for `dx_m`.
     #[serde(default)]
     pub dt_s: Option<f64>,
-    /// Optional per-axis graded primal spacings (FS.0b.0; CPU-only — see
-    /// [`GradedSpacings`]). `None` is the uniform `dx_m` grid. When set,
+    /// Optional per-axis graded primal spacings (FS.0b.0/0b.2 — see
+    /// [`GradedSpacings`]; runs on both backends since ADR-0214, with
+    /// NTFF-on-graded and z-taper-straddling aperture ports rejected).
+    /// `None` is the uniform `dx_m` grid. When set,
     /// the default time step comes from the **minimum** spacing per axis
     /// (0.9× the graded Courant limit), and `dt_s` is validated against
     /// that limit.
@@ -824,31 +826,27 @@ fn run_job(mut spec: JobSpec, tx: &Sender<JobEvent>, cancel: &AtomicBool) {
         });
         return;
     }
-    // Graded grids are CPU-only in FS.0b.0: an explicit GPU request fails
-    // with the Unsupported message (the R.3 idiom), auto falls back to CPU.
+    // Graded grids run on the GPU as of FS.0b.2 (ADR-0214): the kernels
+    // multiply by per-cell inverse spacings; set_spacings attaches them
+    // after construction (aperture-port z-taper and NTFF-on-graded are
+    // rejected inside set_spacings with Unsupported — Auto falls back).
     #[cfg(feature = "gpu")]
-    if matches!(spec.backend, BackendChoice::Gpu) && graded.is_some() {
-        let _ = tx.send(JobEvent::Error {
-            message: yee_compute::ComputeError::Unsupported(
-                "graded grid (FS.0b) is not on the GPU yet",
-            )
-            .to_string(),
-        });
-        return;
-    }
-    #[cfg(feature = "gpu")]
-    if matches!(spec.backend, BackendChoice::Gpu | BackendChoice::Auto)
-        && spec.ntff.is_none()
-        && graded.is_none()
-    {
-        match yee_compute::GpuFdtd::with_drive(
+    if matches!(spec.backend, BackendChoice::Gpu | BackendChoice::Auto) && spec.ntff.is_none() {
+        let gpu_engine = yee_compute::GpuFdtd::with_drive(
             fdtd_spec,
             Fields::zero(&fdtd_spec),
             materials.clone(),
             boundary.clone(),
             drive.clone(),
             total,
-        ) {
+        )
+        .and_then(|mut engine| {
+            if let Some(g) = &graded {
+                engine.set_spacings(g)?;
+            }
+            Ok(engine)
+        });
+        match gpu_engine {
             Ok(mut engine) => {
                 let mut done = 0usize;
                 while done < total && !cancel.load(Ordering::Relaxed) {
@@ -1306,19 +1304,18 @@ mod tests {
     /// back to the CPU backend.
     #[cfg(feature = "gpu")]
     #[test]
-    fn graded_gpu_request_is_rejected_and_auto_falls_back() {
-        let mut spec = cavity_spec(BackendChoice::Gpu);
-        spec.spacings = Some(constant_spacings(&spec));
-        let message = expect_error(spec);
-        assert!(
-            message.contains("graded grid (FS.0b) is not on the GPU yet"),
-            "unexpected message: {message}"
-        );
-
+    fn graded_runs_on_gpu_or_auto_falls_back() {
+        // FS.0b.2 (ADR-0214): graded grids run on the GPU backend. Auto
+        // must always complete — on "gpu" where an adapter exists, on
+        // "cpu" otherwise (the compute-020 uniform-fill scenario).
         let mut spec = cavity_spec(BackendChoice::Auto);
         spec.spacings = Some(constant_spacings(&spec));
         let result = run_to_done(spec);
-        assert_eq!(result.backend, "cpu");
+        assert!(
+            result.backend == "gpu" || result.backend == "cpu",
+            "unexpected backend {}",
+            result.backend
+        );
         assert!(result.probes[0].iter().any(|v| *v != 0.0));
     }
 
