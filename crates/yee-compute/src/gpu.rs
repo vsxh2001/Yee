@@ -35,7 +35,7 @@ use crate::drive::{Drive, EComponent};
 use crate::error::ComputeError;
 use crate::fields::Fields;
 use crate::materials::{Boundary, Materials};
-use crate::spec::{FdtdSpec, len3};
+use crate::spec::{FdtdSpec, GradedSpacings, SpacingArrays, len3};
 
 /// Steps encoded per queue submission. Keeps a single command buffer to a
 /// few hundred dispatches so watchdog-limited platforms don't kill long runs.
@@ -57,9 +57,6 @@ struct Params {
     has_cpml: u32,
     has_mask: u32,
     has_dispersion: u32,
-    inv_dx: f32,
-    inv_dy: f32,
-    inv_dz: f32,
     /// ω·Δt for the on-GPU NTFF DFT accumulator (E.5b); 0.0 disables it.
     dft_omega_dt: f32,
 }
@@ -85,6 +82,15 @@ pub struct GpuFdtd {
     field_arena: wgpu::Buffer,
     psi_arena: wgpu::Buffer,
     drive_data: wgpu::Buffer,
+    /// Packed inverse primal/dual spacings (FS.0b.2) — uniform fill at
+    /// build, refreshed in place by [`GpuFdtd::set_spacings`].
+    spacing_buffer: wgpu::Buffer,
+    /// `(npml, faces)` when CPML is active, for the graded scope check.
+    cpml_layers: Option<(usize, [[bool; 2]; 3])>,
+    has_dispersion: bool,
+    /// Host copy of the drive: `set_spacings` recomputes the spacing-derived
+    /// port constants (resistive α/γ, aperture `vcoef`) from it.
+    drive: Drive,
     drive_counts: (usize, usize, usize, usize), // (n_soft, n_ports, n_probes, n_aperture)
     max_steps: usize,
     steps_taken: usize,
@@ -294,7 +300,9 @@ impl GpuFdtd {
         });
 
         // Bindings: 0 = uniform Params; 1 = fields (rw); 2 = coeffs (r);
-        // 3 = psi (rw); 4 = profiles (r); 5 = masks (r).
+        // 3 = psi (rw); 4 = profiles (r); 5 = masks (r); 6 = drive index (r);
+        // 7 = drive data (rw); 8 = inverse spacings (r; FS.0b.2 — the 8th
+        // storage buffer, exactly the WebGPU default per-stage limit).
         let storage = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE,
@@ -325,6 +333,7 @@ impl GpuFdtd {
                 storage(5, true),
                 storage(6, true),
                 storage(7, false),
+                storage(8, true),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -472,6 +481,18 @@ impl GpuFdtd {
         }
         let psi_arena = make_storage_buffer("yee-compute psi", &psi_data, true);
         let profile_buffer = make_storage_buffer("yee-compute profiles", &profile_data, false);
+        let cpml_layers = cpml_config.map(|c| (c.npml, c.faces));
+
+        // --- inverse-spacing buffer (FS.0b.2): uniform fill at build; the
+        // entries are bit-equal to the retired scalar `Params.inv_*` values,
+        // so the uniform path is unchanged bit-for-bit (compute-020).
+        // `set_spacings` refreshes the contents in place (lengths are
+        // functions of the spec, so the bind group never changes). ---
+        let spacing_buffer = make_storage_buffer(
+            "yee-compute spacings",
+            &SpacingArrays::uniform(&spec).inverse_f32(),
+            false,
+        );
 
         // --- mask arena: ex | ey | ez as u32 (dummy when no masks) ---
         let has_mask = materials.has_mask();
@@ -633,9 +654,6 @@ impl GpuFdtd {
             has_cpml: u32::from(cpml_config.is_some()),
             has_mask: u32::from(has_mask),
             has_dispersion: u32::from(dispersive.is_some()),
-            inv_dx: (1.0 / spec.dx) as f32,
-            inv_dy: (1.0 / spec.dy) as f32,
-            inv_dz: (1.0 / spec.dz) as f32,
             dft_omega_dt: dft_f_probe.map_or(0.0, |f| (std::f64::consts::TAU * f * spec.dt) as f32),
         };
         let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -682,6 +700,10 @@ impl GpuFdtd {
                     binding: 7,
                     resource: drive_data.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: spacing_buffer.as_entire_binding(),
+                },
             ],
         });
 
@@ -699,6 +721,10 @@ impl GpuFdtd {
             field_arena,
             psi_arena,
             drive_data,
+            spacing_buffer,
+            cpml_layers,
+            has_dispersion: dispersive.is_some(),
+            drive,
             drive_counts: (n_soft, n_ports, n_probes, n_aperture),
             max_steps,
             steps_taken: 0,
@@ -714,6 +740,130 @@ impl GpuFdtd {
     /// Adapter name (diagnostics; e.g. printed by the parity gates).
     pub fn adapter_name(&self) -> &str {
         &self.adapter_name
+    }
+
+    /// Attach per-axis nonuniform primal spacings (FS.0b.2, ADR-0214),
+    /// mirroring [`crate::CpuFdtd::set_spacings`]: the H kernels use the
+    /// primal cell width at the H sample, the E kernels the dual spacing.
+    /// Refreshes the inverse-spacing buffer and the spacing-derived port
+    /// constants (resistive α/γ from the local dual-transverse area ×
+    /// primal dz, aperture `vcoef` from the local primal dz) in place.
+    /// Constant arrays equal to the scalar `spec.dx/dy/dz` are bit-exact
+    /// against the GPU's own scalar path (gate `compute-020`). Call before
+    /// stepping.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ComputeError::Unsupported`] for the GPU-capability gaps:
+    /// the on-GPU NTFF DFT accumulator (`with_ntff_dft` — downstream NTFF
+    /// surface integration assumes a uniform grid), or an aperture port
+    /// whose cells straddle non-uniform z-spacing (the per-port modal
+    /// coefficient is one scalar; FS.0b.1 `auto_spacings` substrates are
+    /// uniform in z, so engine apertures are unaffected).
+    ///
+    /// # Panics
+    ///
+    /// Panics on invalid spacings (wrong lengths, non-positive widths),
+    /// grading inside an absorbing CPML layer, a dispersive map (uniform
+    /// only, FS.0b.0), `dt` above the graded Courant limit, or when called
+    /// after stepping — the same contract as the CPU backend. Untrusted
+    /// callers should pre-flight with [`GradedSpacings::validate`] /
+    /// [`GradedSpacings::validate_cpml_layers`].
+    pub fn set_spacings(&mut self, graded: &GradedSpacings) -> Result<(), ComputeError> {
+        if let Err(e) = graded.validate(&self.spec) {
+            panic!("set_spacings: {e}");
+        }
+        if let Some((npml, faces)) = self.cpml_layers
+            && let Err(e) = graded.validate_cpml_layers(npml, faces)
+        {
+            panic!("set_spacings: {e}");
+        }
+        assert!(
+            !self.has_dispersion,
+            "set_spacings: dispersive ADE materials are uniform-grid only (FS.0b.0)"
+        );
+        assert!(
+            self.spec.dt <= graded.courant_limit(),
+            "set_spacings: dt = {} s exceeds the graded Courant limit {} s \
+             (use the minimum spacing per axis)",
+            self.spec.dt,
+            graded.courant_limit()
+        );
+        assert!(
+            self.steps_taken == 0,
+            "set_spacings: call before stepping (the GPU state has already \
+             advanced {} steps on the previous spacings)",
+            self.steps_taken
+        );
+        if self.dft_enabled {
+            return Err(ComputeError::Unsupported(
+                "the on-GPU NTFF DFT accumulator on a graded grid (NTFF surface \
+                 integration assumes a uniform grid; FS.0b.2 keeps NTFF+graded CPU-rejected)",
+            ));
+        }
+        let sp = SpacingArrays::graded(graded);
+
+        // Aperture `vcoef = dz/n_columns` is one scalar per port: exact only
+        // when every cell of the port shares one primal dz. Reject
+        // z-taper-straddling ports BEFORE any buffer is touched, so a failed
+        // call leaves the stepper on its previous (uniform) spacings.
+        let mut vcoefs = Vec::with_capacity(self.drive.aperture_ports.len());
+        for port in &self.drive.aperture_ports {
+            let dz0 = sp.z.primal[port.cells[0].2];
+            if port.cells.iter().any(|c| sp.z.primal[c.2] != dz0) {
+                return Err(ComputeError::Unsupported(
+                    "an aperture port spanning non-uniform z-spacing on the GPU \
+                     (the per-port modal coefficient is one scalar); keep the \
+                     aperture inside a uniform-dz region",
+                ));
+            }
+            vcoefs.push((dz0 / port.n_columns as f64) as f32);
+        }
+
+        self.queue.write_buffer(
+            &self.spacing_buffer,
+            0,
+            bytemuck::cast_slice(&sp.inverse_f32()),
+        );
+
+        // Resistive-port α/γ with the local cell sizes at the port cell
+        // (dual transverse spacings × primal dz) — the exact CPU formulas,
+        // in f64, at the α|γ region of `drv_data` (indices [1+n, 1+3n)).
+        let n_ports = self.drive.ports.len();
+        if n_ports > 0 {
+            let mut alpha_gamma = Vec::with_capacity(2 * n_ports);
+            for port in &self.drive.ports {
+                let (ci, cj, ck) = port.cell;
+                let area = sp.x.dual[ci] * sp.y.dual[cj];
+                let dz_c = sp.z.primal[ck];
+                alpha_gamma
+                    .push((self.spec.dt * dz_c / (2.0 * EPS0 * port.resistance * area)) as f32);
+            }
+            for port in &self.drive.ports {
+                let (ci, cj, _) = port.cell;
+                let area = sp.x.dual[ci] * sp.y.dual[cj];
+                alpha_gamma.push((self.spec.dt / (EPS0 * port.resistance * area)) as f32);
+            }
+            self.queue.write_buffer(
+                &self.drive_data,
+                ((1 + n_ports) * std::mem::size_of::<f32>()) as u64,
+                bytemuck::cast_slice(&alpha_gamma),
+            );
+        }
+
+        // Aperture `vcoef` region: dd_ap_base + n_aperture (see the drv_data
+        // layout comment in `build` and the dd_ap_* helpers in fdtd.wgsl).
+        if !vcoefs.is_empty() {
+            let (n_soft, n_ports, n_probes, n_aperture) = self.drive_counts;
+            let base =
+                1 + 3 * n_ports + self.max_steps * (n_soft + n_ports + n_probes) + n_aperture;
+            self.queue.write_buffer(
+                &self.drive_data,
+                (base * std::mem::size_of::<f32>()) as u64,
+                bytemuck::cast_slice(&vcoefs),
+            );
+        }
+        Ok(())
     }
 
     /// Dispatch extents per update pipeline (hx, hy, hz, ex, ey, ez), and
