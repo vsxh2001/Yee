@@ -6,18 +6,18 @@
 //! FS.0b payoff assertion: refine only the staircase-limited feature
 //! regions, not everywhere.
 //!
-//! The JobSpec is built directly on the graded voxelizer (the uniform
-//! `board.rs` fixture is not rewired — that integration is FS.0b.2). Both
-//! runs (DUT + through-line reference) share the DUT-derived grid — the
-//! ADR-0204 same-physical-problem lesson — and the measurement is the
-//! launch-normalized double ratio (`sparams::forward_transfer`), never
-//! the single ratio (ADR-0204).
+//! As of FS.0b.2a the fixture is the library builder
+//! [`two_port_board_jobs_graded`] (both runs share the DUT-derived grid;
+//! the measurement is the launch-normalized double ratio — the ADR-0204
+//! lessons live in the fixture API now). This gate therefore certifies
+//! the shared builder end-to-end.
 //!
 //! **Measured 2026-07-11 (ADR-0210):** grid 282×110×41 = 1,271,820 cells
 //! (coarse 0.533 mm, fine 0.267 mm, guard 1.6 mm, k_top 6) vs the uniform
 //! pass-2 506×176×75 = 6,679,200 — **ratio 0.190**; notch **4.900 GHz @
 //! −37.2 dB** (err 1.03 % of the uniform-converged 4.850 GHz); both
-//! solves 306 s release on 4 cores.
+//! solves 306 s release on 4 cores (merged-tree re-run: identical
+//! numbers, 221 s).
 //!
 //! `#[ignore]`'d (2 release FDTD solves, ~1.3 M cells × ~10 k steps):
 //!
@@ -27,15 +27,13 @@
 
 use std::time::Instant;
 
-use yee_engine::automesh::{GradedMeshOptions, auto_dx, auto_spacings};
-use yee_engine::board::{TwoPortBoardOptions, reference_through_line, two_port_board_job};
-use yee_engine::sparams;
-use yee_engine::{
-    AperturePortSpec, BackendChoice, BoundarySpec, JobEvent, JobSpec, MaterialsSpec, ProbeSpec,
-    submit,
+use yee_engine::automesh::auto_dx;
+use yee_engine::board::{
+    GradedBoardOptions, TwoPortBoardOptions, two_port_board_job, two_port_board_jobs_graded,
 };
+use yee_engine::sparams;
+use yee_engine::{JobEvent, JobSpec, submit};
 use yee_layout::{BBox, Layout, Point2, Polygon, PortRef, Substrate, eps_eff, open_end_delta_l};
-use yee_voxel::{GradedMicrostripModel, GradedVoxelGrid, voxelize_microstrip_graded};
 
 const EPS_R: f64 = 4.4;
 const H_M: f64 = 1.6e-3;
@@ -83,25 +81,6 @@ fn stub_layout() -> Layout {
     }
 }
 
-/// First index `i` such that a full `2·sp`-cell probe span starting at
-/// node `i` lies on bit-equal-coarse cells with `nodes[i] ≥ x_min`.
-fn coarse_run_at(
-    nodes: &[f64],
-    widths: &[f64],
-    coarse: f64,
-    sp: usize,
-    x_min: f64,
-    from_right_of: f64,
-) -> usize {
-    (0..widths.len() - 2 * sp)
-        .find(|&i| {
-            nodes[i] >= x_min
-                && nodes[i + 2 * sp] <= from_right_of
-                && widths[i..i + 2 * sp].iter().all(|d| *d == coarse)
-        })
-        .expect("no uniform-coarse probe stretch found")
-}
-
 /// Run one graded job to completion; returns (probes, dt).
 fn run(spec: JobSpec) -> (Vec<Vec<f64>>, f64) {
     let handle = submit(spec);
@@ -119,162 +98,29 @@ fn run(spec: JobSpec) -> (Vec<Vec<f64>>, f64) {
 #[ignore = "slow: 2 release FDTD solves (~1.4M cells x ~10k steps); engine-graded-001 gate (FS.0b.1) — run with --release --ignored"]
 fn graded_rules_reproduce_the_converged_notch_at_a_fraction_of_the_cells() {
     let layout = stub_layout();
-    let reference = reference_through_line(&layout);
-
-    // --- The graded rulebook, no hand-set spacing anywhere. -------------
-    let opts = GradedMeshOptions::for_board(&layout, F_MAX_HZ);
-    let spac = auto_spacings(&layout, F_MAX_HZ, &opts).expect("auto_spacings failed");
-    let (nx, ny, nz) = (spac.dx.len(), spac.dy.len(), spac.dz.len());
-    eprintln!(
-        "engine-graded-001: coarse = {:.4} mm, fine = {:.4} mm, guard = {:.2} mm, \
-         grid {nx}x{ny}x{nz} = {} cells (k_top = {})",
-        spac.coarse_m * 1e3,
-        spac.fine_m * 1e3,
-        opts.guard_m * 1e3,
-        spac.cell_count(),
-        spac.k_top,
-    );
-
-    // --- Both layouts voxelized on the SAME (DUT-derived) grid. ---------
-    let grid = GradedVoxelGrid {
-        dx_m: spac.dx.clone(),
-        dy_m: spac.dy.clone(),
-        dz_m: spac.dz.clone(),
-        x0_m: spac.x0_m,
-        y0_m: spac.y0_m,
-        k_gnd: spac.k_gnd,
-        k_top: spac.k_top,
-    };
-    let dut_model = voxelize_microstrip_graded(&layout, &grid);
-    let ref_model = voxelize_microstrip_graded(&reference, &grid);
-    assert_eq!(dut_model.dims, ref_model.dims);
-
-    // --- Fixture geometry (all sizes in METRES, ADR-0204 hygiene). ------
-    // Aperture j-band: the feed width centred on the port height, from
-    // the true graded cell centres.
-    let tap_y = layout.ports[0].at.y;
-    let yc = |j: usize| (dut_model.y_nodes_m[j] + dut_model.y_nodes_m[j + 1]) / 2.0;
-    let in_band = |j: usize| (yc(j) - tap_y).abs() < W_M / 2.0;
-    let j_lo = (0..ny).find(|&j| in_band(j)).expect("empty feed band");
-    let j_hi = (j_lo..ny).find(|&j| !in_band(j)).unwrap_or(ny);
-    let j_strip = (j_lo + j_hi) / 2;
-    let k_top = spac.k_top;
-    let k_probe = k_top - 1;
-
-    // Probe triples on uniform-coarse stretches (fit_standing_wave needs
-    // equal spacing), 12 coarse cells apart = the FS.0a 6.4 mm.
-    let sp = 12usize;
-    let spacing_m = sp as f64 * spac.coarse_m;
-    let clearance = 2.4e-3;
-    let i_a0 = coarse_run_at(
-        &dut_model.x_nodes_m,
-        &spac.dx,
-        spac.coarse_m,
-        sp,
-        layout.ports[0].at.x + clearance,
-        layout.bbox.max.x,
-    );
-    let i_b0 = {
-        // Last coarse run whose far probe stays clear of the output port.
-        let limit = layout.ports[1].at.x - clearance;
-        (0..nx - 2 * sp)
-            .rev()
-            .find(|&i| {
-                dut_model.x_nodes_m[i + 2 * sp] <= limit
-                    && spac.dx[i..i + 2 * sp].iter().all(|d| *d == spac.coarse_m)
-            })
-            .expect("no coarse stretch for triple B")
-    };
-    assert!(i_b0 > i_a0 + 2 * sp, "probe triples overlap");
-
-    // Time base: the FS.0a physical window at the fine spacing (the
-    // graded Courant dt equals the uniform-at-fine dt: every axis
-    // minimum is the fine spacing).
-    let min_d = |a: &[f64]| a.iter().copied().fold(f64::INFINITY, f64::min);
-    let (mx, my, mz) = (min_d(&spac.dx), min_d(&spac.dy), min_d(&spac.dz));
-    let dt = 0.9 / (C0_M_S * (1.0 / (mx * mx) + 1.0 / (my * my) + 1.0 / (mz * mz)).sqrt());
-    let n_steps = (9000.0 * 0.3e-3 / mx).round() as usize;
     let bw_hz = 0.8 * F0_HZ;
-    let t0_steps =
-        ((3.5 * (2.0_f64 * std::f64::consts::LN_2).sqrt() / (std::f64::consts::PI * bw_hz)) / dt)
-            .ceil() as usize;
 
-    let job_for = |model: &GradedMicrostripModel| -> JobSpec {
-        let materials = MaterialsSpec {
-            eps_r_cells: Some(model.eps_r_cells.as_slice().unwrap().to_vec()),
-            pec_mask_ex: Some(model.pec_mask_ex.as_slice().unwrap().to_vec()),
-            pec_mask_ey: Some(model.pec_mask_ey.as_slice().unwrap().to_vec()),
-            ..MaterialsSpec::default()
-        };
-        let mk_probe = |i: usize| ProbeSpec {
-            component: "ez".into(),
-            cell: (i, j_strip, k_probe),
-        };
-        let mk_port = |i: usize, v0: f64| AperturePortSpec {
-            i,
-            j_lo,
-            j_hi,
-            k_lo: 0,
-            k_top,
-            resistance_ohm: Z0_OHM,
-            v0,
-            f0_hz: F0_HZ,
-            bw_hz,
-            t0_steps,
-            record: false,
-        };
-        JobSpec {
-            nx,
-            ny,
-            nz,
-            // The nominal spacing feeding the CPML sigma_max recipe: the
-            // absorbing layers are exactly coarse (ADR-0208 scope rule).
-            dx_m: spac.coarse_m,
-            n_steps,
-            boundary: BoundarySpec::Cpml {
-                npml: opts.npml,
-                axes: [true, true, false],
-                faces: None,
-            },
-            sources: vec![],
-            ports: vec![],
-            aperture_ports: vec![
-                mk_port(model.port_cells[0].0, 1.0),
-                mk_port(model.port_cells[1].0, 0.0),
-            ],
-            probes: vec![
-                mk_probe(i_a0),
-                mk_probe(i_a0 + sp),
-                mk_probe(i_a0 + 2 * sp),
-                mk_probe(i_b0),
-                mk_probe(i_b0 + sp),
-                mk_probe(i_b0 + 2 * sp),
-            ],
-            slice: None,
-            ntff: None,
-            materials: Some(materials),
-            dt_s: Some(dt),
-            spacings: Some(spac.to_spacings()),
-            backend: BackendChoice::Cpu,
-        }
-    };
-
+    // --- The FS.0b.2a fixture: rulebook grid + shared-grid job pair, no
+    // hand-set spacing anywhere.
+    let opts = GradedBoardOptions::for_board(&layout, F_MAX_HZ, F0_HZ, bw_hz);
+    let (dut_job, ref_job) =
+        two_port_board_jobs_graded(&layout, F_MAX_HZ, &opts).expect("graded fixture failed");
+    let (nx, ny, nz) = (dut_job.spec.nx, dut_job.spec.ny, dut_job.spec.nz);
     eprintln!(
-        "  fixture: ports i = {} / {}, j band [{j_lo}, {j_hi}), triples at \
-         i = {i_a0}/{i_b0} (+{sp}/+{}), spacing {:.3} mm, {n_steps} steps, \
-         dt = {:.4e} s",
-        dut_model.port_cells[0].0,
-        dut_model.port_cells[1].0,
-        2 * sp,
-        spacing_m * 1e3,
-        dt,
+        "engine-graded-001: coarse = {:.4} mm (spec dx_m), grid {nx}x{ny}x{nz} = {} cells, \
+         {} steps, dt = {:.4e} s, probe spacing {:.3} mm",
+        dut_job.spec.dx_m * 1e3,
+        dut_job.cells,
+        dut_job.spec.n_steps,
+        dut_job.dt_s,
+        dut_job.spacing_m * 1e3,
     );
 
     // --- Solve (reference first, then DUT), timed. -----------------------
     let t_start = Instant::now();
-    let (ref_probes, dt_ref) = run(job_for(&ref_model));
+    let (ref_probes, dt_ref) = run(ref_job.spec.clone());
     let t_ref = t_start.elapsed();
-    let (dut_probes, dt_dut) = run(job_for(&dut_model));
+    let (dut_probes, dt_dut) = run(dut_job.spec.clone());
     let t_total = t_start.elapsed();
     assert_eq!(dt_ref, dt_dut, "runs diverged in dt");
     eprintln!(
@@ -290,7 +136,7 @@ fn graded_rules_reproduce_the_converged_notch_at_a_fraction_of_the_cells() {
             [&p[0], &p[1], &p[2]],
             [&p[3], &p[4], &p[5]],
             dt_ref,
-            spacing_m,
+            dut_job.spacing_m,
             &freqs,
         )
     };
@@ -329,7 +175,7 @@ fn graded_rules_reproduce_the_converged_notch_at_a_fraction_of_the_cells() {
     uopts.spacing_cells = (12.0 * dx0 / dx_u).round() as usize;
     let ujob = two_port_board_job(&layout, &uopts).expect("uniform job build failed");
     let cells_uniform = ujob.spec.nx * ujob.spec.ny * ujob.spec.nz;
-    let cells_graded = spac.cell_count();
+    let cells_graded = dut_job.cells;
     let ratio = cells_graded as f64 / cells_uniform as f64;
 
     eprintln!(

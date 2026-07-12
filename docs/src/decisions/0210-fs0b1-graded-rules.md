@@ -120,3 +120,21 @@ everywhere because you cannot refine somewhere.
   the graded voxelizer covers the classic floor-ground stack.
 - Fine spacing is a single global value per mesh; per-band fine values
   (e.g. a 0.1 mm gap next to a 0.5 mm gap) are a later increment.
+
+## FS.0b.2a addendum (2026-07-12): the fixture is a library API
+
+The gate's hand-rolled setup moved into `yee_engine::board`:
+`GradedBoardOptions` + **`two_port_board_jobs_graded(dut, f_max, &opts)
+-> (dut_job, ref_job)`**. Returning the (DUT, reference) pair from one
+call — both voxelized on the DUT-derived grid — encodes the ADR-0204
+same-physical-problem lesson in the API shape instead of caller
+discipline. Probe triples land on bit-equal-coarse runs found from the
+left (after port 0 + clearance) and from the right (before port 1);
+`GradedTwoPortBoardJob { spec, dt_s, spacing_m, cells }` matches the
+uniform fixture's post-processing contract, so `sparams` code is shared
+unchanged. `engine_graded_notch.rs` now runs through the fixture — the
+gate certifies the builder end-to-end (re-measured through the fixture:
+same 4.900 GHz @ −37.2 dB / ratio 0.190; the geometry derivation is
+identical so the solves are bit-identical). Structural instant gate:
+`board::graded_tests::graded_fixture_builds_the_shared_grid_pair`. The
+GPU half of FS.0b.2 is the parallel worktree track (ADR-0214).
