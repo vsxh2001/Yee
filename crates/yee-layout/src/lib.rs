@@ -1525,3 +1525,88 @@ mod inset_patch_tests {
         assert_eq!(layout.traces.len(), 4);
     }
 }
+
+// ===========================================================================
+// Multilayer stackups — FS.4.0, ADR-0215
+// ===========================================================================
+
+/// One dielectric layer of a [`Stackup`], metres/dimensionless.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct StackupLayer {
+    /// Relative permittivity `ε_r` of this layer.
+    pub eps_r: f64,
+    /// Layer thickness, metres.
+    pub height_m: f64,
+    /// Dielectric loss tangent `tan δ` (dimensionless).
+    pub loss_tangent: f64,
+}
+
+/// An N-layer dielectric stackup (FS.4.0, ADR-0215): layers bottom-up,
+/// ground plane below `layers[0]`, optional PEC lid directly on top of
+/// the last layer (stripline / shielded boards). `lid: false` leaves the
+/// top open to air — the microstrip case.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Stackup {
+    /// Dielectric layers, bottom (on the ground plane) to top.
+    pub layers: Vec<StackupLayer>,
+    /// PEC sheet directly above the last layer.
+    pub lid: bool,
+}
+
+impl Stackup {
+    /// Symmetric stripline: two identical `b/2` layers with the trace at
+    /// the mid interface (`trace_layer = 0`), lid on. The canonical
+    /// FS.4.0 validation stack — TEM in homogeneous dielectric, so
+    /// `ε_eff = ε_r` exactly.
+    pub fn symmetric_stripline(eps_r: f64, b_m: f64) -> Self {
+        let half = StackupLayer {
+            eps_r,
+            height_m: b_m / 2.0,
+            loss_tangent: 0.0,
+        };
+        Self {
+            layers: vec![half, half],
+            lid: true,
+        }
+    }
+
+    /// Total dielectric thickness, metres.
+    pub fn total_height_m(&self) -> f64 {
+        self.layers.iter().map(|l| l.height_m).sum()
+    }
+}
+
+#[cfg(test)]
+mod stackup_tests {
+    use super::*;
+
+    #[test]
+    fn symmetric_stripline_is_two_equal_layers_with_lid() {
+        let s = Stackup::symmetric_stripline(4.4, 3.2e-3);
+        assert_eq!(s.layers.len(), 2);
+        assert_eq!(s.layers[0], s.layers[1]);
+        assert!(s.lid);
+        assert!((s.total_height_m() - 3.2e-3).abs() < 1e-18);
+    }
+
+    #[test]
+    fn stackup_round_trips_through_json() {
+        let s = Stackup {
+            layers: vec![
+                StackupLayer {
+                    eps_r: 4.4,
+                    height_m: 0.2e-3,
+                    loss_tangent: 0.02,
+                },
+                StackupLayer {
+                    eps_r: 3.5,
+                    height_m: 0.8e-3,
+                    loss_tangent: 0.001,
+                },
+            ],
+            lid: false,
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(serde_json::from_str::<Stackup>(&json).unwrap(), s);
+    }
+}

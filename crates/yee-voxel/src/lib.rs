@@ -68,7 +68,7 @@
 
 use ndarray::Array3;
 use yee_fdtd::{LumpedRlcPort, SourceWaveform, WalkingSkeletonSolver, YeeGrid};
-use yee_layout::{Layout, Point2, Polygon};
+use yee_layout::{Layout, Point2, Polygon, Stackup};
 
 /// Lumped-LC FDTD EM simulation of a synthesized filter board (Filter Phase
 /// F2.3, ADR-0115): place each ladder L/C as a [`yee_fdtd::LumpedRlcPort`] on
@@ -1250,6 +1250,159 @@ fn coupled_mode_eeff(
         eps_eff,
     );
     eps_eff
+}
+
+// ===========================================================================
+// Multilayer stackup voxelization — FS.4.0, ADR-0215
+// ===========================================================================
+
+/// Voxelize a planar layout on an N-layer [`Stackup`] (FS.4.0,
+/// ADR-0215): ground plane at `k = 0`, `stackup.layers` filled bottom-up
+/// with **no air gap anywhere in the stack** (the ADR-0108 lesson
+/// generalized — an accidental series gap between layers poisons every
+/// downstream result), the trace PEC on the plane at the TOP of
+/// `layers[trace_layer]`, and — when `stackup.lid` — a whole-plane PEC
+/// lid directly above the last layer (`air_above_cells` then ignored:
+/// the domain ends at the lid).
+///
+/// Each layer quantizes to `round(height/dx).max(1)` cells (height error
+/// ≤ dx/2, the walking-skeleton trade recorded in the ADR). A
+/// single-layer open stackup with `trace_layer = 0` reproduces
+/// [`voxelize_microstrip`] bit-identically (gate `voxel-stackup-001`).
+///
+/// Returns the standard [`MicrostripModel`] (ports mapped to the trace
+/// plane) so every downstream fixture works unchanged.
+///
+/// # Panics
+///
+/// Panics if `trace_layer` is out of range or a layer height is not
+/// positive — malformed stackups are caller bugs, not data.
+pub fn voxelize_stackup(
+    layout: &Layout,
+    stackup: &Stackup,
+    trace_layer: usize,
+    opts: &VoxelOptions,
+) -> MicrostripModel {
+    let dx = opts.dx_m;
+    assert!(
+        dx.is_finite() && dx > 0.0,
+        "VoxelOptions::dx_m must be positive and finite"
+    );
+    assert!(
+        trace_layer < stackup.layers.len(),
+        "trace_layer {trace_layer} out of range ({} layers)",
+        stackup.layers.len()
+    );
+
+    // --- Layer quantization: contiguous cell bands, no gaps. ---
+    let mut k_starts = Vec::with_capacity(stackup.layers.len());
+    let mut k = 0usize;
+    for layer in &stackup.layers {
+        assert!(
+            layer.height_m > 0.0,
+            "stackup layer height must be positive"
+        );
+        k_starts.push(k);
+        k += ((layer.height_m / dx).round() as usize).max(1);
+    }
+    let n_stack = k;
+    let k_trace = k_starts[trace_layer]
+        + ((stackup.layers[trace_layer].height_m / dx).round() as usize).max(1);
+    // Open top: one guaranteed cell layer above the stack (mirroring the
+    // microstrip voxelizer's top-metal layer, which makes the
+    // single-layer case bit-identical) plus the air margin. Lidded: the
+    // domain ends exactly at the lid plane.
+    let nz = if stackup.lid {
+        n_stack
+    } else {
+        n_stack + 1 + opts.air_above_cells
+    };
+
+    // --- X-Y extent: identical to the microstrip voxelizer. ---
+    let margin = opts.xy_margin_cells as f64 * dx;
+    let x0 = layout.bbox.min.x - margin;
+    let x1 = layout.bbox.max.x + margin;
+    let y0 = layout.bbox.min.y - margin;
+    let y1 = layout.bbox.max.y + margin;
+    let nx = ((x1 - x0) / dx).ceil() as usize;
+    let ny = ((y1 - y0) / dx).ceil() as usize;
+    assert!(
+        nx > 0 && ny > 0,
+        "voxelize_stackup: degenerate x-y extent (nx={nx}, ny={ny})"
+    );
+
+    let mut eps = Array3::<f64>::from_elem((nx + 1, ny + 1, nz + 1), 1.0);
+    let mut pec_ex = Array3::<bool>::from_elem((nx, ny + 1, nz + 1), false);
+    let mut pec_ey = Array3::<bool>::from_elem((nx + 1, ny, nz + 1), false);
+
+    let in_trace = |x: f64, y: f64| {
+        layout
+            .traces
+            .iter()
+            .any(|p| point_in_polygon(Point2 { x, y }, p))
+    };
+
+    // Dielectric: each layer's E_z-edge band, contiguous from k = 0.
+    for i in 0..nx {
+        for j in 0..ny {
+            for (layer, &ks) in stackup.layers.iter().zip(&k_starts) {
+                let ke = ks + ((layer.height_m / dx).round() as usize).max(1);
+                for kk in ks..ke {
+                    eps[(i, j, kk)] = layer.eps_r;
+                }
+            }
+        }
+    }
+
+    // Tangential PEC masks: ground plane (k = 0), trace plane (k_trace,
+    // under the traces), lid plane (k = n_stack, whole plane) when lidded.
+    for i in 0..nx {
+        for j in 0..=ny {
+            pec_ex[(i, j, 0)] = true;
+            let (x, y) = (x0 + (i as f64 + 0.5) * dx, y0 + j as f64 * dx);
+            if in_trace(x, y) {
+                pec_ex[(i, j, k_trace)] = true;
+            }
+            if stackup.lid {
+                pec_ex[(i, j, n_stack)] = true;
+            }
+        }
+    }
+    for i in 0..=nx {
+        for j in 0..ny {
+            pec_ey[(i, j, 0)] = true;
+            let (x, y) = (x0 + i as f64 * dx, y0 + (j as f64 + 0.5) * dx);
+            if in_trace(x, y) {
+                pec_ey[(i, j, k_trace)] = true;
+            }
+            if stackup.lid {
+                pec_ey[(i, j, n_stack)] = true;
+            }
+        }
+    }
+
+    let port_cells = layout
+        .ports
+        .iter()
+        .map(|port| {
+            let i = (((port.at.x - x0) / dx).floor() as isize).clamp(0, nx as isize - 1) as usize;
+            let j = (((port.at.y - y0) / dx).floor() as isize).clamp(0, ny as isize - 1) as usize;
+            (i, j, k_trace)
+        })
+        .collect();
+
+    let grid = YeeGrid::vacuum(nx, ny, nz, dx)
+        .with_eps_r_cells(eps)
+        .with_pec_mask_ex(pec_ex)
+        .with_pec_mask_ey(pec_ey);
+
+    MicrostripModel {
+        k_gnd: 0,
+        grid,
+        dims: (nx, ny, nz),
+        dx_m: dx,
+        port_cells,
+    }
 }
 
 #[cfg(test)]
