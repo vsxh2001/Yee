@@ -289,9 +289,8 @@ jobs:
       # FS.5b.1 (ADR-0218): aggressive space mapping with the engine as
       # the fine model — the measured stub notch driven onto an off-design
       # target in <= 4 fine evals (~2 release solves each).
-      # HELD until the first local green run pins the measured numbers.
-      # - name: sm-em-001 (yee-filter, release, ignored)
-      #   run: cargo test -p yee-filter --release --test sm_em_001 -- --ignored --nocapture
+      - name: sm-em-001 (yee-filter, release, ignored)
+        run: cargo test -p yee-filter --release --test sm_em_001 -- --ignored --nocapture
 
   engine-graded-gate:
     name: Graded-mesh notch gate (engine-graded-001, FS.0b.1, release)
