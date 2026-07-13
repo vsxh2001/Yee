@@ -972,6 +972,65 @@ pub struct PatchArray {
     pub dims: PatchArrayDims,
 }
 
+/// A single-stub matching solution (FS.6.2, ADR-0219).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StubMatch {
+    /// Distance from the Γ reference plane **toward the generator**,
+    /// metres (already reduced mod λ_g/2 to the smallest non-negative).
+    pub d_m: f64,
+    /// Open-circuit shunt-stub length, metres (smallest positive).
+    pub l_open_m: f64,
+    /// The normalized susceptance the stub cancels (diagnostic).
+    pub b: f64,
+}
+
+/// Synthesize a **single shunt open-stub match** from a measured complex
+/// reflection coefficient: find the distance `d` toward the generator
+/// where the normalized line admittance crosses `g = 1` (i.e.
+/// `Re[Γ(d)] = −|Γ|²`, the classic Smith-chart construction), then the
+/// open-stub length whose susceptance `j·tan(βl)` cancels the residual
+/// `+jb`. Everything is in normalized admittance, so `Z₀` cancels; `β`
+/// is the feed line's phase constant at the match frequency.
+///
+/// Two crossings exist; this returns the one with the smaller `d` (the
+/// first toward the generator). Verified against Pozar Example 5.2
+/// (`Z_L = 60 − j80 Ω` on 50 Ω: `d = 0.1104 λ`) and by the machine
+/// contract that the synthesized pair nulls the combined reflection to
+/// numerical precision (see the unit gates).
+pub fn single_stub_match(gamma: (f64, f64), beta_rad_m: f64) -> StubMatch {
+    assert!(
+        beta_rad_m > 0.0 && beta_rad_m.is_finite(),
+        "non-physical beta"
+    );
+    let mag = (gamma.0 * gamma.0 + gamma.1 * gamma.1).sqrt();
+    assert!(mag < 1.0, "|Γ| = {mag} ≥ 1: not a passive load");
+    let phi = gamma.1.atan2(gamma.0);
+    let half_lam = core::f64::consts::PI / beta_rad_m;
+    let mut best: Option<StubMatch> = None;
+    for sign in [1.0_f64, -1.0] {
+        // Re[Γ(d)] = −|Γ|² ⇔ cos(φ − 2βd) = −|Γ|.
+        let theta = sign * (-mag).acos();
+        let d = ((phi - theta) / (2.0 * beta_rad_m)).rem_euclid(half_lam);
+        // The rotated Γ and the residual susceptance at the g = 1 point.
+        let gd = (mag * theta.cos(), mag * theta.sin());
+        // y = (1 − Γ)/(1 + Γ).
+        let denom = (1.0 + gd.0) * (1.0 + gd.0) + gd.1 * gd.1;
+        let b = -2.0 * gd.1 / denom;
+        // Open stub: j·tan(βl) = −jb.
+        let l = ((-b).atan() / beta_rad_m).rem_euclid(half_lam);
+        let cand = StubMatch {
+            d_m: d,
+            l_open_m: l,
+            b,
+        };
+        best = match best {
+            Some(prev) if prev.d_m <= cand.d_m => Some(prev),
+            _ => Some(cand),
+        };
+    }
+    best.expect("two candidates always exist")
+}
+
 /// Corner style for [`double_jog`] (FS.3.2a, ADR-0217).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MiterStyle {

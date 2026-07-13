@@ -262,3 +262,4 @@
 - [ADR-0216: FS.0b.2b — the convergence loop on graded grids](decisions/0216-fs0b2b-graded-convergence.md)
 - [ADR-0217: FS.3.2a — diagonal-edge geometry under full-wave test](decisions/0217-fs32a-diagonal-geometry.md)
 - [ADR-0218: FS.5b.1 — space mapping with the engine as the fine model](decisions/0218-fs5b1-asm-em-fine.md)
+- [ADR-0219: FS.6.2a — single-stub matching synthesis](decisions/0219-fs62a-stub-match.md)
