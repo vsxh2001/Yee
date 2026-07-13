@@ -91,6 +91,8 @@ struct Measured {
     beta_rad_m: f64,
     /// Layout-frame x of probe A0 (the Γ_a reference plane).
     x_a0: f64,
+    /// Layout-frame x of probe P0 (the Γ_p reference plane).
+    x_p0: f64,
 }
 
 /// Voxelize, run, and wave-split one layout (probes: P triple then A
@@ -197,15 +199,28 @@ fn measure(layout: &Layout) -> Measured {
         })
         .expect("no Done event");
 
+    // Constrained-β wave split (ADR-0219): the free-β fit near the
+    // resonant patch locks onto the bulk-substrate velocity (measured
+    // 107.4 vs HJ 93.7 rad/m — the patch near-field, not the line
+    // mode), corrupting both β and Γ. The 50 Ω line's β is design
+    // data; the residual flags contamination the two-wave model cannot
+    // absorb.
+    let beta_hj =
+        2.0 * PI * F0_HZ * yee_layout::eps_eff(layout.ports[0].width_m, H_M, EPS_R).sqrt()
+            / 299_792_458.0;
     let spacing = SP_CELLS as f64 * dx;
     let split_at = |k0: usize| {
         let v: Vec<(f64, f64)> = (k0..k0 + 3)
             .map(|k| sparams::single_bin_dft(&p[k], dt, F0_HZ))
             .collect();
-        sparams::fit_standing_wave(v[0], v[1], v[2], spacing)
+        sparams::fit_standing_wave_known_beta(v[0], v[1], v[2], spacing, beta_hj)
     };
     let sp_p = split_at(0);
     let sp_a = split_at(3);
+    eprintln!(
+        "  fit residuals: P {:.4}, A {:.4} (constrained β = {beta_hj:.2} rad/m)",
+        sp_p.residual, sp_a.residual
+    );
     let cdiv = |a: (f64, f64), b: (f64, f64)| {
         let n = b.0 * b.0 + b.1 * b.1;
         ((a.0 * b.0 + a.1 * b.1) / n, (a.1 * b.0 - a.0 * b.1) / n)
@@ -213,8 +228,9 @@ fn measure(layout: &Layout) -> Measured {
     Measured {
         gamma_a: cdiv(sp_a.bwd, sp_a.fwd),
         gamma_p: cdiv(sp_p.bwd, sp_p.fwd),
-        beta_rad_m: sp_a.beta_rad_m,
+        beta_rad_m: beta_hj,
         x_a0: x0 + i_a0 as f64 * dx,
+        x_p0: x0 + i_p0 as f64 * dx,
     }
 }
 
@@ -245,22 +261,20 @@ fn synthesized_stub_match_improves_measured_s11() {
          (|Γ| = {g_a:.3}) — matching it proves nothing"
     );
 
-    // Synthesize from the MEASURED Γ with the closed-form line β. The
-    // first run used the fitted β (107.4 rad/m vs HJ 93.7 — the fit at
-    // triple A picks up the patch's TM₀ surface wave, which travels at
-    // the ~bulk √ε_r velocity) and the ~15° of synthesis phase error it
-    // injected cost real match depth (4.30 dB improvement measured).
-    // The 50 Ω feed's β is design data, HJ-validated to ~1 % in this
-    // workspace; the fitted value stays printed above as a diagnostic.
-    let beta_hj = 2.0 * PI * F0_HZ * yee_layout::eps_eff(dut.ports[0].width_m, H_M, EPS_R).sqrt()
-        / 299_792_458.0;
-    let m = single_stub_match(m0.gamma_a, beta_hj);
-    let mut x_stub = m0.x_a0 - m.d_m;
-    // Feasibility fallback: Γ(d) has period λ_g/2, so an infeasible
-    // generator-side position can move load-side of plane A instead.
+    // Synthesize from Γ at plane P — 46 mm from the patch, where the
+    // constrained fit sees the clean line mode (plane A sits 12 mm from
+    // the resonant patch edge and its Γ is near-field-biased: run 1
+    // measured |Γ_A| = 0.464 vs |Γ_P| ≈ 0.59 with the free fit locked
+    // onto the bulk velocity — ADR-0219). Γ(d) has period λ_g/2, so the
+    // stub lands at the first x = x_P0 − d + k·λ_g/2 inside the
+    // feasibility window (clear of triple P and of the patch edge).
+    let beta_hj = m0.beta_rad_m;
+    let m = single_stub_match(m0.gamma_p, beta_hj);
     let p_end = dut.ports[0].at.x + P0_OFFSET_M + (2 * SP_CELLS) as f64 * DX_M;
-    if x_stub < p_end + 2.0e-3 {
-        x_stub += PI / beta_hj;
+    let half_lam = PI / beta_hj;
+    let mut x_stub = m0.x_p0 - m.d_m;
+    while x_stub < p_end + 2.0e-3 {
+        x_stub += half_lam;
     }
     eprintln!(
         "  synthesis: d = {:.3} mm, l_open = {:.3} mm (b = {:+.3}) → stub at x = {:.3} mm",

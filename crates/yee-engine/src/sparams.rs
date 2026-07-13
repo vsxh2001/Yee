@@ -243,6 +243,64 @@ pub fn forward_transfer(
 /// identity breaks at the forward-ripple minima (raw |Γ| > 1 is the
 /// tell). Exporting a measured through-line S11 needs de-embedding /
 /// calibration — queued as R.2b.
+/// [`fit_standing_wave`] with the phase constant **known** (e.g. the
+/// HJ closed form for a 50 Ω feed): least-squares `(a, b)` for
+/// `V(x) = a·e^{−jβx} + b·e^{+jβx}` over three equally spaced phasors —
+/// overdetermined (3 equations, 2 complex unknowns), so `residual` is
+/// the normalized leftover and flags contamination by components that
+/// do not propagate at `β` (measured: a resonant patch's near-field 12
+/// mm away biased the free-β fit to the bulk-substrate velocity,
+/// ADR-0219). Returns the split at `v0`'s plane.
+pub fn fit_standing_wave_known_beta(
+    v0: (f64, f64),
+    v1: (f64, f64),
+    v2: (f64, f64),
+    spacing_m: f64,
+    beta_rad_m: f64,
+) -> WaveSplit {
+    let bd = beta_rad_m * spacing_m;
+    // Design matrix rows: x = 0, d, 2d with e_k = e^{∓jkβd}.
+    // Normal equations for [a, b]: M = [[3, S̄], [S, 3]] with
+    // S = Σ e^{+2jkbd} over k = 0..3 (cross terms), rhs = [Σ e^{+jkbd}·v_k,
+    // Σ e^{−jkbd}·v_k].
+    let s: (f64, f64) = (0..3).fold((0.0, 0.0), |acc, k| cadd(acc, cexpj(2.0 * bd * k as f64)));
+    let r1: (f64, f64) = (0..3).fold((0.0, 0.0), |acc, k| {
+        cadd(acc, cmul(cexpj(bd * k as f64), [v0, v1, v2][k]))
+    });
+    let r2: (f64, f64) = (0..3).fold((0.0, 0.0), |acc, k| {
+        cadd(acc, cmul(cexpj(-bd * k as f64), [v0, v1, v2][k]))
+    });
+    // Solve [[3, conj(S)], [S, 3]] [a b]^T = [r1 r2]^T.
+    let sc = (s.0, -s.1);
+    let det = csub((9.0, 0.0), cmul(s, sc));
+    // Normal equations [[3, S], [S̄, 3]]·[a, b]ᵀ = [r1, r2]ᵀ.
+    let (a, b) = if cabs(det) > 1e-12 {
+        (
+            cdiv(csub(cmul((3.0, 0.0), r1), cmul(s, r2)), det),
+            cdiv(csub(cmul((3.0, 0.0), r2), cmul(sc, r1)), det),
+        )
+    } else {
+        (v0, (0.0, 0.0))
+    };
+    // Normalized residual: model-vs-data mismatch over signal power.
+    let mut num = 0.0;
+    let mut den = 0.0;
+    for (k, v) in [v0, v1, v2].into_iter().enumerate() {
+        let model = cadd(
+            cmul(a, cexpj(-bd * k as f64)),
+            cmul(b, cexpj(bd * k as f64)),
+        );
+        num += cabs(csub(v, model)).powi(2);
+        den += cabs(v).powi(2);
+    }
+    WaveSplit {
+        fwd: a,
+        bwd: b,
+        beta_rad_m,
+        residual: if den > 0.0 { (num / den).sqrt() } else { 0.0 },
+    }
+}
+
 pub fn complex_reflection(
     triple: [&[f64]; 3],
     dt_s: f64,
@@ -280,6 +338,34 @@ mod tests {
         assert!((mag - a * n as f64 / 2.0).abs() / (a * n as f64 / 2.0) < 1e-9);
         assert!(re.abs() < 1e-6 * mag, "real part should vanish: {re}");
         assert!(im < 0.0, "positive-frequency bin of sin carries −j");
+    }
+
+    #[test]
+    fn known_beta_fit_recovers_an_exact_two_wave_field() {
+        let beta = 230.0; // rad/m
+        let d = 3.6e-3;
+        let (a, b) = ((0.8, -0.3), (0.25, 0.4));
+        let sample = |k: f64| {
+            let (ef, eb) = (cexpj(-beta * d * k), cexpj(beta * d * k));
+            cadd(cmul(a, ef), cmul(b, eb))
+        };
+        let split = fit_standing_wave_known_beta(sample(0.0), sample(1.0), sample(2.0), d, beta);
+        for (got, want) in [(split.fwd, a), (split.bwd, b)] {
+            assert!(
+                (got.0 - want.0).abs() < 1e-10 && (got.1 - want.1).abs() < 1e-10,
+                "got {got:?} want {want:?}"
+            );
+        }
+        assert!(split.residual < 1e-10, "residual {}", split.residual);
+        // A wrong-beta contaminant shows up in the residual, not silently.
+        let bulk = 264.5;
+        let noisy = |k: f64| cadd(sample(k), cmul((0.3, 0.1), cexpj(bulk * d * k)));
+        let split2 = fit_standing_wave_known_beta(noisy(0.0), noisy(1.0), noisy(2.0), d, beta);
+        assert!(
+            split2.residual > 0.01,
+            "contamination must be flagged: residual {}",
+            split2.residual
+        );
     }
 
     #[test]
