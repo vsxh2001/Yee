@@ -450,7 +450,158 @@ export default function App() {
       <FilterDesignPanel />
       <AntennaDesignPanel />
       <ImportPanel />
+      <YieldPanel />
     </main>
+  );
+}
+
+// FS.5c (ADR-0222): the yield-analysis panel — the ADR-0211 Monte-Carlo
+// yield machinery (deterministic seeded MC, Wilson 95 % CI) on the
+// closed-form patch-resonance testcase the surrogate-yield-001 gate
+// certified. Defaults are the ADR-0211 tolerances; same seed ⇒ the same
+// numbers every run.
+interface YieldResponse {
+  yield_frac: number;
+  ci95_lo: number;
+  ci95_hi: number;
+  n_pass: number;
+  n_samples: number;
+  length_nominal_m: number;
+}
+
+export function YieldPanel() {
+  const [f0Ghz, setF0Ghz] = useState(2.45);
+  const [epsR, setEpsR] = useState(4.4);
+  const [sigmaLMm, setSigmaLMm] = useState(0.1);
+  const [sigmaEps, setSigmaEps] = useState(0.05);
+  const [specMhz, setSpecMhz] = useState(40);
+  const [nSamples, setNSamples] = useState(10000);
+  const [seed, setSeed] = useState(20260711);
+  const [resp, setResp] = useState<YieldResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function runYield() {
+    setBusy(true);
+    setError(null);
+    setResp(null);
+    try {
+      setResp(
+        await invoke<YieldResponse>("yield_estimate", {
+          req: {
+            f0_hz: f0Ghz * 1e9,
+            eps_r: epsR,
+            sigma_l_m: sigmaLMm * 1e-3,
+            sigma_eps_r: sigmaEps,
+            spec_halfwidth_hz: specMhz * 1e6,
+            n_samples: nSamples,
+            seed,
+          },
+        }),
+      );
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section data-testid="yield-analysis">
+      <h2>Yield analysis</h2>
+      <p className="sub">
+        patch resonance · Monte-Carlo over fab tolerances · Wilson 95 % CI
+      </p>
+      <section className="controls">
+        <label>
+          f₀ (GHz)
+          <input
+            type="number"
+            step={0.05}
+            value={f0Ghz}
+            disabled={busy}
+            onChange={(e) => setF0Ghz(Number(e.target.value))}
+          />
+        </label>
+        <label>
+          ε_r
+          <input
+            type="number"
+            step={0.1}
+            value={epsR}
+            disabled={busy}
+            onChange={(e) => setEpsR(Number(e.target.value))}
+          />
+        </label>
+        <label>
+          σ_L (mm)
+          <input
+            type="number"
+            step={0.01}
+            value={sigmaLMm}
+            disabled={busy}
+            onChange={(e) => setSigmaLMm(Number(e.target.value))}
+          />
+        </label>
+        <label>
+          σ_εr
+          <input
+            type="number"
+            step={0.01}
+            value={sigmaEps}
+            disabled={busy}
+            onChange={(e) => setSigmaEps(Number(e.target.value))}
+          />
+        </label>
+        <label>
+          Spec ± (MHz)
+          <input
+            type="number"
+            step={1}
+            value={specMhz}
+            disabled={busy}
+            onChange={(e) => setSpecMhz(Number(e.target.value))}
+          />
+        </label>
+        <label>
+          Samples
+          <input
+            type="number"
+            min={1}
+            step={1000}
+            value={nSamples}
+            disabled={busy}
+            onChange={(e) => setNSamples(Number(e.target.value))}
+          />
+        </label>
+        <label>
+          Seed
+          <input
+            type="number"
+            min={0}
+            step={1}
+            value={seed}
+            disabled={busy}
+            onChange={(e) => setSeed(Number(e.target.value))}
+          />
+        </label>
+        <button onClick={runYield} disabled={busy}>
+          {busy ? "Sampling…" : "Estimate yield"}
+        </button>
+      </section>
+
+      {error && <p className="error">{error}</p>}
+
+      {resp && (
+        <p className="meta" data-testid="yield-result">
+          yield <strong>{(resp.yield_frac * 100).toFixed(2)} %</strong> · 95 %
+          CI [{(resp.ci95_lo * 100).toFixed(2)},{" "}
+          {(resp.ci95_hi * 100).toFixed(2)}] % · {resp.n_pass} /{" "}
+          {resp.n_samples} pass · L₀ ={" "}
+          {(resp.length_nominal_m * 1e3).toFixed(2)} mm
+        </p>
+      )}
+    </section>
   );
 }
 

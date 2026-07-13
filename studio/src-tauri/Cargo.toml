@@ -29,6 +29,8 @@ yee-layout  = { path = "../../crates/yee-layout" }
 yee-io      = { path = "../../crates/yee-io" }
 yee-export  = { path = "../../crates/yee-export" }
 yee-voxel   = { path = "../../crates/yee-voxel" }
+# FS.5c yield exposure (ADR-0222): the ADR-0211 MC yield machinery.
+yee-surrogate = { path = "../../crates/yee-surrogate" }
 num-complex = "0.4"
 
 [profile.release]

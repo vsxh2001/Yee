@@ -14,6 +14,7 @@ pub mod antenna;
 pub mod design;
 pub mod import;
 pub mod verify;
+pub mod yield_mc;
 
 use tauri::Emitter;
 use yee_engine::{JobEvent, JobResult, JobSpec};
@@ -25,6 +26,7 @@ use crate::antenna::{
 use crate::design::{FilterDesignRequest, FilterDesignResponse, design_filter_impl};
 use crate::import::{ImportRequest, ImportResponse, import_gerber_impl};
 use crate::verify::{FilterVerifyRequest, FilterVerifyResponse, verify_filter_impl};
+use crate::yield_mc::{YieldRequest, YieldResponse, yield_estimate_impl};
 
 /// Run a simulation job on the engine, streaming progress events.
 #[tauri::command]
@@ -106,6 +108,14 @@ fn import_gerber(req: ImportRequest) -> Result<ImportResponse, String> {
     import_gerber_impl(&req)
 }
 
+/// Run the Monte-Carlo yield analysis (FS.5c, ADR-0222): the ADR-0211
+/// closed-form patch-resonance testcase — deterministic seeded MC with
+/// Wilson 95 % bounds, instant at the default sample count.
+#[tauri::command]
+fn yield_estimate(req: YieldRequest) -> Result<YieldResponse, String> {
+    yield_estimate_impl(&req)
+}
+
 /// Build and run the Tauri application.
 pub fn run() {
     tauri::Builder::default()
@@ -115,7 +125,8 @@ pub fn run() {
             verify_filter,
             design_antenna,
             verify_antenna,
-            import_gerber
+            import_gerber,
+            yield_estimate
         ])
         .run(tauri::generate_context!())
         .expect("error while running yee-studio");

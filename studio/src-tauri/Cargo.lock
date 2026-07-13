@@ -5344,7 +5344,17 @@ dependencies = [
  "yee-filter",
  "yee-io",
  "yee-layout",
+ "yee-surrogate",
  "yee-voxel",
+]
+
+[[package]]
+name = "yee-surrogate"
+version = "0.0.0"
+dependencies = [
+ "nalgebra",
+ "num-complex",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
