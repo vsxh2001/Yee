@@ -79,7 +79,14 @@ fn coarse_notch_ghz(l_mm: f64) -> f64 {
 /// dB bins around the minimum.
 fn measured_notch_ghz(stub_len_mm: f64) -> f64 {
     let dut = stub_layout(stub_len_mm * 1e-3);
-    let opts = GradedBoardOptions::for_board(&dut, F_MAX_HZ, F0_HZ, 0.8 * F0_HZ);
+    let mut opts = GradedBoardOptions::for_board(&dut, F_MAX_HZ, F0_HZ, 0.8 * F0_HZ);
+    // Edge-snapped meshing (ADR-0218): without it the stub length
+    // quantizes to fine-cell multiples and the notch response is a
+    // staircase in the design variable — the first run measured three
+    // lengths spanning 34 µm reading the identical 5.3530 GHz, and
+    // Broyden oscillated inside the step. Snapping makes the rasterized
+    // stub end track the requested length continuously.
+    opts.mesh.snap_edges = true;
     let (dut_job, ref_job) =
         two_port_board_jobs_graded(&dut, F_MAX_HZ, &opts).expect("graded job build failed");
     let (dt, spacing) = (dut_job.dt_s, dut_job.spacing_m);

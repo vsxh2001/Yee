@@ -141,6 +141,18 @@ pub struct GradedMeshOptions {
     /// rest of the options are metre-denominated fixture geometry that
     /// must stay constant across passes (ADR-0204).
     pub scale: f64,
+    /// Snap a grid node exactly onto every trace-AABB edge (FS.5b.1,
+    /// ADR-0218). Without this, the point-sampled rasterization
+    /// quantizes every geometry edge to the local cell size, so a
+    /// design-refinement loop sees a **staircase** response — measured:
+    /// three stub lengths spanning 34 µm all produced the identical
+    /// notch frequency, and Broyden space mapping oscillated inside one
+    /// quantization step. With snapping, the rasterized edge tracks the
+    /// requested edge continuously. The nudge is spread over 4 cells per
+    /// side (max width change fine/8), so the junction growth ratio
+    /// stays ≤ 9/7 < 1.3 — inside the compute-019-certified regime.
+    /// Default `false`: the pinned graded-gate grids are unchanged.
+    pub snap_edges: bool,
 }
 
 impl GradedMeshOptions {
@@ -157,6 +169,7 @@ impl GradedMeshOptions {
             growth: 1.3,
             guard_m: layout.substrate.height_m,
             scale: 1.0,
+            snap_edges: false,
         }
     }
 }
@@ -327,6 +340,17 @@ pub fn auto_spacings(
         opts.growth,
         opts.air_above_m,
     );
+    let (mut dx, mut dy) = (dx, dy);
+    if opts.snap_edges {
+        let mut sx: Vec<f64> = Vec::new();
+        let mut sy: Vec<f64> = Vec::new();
+        for &(bx0, by0, bx1, by1) in &boxes {
+            sx.extend([bx0, bx1]);
+            sy.extend([by0, by1]);
+        }
+        snap_axis(&mut dx, x0_m, &sx);
+        snap_axis(&mut dy, y0_m, &sy);
+    }
     Ok(AutoSpacings {
         dx,
         dy,
@@ -338,6 +362,56 @@ pub fn auto_spacings(
         coarse_m: coarse,
         fine_m: fine,
     })
+}
+
+/// Shift the nearest interior node onto each snap coordinate, spreading
+/// the shift over up to 4 nodes per side with linear falloff so no cell
+/// width changes by more than `shift/4` (growth-ratio hygiene — see
+/// [`GradedMeshOptions::snap_edges`]). Snap points outside the axis or
+/// closer than 5 cells to either end are skipped (trace edges always sit
+/// a full margin inside the domain).
+fn snap_axis(widths: &mut [f64], lo: f64, snaps: &[f64]) {
+    for &s in snaps {
+        let mut nodes = Vec::with_capacity(widths.len() + 1);
+        let mut acc = lo;
+        nodes.push(acc);
+        for w in widths.iter() {
+            acc += w;
+            nodes.push(acc);
+        }
+        let j = match nodes
+            .iter()
+            .enumerate()
+            .min_by(|a, b| (a.1 - s).abs().total_cmp(&(b.1 - s).abs()))
+        {
+            Some((j, _)) => j,
+            None => continue,
+        };
+        if j < 5 || j + 5 > widths.len() {
+            continue;
+        }
+        let delta = s - nodes[j];
+        if delta.abs() < 1e-15 {
+            continue;
+        }
+        // Guard: never shrink a cell below half its size (keeps the
+        // Courant dt sane even for a snap point mid-cell of the finest
+        // band; |delta| ≤ cell/2 by nearest-node choice, and the spread
+        // divides it by 4).
+        for k in -3_isize..=3 {
+            let frac = (4 - k.unsigned_abs() as i64) as f64 / 4.0;
+            let node_idx = (j as isize + k) as usize;
+            nodes[node_idx] += delta * frac;
+        }
+        // Rewrite ONLY the affected cells (j−4 ..= j+3): recomputing every
+        // width from the cumulative nodes perturbs untouched coarse cells
+        // by an ULP, and the fixture's probe placement requires
+        // bit-equal-coarse runs (measured: the first snapped build lost
+        // every coarse stretch to re-differencing rounding).
+        for i in (j - 4)..=(j + 3) {
+            widths[i] = nodes[i + 1] - nodes[i];
+        }
+    }
 }
 
 /// Ascending geometric ladder strictly between `fine` and `coarse`:
@@ -894,6 +968,59 @@ mod tests {
                 auto_spacings(&l, 6.0e9, &opts).is_err(),
                 "scale {bad} must be rejected"
             );
+        }
+    }
+
+    #[test]
+    fn snap_edges_puts_nodes_exactly_on_trace_edges() {
+        let l = stub_like_layout();
+        let mut opts = GradedMeshOptions::for_board(&l, 6.0e9);
+        opts.snap_edges = true;
+        let s = auto_spacings(&l, 6.0e9, &opts).unwrap();
+        let off = auto_spacings(
+            &l,
+            6.0e9,
+            &GradedMeshOptions {
+                snap_edges: false,
+                ..opts
+            },
+        )
+        .unwrap();
+        // Same cell counts and total extents — snapping only moves nodes.
+        assert_eq!(s.dx.len(), off.dx.len());
+        assert_eq!(s.dy.len(), off.dy.len());
+        let ext = |v: &[f64]| v.iter().sum::<f64>();
+        assert!((ext(&s.dx) - ext(&off.dx)).abs() < 1e-12);
+        assert!((ext(&s.dy) - ext(&off.dy)).abs() < 1e-12);
+        // Every trace-AABB edge coordinate is now a grid node.
+        let has_node = |widths: &[f64], origin: f64, coord: f64| {
+            let mut acc = origin;
+            if (acc - coord).abs() < 1e-9 {
+                return true;
+            }
+            for w in widths {
+                acc += w;
+                if (acc - coord).abs() < 1e-9 {
+                    return true;
+                }
+            }
+            false
+        };
+        for coord in [0.0, 100.0e-3, 48.5e-3, 51.5e-3] {
+            assert!(has_node(&s.dx, s.x0_m, coord), "x edge {coord} not snapped");
+        }
+        for coord in [0.0, 3.0e-3, 11.0e-3] {
+            assert!(has_node(&s.dy, s.y0_m, coord), "y edge {coord} not snapped");
+        }
+        // The growth-ratio invariant survives the nudge.
+        for (axis, arr) in [("dx", &s.dx), ("dy", &s.dy)] {
+            for (i, w) in arr.windows(2).enumerate() {
+                let ratio = (w[1] / w[0]).max(w[0] / w[1]);
+                assert!(
+                    ratio <= opts.growth * (1.0 + 1e-9),
+                    "{axis} junction {i}: ratio {ratio}"
+                );
+            }
         }
     }
 
