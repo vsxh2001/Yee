@@ -233,8 +233,7 @@ fn synthesized_stub_match_improves_measured_s11() {
         db(g_a),
         db(g_p0),
         m0.beta_rad_m,
-        2.0 * PI * F0_HZ
-            * yee_layout::eps_eff(dut.ports[0].width_m, H_M, EPS_R).sqrt()
+        2.0 * PI * F0_HZ * yee_layout::eps_eff(dut.ports[0].width_m, H_M, EPS_R).sqrt()
             / 299_792_458.0
     );
     assert!(
