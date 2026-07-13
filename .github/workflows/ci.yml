@@ -406,6 +406,10 @@ jobs:
       # (engine-eff-001, 2 solves + 192-direction NTFF, ~16 min).
       - name: FS.2c efficiency (engine-eff-001)
         run: cargo test -p yee-engine --release --test antenna_efficiency -- --ignored --nocapture
+      # FS.6.2b (ADR-0219): match synthesized from a measured antenna
+      # Gamma improves the measured S11 (2 release solves, ~11 min).
+      - name: FS.6.2b stub match (match-em-001)
+        run: cargo test -p yee-engine --release --test antenna_stub_match -- --ignored --nocapture
 
   fdtd-coupling-gate:
     name: FDTD propagation ε_eff gate (fdtd-line-eeff, release)

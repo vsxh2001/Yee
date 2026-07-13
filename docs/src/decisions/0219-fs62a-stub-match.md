@@ -25,7 +25,35 @@ the published tables mix open/short-stub branches (memory of Example 5.2
 produced the shorted-stub length), while the null contract is
 self-verifying and branch-independent.
 
-## Queued
+## FS.6.2b — the full-wave loop (SHIPPED; gate `match-em-001` GREEN)
 
-FS.6.2b — the full-wave loop (measured Γ → synthesized stub → measured
-improvement), designed in the spec; the FS.6 roadmap gate.
+The FS.6 roadmap gate: an edge-fed 2.45 GHz patch (measured
+|Γ| ≈ 0.6, −4.50 dB) is matched by a stub synthesized from its
+**measured** Γ — matched |Γ| = 0.282 (−11.00 dB), **improvement
+6.49 dB** (bar ≥ 6 dB), 667 s release, in the antenna CI job.
+
+It took three runs, and the failure chain is the real lesson
+(**measurement-plane hygiene near resonant radiators**):
+
+1. Run 1 (+4.30 dB, short of bar): judging plane P at 3 mm read
+   |Γ_P| = 0.636 vs the plane-invariant 0.464 — the aperture port's
+   evanescent near-zone. Also the free-β standing-wave fit at plane A
+   (12 mm from the patch edge) read **β = 107.4 rad/m = the
+   bulk-substrate velocity** (107.7), not the line's 93.7: the patch's
+   resonant near-field dominates there.
+2. Run 2 (−0.27 dB, *worse*): "fixing" only β (HJ closed form) while
+   keeping the near-field-corrupted Γ_A broke the partial error
+   cancellation of run 1 — a clean β with a dirty Γ is worse than a
+   consistently dirty pair.
+3. Run 3 (GREEN): `sparams::fit_standing_wave_known_beta` — the wave
+   split with β **known** (overdetermined least squares; its residual
+   flags non-β contamination; the unit gate caught a Cramer conjugate
+   swap on the first cut) — plus Γ measured at plane P (46 mm from the
+   patch; constrained-fit residuals 0.004–0.01 at both planes) and
+   λ_g/2-periodic stub placement into the feasibility window.
+
+Standing rule extracted: **synthesize from a Γ measured on a plane far
+from resonant structures, with the wave split constrained to the line's
+known β, and check the fit residual** — a free-β fit near a radiator
+locks onto whatever wave dominates locally and silently corrupts both
+outputs.

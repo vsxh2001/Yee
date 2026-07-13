@@ -17,7 +17,7 @@ Gates (instant, GREEN first run): `pozar_example_5_2_stub_position`
 96 loads over the passive Γ-disk (|Γ| 0.1–0.8, 12 phases) each null the
 combined reflection below 1e-9.
 
-## FS.6.2b — full-wave verification (queued; the FS.6 roadmap gate)
+## FS.6.2b — full-wave verification (SHIPPED; see ADR-0219 for the measured three-run forensic chain)
 
 "A match synthesized from a **measured** antenna Γ improves its
 **measured** S11." Design sketch for the next session:
