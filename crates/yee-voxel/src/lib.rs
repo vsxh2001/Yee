@@ -599,24 +599,58 @@ pub fn substrate_sigma_cells(model: &MicrostripModel, tan_d: f64, f_ref_hz: f64)
 /// (R.1, ADR-0194): the `E_z` edges `k = 0 .. k_top` become PEC — a ground-to-trace
 /// shorting post when `k_top` is the trace plane.
 ///
+/// Equivalent to [`with_via_between`]`(model, i, j, 0, k_top)` (FS.4.1,
+/// ADR-0221 kept it as the single-layer back-compat spelling).
+///
 /// # Panics
 ///
 /// Panics if `(i, j)` or `k_top` exceeds the `E_z` grid.
 pub fn with_via_at_cell(model: &mut MicrostripModel, i: usize, j: usize, k_top: usize) {
+    with_via_between(model, i, j, 0, k_top);
+}
+
+/// Punch a **blind via** at grid column `(i, j)` (FS.4.1, ADR-0221): the
+/// `E_z` edges `k = k_lo .. k_hi` become PEC — a metal post spanning the
+/// z node-plane `k_lo` to the z node-plane `k_hi`, touching neither
+/// outer plate unless the range does.
+///
+/// `k_lo`/`k_hi` are **grid cell indices**, not stackup layer indices:
+/// callers on a [`voxelize_stackup`] model quantize layer heights the
+/// same way the voxelizer did (`round(h/dx).max(1)` cumulative bands)
+/// and follow the crate's cell-index post-processing idiom
+/// ([`with_via_at_cell`] / [`truncate_ground_at_cell`]).
+///
+/// # Panics
+///
+/// Panics if `(i, j)` exceeds the `E_z` grid or the range is malformed
+/// (`k_lo > k_hi` or `k_hi > nz`) — a malformed via is a caller bug,
+/// not data.
+pub fn with_via_between(model: &mut MicrostripModel, i: usize, j: usize, k_lo: usize, k_hi: usize) {
     let (nx, ny, nz) = model.dims;
     assert!(
-        i <= nx && j <= ny && k_top <= nz,
-        "via at ({i}, {j}) k_top {k_top} outside grid {nx}x{ny}x{nz}"
+        i <= nx && j <= ny && k_lo <= k_hi && k_hi <= nz,
+        "via at ({i}, {j}) spanning k {k_lo}..{k_hi} outside grid {nx}x{ny}x{nz}"
     );
     let mut mask = model
         .grid
         .pec_mask_ez
         .take()
         .unwrap_or_else(|| ndarray::Array3::from_elem((nx + 1, ny + 1, nz), false));
-    for k in 0..k_top {
+    for k in k_lo..k_hi {
         mask[(i, j, k)] = true;
     }
     model.grid.pec_mask_ez = Some(mask);
+}
+
+/// Punch a **through-via** at grid column `(i, j)` (FS.4.1, ADR-0221):
+/// the full-stack case of [`with_via_between`] — every `E_z` edge
+/// `k = 0 .. nz` becomes PEC, connecting the ground plane to the domain
+/// top. On a lidded [`voxelize_stackup`] model the node plane `nz` *is*
+/// the lid, so this is a ground-to-lid barrel through every layer (and
+/// through the trace plane, shorting any trace it passes).
+pub fn with_through_via_at_cell(model: &mut MicrostripModel, i: usize, j: usize) {
+    let nz = model.dims.2;
+    with_via_between(model, i, j, 0, nz);
 }
 
 /// Truncate the ground plane to the strip of the first `i_ground_end` grid
