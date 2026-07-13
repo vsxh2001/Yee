@@ -301,6 +301,19 @@ pub fn fit_standing_wave_known_beta(
     }
 }
 
+/// **Complex** reflection at a probe-triple plane (R.2): `bwd / fwd` as
+/// an `(re, im)` phasor per frequency — the complex Γ whose magnitude
+/// [`directional_reflection_db`] reports.
+///
+/// Interpretation caveat (ADR-0195): this is Γ looking from the plane
+/// toward whatever terminates the line — for a one-port DUT (an antenna,
+/// a shorted stub) that IS the DUT's reflection, which is how A.1/A.3
+/// use it. On a **through** measurement it is the *fixture's* load-port
+/// reflection, not the DUT's S11 — and if the run's time window truncates
+/// the port-to-port multi-bounce ring-down, the steady-state |Γ| ≤ 1
+/// identity breaks at the forward-ripple minima (raw |Γ| > 1 is the
+/// tell). Exporting a measured through-line S11 needs de-embedding /
+/// calibration — queued as R.2b.
 pub fn complex_reflection(
     triple: [&[f64]; 3],
     dt_s: f64,

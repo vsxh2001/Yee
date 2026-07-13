@@ -89,8 +89,6 @@ struct Measured {
     gamma_a: (f64, f64),
     gamma_p: (f64, f64),
     beta_rad_m: f64,
-    /// Layout-frame x of probe A0 (the Γ_a reference plane).
-    x_a0: f64,
     /// Layout-frame x of probe P0 (the Γ_p reference plane).
     x_p0: f64,
 }
@@ -229,7 +227,6 @@ fn measure(layout: &Layout) -> Measured {
         gamma_a: cdiv(sp_a.bwd, sp_a.fwd),
         gamma_p: cdiv(sp_p.bwd, sp_p.fwd),
         beta_rad_m: beta_hj,
-        x_a0: x0 + i_a0 as f64 * dx,
         x_p0: x0 + i_p0 as f64 * dx,
     }
 }
