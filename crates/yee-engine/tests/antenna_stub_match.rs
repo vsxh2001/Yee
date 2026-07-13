@@ -42,8 +42,11 @@ const N_STEPS: usize = 9000;
 const FEED_LEN_M: f64 = 58.0e-3;
 /// Reference plane A: distance from the port along the feed.
 const A0_OFFSET_M: f64 = 46.0e-3;
-/// Port-side triple P: clear of the aperture's evanescent zone.
-const P0_OFFSET_M: f64 = 3.0e-3;
+/// Port-side triple P: the A.0-validated measurement offset. The first
+/// run put P at 3 mm and read |Γ_P| = 0.636 vs |Γ_A| = 0.464 — |Γ| is
+/// plane-invariant on the lossless feed, so the excess was the aperture
+/// port's evanescent near-zone contaminating the fit.
+const P0_OFFSET_M: f64 = 12.0e-3;
 /// Probe-triple spacing, cells.
 const SP_CELLS: usize = 12;
 
@@ -242,9 +245,23 @@ fn synthesized_stub_match_improves_measured_s11() {
          (|Γ| = {g_a:.3}) — matching it proves nothing"
     );
 
-    // Synthesize the stub from the MEASURED Γ and β.
-    let m = single_stub_match(m0.gamma_a, m0.beta_rad_m);
-    let x_stub = m0.x_a0 - m.d_m;
+    // Synthesize from the MEASURED Γ with the closed-form line β. The
+    // first run used the fitted β (107.4 rad/m vs HJ 93.7 — the fit at
+    // triple A picks up the patch's TM₀ surface wave, which travels at
+    // the ~bulk √ε_r velocity) and the ~15° of synthesis phase error it
+    // injected cost real match depth (4.30 dB improvement measured).
+    // The 50 Ω feed's β is design data, HJ-validated to ~1 % in this
+    // workspace; the fitted value stays printed above as a diagnostic.
+    let beta_hj = 2.0 * PI * F0_HZ * yee_layout::eps_eff(dut.ports[0].width_m, H_M, EPS_R).sqrt()
+        / 299_792_458.0;
+    let m = single_stub_match(m0.gamma_a, beta_hj);
+    let mut x_stub = m0.x_a0 - m.d_m;
+    // Feasibility fallback: Γ(d) has period λ_g/2, so an infeasible
+    // generator-side position can move load-side of plane A instead.
+    let p_end = dut.ports[0].at.x + P0_OFFSET_M + (2 * SP_CELLS) as f64 * DX_M;
+    if x_stub < p_end + 2.0e-3 {
+        x_stub += PI / beta_hj;
+    }
     eprintln!(
         "  synthesis: d = {:.3} mm, l_open = {:.3} mm (b = {:+.3}) → stub at x = {:.3} mm",
         m.d_m * 1e3,
@@ -254,12 +271,14 @@ fn synthesized_stub_match_improves_measured_s11() {
     );
     // The stub must land on the feed, generator-side of triple A and
     // load-side of triple P (both by fixture construction).
-    let port_x = dut.ports[0].at.x;
     assert!(
-        x_stub > port_x + P0_OFFSET_M + (2 * SP_CELLS) as f64 * DX_M + 2.0e-3,
+        x_stub > p_end + 2.0e-3,
         "stub {x_stub:.4} m collides with the port triple"
     );
-    assert!(x_stub < m0.x_a0 - 1.0e-3, "stub collides with plane A");
+    assert!(
+        x_stub < -2.0e-3 - dut.ports[0].width_m / 2.0,
+        "stub {x_stub:.4} m collides with the patch edge"
+    );
 
     // Run 2: the matched layout.
     eprintln!("match-em-001: matched run");
