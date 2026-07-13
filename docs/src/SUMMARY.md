@@ -263,3 +263,4 @@
 - [ADR-0217: FS.3.2a — diagonal-edge geometry under full-wave test](decisions/0217-fs32a-diagonal-geometry.md)
 - [ADR-0218: FS.5b.1 — space mapping with the engine as the fine model](decisions/0218-fs5b1-asm-em-fine.md)
 - [ADR-0219: FS.6.2a — single-stub matching synthesis](decisions/0219-fs62a-stub-match.md)
+- [ADR-0220: FS.3.2b — Gerber import: circular arcs + aperture flashes](decisions/0220-fs32b-gerber-arcs-flashes.md)
