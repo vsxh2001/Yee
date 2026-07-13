@@ -124,7 +124,9 @@ fn coord_word_xy(x_m: f64, y_m: f64) -> String {
 /// RS-274X Gerber import (FS.3.0) — the region subset this crate's writer
 /// emits, parsed back into polygons.
 pub mod import;
-pub use import::{GerberImportError, gerber_to_layout, gerber_to_outline, gerber_to_polygons};
+pub use import::{
+    ARC_CHORD_TOL_M, GerberImportError, gerber_to_layout, gerber_to_outline, gerber_to_polygons,
+};
 
 /// Emit a single-copper-layer **RS-274X Gerber** for a [`Layout`]'s top-metal
 /// polygons, each as a filled region (`G36*` … `G37*`).

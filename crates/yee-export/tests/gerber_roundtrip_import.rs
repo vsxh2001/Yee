@@ -106,9 +106,10 @@ fn out_of_subset_inputs_are_rejected_explicitly() {
         gerber_to_polygons("G36*\nX1Y1D02*\nX2Y2D01*\n"),
         Err(GerberImportError::UnclosedRegion)
     );
-    // Arcs are FS.3.1+ — explicit rejection, not mis-parse.
+    // Multi-quadrant arcs shipped in FS.3.2b (gate gerber-rt-003); the
+    // legacy single-quadrant G74 mode stays a named rejection.
     assert!(matches!(
-        gerber_to_polygons("G02*\nM02*\n"),
+        gerber_to_polygons("G74*\nM02*\n"),
         Err(GerberImportError::UnsupportedCommand(_))
     ));
     // Stroked draws outside a region (the outline layer) are FS.3.1.
