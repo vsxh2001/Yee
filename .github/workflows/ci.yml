@@ -238,6 +238,7 @@ jobs:
   compute-engine-gates:
     name: Compute engine gates (yee-compute + yee-engine, release)
     runs-on: ubuntu-latest
+    timeout-minutes: 330
     # No `needs: lint-test` — same rationale as fdtd-coupling-gate. Runs the
     # `#[ignore]`'d yee-compute gates (ADR-0175..0177): compute-006 cavity
     # TE101 vs the analytic Pozar frequency, compute-008 line-eeff vs
@@ -350,6 +351,7 @@ jobs:
   antenna-gates:
     name: Antenna design gates (A.0-A.3, release)
     runs-on: ubuntu-latest
+    timeout-minutes: 240
     # No `needs:` — parallel with the other release gates. Runs the antenna
     # track (ADR-0190..0193): A.0 resonance (engine-antenna-001), A.1 inset +
     # directional S11 (engine-antenna-002), A.2 far-field pattern
@@ -655,6 +657,7 @@ jobs:
   fem-eigen-gate:
     name: FEM eigen gates (fem-eig-001/003, release)
     runs-on: ubuntu-latest
+    timeout-minutes: 240
     # No `needs: lint-test`: builds only the yee-validation tree in `--release`,
     # in parallel with the other release gates. These FEM gates are
     # `#[ignore]`'d for the default debug `cargo test --workspace` (CLAUDE.md
@@ -718,6 +721,34 @@ jobs:
       - name: mom microstrip eps_eff (fem-line-eeff-001, release, ignored)
         run: cargo test -p yee-fem --release --test microstrip_eeff -- --ignored fem_line_eeff_001 --nocapture
 
+  fem-coupling-gate:
+    name: FEM coupling gates (fem-coupling-001/002, release)
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    # Split out of the FEM eigen job (2026-07-14): the combined job blew the
+    # 6-hour workflow hard limit on hosted runners (run 369 measured
+    # fem-eig-003 2h22m + coupling-002 57m + coupling-correct 63m + the BO
+    # gate cancelled at the axe). K1/K2 stay per-PR here (~1.3 h hosted);
+    # the two refinement-LOOP gates (fem-coupling-correct-001,
+    # bo-coupling-001 — root-find/BO over multi-minute FEM sweeps) moved to
+    # heavy-weekly.yml, the same policy as engine-automesh-002.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.92"
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install system deps (fontconfig for plotters)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev pkg-config
+
       # FEM-EM brick K1 (ADR-0155): coupled-microstrip resonator-pair coupling
       # `k` gate. One driven sparse-LU sweep (~61 pts) on a ~63k-tet FR-4
       # coupled pair; asserts two resolvable transmission peaks (valley ≥ 6 dB
@@ -743,36 +774,6 @@ jobs:
       # faer sparse-LU bandwidth low).
       - name: fem coupled-resonator k vs gap (fem-coupling-002, release, ignored)
         run: cargo test -p yee-fem --release --test fem_coupling_002 -- --ignored --nocapture
-
-      # F1.2.1.1 brick B1 (ADR-0159): FEM-k per-gap coupling design-curve
-      # CORRECTOR. Bisects the gap onto the FEM-measured K(gap) curve until the
-      # realized resonant-split coupling hits a synthesis target (k_target =
-      # 0.040), fixing the impedance-k-vs-resonant-k divergence (k_imp ≠ k_eps;
-      # ADR-0155 K2) that floors the 3-pole filter S21 at ~−27 dB. Asserts the
-      # root-find converged within 8 % of the target inside a 6-eval budget on the
-      # [1.0,4.0] mm bracket, and that the corrected gap moved a real margin off
-      # the deliberately-mis-dimensioned 2.0 mm seed (~20 % off). `#[ignore]`'d so
-      # the default debug `cargo test --workspace` never runs it; run here in
-      # `--release`. ~25 min (one K1-sized driven sweep per bisection eval, ~5-6
-      # evals); fits the GitHub runner (the long-thin coupled-pair box keeps the
-      # per-ω faer sparse-LU bandwidth low).
-      - name: fem coupling gap corrector (fem-coupling-correct-001, release, ignored)
-        run: cargo test -p yee-fem --release --test fem_coupling_correct_001 -- --ignored --nocapture
-
-      # F1.2.1.0 (ADR-0157): single-gap surrogate-BO EM-in-loop dimensional
-      # refinement — the design engine's walking skeleton. A 1-D Bayesian
-      # optimizer (`yee_surrogate::minimize`, EI/GP) drives the FEM resonant-
-      # split coupling-k (`yee_fem::coupled_resonator_k`) from an off-target
-      # seed gap (2.0 mm, k_fem ≈ 0.0481 → ~20 % off TARGET_K = 0.040) to the
-      # target, closing the ~17–26 % impedance-vs-resonant divergence the
-      # analytic dimensioner cannot. HEAVY: the BO closure calls one FEM driven
-      # sweep per eval — 12 sequential evals + 2 confirmation evals ≈ 57 min in
-      # `--release` (each sweep is multi-minute, like fem-coupling-001).
-      # `#[ignore]`'d so the default debug `cargo test --workspace` never runs
-      # it; run here in `--release` (the long-thin coupled-pair box keeps the
-      # per-ω faer sparse-LU bandwidth low, so it fits the GitHub runner).
-      - name: bo coupled-resonator gap refine (bo-coupling-001, release, ignored)
-        run: cargo test -p yee-validation --release --test bo_coupling_001 -- --ignored --nocapture
 
   fdtd-heavy-validation-gate:
     name: FDTD heavy validation gates (release)
