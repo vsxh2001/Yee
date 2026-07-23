@@ -39,6 +39,33 @@ use crate::spec::{FdtdSpec, GradedSpacings, SpacingArrays, len3};
 
 /// Steps encoded per queue submission. Keeps a single command buffer to a
 /// few hundred dispatches so watchdog-limited platforms don't kill long runs.
+//
+// FS.7.0 task 3 (ADR-0223) root-caused the 128^3->224^3 throughput decline
+// (2408 -> 1841 -> 1401 -> 934 Mcells/s, i.e. -23.5%/-23.9%/-33.3% per +32
+// grid step; RTX 5060 Ti) against this const and found it is NOT the cause:
+//   (a) chunking: swept STEPS_PER_SUBMIT in {8,16,32,64,128,256} at every
+//       grid size in the bench sweep. 128^3/192^3 Mcells/s stayed flat to
+//       within run-to-run noise (~0.3%) across the whole 32x range (e.g.
+//       192^3: 1400.9/1401.2/1401.1/1401.0/1400.5/1399.9) -- submission /
+//       encoder overhead is not the bottleneck (a single compute pass
+//       already covers a whole chunk, so this also rules out per-pass
+//       bind-group overhead, hypothesis (b)).
+//   (d) power/thermal: `nvidia-smi dmon` during a run showed clocks
+//       reaching ~2600-2700 MHz (near the ~3090 MHz boost cap), temps
+//       34-45 C, power draw peaking ~107 W -- no throttling.
+//   (c) the >128 MiB single-binding path (field arena crosses 128 MiB
+//       between 160^3=93.8 MiB and 192^3=162.0 MiB; coeff arena crosses it
+//       between 192^3=109.7 MiB and 224^3=173.8 MiB, see `78cd12f`): the
+//       decline is smooth across both crossings, not a step -- the 128->160
+//       Mcells/s ratio (-23.5%, no crossing) and the 160->192 ratio (-23.9%,
+//       crosses the field-arena threshold) are statistically the same drop.
+//       No extra driver-side penalty was measured at the crossing.
+// Net: the decline is consistent with the per-step working set (fields +
+// coeffs, ~10 MiB at 64^3 growing to ~431 MiB at 224^3) outstripping
+// on-chip cache reuse as the grid grows -- a memory-hierarchy/roofline
+// effect, not a bug in this crate, and not fixable by a chunk-size change.
+// STEPS_PER_SUBMIT stays 64 (no measured value beats it); see ADR-0223 for
+// the full sweep and analysis.
 const STEPS_PER_SUBMIT: usize = 64;
 
 // Workgroup shape for the 9 volume kernels in `shaders/fdtd.wgsl`
