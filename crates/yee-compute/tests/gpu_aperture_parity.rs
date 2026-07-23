@@ -131,6 +131,7 @@ fn gpu_aperture_ports_match_cpu_probe_series() {
                 cell: (24, J_HI + 2, K_SUB + 3),
             },
         ],
+        h_probes: vec![],
     };
 
     let mut gpu = match GpuFdtd::with_drive(

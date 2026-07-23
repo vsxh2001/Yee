@@ -86,6 +86,7 @@ fn cavity_drive(dt: f64) -> Drive {
             component: EComponent::Ey,
             cell: PRB,
         }],
+        h_probes: vec![],
     }
 }
 

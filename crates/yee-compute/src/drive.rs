@@ -185,6 +185,73 @@ pub struct Probe {
     pub cell: (usize, usize, usize),
 }
 
+/// Magnetic-field component selector for [`HProbe`] (FS.4.2a).
+///
+/// Kept as its own type — not folded into [`EComponent`] — so no existing
+/// `EComponent`/`Probe` call site (source, port, or E-probe) has to change:
+/// H sampling lives entirely on the parallel [`Drive::h_probes`] field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HComponent {
+    /// `H_x`
+    Hx,
+    /// `H_y`
+    Hy,
+    /// `H_z`
+    Hz,
+}
+
+impl HComponent {
+    /// Dims of this component's array under `spec`.
+    fn dims(self, spec: &FdtdSpec) -> (usize, usize, usize) {
+        match self {
+            Self::Hx => spec.hx_dims(),
+            Self::Hy => spec.hy_dims(),
+            Self::Hz => spec.hz_dims(),
+        }
+    }
+
+    /// Flat index of `cell` within this component's array.
+    pub(crate) fn flat(self, spec: &FdtdSpec, cell: (usize, usize, usize)) -> usize {
+        let dims = self.dims(spec);
+        assert!(
+            cell.0 < dims.0 && cell.1 < dims.1 && cell.2 < dims.2,
+            "cell {cell:?} out of bounds for {self:?} dims {dims:?}"
+        );
+        idx3(dims, cell.0, cell.1, cell.2)
+    }
+
+    /// Offset of this component within the packed field arena, counting
+    /// past the E block (`ex | ey | ez |` **`hx | hy | hz`**) — matches the
+    /// GPU packing order in `gpu.rs` / `off_hx`/`off_hy`/`off_hz` in
+    /// `fdtd.wgsl`.
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+    pub(crate) fn arena_offset(self, spec: &FdtdSpec) -> usize {
+        let e_len = len3(spec.ex_dims()) + len3(spec.ey_dims()) + len3(spec.ez_dims());
+        match self {
+            Self::Hx => e_len,
+            Self::Hy => e_len + len3(spec.hx_dims()),
+            Self::Hz => e_len + len3(spec.hx_dims()) + len3(spec.hy_dims()),
+        }
+    }
+}
+
+/// Per-step H-field sample recorded after each full step (FS.4.2a) —
+/// parallel to [`Probe`] on [`Drive::h_probes`]. Recorded alongside the E
+/// probes (after the port/aperture-port correction phase, same step
+/// iteration): the H state read there is `H` at `t = (n + ½)·Δt` — the
+/// half-step **before** the co-recorded `E` sample at `t = (n + 1)·Δt`,
+/// because `update_h` runs once at the top of the leapfrog iteration and
+/// nothing after it touches H. Callers doing Ampère-loop current extraction
+/// (e.g. the stripline Z₀ gate) must account for this half-step offset from
+/// the co-recorded V(E) sample explicitly — it is not corrected here.
+#[derive(Debug, Clone, Copy)]
+pub struct HProbe {
+    /// Sampled component.
+    pub component: HComponent,
+    /// Sampled cell.
+    pub cell: (usize, usize, usize),
+}
+
 /// Drive configuration: what excites the grid and what gets recorded.
 #[derive(Debug, Clone, Default)]
 pub struct Drive {
@@ -198,6 +265,9 @@ pub struct Drive {
     pub aperture_ports: Vec<AperturePort>,
     /// Probes recorded once per step, in order, after the ports.
     pub probes: Vec<Probe>,
+    /// H-field probes (FS.4.2a) recorded once per step, alongside `probes`
+    /// — see [`HProbe`] for the staggering caveat.
+    pub h_probes: Vec<HProbe>,
 }
 
 impl Drive {
@@ -239,6 +309,9 @@ impl Drive {
         for p in &self.probes {
             let _ = p.component.flat(spec, p.cell);
         }
+        for p in &self.h_probes {
+            let _ = p.component.flat(spec, p.cell);
+        }
     }
 
     /// True when there is nothing to inject, correct, or record.
@@ -248,5 +321,6 @@ impl Drive {
             && self.ports.is_empty()
             && self.aperture_ports.is_empty()
             && self.probes.is_empty()
+            && self.h_probes.is_empty()
     }
 }

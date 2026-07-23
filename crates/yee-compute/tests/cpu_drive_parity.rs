@@ -83,6 +83,7 @@ fn driven_step_is_bit_exact_against_reference() {
             component: EComponent::Ez,
             cell: PROBE_CELL,
         }],
+        h_probes: vec![],
     };
     let mut engine = CpuFdtd::with_drive(
         spec,

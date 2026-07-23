@@ -19,7 +19,7 @@ use yee_core::units::{EPS0, MU0};
 
 use crate::cpml::CpuCpmlState;
 use crate::dispersive::{CpuDispersiveState, DispersiveMap};
-use crate::drive::{Drive, EComponent};
+use crate::drive::{Drive, EComponent, HComponent};
 use crate::fields::Fields;
 use crate::materials::{Boundary, Materials};
 use crate::spec::{FdtdSpec, GradedSpacings, SpacingArrays, idx3, len3};
@@ -58,6 +58,9 @@ pub struct CpuFdtd {
     aperture_state: Vec<f64>,
     /// Recorded probe series, one inner `Vec` per [`Drive::probes`] entry.
     probe_series: Vec<Vec<f64>>,
+    /// Recorded H-probe series (FS.4.2a), one inner `Vec` per
+    /// [`Drive::h_probes`] entry.
+    h_probe_series: Vec<Vec<f64>>,
     /// Per-step `(v_src, v_terminal, i_branch)` per aperture port (empty
     /// inner `Vec` when `AperturePort::record` is false) — FS.2a,
     /// ADR-0207.
@@ -128,6 +131,7 @@ impl CpuFdtd {
         let port_state = vec![0.0; drive.ports.len()];
         let aperture_state = vec![0.0; drive.aperture_ports.len()];
         let probe_series = vec![Vec::new(); drive.probes.len()];
+        let h_probe_series = vec![Vec::new(); drive.h_probes.len()];
         let aperture_records = vec![Vec::new(); drive.aperture_ports.len()];
         let spacings = SpacingArrays::uniform(&spec);
         Self {
@@ -142,6 +146,7 @@ impl CpuFdtd {
             port_state,
             aperture_state,
             probe_series,
+            h_probe_series,
             aperture_records,
             spacings,
             graded: false,
@@ -325,6 +330,22 @@ impl CpuFdtd {
                     series.push(field[flat]);
                 }
             }
+            if !self.drive.h_probes.is_empty() {
+                // Same step iteration as the E-probe recording above, so the
+                // two series share an index — but the H state read here was
+                // written by `update_h` at the TOP of this iteration
+                // (t = (n+½)·Δt), a half-step behind the E sample just taken
+                // above (t = (n+1)·Δt). See `HProbe`'s doc comment.
+                for (probe, series) in self.drive.h_probes.iter().zip(&mut self.h_probe_series) {
+                    let flat = probe.component.flat(&self.spec, probe.cell);
+                    let field = match probe.component {
+                        HComponent::Hx => &self.fields.hx,
+                        HComponent::Hy => &self.fields.hy,
+                        HComponent::Hz => &self.fields.hz,
+                    };
+                    series.push(field[flat]);
+                }
+            }
         }
     }
 
@@ -332,6 +353,14 @@ impl CpuFdtd {
     /// one sample per completed step).
     pub fn probe_series(&self) -> &[Vec<f64>] {
         &self.probe_series
+    }
+
+    /// Recorded H-probe series (FS.4.2a; one inner slice per
+    /// [`Drive::h_probes`] entry, one sample per completed step — see
+    /// `HProbe`'s doc comment for the half-step timing relative to
+    /// [`CpuFdtd::probe_series`]).
+    pub fn h_probe_series(&self) -> &[Vec<f64>] {
+        &self.h_probe_series
     }
 
     /// Per-step `(v_src, v_terminal, i_branch)` records, one inner slice

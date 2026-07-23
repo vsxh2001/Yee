@@ -268,3 +268,4 @@
 - [ADR-0222: FS.5c — studio exposure of yield analysis](decisions/0222-fs5c-studio-yield.md)
 - [ADR-0223: FS.7.0 — GPU performance walking skeleton: reproducible bench + honest bar verdict](decisions/0223-fs70-gpu-bench.md)
 - [ADR-0224: FS.7.1 — GPU kernel optimization: index remap + pass fusion (bar MET)](decisions/0224-fs71-kernel-opt.md)
+- [ADR-0225: FS.4.2a — stripline Z₀: H-field probes + V/I extraction gate](decisions/0225-fs42a-stripline-z0.md)
