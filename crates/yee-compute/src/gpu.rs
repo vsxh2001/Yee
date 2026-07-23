@@ -72,6 +72,11 @@ const STEPS_PER_SUBMIT: usize = 64;
 // (`@workgroup_size(WORKGROUP_X, WORKGROUP_Y, WORKGROUP_Z)` there — keep the
 // two declarations in lockstep).
 //
+// FS.7.1 (ADR-0224) remapped gid<->linearization (gid.x -> k, gid.y -> j,
+// gid.z -> i) so adjacent threads touch adjacent k-fastest memory; the
+// table below is FS.7.0's PRE-remap measurement and is invalidated by that
+// change (see ADR-0224 for the post-remap re-tune and its own table).
+//
 // FS.7.0 task 2 (ADR-0223) measured (4,4,4) against flat-x candidates on an
 // RTX 5060 Ti, 128^3/192^3 Mcells/s (median of 3x200-step reps):
 //   (4,4,4)  [this]: 2403 / 1401  (baseline)
@@ -930,7 +935,10 @@ impl GpuFdtd {
     }
 
     /// Dispatch extents per update pipeline (hx, hy, hz, ex, ey, ez), and
-    /// per clamp pipeline (the E extents, last three).
+    /// per clamp pipeline (the E extents, last three). Each tuple is
+    /// `(dim_i, dim_j, dim_k)` — the shader's own axis order, not the gid
+    /// order (FS.7.1, ADR-0224: `gid.x` covers `k`, `gid.z` covers `i`, see
+    /// the `dispatch_workgroups` calls below).
     fn dispatch_extents(&self) -> [(usize, usize, usize); 6] {
         [
             self.spec.hx_dims(),
@@ -981,9 +989,9 @@ impl GpuFdtd {
                     for (pipeline, extent) in self.update_pipelines[..3].iter().zip(extents) {
                         pass.set_pipeline(pipeline);
                         pass.dispatch_workgroups(
-                            groups_x(extent.0),
+                            groups_x(extent.2),
                             groups_y(extent.1),
-                            groups_z(extent.2),
+                            groups_z(extent.0),
                         );
                     }
                     // Soft sources between the half-steps (reference order).
@@ -996,18 +1004,18 @@ impl GpuFdtd {
                     {
                         pass.set_pipeline(pipeline);
                         pass.dispatch_workgroups(
-                            groups_x(extent.0),
+                            groups_x(extent.2),
                             groups_y(extent.1),
-                            groups_z(extent.2),
+                            groups_z(extent.0),
                         );
                     }
                     if self.has_mask {
                         for (pipeline, extent) in self.clamp_pipelines.iter().zip(&extents[3..6]) {
                             pass.set_pipeline(pipeline);
                             pass.dispatch_workgroups(
-                                groups_x(extent.0),
+                                groups_x(extent.2),
                                 groups_y(extent.1),
-                                groups_z(extent.2),
+                                groups_z(extent.0),
                             );
                         }
                     }

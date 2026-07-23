@@ -199,9 +199,9 @@ fn pml_depth(axis: u32, i: u32, n: u32) -> i32 {
 
 @compute @workgroup_size(4, 4, 4)
 fn update_hx(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    let k = gid.x;
     let j = gid.y;
-    let k = gid.z;
+    let i = gid.z;
     if (i > p.nx || j >= p.ny || k >= p.nz) {
         return;
     }
@@ -231,9 +231,9 @@ fn update_hx(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(4, 4, 4)
 fn update_hy(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    let k = gid.x;
     let j = gid.y;
-    let k = gid.z;
+    let i = gid.z;
     if (i >= p.nx || j > p.ny || k >= p.nz) {
         return;
     }
@@ -263,9 +263,9 @@ fn update_hy(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(4, 4, 4)
 fn update_hz(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    let k = gid.x;
     let j = gid.y;
-    let k = gid.z;
+    let i = gid.z;
     if (i >= p.nx || j >= p.ny || k > p.nz) {
         return;
     }
@@ -297,9 +297,9 @@ fn update_hz(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(4, 4, 4)
 fn update_ex(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    let k = gid.x;
     let j = gid.y;
-    let k = gid.z;
+    let i = gid.z;
     // Interior j ∈ [1, ny), k ∈ [1, nz); outer faces are the PEC box.
     if (i >= p.nx || j == 0u || j >= p.ny || k == 0u || k >= p.nz) {
         return;
@@ -336,9 +336,9 @@ fn update_ex(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(4, 4, 4)
 fn update_ey(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    let k = gid.x;
     let j = gid.y;
-    let k = gid.z;
+    let i = gid.z;
     // Interior i ∈ [1, nx), k ∈ [1, nz).
     if (i == 0u || i >= p.nx || j >= p.ny || k == 0u || k >= p.nz) {
         return;
@@ -375,9 +375,9 @@ fn update_ey(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(4, 4, 4)
 fn update_ez(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    let k = gid.x;
     let j = gid.y;
-    let k = gid.z;
+    let i = gid.z;
     // Interior i ∈ [1, nx), j ∈ [1, ny).
     if (i == 0u || i >= p.nx || j == 0u || j >= p.ny || k >= p.nz) {
         return;
@@ -419,9 +419,9 @@ fn update_ez(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(4, 4, 4)
 fn clamp_ex(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    let k = gid.x;
     let j = gid.y;
-    let k = gid.z;
+    let i = gid.z;
     if (i >= p.nx || j > p.ny || k > p.nz) {
         return;
     }
@@ -433,9 +433,9 @@ fn clamp_ex(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(4, 4, 4)
 fn clamp_ey(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    let k = gid.x;
     let j = gid.y;
-    let k = gid.z;
+    let i = gid.z;
     if (i > p.nx || j >= p.ny || k > p.nz) {
         return;
     }
@@ -447,9 +447,9 @@ fn clamp_ey(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(4, 4, 4)
 fn clamp_ez(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    let k = gid.x;
     let j = gid.y;
-    let k = gid.z;
+    let i = gid.z;
     if (i > p.nx || j > p.ny || k >= p.nz) {
         return;
     }
