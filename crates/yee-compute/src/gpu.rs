@@ -1098,6 +1098,39 @@ impl GpuFdtd {
         self.read_f32_buffer(&self.field_arena)
     }
 
+    /// Block until the device has finished all work submitted so far.
+    ///
+    /// `step_n` only *submits* command buffers — wgpu queues are
+    /// asynchronous, so it returns as soon as the driver has accepted the
+    /// work, not when the GPU has finished executing it. Naively timing a
+    /// bare `step_n` call therefore measures submission overhead, not
+    /// device time (confirmed: it reads a multi-hundred-x "speedup" that
+    /// does not scale with grid size). `sync()` is the benchmark/sequencing
+    /// seam: submit an empty command buffer (so there is always something
+    /// to wait on even with zero prior submissions this call) and poll the
+    /// device to completion, reusing the same wait idiom `read_fields`'s
+    /// readback already blocks on. `read_fields`/`read_probes` do not need
+    /// an extra `sync()` call — their buffer-map already waits for the
+    /// device to be idle.
+    pub fn sync(&self) -> Result<(), ComputeError> {
+        let encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("yee-compute sync"),
+            });
+        self.queue.submit(Some(encoder.finish()));
+        self.wait_idle()
+    }
+
+    /// Poll the device until all submitted work has retired. Shared by
+    /// [`GpuFdtd::sync`] and the buffer-readback path.
+    fn wait_idle(&self) -> Result<(), ComputeError> {
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| ComputeError::Readback(e.to_string()))?;
+        Ok(())
+    }
+
     /// Copy a whole f32 storage buffer back to the host, widened to FP64.
     fn read_f32_buffer(&self, source: &wgpu::Buffer) -> Result<Vec<f64>, ComputeError> {
         let size = source.size();
@@ -1121,9 +1154,7 @@ impl GpuFdtd {
             .map_async(wgpu::MapMode::Read, move |result| {
                 let _ = tx.send(result);
             });
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|e| ComputeError::Readback(e.to_string()))?;
+        self.wait_idle()?;
         rx.recv()
             .map_err(|e| ComputeError::Readback(e.to_string()))?
             .map_err(|e| ComputeError::Readback(e.to_string()))?;
