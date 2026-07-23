@@ -290,9 +290,24 @@ impl GpuFdtd {
         .map_err(|_| ComputeError::NoAdapter)?;
         let adapter_name = adapter.get_info().name.clone();
 
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
-                .map_err(|e| ComputeError::Device(e.to_string()))?;
+        // Lift only the buffer-size caps to what the adapter actually
+        // supports: wgpu's *default* limits cap storage-buffer bindings at
+        // 128 MiB, which rejects grids whose fields arena exceeds that
+        // (≈192³ and up) on hardware that could hold them easily. All other
+        // limits stay at the WebGPU defaults so the browser-compute seam is
+        // unaffected (a browser adapter reports its own, already-clamped
+        // limits).
+        let adapter_limits = adapter.limits();
+        let required_limits = wgpu::Limits {
+            max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
+            max_buffer_size: adapter_limits.max_buffer_size,
+            ..wgpu::Limits::default()
+        };
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_limits,
+            ..Default::default()
+        }))
+        .map_err(|e| ComputeError::Device(e.to_string()))?;
 
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("yee-compute fdtd"),
