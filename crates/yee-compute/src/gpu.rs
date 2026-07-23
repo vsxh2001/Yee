@@ -14,10 +14,12 @@
 //! reference CPML pass uses regardless of σ), and `ch` (`Δt/(μ₀μ_r)`) —
 //! then narrows them once to f32.
 //!
-//! A full step is six fused bulk+CPML dispatches (3 H, then 3 E) plus three
-//! mask clamps when masks are attached, all in one compute pass: WebGPU
-//! orders storage-buffer writes between dispatches, so no explicit barriers
-//! are needed. `step_n` submits in chunks to bound command-buffer size.
+//! A full step is two fused bulk+CPML dispatches (`update_h` then
+//! `update_e`, each computing all three staggered components per cell —
+//! FS.7.1, ADR-0224) plus three mask clamps when masks are attached, all in
+//! one compute pass: WebGPU orders storage-buffer writes between dispatches,
+//! so no explicit barriers are needed. `step_n` submits in chunks to bound
+//! command-buffer size.
 //! The FP64 host state is narrowed on upload and widened on readback; gates
 //! `compute-002`/`compute-005` bound the accumulated FP32 error against the
 //! CPU backend. The PEC box is enforced host-side by zeroing the outer
@@ -68,28 +70,33 @@ use crate::spec::{FdtdSpec, GradedSpacings, SpacingArrays, len3};
 // the full sweep and analysis.
 const STEPS_PER_SUBMIT: usize = 64;
 
-// Workgroup shape for the 9 volume kernels in `shaders/fdtd.wgsl`
-// (`@workgroup_size(WORKGROUP_X, WORKGROUP_Y, WORKGROUP_Z)` there — keep the
-// two declarations in lockstep).
+// Workgroup shape for the volume kernels in `shaders/fdtd.wgsl` (post-FS.7.1
+// fusion: `update_h`, `update_e`, `clamp_ex/ey/ez` — 5, was 9 pre-fusion;
+// `@workgroup_size(WORKGROUP_X, WORKGROUP_Y, WORKGROUP_Z)` there — keep the
+// declarations in lockstep).
 //
-// FS.7.0 task 2 (ADR-0223) measured (4,4,4) against flat-x candidates on an
-// RTX 5060 Ti, 128^3/192^3 Mcells/s (median of 3x200-step reps):
-//   (4,4,4)  [this]: 2403 / 1401  (baseline)
-//   (64,1,1)       :  469 /  321  (-80%  / -77%)
-//   (32,2,2)       :  523 /  360  (-78%  / -74%)
-//   (8,8,4)        : 2074 / 1413  (-14%  /  +1%, noise)
-// The shader's `iex`/`iey`/... linearization is k-fastest (C order over
-// nz), but `gid.x` maps to `i` (the slowest-varying index) — flattening the
-// workgroup along gid.x therefore widens the per-thread memory stride
-// instead of improving coalescing, and both flat-x shapes measured 4-5x
-// worse. (8,8,4) roughly ties at 192^3 but loses at 128^3. (4,4,4) wins
-// outright or ties everywhere measured; kept as the hardcoded shape (no
-// runtime knob per YAGNI — remapping gid<->linearization to actually
-// exploit the k-fastest layout is a distinct, larger change than a shape
-// swap and is out of scope here).
-const WORKGROUP_X: u32 = 4;
-const WORKGROUP_Y: u32 = 4;
-const WORKGROUP_Z: u32 = 4;
+// FS.7.0 (ADR-0223) measured (4,4,4) as the best shape UNDER THE OLD
+// gid.x->i mapping (flat-x lost 4-5x there because gid.x drove the
+// slowest-varying array axis). FS.7.1 (ADR-0224) remapped gid<->linearization
+// (gid.x -> k, gid.y -> j, gid.z -> i, adjacent threads -> adjacent
+// k-fastest memory) and re-measured from scratch, RTX 5060 Ti, 128^3/192^3
+// Mcells/s (median of 3x200-step reps, post-remap):
+//   (4,4,4)   [control]: 3166 / 2998  (was the ADR-0223 winner)
+//   (64,1,1)            : 3461 / 3143  (+9.3% / +4.8%)
+//   (32,2,2)  [this]    : 3449 / 3144  (+8.9% / +4.9%)
+//   (16,4,4)            : 3470 / 3152  (+9.6% / +5.1%)
+// All three flat-ish post-remap shapes are within noise of each other at
+// 128^3/192^3/224^3 (now that gid.x tracks the fast axis, the previous
+// 4-5x flat-x penalty is gone), but they diverge sharply at the small
+// grids where the per-dispatch overhead matters more: (32,2,2) clearly
+// wins 64^3/96^3 (7569/9379 Mcells/s, reproduced) vs (64,1,1) (6943/8642)
+// and (16,4,4) (6723/8098). (32,2,2) is the only shape that is at or near
+// the top across all 6 grid sizes, so it is kept as the hardcoded shape
+// (no runtime knob per YAGNI). See ADR-0224 for the full 6-grid before/
+// after table.
+const WORKGROUP_X: u32 = 32;
+const WORKGROUP_Y: u32 = 2;
+const WORKGROUP_Z: u32 = 2;
 
 /// Uniform block mirrored by `struct Params` in `shaders/fdtd.wgsl`.
 #[repr(C)]
@@ -116,8 +123,9 @@ pub struct GpuFdtd {
     device: wgpu::Device,
     queue: wgpu::Queue,
     bind_group: wgpu::BindGroup,
-    /// Update pipelines in dispatch order: hx, hy, hz, ex, ey, ez.
-    update_pipelines: [wgpu::ComputePipeline; 6],
+    /// Update pipelines in dispatch order: H (fused hx/hy/hz), E (fused
+    /// ex/ey/ez) — FS.7.1, ADR-0224.
+    update_pipelines: [wgpu::ComputePipeline; 2],
     /// Mask clamp pipelines (ex, ey, ez); dispatched only when `has_mask`.
     clamp_pipelines: [wgpu::ComputePipeline; 3],
     /// Drive pipelines: inject_soft, apply_ports, record_probes,
@@ -414,14 +422,7 @@ impl GpuFdtd {
                 cache: None,
             })
         };
-        let update_pipelines = [
-            make_pipeline("update_hx"),
-            make_pipeline("update_hy"),
-            make_pipeline("update_hz"),
-            make_pipeline("update_ex"),
-            make_pipeline("update_ey"),
-            make_pipeline("update_ez"),
-        ];
+        let update_pipelines = [make_pipeline("update_h"), make_pipeline("update_e")];
         let clamp_pipelines = [
             make_pipeline("clamp_ex"),
             make_pipeline("clamp_ey"),
@@ -929,13 +930,22 @@ impl GpuFdtd {
         Ok(())
     }
 
-    /// Dispatch extents per update pipeline (hx, hy, hz, ex, ey, ez), and
-    /// per clamp pipeline (the E extents, last three).
-    fn dispatch_extents(&self) -> [(usize, usize, usize); 6] {
+    /// Dispatch extent shared by both fused update pipelines (`update_h`,
+    /// `update_e`): the cell-centered union `[nx+1, ny+1, nz+1]` of the
+    /// three staggered per-component shapes each fuses over (FS.7.1,
+    /// ADR-0224). The tuple is `(dim_i, dim_j, dim_k)` — the shader's own
+    /// axis order, not the gid order (`gid.x` covers `k`, `gid.z` covers
+    /// `i`, see the `dispatch_workgroups` calls below).
+    fn fused_extent(&self) -> (usize, usize, usize) {
+        self.spec.cell_dims()
+    }
+
+    /// Dispatch extents per clamp pipeline (ex, ey, ez) — clamps stay
+    /// per-component (each touches only its own field + mask arena, no
+    /// fusion benefit). Same `(dim_i, dim_j, dim_k)` axis-order note as
+    /// [`GpuFdtd::fused_extent`].
+    fn clamp_extents(&self) -> [(usize, usize, usize); 3] {
         [
-            self.spec.hx_dims(),
-            self.spec.hy_dims(),
-            self.spec.hz_dims(),
             self.spec.ex_dims(),
             self.spec.ey_dims(),
             self.spec.ez_dims(),
@@ -956,7 +966,8 @@ impl GpuFdtd {
                 self.max_steps
             );
         }
-        let extents = self.dispatch_extents();
+        let fused_extent = self.fused_extent();
+        let clamp_extents = self.clamp_extents();
         let groups_x = |len: usize| (len as u32).div_ceil(WORKGROUP_X);
         let groups_y = |len: usize| (len as u32).div_ceil(WORKGROUP_Y);
         let groups_z = |len: usize| (len as u32).div_ceil(WORKGROUP_Z);
@@ -977,37 +988,33 @@ impl GpuFdtd {
                 });
                 pass.set_bind_group(0, &self.bind_group, &[]);
                 for _ in 0..chunk {
-                    // H half-step (3 components).
-                    for (pipeline, extent) in self.update_pipelines[..3].iter().zip(extents) {
-                        pass.set_pipeline(pipeline);
-                        pass.dispatch_workgroups(
-                            groups_x(extent.0),
-                            groups_y(extent.1),
-                            groups_z(extent.2),
-                        );
-                    }
+                    // H half-step (hx/hy/hz fused into one dispatch, FS.7.1).
+                    pass.set_pipeline(&self.update_pipelines[0]);
+                    pass.dispatch_workgroups(
+                        groups_x(fused_extent.2),
+                        groups_y(fused_extent.1),
+                        groups_z(fused_extent.0),
+                    );
                     // Soft sources between the half-steps (reference order).
                     if n_soft > 0 {
                         pass.set_pipeline(&self.drive_pipelines[0]);
                         pass.dispatch_workgroups(lane_groups(n_soft), 1, 1);
                     }
-                    // E half-step (3 components), CPML fused.
-                    for (pipeline, extent) in self.update_pipelines[3..].iter().zip(&extents[3..6])
-                    {
-                        pass.set_pipeline(pipeline);
-                        pass.dispatch_workgroups(
-                            groups_x(extent.0),
-                            groups_y(extent.1),
-                            groups_z(extent.2),
-                        );
-                    }
+                    // E half-step (ex/ey/ez fused into one dispatch, CPML
+                    // fused in too, FS.7.1).
+                    pass.set_pipeline(&self.update_pipelines[1]);
+                    pass.dispatch_workgroups(
+                        groups_x(fused_extent.2),
+                        groups_y(fused_extent.1),
+                        groups_z(fused_extent.0),
+                    );
                     if self.has_mask {
-                        for (pipeline, extent) in self.clamp_pipelines.iter().zip(&extents[3..6]) {
+                        for (pipeline, extent) in self.clamp_pipelines.iter().zip(&clamp_extents) {
                             pass.set_pipeline(pipeline);
                             pass.dispatch_workgroups(
-                                groups_x(extent.0),
+                                groups_x(extent.2),
                                 groups_y(extent.1),
-                                groups_z(extent.2),
+                                groups_z(extent.0),
                             );
                         }
                     }

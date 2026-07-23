@@ -316,6 +316,7 @@ fn ade_step(
 /// *before* scaling preserves the cancellation in FP32 (a flattened
 /// `d_new·aux1' + d_old·aux1` loses ~10 bits and fails the parity gate).
 #[derive(Debug, Clone, Copy, Default)]
+#[cfg_attr(not(feature = "gpu"), allow(dead_code))]
 pub(crate) struct AdeCoeffs {
     pub ce: f64,
     pub c0: f64,
@@ -325,6 +326,7 @@ pub(crate) struct AdeCoeffs {
     pub s: f64,
 }
 
+#[cfg_attr(not(feature = "gpu"), allow(dead_code))]
 pub(crate) fn ade_coeffs(mat: DispersiveMaterial, dt: f64) -> AdeCoeffs {
     match mat {
         DispersiveMaterial::Vacuum => AdeCoeffs {
