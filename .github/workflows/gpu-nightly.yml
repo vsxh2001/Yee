@@ -63,3 +63,22 @@ jobs:
           YEE_BPF_BO_DX_MM: "0.1"
           YEE_BPF_BO_BACKEND: gpu
         run: cargo test -p yee-filter --release --test engine_bpf_bo -- --ignored --nocapture
+
+      # FS.7 (ADR-0223/0224): reproducible CPU-vs-GPU throughput bench, run
+      # twice — once for the machine-readable JSON artifact, once for the
+      # human-readable table — so nightly always has a fresh, honest
+      # hardware-specific number to publish alongside the README claim.
+      - name: yee-compute bench (FS.7, JSON)
+        run: cargo run -p yee-compute --release --example bench -- --json > bench-results.json
+
+      - name: yee-compute bench (FS.7, table)
+        run: cargo run -p yee-compute --release --example bench | tee bench-results.txt
+
+      - name: Upload bench results
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-bench-results
+          path: |
+            bench-results.json
+            bench-results.txt
+          retention-days: 90

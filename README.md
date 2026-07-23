@@ -91,6 +91,29 @@ Yee is a Cargo workspace built around three layers: a **kernel layer** (CUDA C k
 
 The **rightmost columns tell the story**: there is no open-source GPU-accelerated planar MoM. That is exactly where Yee enters.
 
+## Performance
+
+FDTD throughput, vacuum cubic grids, FP32, sync-correct (device-wait timed, not submit-only), 3-repetition medians:
+
+| Grid | Mcells·step/s |
+|---|---|
+| 64³  | 11537 |
+| 96³  | 12665 |
+| 128³ | 4442 |
+| 160³ | 4519 |
+| 192³ | 4685 |
+| 224³ | 4685 |
+
+Measured on a single RTX 5060 Ti 16 GB. These are hardware-specific numbers from one consumer card, not a cross-vendor or "fastest" claim. They clear the gprMax CUDA-FDTD reference bar (3405 Mcells/s) at every grid size measured, peaking at 3.7× the bar. See [ADR-0223](docs/src/decisions/0223-fs70-gpu-bench.md) (bench methodology, first honest bar miss) and [ADR-0224](docs/src/decisions/0224-fs71-kernel-opt.md) (kernel-fusion optimization that cleared it).
+
+Reproduce locally:
+
+```bash
+cargo run -p yee-compute --release --example bench
+```
+
+The GPU nightly workflow (`.github/workflows/gpu-nightly.yml`) re-runs this bench and publishes fresh JSON + table artifacts on every scheduled run, but only when a GPU runner is registered (repo variable `YEE_GPU_RUNNER_ENABLED`) — without one, the job no-ops and no numbers are published.
+
 ## Links
 
 - [ROADMAP.md](ROADMAP.md) — multi-year plan, deliverables, validation milestones
