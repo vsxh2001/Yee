@@ -18,6 +18,8 @@
 //! cargo test -p yee-compute --release --test cavity_resonance -- --ignored --nocapture
 //! ```
 
+#![cfg(feature = "gpu")]
+
 use std::f64::consts::PI;
 
 use yee_compute::{

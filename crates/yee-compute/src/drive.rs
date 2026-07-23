@@ -44,6 +44,7 @@ impl EComponent {
 
     /// Offset of this component within the packed E/H field arena
     /// (ex | ey | ez | …), matching the GPU packing.
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
     pub(crate) fn arena_offset(self, spec: &FdtdSpec) -> usize {
         match self {
             Self::Ex => 0,
@@ -241,6 +242,7 @@ impl Drive {
     }
 
     /// True when there is nothing to inject, correct, or record.
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
     pub(crate) fn is_empty(&self) -> bool {
         self.soft_sources.is_empty()
             && self.ports.is_empty()
