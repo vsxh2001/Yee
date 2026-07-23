@@ -39,9 +39,57 @@ use crate::spec::{FdtdSpec, GradedSpacings, SpacingArrays, len3};
 
 /// Steps encoded per queue submission. Keeps a single command buffer to a
 /// few hundred dispatches so watchdog-limited platforms don't kill long runs.
+//
+// FS.7.0 task 3 (ADR-0223) root-caused the 128^3->224^3 throughput decline
+// (2408 -> 1841 -> 1401 -> 934 Mcells/s, i.e. -23.5%/-23.9%/-33.3% per +32
+// grid step; RTX 5060 Ti) against this const and found it is NOT the cause:
+//   (a) chunking: swept STEPS_PER_SUBMIT in {8,16,32,64,128,256} at every
+//       grid size in the bench sweep. 128^3/192^3 Mcells/s stayed flat to
+//       within run-to-run noise (~0.3%) across the whole 32x range (e.g.
+//       192^3: 1400.9/1401.2/1401.1/1401.0/1400.5/1399.9) -- submission /
+//       encoder overhead is not the bottleneck (a single compute pass
+//       already covers a whole chunk, so this also rules out per-pass
+//       bind-group overhead, hypothesis (b)).
+//   (d) power/thermal: `nvidia-smi dmon` during a run showed clocks
+//       reaching ~2600-2700 MHz (near the ~3090 MHz boost cap), temps
+//       34-45 C, power draw peaking ~107 W -- no throttling.
+//   (c) the >128 MiB single-binding path (field arena crosses 128 MiB
+//       between 160^3=93.8 MiB and 192^3=162.0 MiB; coeff arena crosses it
+//       between 192^3=109.7 MiB and 224^3=173.8 MiB, see `78cd12f`): the
+//       decline is smooth across both crossings, not a step -- the 128->160
+//       Mcells/s ratio (-23.5%, no crossing) and the 160->192 ratio (-23.9%,
+//       crosses the field-arena threshold) are statistically the same drop.
+//       No extra driver-side penalty was measured at the crossing.
+// Net: the decline is consistent with the per-step working set (fields +
+// coeffs, ~10 MiB at 64^3 growing to ~431 MiB at 224^3) outstripping
+// on-chip cache reuse as the grid grows -- a memory-hierarchy/roofline
+// effect, not a bug in this crate, and not fixable by a chunk-size change.
+// STEPS_PER_SUBMIT stays 64 (no measured value beats it); see ADR-0223 for
+// the full sweep and analysis.
 const STEPS_PER_SUBMIT: usize = 64;
 
-const WORKGROUP: u32 = 4;
+// Workgroup shape for the 9 volume kernels in `shaders/fdtd.wgsl`
+// (`@workgroup_size(WORKGROUP_X, WORKGROUP_Y, WORKGROUP_Z)` there — keep the
+// two declarations in lockstep).
+//
+// FS.7.0 task 2 (ADR-0223) measured (4,4,4) against flat-x candidates on an
+// RTX 5060 Ti, 128^3/192^3 Mcells/s (median of 3x200-step reps):
+//   (4,4,4)  [this]: 2403 / 1401  (baseline)
+//   (64,1,1)       :  469 /  321  (-80%  / -77%)
+//   (32,2,2)       :  523 /  360  (-78%  / -74%)
+//   (8,8,4)        : 2074 / 1413  (-14%  /  +1%, noise)
+// The shader's `iex`/`iey`/... linearization is k-fastest (C order over
+// nz), but `gid.x` maps to `i` (the slowest-varying index) — flattening the
+// workgroup along gid.x therefore widens the per-thread memory stride
+// instead of improving coalescing, and both flat-x shapes measured 4-5x
+// worse. (8,8,4) roughly ties at 192^3 but loses at 128^3. (4,4,4) wins
+// outright or ties everywhere measured; kept as the hardcoded shape (no
+// runtime knob per YAGNI — remapping gid<->linearization to actually
+// exploit the k-fastest layout is a distinct, larger change than a shape
+// swap and is out of scope here).
+const WORKGROUP_X: u32 = 4;
+const WORKGROUP_Y: u32 = 4;
+const WORKGROUP_Z: u32 = 4;
 
 /// Uniform block mirrored by `struct Params` in `shaders/fdtd.wgsl`.
 #[repr(C)]
@@ -909,7 +957,9 @@ impl GpuFdtd {
             );
         }
         let extents = self.dispatch_extents();
-        let groups = |len: usize| (len as u32).div_ceil(WORKGROUP);
+        let groups_x = |len: usize| (len as u32).div_ceil(WORKGROUP_X);
+        let groups_y = |len: usize| (len as u32).div_ceil(WORKGROUP_Y);
+        let groups_z = |len: usize| (len as u32).div_ceil(WORKGROUP_Z);
         let lane_groups = |count: usize| (count as u32).div_ceil(64).max(1);
         let mut remaining = n;
         while remaining > 0 {
@@ -931,9 +981,9 @@ impl GpuFdtd {
                     for (pipeline, extent) in self.update_pipelines[..3].iter().zip(extents) {
                         pass.set_pipeline(pipeline);
                         pass.dispatch_workgroups(
-                            groups(extent.0),
-                            groups(extent.1),
-                            groups(extent.2),
+                            groups_x(extent.0),
+                            groups_y(extent.1),
+                            groups_z(extent.2),
                         );
                     }
                     // Soft sources between the half-steps (reference order).
@@ -946,18 +996,18 @@ impl GpuFdtd {
                     {
                         pass.set_pipeline(pipeline);
                         pass.dispatch_workgroups(
-                            groups(extent.0),
-                            groups(extent.1),
-                            groups(extent.2),
+                            groups_x(extent.0),
+                            groups_y(extent.1),
+                            groups_z(extent.2),
                         );
                     }
                     if self.has_mask {
                         for (pipeline, extent) in self.clamp_pipelines.iter().zip(&extents[3..6]) {
                             pass.set_pipeline(pipeline);
                             pass.dispatch_workgroups(
-                                groups(extent.0),
-                                groups(extent.1),
-                                groups(extent.2),
+                                groups_x(extent.0),
+                                groups_y(extent.1),
+                                groups_z(extent.2),
                             );
                         }
                     }
@@ -1098,6 +1148,39 @@ impl GpuFdtd {
         self.read_f32_buffer(&self.field_arena)
     }
 
+    /// Block until the device has finished all work submitted so far.
+    ///
+    /// `step_n` only *submits* command buffers — wgpu queues are
+    /// asynchronous, so it returns as soon as the driver has accepted the
+    /// work, not when the GPU has finished executing it. Naively timing a
+    /// bare `step_n` call therefore measures submission overhead, not
+    /// device time (confirmed: it reads a multi-hundred-x "speedup" that
+    /// does not scale with grid size). `sync()` is the benchmark/sequencing
+    /// seam: submit an empty command buffer (so there is always something
+    /// to wait on even with zero prior submissions this call) and poll the
+    /// device to completion, reusing the same wait idiom `read_fields`'s
+    /// readback already blocks on. `read_fields`/`read_probes` do not need
+    /// an extra `sync()` call — their buffer-map already waits for the
+    /// device to be idle.
+    pub fn sync(&self) -> Result<(), ComputeError> {
+        let encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("yee-compute sync"),
+            });
+        self.queue.submit(Some(encoder.finish()));
+        self.wait_idle()
+    }
+
+    /// Poll the device until all submitted work has retired. Shared by
+    /// [`GpuFdtd::sync`] and the buffer-readback path.
+    fn wait_idle(&self) -> Result<(), ComputeError> {
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| ComputeError::Readback(e.to_string()))?;
+        Ok(())
+    }
+
     /// Copy a whole f32 storage buffer back to the host, widened to FP64.
     fn read_f32_buffer(&self, source: &wgpu::Buffer) -> Result<Vec<f64>, ComputeError> {
         let size = source.size();
@@ -1121,9 +1204,7 @@ impl GpuFdtd {
             .map_async(wgpu::MapMode::Read, move |result| {
                 let _ = tx.send(result);
             });
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|e| ComputeError::Readback(e.to_string()))?;
+        self.wait_idle()?;
         rx.recv()
             .map_err(|e| ComputeError::Readback(e.to_string()))?
             .map_err(|e| ComputeError::Readback(e.to_string()))?;
