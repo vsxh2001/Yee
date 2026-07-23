@@ -611,6 +611,43 @@ fn apply_aperture_ports(@builtin(global_invocation_id) gid: vec3<u32>) {
     drv_data[dd_ap_vprev(q)] = v_post * vcoef;
 }
 
+// ========================= H probes (FS.4.2a) =========================
+// Appended after the aperture-port region in both buffers, so every
+// accessor above (including the aperture ones) keeps its offset — same
+// append-only convention as the R.3 block itself.
+// drv_idx: [n_hp, h-probe field-arena offsets ×n_hp] (offsets already
+// carry the full E-block prefix via `HComponent::arena_offset` host-side,
+// exactly like `probe_field_off` for the E probes).
+// drv_data: [h-probe output region (max_steps × n_hp)] — same "one sample
+// per probe per step, written to the step-indexed slot" scheme as
+// `record_probes`.
+
+fn ap_total_cells() -> u32 {
+    var total = 0u;
+    for (var q = 0u; q < d_nap(); q++) {
+        total += ap_ncells(q);
+    }
+    return total;
+}
+fn hp_idx_base() -> u32 { return ap_base() + 1u + 2u * d_nap() + ap_total_cells(); }
+fn d_nhp() -> u32 { return drv_idx[hp_idx_base()]; }
+fn hprobe_field_off(q: u32) -> u32 { return drv_idx[hp_idx_base() + 1u + q]; }
+
+fn dd_hp_base() -> u32 {
+    return dd_ap_base() + 4u * d_nap() + d_maxsteps() * d_nap();
+}
+fn dd_hprobe(step: u32, q: u32) -> u32 {
+    return dd_hp_base() + step * d_nhp() + q;
+}
+
+@compute @workgroup_size(64)
+fn record_h_probes(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let q = gid.x;
+    if (q >= d_nhp()) {
+        return;
+    }
+    drv_data[dd_hprobe(dd_step(), q)] = fields[hprobe_field_off(q)];
+}
 
 // ======================= NTFF DFT accumulation (E.5b) =======================
 // Full-field running DFT at f_probe: after each completed step (fields at

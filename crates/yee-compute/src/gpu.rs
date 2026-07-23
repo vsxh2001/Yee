@@ -129,8 +129,8 @@ pub struct GpuFdtd {
     /// Mask clamp pipelines (ex, ey, ez); dispatched only when `has_mask`.
     clamp_pipelines: [wgpu::ComputePipeline; 3],
     /// Drive pipelines: inject_soft, apply_ports, record_probes,
-    /// bump_step, apply_aperture_ports.
-    drive_pipelines: [wgpu::ComputePipeline; 5],
+    /// bump_step, apply_aperture_ports, record_h_probes (FS.4.2a).
+    drive_pipelines: [wgpu::ComputePipeline; 6],
     has_mask: bool,
     dft_enabled: bool,
     /// accumulate_dft pipeline (E.5b).
@@ -147,7 +147,8 @@ pub struct GpuFdtd {
     /// Host copy of the drive: `set_spacings` recomputes the spacing-derived
     /// port constants (resistive α/γ, aperture `vcoef`) from it.
     drive: Drive,
-    drive_counts: (usize, usize, usize, usize), // (n_soft, n_ports, n_probes, n_aperture)
+    // (n_soft, n_ports, n_probes, n_aperture, n_hprobes)
+    drive_counts: (usize, usize, usize, usize, usize),
     max_steps: usize,
     steps_taken: usize,
     adapter_name: String,
@@ -434,6 +435,7 @@ impl GpuFdtd {
             make_pipeline("record_probes"),
             make_pipeline("bump_step"),
             make_pipeline("apply_aperture_ports"),
+            make_pipeline("record_h_probes"),
         ];
         let dft_pipeline = make_pipeline("accumulate_dft");
 
@@ -586,11 +588,12 @@ impl GpuFdtd {
 
         // --- drive buffers: index table + state/amplitude/probe data.
         // Layout mirrored by the drv_* helpers in fdtd.wgsl. ---
-        let (n_soft, n_ports, n_probes, n_aperture) = (
+        let (n_soft, n_ports, n_probes, n_aperture, n_hprobes) = (
             drive.soft_sources.len(),
             drive.ports.len(),
             drive.probes.len(),
             drive.aperture_ports.len(),
+            drive.h_probes.len(),
         );
         let mut drv_idx: Vec<u32> = vec![
             n_soft as u32,
@@ -632,6 +635,19 @@ impl GpuFdtd {
                 );
             }
         }
+        // H-probe field-arena offsets (FS.4.2a), appended after the
+        // aperture-port block so every accessor above keeps its offset (same
+        // append-only convention as the aperture block itself): [n_hp,
+        // h-probe field-arena offsets ×n_hp]. `HComponent::arena_offset`
+        // already includes the full E-block prefix, so this indexes the same
+        // packed `fields` arena the E probes do.
+        drv_idx.push(n_hprobes as u32);
+        for probe in &drive.h_probes {
+            drv_idx.push(
+                (probe.component.arena_offset(&spec) + probe.component.flat(&spec, probe.cell))
+                    as u32,
+            );
+        }
         let drive_index = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("yee-compute drive index"),
             size: std::mem::size_of_val(drv_idx.as_slice()) as u64,
@@ -644,11 +660,12 @@ impl GpuFdtd {
         //            amps (max_steps × n_soft), vsrc (max_steps × n_ports),
         //            probes (max_steps × n_probes),
         //            then the R.3 aperture block: v_prev ×n_ap, vcoef ×n_ap,
-        //            g ×n_ap, back ×n_ap, ap_vsrc (max_steps × n_ap)]
-        //            — all f64-precomputed.
+        //            g ×n_ap, back ×n_ap, ap_vsrc (max_steps × n_ap),
+        //            then the FS.4.2a H-probe block: h-probes
+        //            (max_steps × n_hp)] — all f64-precomputed.
         let mut drv_data: Vec<f32> = Vec::with_capacity(
             1 + 3 * n_ports
-                + max_steps * (n_soft + n_ports + n_probes + n_aperture)
+                + max_steps * (n_soft + n_ports + n_probes + n_aperture + n_hprobes)
                 + 4 * n_aperture,
         );
         drv_data.push(0.0); // step counter
@@ -698,6 +715,10 @@ impl GpuFdtd {
                 drv_data.push(port.waveform.value(n, spec.dt) as f32);
             }
         }
+        // H-probe output region (FS.4.2a): one sample per H-probe per step,
+        // written by `record_h_probes` (same "step-indexed slot" layout as
+        // the E-probe region above).
+        drv_data.extend(std::iter::repeat_n(0.0, max_steps * n_hprobes));
         let drive_data = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("yee-compute drive data"),
             size: std::mem::size_of_val(drv_data.as_slice()) as u64,
@@ -789,7 +810,7 @@ impl GpuFdtd {
             cpml_layers,
             has_dispersion: dispersive.is_some(),
             drive,
-            drive_counts: (n_soft, n_ports, n_probes, n_aperture),
+            drive_counts: (n_soft, n_ports, n_probes, n_aperture, n_hprobes),
             max_steps,
             steps_taken: 0,
             adapter_name,
@@ -918,7 +939,7 @@ impl GpuFdtd {
         // Aperture `vcoef` region: dd_ap_base + n_aperture (see the drv_data
         // layout comment in `build` and the dd_ap_* helpers in fdtd.wgsl).
         if !vcoefs.is_empty() {
-            let (n_soft, n_ports, n_probes, n_aperture) = self.drive_counts;
+            let (n_soft, n_ports, n_probes, n_aperture, _n_hprobes) = self.drive_counts;
             let base =
                 1 + 3 * n_ports + self.max_steps * (n_soft + n_ports + n_probes) + n_aperture;
             self.queue.write_buffer(
@@ -956,8 +977,9 @@ impl GpuFdtd {
     /// clamps when masks are attached), submitting in [`STEPS_PER_SUBMIT`]
     /// chunks.
     pub fn step_n(&mut self, n: usize) -> Result<(), ComputeError> {
-        let (n_soft, n_ports, n_probes, n_aperture) = self.drive_counts;
-        let has_drive = n_soft + n_ports + n_probes + n_aperture > 0 || self.dft_enabled;
+        let (n_soft, n_ports, n_probes, n_aperture, n_hprobes) = self.drive_counts;
+        let has_drive =
+            n_soft + n_ports + n_probes + n_aperture + n_hprobes > 0 || self.dft_enabled;
         if has_drive {
             assert!(
                 self.steps_taken + n <= self.max_steps,
@@ -1033,6 +1055,12 @@ impl GpuFdtd {
                         pass.set_pipeline(&self.drive_pipelines[2]);
                         pass.dispatch_workgroups(lane_groups(n_probes), 1, 1);
                     }
+                    // H probes (FS.4.2a), recorded alongside the E probes —
+                    // same reference order, same step-indexed slot scheme.
+                    if n_hprobes > 0 {
+                        pass.set_pipeline(&self.drive_pipelines[5]);
+                        pass.dispatch_workgroups(lane_groups(n_hprobes), 1, 1);
+                    }
                     if self.dft_enabled {
                         let total: usize = [
                             len3(self.spec.ex_dims()),
@@ -1062,7 +1090,7 @@ impl GpuFdtd {
     /// Read back the recorded probe series (one `Vec` per [`Drive::probes`]
     /// entry, `steps_taken` samples each), widened to FP64.
     pub fn read_probes(&mut self) -> Result<Vec<Vec<f64>>, ComputeError> {
-        let (n_soft, n_ports, n_probes, _n_aperture) = self.drive_counts;
+        let (n_soft, n_ports, n_probes, _n_aperture, _n_hprobes) = self.drive_counts;
         if n_probes == 0 {
             return Ok(Vec::new());
         }
@@ -1072,6 +1100,31 @@ impl GpuFdtd {
         for step in 0..self.steps_taken {
             for (q, out) in series.iter_mut().enumerate() {
                 out.push(widened[probe_base + step * n_probes + q]);
+            }
+        }
+        Ok(series)
+    }
+
+    /// Read back the recorded H-probe series (FS.4.2a; one `Vec` per
+    /// [`Drive::h_probes`] entry, `steps_taken` samples each), widened to
+    /// FP64. Mirrors [`GpuFdtd::read_probes`], offset past the
+    /// aperture-port block (`dd_ap_base` + 4·n_ap + max_steps·n_ap in
+    /// `fdtd.wgsl`'s `dd_hp_base`).
+    pub fn read_h_probes(&mut self) -> Result<Vec<Vec<f64>>, ComputeError> {
+        let (n_soft, n_ports, n_probes, n_aperture, n_hprobes) = self.drive_counts;
+        if n_hprobes == 0 {
+            return Ok(Vec::new());
+        }
+        let widened = self.read_f32_buffer(&self.drive_data)?;
+        let hp_base = 1
+            + 3 * n_ports
+            + self.max_steps * (n_soft + n_ports + n_probes)
+            + 4 * n_aperture
+            + self.max_steps * n_aperture;
+        let mut series = vec![Vec::with_capacity(self.steps_taken); n_hprobes];
+        for step in 0..self.steps_taken {
+            for (q, out) in series.iter_mut().enumerate() {
+                out.push(widened[hp_base + step * n_hprobes + q]);
             }
         }
         Ok(series)

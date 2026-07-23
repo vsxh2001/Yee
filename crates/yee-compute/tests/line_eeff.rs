@@ -153,6 +153,7 @@ fn line_eeff_on_engine_matches_hammerstad_jensen() {
                 cell: (i_b, j_strip, k_probe),
             },
         ],
+        h_probes: vec![],
     };
 
     let mut engine = CpuFdtd::with_drive(
