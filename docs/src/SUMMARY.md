@@ -266,3 +266,4 @@
 - [ADR-0220: FS.3.2b — Gerber import: circular arcs + aperture flashes](decisions/0220-fs32b-gerber-arcs-flashes.md)
 - [ADR-0221: FS.4.1 — vias through multilayer stackups (through + blind)](decisions/0221-fs41-stackup-vias.md)
 - [ADR-0222: FS.5c — studio exposure of yield analysis](decisions/0222-fs5c-studio-yield.md)
+- [ADR-0223: FS.7.0 — GPU performance walking skeleton: reproducible bench + honest bar verdict](decisions/0223-fs70-gpu-bench.md)
