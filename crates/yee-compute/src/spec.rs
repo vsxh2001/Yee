@@ -93,6 +93,14 @@ impl FdtdSpec {
     pub fn hz_dims(&self) -> (usize, usize, usize) {
         (self.nx, self.ny, self.nz + 1)
     }
+
+    /// Cell-centered shape `[nx+1, ny+1, nz+1]` — the union of `ex_dims`/
+    /// `ey_dims`/`ez_dims` (and of `hx_dims`/`hy_dims`/`hz_dims`), used as
+    /// the single dispatch extent for the fused `update_h`/`update_e`
+    /// kernels (FS.7.1, ADR-0224).
+    pub fn cell_dims(&self) -> (usize, usize, usize) {
+        (self.nx + 1, self.ny + 1, self.nz + 1)
+    }
 }
 
 /// Per-axis nonuniform **primal cell widths** (FS.0b.0, ADR-0208).

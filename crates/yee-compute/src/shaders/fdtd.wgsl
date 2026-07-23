@@ -1,10 +1,13 @@
 // FP32 Yee FDTD update kernels (E.1: per-cell materials + Roden-Gedney CPML
 // + interior PEC masks), fused bulk+CPML, arena-buffer layout.
 //
-// Nine entry points: six field updates (one per staggered component, each
-// dispatched over its own extent with in-shader bounds checks) and three
-// PEC-mask clamps for the E components. Linearization matches the host side
-// (ndarray default C order): idx = (i * dim_j + j) * dim_k + k.
+// Five volume entry points: `update_h`/`update_e` (FS.7.1, ADR-0224 — each
+// fuses its three staggered-component updates into one dispatch, one thread
+// per cell of the union extent [nx+1,ny+1,nz+1], with each component's own
+// in-shader bounds check unchanged from the pre-fusion per-component
+// kernels) and three PEC-mask clamps for the E components. Linearization
+// matches the host side (ndarray default C order):
+// idx = (i * dim_j + j) * dim_k + k.
 //
 // Arena layout (all offsets derived from nx/ny/nz in the helpers below —
 // the host packs buffers in the identical order):
@@ -196,12 +199,19 @@ fn pml_depth(axis: u32, i: u32, n: u32) -> i32 {
 }
 
 // ============================= H updates =============================
+//
+// FS.7.1 (ADR-0224) fuses the three H-component updates into one dispatch:
+// each thread's (i, j, k) is the shared cell index (factored below); the
+// three `do_update_h*` bodies are copied VERBATIM from the pre-fusion
+// `update_hx/hy/hz` entry points (only the `let k/j/i = gid...` prologue
+// moved to the caller and the function now takes (i, j, k) as parameters
+// instead of reading `gid` directly) — no float expression is reassociated,
+// no per-cell arithmetic changes. Each retains its own bounds-check-and-
+// early-return, so dispatching over the union extent `[nx+1, ny+1, nz+1]`
+// (`FdtdSpec::cell_dims`) reproduces exactly the same per-component work as
+// the three separate dispatches did.
 
-@compute @workgroup_size(32, 2, 2)
-fn update_hx(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let k = gid.x;
-    let j = gid.y;
-    let i = gid.z;
+fn do_update_hx(i: u32, j: u32, k: u32) {
     if (i > p.nx || j >= p.ny || k >= p.nz) {
         return;
     }
@@ -229,11 +239,7 @@ fn update_hx(@builtin(global_invocation_id) gid: vec3<u32>) {
     fields[off_hx() + idx] = h;
 }
 
-@compute @workgroup_size(32, 2, 2)
-fn update_hy(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let k = gid.x;
-    let j = gid.y;
-    let i = gid.z;
+fn do_update_hy(i: u32, j: u32, k: u32) {
     if (i >= p.nx || j > p.ny || k >= p.nz) {
         return;
     }
@@ -261,11 +267,7 @@ fn update_hy(@builtin(global_invocation_id) gid: vec3<u32>) {
     fields[off_hy() + idx] = h;
 }
 
-@compute @workgroup_size(32, 2, 2)
-fn update_hz(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let k = gid.x;
-    let j = gid.y;
-    let i = gid.z;
+fn do_update_hz(i: u32, j: u32, k: u32) {
     if (i >= p.nx || j >= p.ny || k > p.nz) {
         return;
     }
@@ -293,13 +295,24 @@ fn update_hz(@builtin(global_invocation_id) gid: vec3<u32>) {
     fields[off_hz() + idx] = h;
 }
 
-// ============================= E updates =============================
-
 @compute @workgroup_size(32, 2, 2)
-fn update_ex(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn update_h(@builtin(global_invocation_id) gid: vec3<u32>) {
     let k = gid.x;
     let j = gid.y;
     let i = gid.z;
+    do_update_hx(i, j, k);
+    do_update_hy(i, j, k);
+    do_update_hz(i, j, k);
+}
+
+// ============================= E updates =============================
+//
+// Same fusion pattern as the H updates above: `do_update_e*` bodies are the
+// pre-fusion `update_ex/ey/ez` entry points verbatim (gid prologue factored
+// out into the caller; component functions keep their own `return` so the
+// has_dispersion early-out only skips that component, not its siblings).
+
+fn do_update_ex(i: u32, j: u32, k: u32) {
     // Interior j ∈ [1, ny), k ∈ [1, nz); outer faces are the PEC box.
     if (i >= p.nx || j == 0u || j >= p.ny || k == 0u || k >= p.nz) {
         return;
@@ -334,11 +347,7 @@ fn update_ex(@builtin(global_invocation_id) gid: vec3<u32>) {
     fields[off_ex() + idx] = e;
 }
 
-@compute @workgroup_size(32, 2, 2)
-fn update_ey(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let k = gid.x;
-    let j = gid.y;
-    let i = gid.z;
+fn do_update_ey(i: u32, j: u32, k: u32) {
     // Interior i ∈ [1, nx), k ∈ [1, nz).
     if (i == 0u || i >= p.nx || j >= p.ny || k == 0u || k >= p.nz) {
         return;
@@ -373,11 +382,7 @@ fn update_ey(@builtin(global_invocation_id) gid: vec3<u32>) {
     fields[off_ey() + idx] = e;
 }
 
-@compute @workgroup_size(32, 2, 2)
-fn update_ez(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let k = gid.x;
-    let j = gid.y;
-    let i = gid.z;
+fn do_update_ez(i: u32, j: u32, k: u32) {
     // Interior i ∈ [1, nx), j ∈ [1, ny).
     if (i == 0u || i >= p.nx || j == 0u || j >= p.ny || k >= p.nz) {
         return;
@@ -410,6 +415,16 @@ fn update_ez(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
     fields[off_ez() + idx] = e;
+}
+
+@compute @workgroup_size(32, 2, 2)
+fn update_e(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let k = gid.x;
+    let j = gid.y;
+    let i = gid.z;
+    do_update_ex(i, j, k);
+    do_update_ey(i, j, k);
+    do_update_ez(i, j, k);
 }
 
 // ========================== PEC mask clamps ==========================
