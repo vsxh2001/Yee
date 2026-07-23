@@ -72,29 +72,28 @@ const STEPS_PER_SUBMIT: usize = 64;
 // (`@workgroup_size(WORKGROUP_X, WORKGROUP_Y, WORKGROUP_Z)` there — keep the
 // two declarations in lockstep).
 //
-// FS.7.1 (ADR-0224) remapped gid<->linearization (gid.x -> k, gid.y -> j,
-// gid.z -> i) so adjacent threads touch adjacent k-fastest memory; the
-// table below is FS.7.0's PRE-remap measurement and is invalidated by that
-// change (see ADR-0224 for the post-remap re-tune and its own table).
-//
-// FS.7.0 task 2 (ADR-0223) measured (4,4,4) against flat-x candidates on an
-// RTX 5060 Ti, 128^3/192^3 Mcells/s (median of 3x200-step reps):
-//   (4,4,4)  [this]: 2403 / 1401  (baseline)
-//   (64,1,1)       :  469 /  321  (-80%  / -77%)
-//   (32,2,2)       :  523 /  360  (-78%  / -74%)
-//   (8,8,4)        : 2074 / 1413  (-14%  /  +1%, noise)
-// The shader's `iex`/`iey`/... linearization is k-fastest (C order over
-// nz), but `gid.x` maps to `i` (the slowest-varying index) — flattening the
-// workgroup along gid.x therefore widens the per-thread memory stride
-// instead of improving coalescing, and both flat-x shapes measured 4-5x
-// worse. (8,8,4) roughly ties at 192^3 but loses at 128^3. (4,4,4) wins
-// outright or ties everywhere measured; kept as the hardcoded shape (no
-// runtime knob per YAGNI — remapping gid<->linearization to actually
-// exploit the k-fastest layout is a distinct, larger change than a shape
-// swap and is out of scope here).
-const WORKGROUP_X: u32 = 4;
-const WORKGROUP_Y: u32 = 4;
-const WORKGROUP_Z: u32 = 4;
+// FS.7.0 (ADR-0223) measured (4,4,4) as the best shape UNDER THE OLD
+// gid.x->i mapping (flat-x lost 4-5x there because gid.x drove the
+// slowest-varying array axis). FS.7.1 (ADR-0224) remapped gid<->linearization
+// (gid.x -> k, gid.y -> j, gid.z -> i, adjacent threads -> adjacent
+// k-fastest memory) and re-measured from scratch, RTX 5060 Ti, 128^3/192^3
+// Mcells/s (median of 3x200-step reps, post-remap):
+//   (4,4,4)   [control]: 3166 / 2998  (was the ADR-0223 winner)
+//   (64,1,1)            : 3461 / 3143  (+9.3% / +4.8%)
+//   (32,2,2)  [this]    : 3449 / 3144  (+8.9% / +4.9%)
+//   (16,4,4)            : 3470 / 3152  (+9.6% / +5.1%)
+// All three flat-ish post-remap shapes are within noise of each other at
+// 128^3/192^3/224^3 (now that gid.x tracks the fast axis, the previous
+// 4-5x flat-x penalty is gone), but they diverge sharply at the small
+// grids where the per-dispatch overhead matters more: (32,2,2) clearly
+// wins 64^3/96^3 (7569/9379 Mcells/s, reproduced) vs (64,1,1) (6943/8642)
+// and (16,4,4) (6723/8098). (32,2,2) is the only shape that is at or near
+// the top across all 6 grid sizes, so it is kept as the hardcoded shape
+// (no runtime knob per YAGNI). See ADR-0224 for the full 6-grid before/
+// after table.
+const WORKGROUP_X: u32 = 32;
+const WORKGROUP_Y: u32 = 2;
+const WORKGROUP_Z: u32 = 2;
 
 /// Uniform block mirrored by `struct Params` in `shaders/fdtd.wgsl`.
 #[repr(C)]

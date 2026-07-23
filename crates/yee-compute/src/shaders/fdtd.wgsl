@@ -197,7 +197,7 @@ fn pml_depth(axis: u32, i: u32, n: u32) -> i32 {
 
 // ============================= H updates =============================
 
-@compute @workgroup_size(4, 4, 4)
+@compute @workgroup_size(32, 2, 2)
 fn update_hx(@builtin(global_invocation_id) gid: vec3<u32>) {
     let k = gid.x;
     let j = gid.y;
@@ -229,7 +229,7 @@ fn update_hx(@builtin(global_invocation_id) gid: vec3<u32>) {
     fields[off_hx() + idx] = h;
 }
 
-@compute @workgroup_size(4, 4, 4)
+@compute @workgroup_size(32, 2, 2)
 fn update_hy(@builtin(global_invocation_id) gid: vec3<u32>) {
     let k = gid.x;
     let j = gid.y;
@@ -261,7 +261,7 @@ fn update_hy(@builtin(global_invocation_id) gid: vec3<u32>) {
     fields[off_hy() + idx] = h;
 }
 
-@compute @workgroup_size(4, 4, 4)
+@compute @workgroup_size(32, 2, 2)
 fn update_hz(@builtin(global_invocation_id) gid: vec3<u32>) {
     let k = gid.x;
     let j = gid.y;
@@ -295,7 +295,7 @@ fn update_hz(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 // ============================= E updates =============================
 
-@compute @workgroup_size(4, 4, 4)
+@compute @workgroup_size(32, 2, 2)
 fn update_ex(@builtin(global_invocation_id) gid: vec3<u32>) {
     let k = gid.x;
     let j = gid.y;
@@ -334,7 +334,7 @@ fn update_ex(@builtin(global_invocation_id) gid: vec3<u32>) {
     fields[off_ex() + idx] = e;
 }
 
-@compute @workgroup_size(4, 4, 4)
+@compute @workgroup_size(32, 2, 2)
 fn update_ey(@builtin(global_invocation_id) gid: vec3<u32>) {
     let k = gid.x;
     let j = gid.y;
@@ -373,7 +373,7 @@ fn update_ey(@builtin(global_invocation_id) gid: vec3<u32>) {
     fields[off_ey() + idx] = e;
 }
 
-@compute @workgroup_size(4, 4, 4)
+@compute @workgroup_size(32, 2, 2)
 fn update_ez(@builtin(global_invocation_id) gid: vec3<u32>) {
     let k = gid.x;
     let j = gid.y;
@@ -417,7 +417,7 @@ fn update_ez(@builtin(global_invocation_id) gid: vec3<u32>) {
 // masks are attached; runs after the E updates so the clamp is the final
 // word for the step.
 
-@compute @workgroup_size(4, 4, 4)
+@compute @workgroup_size(32, 2, 2)
 fn clamp_ex(@builtin(global_invocation_id) gid: vec3<u32>) {
     let k = gid.x;
     let j = gid.y;
@@ -431,7 +431,7 @@ fn clamp_ex(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 }
 
-@compute @workgroup_size(4, 4, 4)
+@compute @workgroup_size(32, 2, 2)
 fn clamp_ey(@builtin(global_invocation_id) gid: vec3<u32>) {
     let k = gid.x;
     let j = gid.y;
@@ -445,7 +445,7 @@ fn clamp_ey(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 }
 
-@compute @workgroup_size(4, 4, 4)
+@compute @workgroup_size(32, 2, 2)
 fn clamp_ez(@builtin(global_invocation_id) gid: vec3<u32>) {
     let k = gid.x;
     let j = gid.y;
