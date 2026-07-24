@@ -27,6 +27,7 @@
 //! clamp holds for the whole run.
 
 use std::sync::mpsc;
+use std::sync::{Mutex, MutexGuard};
 
 use yee_core::units::{EPS0, MU0};
 
@@ -116,9 +117,32 @@ struct Params {
     dft_omega_dt: f32,
 }
 
-/// GPU FDTD stepper (per-cell materials, CPML or PEC box, interior masks).
+/// Serializes wgpu `Instance`/`Device` creation against teardown, process-wide.
+///
+/// Root cause (teardown-report.md): two `GpuFdtd`s built on independent
+/// `wgpu::Instance`s whose Vulkan devices get destroyed on different threads
+/// at the same time corrupt process-global state inside the NVIDIA Vulkan
+/// ICD (`libnvidia-glcore.so`) — observed as a SIGSEGV/SIGABRT
+/// (`free(): invalid size` / `double free or corruption`) inside
+/// `vkDestroyDevice`, ~80% of multi-threaded `cargo test -p yee-engine
+/// --release` runs. This is a driver bug, not a wgpu or yee-compute logic
+/// error, so the fix is a documented mitigation: never let two
+/// create-or-destroy sequences run concurrently. Only the brief
+/// creation/teardown window is locked — `step_n` and friends run fully
+/// concurrent across `GpuFdtd`s, so this doesn't serialize actual compute.
+static GPU_LIFECYCLE_LOCK: Mutex<()> = Mutex::new(());
+
+fn gpu_lifecycle_guard() -> MutexGuard<'static, ()> {
+    GPU_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The actual GPU resource bundle — split out from [`GpuFdtd`] so `Drop` can
+/// take the [`gpu_lifecycle_guard`] before tearing any of it down; see
+/// `GPU_LIFECYCLE_LOCK`.
 #[derive(Debug)]
-pub struct GpuFdtd {
+pub struct GpuResources {
     spec: FdtdSpec,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -152,6 +176,37 @@ pub struct GpuFdtd {
     max_steps: usize,
     steps_taken: usize,
     adapter_name: String,
+}
+
+/// GPU FDTD stepper (per-cell materials, CPML or PEC box, interior masks).
+///
+/// A thin wrapper around `Option<GpuResources>`: the `Option` lets `Drop`
+/// pull the resources out and drop them explicitly while holding
+/// `GPU_LIFECYCLE_LOCK`, which a plain field-by-field auto-drop can't do
+/// (the lock would have to be a struct field, held for the stepper's whole
+/// life, not just teardown). All other methods reach fields/methods on
+/// `GpuResources` through `Deref`/`DerefMut`.
+#[derive(Debug)]
+pub struct GpuFdtd(Option<GpuResources>);
+
+impl std::ops::Deref for GpuFdtd {
+    type Target = GpuResources;
+    fn deref(&self) -> &GpuResources {
+        self.0.as_ref().expect("GpuFdtd used after being dropped")
+    }
+}
+
+impl std::ops::DerefMut for GpuFdtd {
+    fn deref_mut(&mut self) -> &mut GpuResources {
+        self.0.as_mut().expect("GpuFdtd used after being dropped")
+    }
+}
+
+impl Drop for GpuFdtd {
+    fn drop(&mut self) {
+        let _guard = gpu_lifecycle_guard();
+        self.0.take(); // vkDestroyDevice etc. run here, still under the lock
+    }
 }
 
 impl GpuFdtd {
@@ -338,6 +393,11 @@ impl GpuFdtd {
             apply_pec_box(&spec, &mut fields);
         }
 
+        // Instance/adapter/device stand-up races against any other
+        // `GpuFdtd`'s teardown in the NVIDIA Vulkan ICD — see
+        // `GPU_LIFECYCLE_LOCK`. Held only across this bring-up block, not
+        // the whole stepper lifetime.
+        let gpu_lifecycle_guard = gpu_lifecycle_guard();
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -365,6 +425,7 @@ impl GpuFdtd {
             ..Default::default()
         }))
         .map_err(|e| ComputeError::Device(e.to_string()))?;
+        drop(gpu_lifecycle_guard);
 
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("yee-compute fdtd"),
@@ -792,7 +853,7 @@ impl GpuFdtd {
             ],
         });
 
-        Ok(Self {
+        Ok(Self(Some(GpuResources {
             spec,
             device,
             queue,
@@ -814,7 +875,7 @@ impl GpuFdtd {
             max_steps,
             steps_taken: 0,
             adapter_name,
-        })
+        })))
     }
 
     /// The problem description this stepper was built from.
