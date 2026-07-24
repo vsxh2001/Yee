@@ -7772,6 +7772,7 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "yee-compute",
+ "yee-export",
  "yee-fdtd",
  "yee-io",
  "yee-layout",
