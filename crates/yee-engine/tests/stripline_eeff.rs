@@ -159,6 +159,7 @@ fn stripline_eeff_matches_the_exact_tem_value() {
             t0_steps,
         }],
         aperture_ports: vec![],
+        thin_wires: vec![],
         probes: vec![
             ProbeSpec {
                 component: "ez".into(),

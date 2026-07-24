@@ -170,6 +170,7 @@ fn stub_job(with_stub: bool) -> (JobSpec, f64) {
             },
         ],
         aperture_ports: vec![],
+        thin_wires: vec![],
         probes: vec![
             ProbeSpec {
                 component: "ez".into(),

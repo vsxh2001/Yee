@@ -199,6 +199,7 @@ fn job_for(layout: &Layout) -> (JobSpec, f64) {
                 record: false,
             },
         ],
+        thin_wires: vec![],
         probes: vec![
             ProbeSpec {
                 component: "ez".into(),

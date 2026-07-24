@@ -18,7 +18,7 @@
 //!     nx: 12, ny: 12, nz: 12, dx_m: 1e-3, n_steps: 40,
 //!     boundary: BoundarySpec::Pec,
 //!     sources: vec![SourceSpec::GaussianEz { cell: (6, 6, 6), t0_steps: 8.0, sigma_steps: 3.0 }],
-//!     ports: vec![], aperture_ports: vec![],
+//!     ports: vec![], aperture_ports: vec![], thin_wires: vec![],
 //!     probes: vec![ProbeSpec { component: "ez".into(), cell: (8, 6, 6) }],
 //!     slice: None, ntff: None, materials: None, dt_s: None, spacings: None,
 //!     backend: BackendChoice::Cpu,
@@ -48,7 +48,7 @@ use serde::{Deserialize, Serialize};
 
 use yee_compute::{
     AperturePort, Boundary, CpmlConfig, CpuFdtd, Drive, EComponent, FdtdSpec, Fields, Materials,
-    Probe, ResistivePort, SoftSource, Waveform,
+    Probe, ResistivePort, SoftSource, ThinWire, Waveform,
 };
 
 /// Which backend executes the job.
@@ -331,6 +331,34 @@ pub struct AperturePortSpec {
     pub record: bool,
 }
 
+/// Z-directed thin-wire subcell (FS.1c, ADR-0228): the **Holland & Simpson
+/// (1981) in-cell-inductance** model for a wire much thinner than a cell —
+/// see [`yee_compute::ThinWire`]'s doc for the full citation and the
+/// discrete update it implements. A wire spans `E_z` cells `k ∈ [k_lo,
+/// k_hi)` at the fixed `(i, j)` column; `feed_k`, if set, is a literal gap
+/// in the wire (no metal, no in-cell inductance) left for a normal
+/// [`AperturePortSpec`] (single-cell, `j_lo = j`, `j_hi = j + 1`, `k_lo =
+/// feed_k`, `k_top = feed_k + 1`) to drive — the mom-001 delta-gap idiom.
+/// CPU backend only: the GPU backend rejects a job whose drive carries any
+/// thin wires with a named `Unsupported` error (`Auto` falls back to CPU).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ThinWireSpec {
+    /// Wire's fixed `x` grid index (the `E_z` column it threads).
+    pub i: usize,
+    /// Wire's fixed `y` grid index (the `E_z` column it threads).
+    pub j: usize,
+    /// First `E_z` cell index (`k`) the wire occupies (inclusive).
+    pub k_lo: usize,
+    /// One past the last `E_z` cell index the wire occupies (exclusive).
+    pub k_hi: usize,
+    /// Physical wire radius (m); must be well under half the local
+    /// transverse cell size (`dx`/`dy`, assumed square).
+    pub radius_m: f64,
+    /// Optional delta-gap feed cell in `[k_lo, k_hi)`.
+    #[serde(default)]
+    pub feed_k: Option<usize>,
+}
+
 /// Far-field request (A.2, ADR-0192): accumulate a surface DFT at `f_hz`
 /// during the run (the validated `yee_fdtd::NtffState` transform) and
 /// return `|E|` for each requested `(θ, φ)` direction (radians, θ from
@@ -405,6 +433,10 @@ pub struct JobSpec {
     /// Multi-cell aperture ports (S.10; both backends since R.3).
     #[serde(default)]
     pub aperture_ports: Vec<AperturePortSpec>,
+    /// Z-directed thin-wire subcells (FS.1c; CPU backend only — the GPU
+    /// backend rejects a drive that carries any, `Auto` falls back).
+    #[serde(default)]
+    pub thin_wires: Vec<ThinWireSpec>,
     /// Probes (recorded every step).
     pub probes: Vec<ProbeSpec>,
     /// Optional final-field slice to return for visualization.
@@ -649,6 +681,16 @@ fn build_drive(
                 t0_steps: a.t0_steps,
             },
             record: a.record,
+        });
+    }
+    for w in &spec.thin_wires {
+        drive.thin_wires.push(ThinWire {
+            i: w.i,
+            j: w.j,
+            k_lo: w.k_lo,
+            k_hi: w.k_hi,
+            radius_m: w.radius_m,
+            feed_k: w.feed_k,
         });
     }
     for p in &spec.probes {
@@ -1018,6 +1060,7 @@ mod tests {
             }],
             ports: vec![],
             aperture_ports: vec![],
+            thin_wires: vec![],
             probes: vec![ProbeSpec {
                 component: "ez".into(),
                 cell: (8, 6, 6),

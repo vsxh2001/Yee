@@ -297,6 +297,7 @@ fn job_for(layout: &Layout, cfg: GateConfig) -> (JobSpec, f64) {
                 record: false,
             },
         ],
+        thin_wires: vec![],
         probes: vec![
             mk_probe(i_a0),
             mk_probe(i_a0 + SPACING_CELLS),

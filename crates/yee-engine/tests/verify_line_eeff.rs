@@ -143,6 +143,7 @@ fn line_eeff_over_job_protocol_matches_hammerstad_jensen() {
             t0_steps,
         }],
         aperture_ports: vec![],
+        thin_wires: vec![],
         probes: vec![
             ProbeSpec {
                 component: "ez".into(),

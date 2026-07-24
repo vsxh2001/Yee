@@ -134,6 +134,7 @@ fn antenna_quasi_yagi_beam_fires_end_on() {
             t0_steps,
             record: false,
         }],
+        thin_wires: vec![],
         probes: vec![],
         slice: None,
         ntff: Some(NtffSpec {

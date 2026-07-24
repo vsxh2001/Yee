@@ -138,6 +138,7 @@ fn antenna_patch_array_narrows_the_beam_in_the_array_plane() {
             t0_steps,
             record: false,
         }],
+        thin_wires: vec![],
         probes: vec![],
         slice: None,
         ntff: Some(NtffSpec {

@@ -139,6 +139,7 @@ fn antenna_patch_array_matches_at_the_designed_resonance() {
             t0_steps,
             record: false,
         }],
+        thin_wires: vec![],
         probes: vec![
             ProbeSpec {
                 component: "ez".into(),

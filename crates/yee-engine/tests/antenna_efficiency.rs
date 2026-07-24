@@ -135,6 +135,7 @@ fn measure_efficiency(tan_d: f64, label: &str) -> (f64, String) {
             t0_steps,
             record: true,
         }],
+        thin_wires: vec![],
         probes: vec![],
         slice: None,
         ntff: Some(NtffSpec {

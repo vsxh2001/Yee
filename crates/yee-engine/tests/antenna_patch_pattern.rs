@@ -126,6 +126,7 @@ fn patch_radiates_a_broadside_beam() {
             t0_steps,
             record: false,
         }],
+        thin_wires: vec![],
         probes: vec![],
         slice: None,
         ntff: Some(NtffSpec {
