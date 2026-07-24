@@ -10,7 +10,7 @@
 //! shared [`crate::board`] fixture, so every design flow (gates, studio,
 //! Python, WS) gets push-button meshing the same way.
 
-use yee_layout::Layout;
+use yee_layout::{Layout, Stackup};
 
 use crate::board::{self, TwoPortBoardOptions, two_port_board_job};
 use crate::{JobEvent, sparams};
@@ -41,6 +41,44 @@ pub fn auto_dx(layout: &Layout, f_max_hz: f64) -> f64 {
         .min(by_substrate)
         .min(by_feature)
         .clamp(1e-6, 1e-3)
+}
+
+/// The stackup meshing rulebook (FS.4.2c, ADR-0227): [`auto_dx`]
+/// generalized to an N-layer [`Stackup`] — the largest dx satisfying:
+///
+/// - **Wavelength**: `dx ≤ λ_min/20` with `λ_min = c/(f_max·√ε_r_max)`,
+///   `ε_r_max` the highest-ε_r layer in the stack (the shortest
+///   in-dielectric wavelength any layer can carry).
+/// - **Per-layer resolution**: `dx ≤ h_i/3` for EVERY layer — generalizes
+///   the substrate rule; a buried interface under-resolved is the same
+///   silent failure as an under-resolved substrate.
+/// - **Feature**: `dx ≤ w_min/2`, unchanged from [`auto_dx`]
+///   ([`min_feature_m`]).
+/// - **Lid** (the ADR-0215 lesson): if `stackup.lid`, `dx ≤ b/16` with
+///   `b = Σ h_i` the total ground→lid dielectric height
+///   ([`Stackup::total_height_m`]). A lidded stack is itself a confined
+///   waveguide; ADR-0215 measured its transverse mode under-resolved
+///   below ~16 cells across `b` (β read 7 % high at `b` = 8 cells,
+///   collapsing to 0.065 % at `b` = 16).
+///
+/// Same `[1 µm, 1 mm]` clamp as [`auto_dx`]. A single-layer, no-lid
+/// `stackup` whose layer's `eps_r`/`height_m` match `layout.substrate`'s
+/// degenerates to exactly [`auto_dx`]'s result (unit-tested consistency
+/// check).
+pub fn auto_dx_stackup(layout: &Layout, stackup: &Stackup, f_max_hz: f64) -> f64 {
+    let eps_r_max = stackup.layers.iter().fold(0.0_f64, |m, l| m.max(l.eps_r));
+    let lambda_min = C0 / (f_max_hz * eps_r_max.sqrt());
+    let by_wavelength = lambda_min / 20.0;
+    let by_layer = stackup
+        .layers
+        .iter()
+        .fold(f64::INFINITY, |m, l| m.min(l.height_m / 3.0));
+    let by_feature = min_feature_m(layout) / 2.0;
+    let mut dx = by_wavelength.min(by_layer).min(by_feature);
+    if stackup.lid {
+        dx = dx.min(stackup.total_height_m() / 16.0);
+    }
+    dx.clamp(1e-6, 1e-3)
 }
 
 /// The smallest feature the mesh must resolve: the minimum over every
@@ -832,7 +870,7 @@ pub fn converge_two_port_graded(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use yee_layout::{BBox, Point2, Polygon, PortRef, Substrate};
+    use yee_layout::{BBox, Point2, Polygon, PortRef, StackupLayer, Substrate};
 
     fn layout_with(traces: Vec<Polygon>, eps_r: f64, h_m: f64) -> Layout {
         let bbox = BBox::from_polygons(&traces);
@@ -902,6 +940,142 @@ mod tests {
         // Absurdly fine demand clamps at 1 µm.
         let l = layout_with(vec![Polygon::rect(0.0, 0.0, 1e-3, 1e-6)], 4.4, 1.6e-3);
         assert_eq!(auto_dx(&l, 5.0e9), 1e-6);
+    }
+
+    // --- auto_dx_stackup (FS.4.2c, ADR-0227) ------------------------------
+
+    #[test]
+    fn stackup_each_rule_binds_when_it_is_the_constraint() {
+        // Wavelength: eps_r_max = 4.4 across two layers (second layer is
+        // the max), thick layers and a wide trace so neither h/3 nor
+        // feature/2 bind. 30 GHz -> lambda_min/20 = 0.238 mm.
+        let l = layout_with(vec![Polygon::rect(0.0, 0.0, 50e-3, 10e-3)], 4.4, 3e-3);
+        let stackup = Stackup {
+            layers: vec![
+                StackupLayer {
+                    eps_r: 2.2,
+                    height_m: 3e-3,
+                    loss_tangent: 0.0,
+                },
+                StackupLayer {
+                    eps_r: 4.4,
+                    height_m: 3e-3,
+                    loss_tangent: 0.0,
+                },
+            ],
+            lid: false,
+        };
+        let dx = auto_dx_stackup(&l, &stackup, 30.0e9);
+        let lam = 299_792_458.0 / (30.0e9 * 4.4_f64.sqrt());
+        assert!(
+            (dx - lam / 20.0).abs() < 1e-12,
+            "wavelength rule (eps_r_max over layers): {dx}"
+        );
+
+        // Per-layer h/3: one thin layer (0.3 mm) among a thick one binds,
+        // same numbers as auto_dx's substrate-rule case.
+        let l = layout_with(vec![Polygon::rect(0.0, 0.0, 50e-3, 10e-3)], 4.4, 3e-3);
+        let stackup = Stackup {
+            layers: vec![
+                StackupLayer {
+                    eps_r: 4.4,
+                    height_m: 3e-3,
+                    loss_tangent: 0.0,
+                },
+                StackupLayer {
+                    eps_r: 4.4,
+                    height_m: 0.3e-3,
+                    loss_tangent: 0.0,
+                },
+            ],
+            lid: false,
+        };
+        let dx = auto_dx_stackup(&l, &stackup, 5.0e9);
+        assert!(
+            (dx - 0.1e-3).abs() < 1e-12,
+            "per-layer h/3 rule (thinnest layer): {dx}"
+        );
+
+        // Feature/2: two 10 mm-wide lines 0.15 mm apart -> 75 um, same
+        // fixture as auto_dx's feature-rule case.
+        let l = layout_with(
+            vec![
+                Polygon::rect(0.0, 0.0, 50e-3, 10e-3),
+                Polygon::rect(0.0, 10.15e-3, 50e-3, 10e-3),
+            ],
+            4.4,
+            1.6e-3,
+        );
+        let stackup = Stackup {
+            layers: vec![StackupLayer {
+                eps_r: 4.4,
+                height_m: 1.6e-3,
+                loss_tangent: 0.0,
+            }],
+            lid: false,
+        };
+        let dx = auto_dx_stackup(&l, &stackup, 5.0e9);
+        assert!(
+            (dx - 0.075e-3).abs() < 1e-12,
+            "feature rule (unchanged from auto_dx): {dx}"
+        );
+    }
+
+    #[test]
+    fn stackup_lid_rule_binds_below_16_cells_across_b() {
+        // The ADR-0215 stripline gate's own numbers: symmetric stripline,
+        // eps_r 4.4, b = 3.2 mm, lid on -> b/16 = 0.2 mm. Wide trace and a
+        // modest f_max keep wavelength/feature loose so the lid rule is
+        // the binding one.
+        let l = layout_with(vec![Polygon::rect(0.0, 0.0, 50e-3, 10e-3)], 4.4, 1.6e-3);
+        let stackup = yee_layout::Stackup::symmetric_stripline(4.4, 3.2e-3);
+        assert!(stackup.lid);
+        let dx = auto_dx_stackup(&l, &stackup, 5.0e9);
+        let by_layer = stackup.layers[0].height_m / 3.0; // 0.533 mm, looser than b/16.
+        assert!(0.2e-3 < by_layer, "fixture must not accidentally bind h/3");
+        assert!(
+            (dx - 0.2e-3).abs() < 1e-12,
+            "lid rule b/16 (ADR-0215): {dx}"
+        );
+    }
+
+    #[test]
+    fn stackup_dx_is_clamped() {
+        // Absurdly fine demand (same shape as auto_dx_is_clamped) clamps
+        // at 1 um even through the stackup path.
+        let l = layout_with(vec![Polygon::rect(0.0, 0.0, 1e-3, 1e-6)], 4.4, 1.6e-3);
+        let stackup = Stackup {
+            layers: vec![StackupLayer {
+                eps_r: 4.4,
+                height_m: 1.6e-3,
+                loss_tangent: 0.0,
+            }],
+            lid: false,
+        };
+        assert_eq!(auto_dx_stackup(&l, &stackup, 5.0e9), 1e-6);
+    }
+
+    #[test]
+    fn stackup_single_layer_no_lid_matches_auto_dx_exactly() {
+        // The consistency check the spec calls out: a Stackup that mirrors
+        // layout.substrate exactly, with no lid, must reproduce auto_dx's
+        // result bit-for-bit -- same rules, same numbers, no b/16 term.
+        let l = layout_with(vec![Polygon::rect(0.0, 0.0, 50e-3, 10e-3)], 4.4, 1.6e-3);
+        let stackup = Stackup {
+            layers: vec![StackupLayer {
+                eps_r: l.substrate.eps_r,
+                height_m: l.substrate.height_m,
+                loss_tangent: l.substrate.loss_tangent,
+            }],
+            lid: false,
+        };
+        for f_max_hz in [1.0e9, 5.0e9, 30.0e9] {
+            assert_eq!(
+                auto_dx_stackup(&l, &stackup, f_max_hz),
+                auto_dx(&l, f_max_hz),
+                "f_max = {f_max_hz}"
+            );
+        }
     }
 
     // --- auto_spacings (FS.0b.1, ADR-0210) --------------------------------
