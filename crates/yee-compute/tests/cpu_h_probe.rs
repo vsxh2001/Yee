@@ -38,6 +38,7 @@ fn h_probe_exact_bit_antisymmetry_about_gaussian_source_first_step() {
         soft_sources: vec![],
         ports: vec![],
         aperture_ports: vec![],
+        thin_wires: vec![],
         probes: vec![],
         h_probes: vec![
             // (ci, cj-1, ck): one cell "below" the source plane.
@@ -86,6 +87,7 @@ fn h_probe_stream_nonzero_and_finite_over_several_steps() {
         soft_sources: vec![],
         ports: vec![],
         aperture_ports: vec![],
+        thin_wires: vec![],
         probes: vec![],
         h_probes: vec![HProbe {
             component: HComponent::Hx,

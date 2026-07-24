@@ -44,6 +44,7 @@ fn drive() -> Drive {
         soft_sources: vec![],
         ports: vec![],
         aperture_ports: vec![],
+        thin_wires: vec![],
         probes: vec![Probe {
             component: EComponent::Ez,
             cell: (CENTER.0, CENTER.1, CENTER.2 - 1),

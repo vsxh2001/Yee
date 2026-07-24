@@ -117,6 +117,7 @@ fn gpu_aperture_ports_match_cpu_probe_series() {
             aperture(PORT_I_DRIVE, 50.0, 1.0, dt),
             aperture(PORT_I_LOAD, 50.0, 0.0, dt),
         ],
+        thin_wires: vec![],
         probes: vec![
             Probe {
                 component: EComponent::Ez,

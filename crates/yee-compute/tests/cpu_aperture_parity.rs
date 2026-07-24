@@ -89,6 +89,7 @@ fn aperture_port_is_bit_exact_against_reference() {
             },
             record: false,
         }],
+        thin_wires: vec![],
         probes: vec![Probe {
             component: EComponent::Ez,
             cell: PROBE_CELL,
