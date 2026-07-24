@@ -36,6 +36,10 @@ thiserror   = { workspace = true }
 # [dependencies] for the board module, R.5b.)
 yee-io      = { workspace = true }
 num-complex = { workspace = true }
+# engine-import-twin-001 (FS.3.2c): the Gerber writer/importer, to build
+# the import-twin measurement gate. Test-only — no cyclic dependency
+# (yee-export does not depend on yee-engine).
+yee-export  = { workspace = true }
 
 [lints.rust]
 unsafe_code  = "forbid"
