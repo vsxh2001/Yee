@@ -273,3 +273,4 @@
 - [ADR-0227: FS.4.2c — automesh stackup integration: N-layer rulebook + lid b/16 rule](decisions/0227-fs42c-automesh-stackup.md)
 - [ADR-0228: FS.1c — thin-wire subcell (Holland–Simpson) + dipole gate vs NEC-4](decisions/0228-fs1c-thin-wire.md)
 - [ADR-0229: FS.3.2c — imported-board-vs-native-twin measurement gate](decisions/0229-fs32c-import-twin.md)
+- [ADR-0230: FS.3.3 — DXF import (closes FS.3)](decisions/0230-fs33-dxf-import.md)

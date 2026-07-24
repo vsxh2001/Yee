@@ -390,7 +390,12 @@ fn flash_polygon(ap: &Aperture, x: f64, y: f64) -> Result<Polygon, GerberImportE
 /// tolerance it is a [`GerberImportError::BadArc`]). `start == end`
 /// (bit-exact, as identical coordinate words decode identically) is a
 /// full 360° circle per the Ucamco G75 rule.
-fn arc_vertices(
+///
+/// `pub(crate)`: also reused by [`crate::dxf`] for bulge-segment
+/// tessellation (FS.3.3) — DXF supplies its own `(center, ccw)` derived
+/// from the bulge value, but the angle-stepping loop and chord tolerance
+/// are shared, not duplicated.
+pub(crate) fn arc_vertices(
     start: (f64, f64),
     end: (f64, f64),
     center: (f64, f64),

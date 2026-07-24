@@ -128,6 +128,11 @@ pub use import::{
     ARC_CHORD_TOL_M, GerberImportError, gerber_to_layout, gerber_to_outline, gerber_to_polygons,
 };
 
+/// ASCII DXF import (FS.3.3) — closed `LWPOLYLINE`/`POLYLINE` chains
+/// parsed back into outline polygons.
+pub mod dxf;
+pub use dxf::{DxfImportError, DxfOptions, dxf_to_outline};
+
 /// Emit a single-copper-layer **RS-274X Gerber** for a [`Layout`]'s top-metal
 /// polygons, each as a filled region (`G36*` … `G37*`).
 ///
