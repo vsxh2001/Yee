@@ -271,3 +271,4 @@
 - [ADR-0225: FS.4.2a — stripline Z₀: H-field probes + V/I extraction gate](decisions/0225-fs42a-stripline-z0.md)
 - [ADR-0226: FS.4.2b — per-layer stackup loss: σ map + stripline attenuation gate](decisions/0226-fs42b-stackup-loss.md)
 - [ADR-0227: FS.4.2c — automesh stackup integration: N-layer rulebook + lid b/16 rule](decisions/0227-fs42c-automesh-stackup.md)
+- [ADR-0228: FS.1c — thin-wire subcell (Holland–Simpson) + dipole gate vs NEC-4](decisions/0228-fs1c-thin-wire.md)
