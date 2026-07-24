@@ -166,6 +166,7 @@ fn antenna_quasi_yagi_resonates_at_the_designed_frequency() {
             t0_steps,
             record: false,
         }],
+        thin_wires: vec![],
         probes: vec![
             ProbeSpec {
                 component: "ez".into(),

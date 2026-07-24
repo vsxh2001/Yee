@@ -213,6 +213,7 @@ pub fn two_port_board_job(
             mk_port(model.port_cells[0].0, 1.0),
             mk_port(load_cell.0, 0.0),
         ],
+        thin_wires: vec![],
         probes: vec![
             mk_probe(i_a0),
             mk_probe(i_a0 + opts.spacing_cells),
@@ -591,6 +592,7 @@ fn graded_job(
             mk_port(model.port_cells[0].0, 1.0),
             mk_port(model.port_cells[1].0, 0.0),
         ],
+        thin_wires: vec![],
         probes: vec![
             mk_probe(fx.i_a0),
             mk_probe(fx.i_a0 + sp),

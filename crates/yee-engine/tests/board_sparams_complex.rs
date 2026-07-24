@@ -208,6 +208,7 @@ fn complex_transfer_phase_matches_theory_and_exports_to_touchstone() {
                 record: false,
             },
         ],
+        thin_wires: vec![],
         probes: vec![
             mk_probe(i_a0),
             mk_probe(i_a0 + SPACING_CELLS),

@@ -136,6 +136,7 @@ fn job_for(layout: &Layout) -> (JobSpec, f64) {
             t0_steps,
             record: false,
         }],
+        thin_wires: vec![],
         probes: vec![ProbeSpec {
             component: "ez".into(),
             cell: (i_p1, j_strip, k_probe),

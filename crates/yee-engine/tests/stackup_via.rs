@@ -215,6 +215,7 @@ fn job(with_stub: bool, with_via: bool) -> (JobSpec, f64) {
                 record: false,
             },
         ],
+        thin_wires: vec![],
         probes: vec![ProbeSpec {
             component: "ez".into(),
             cell: (i_m, j_strip, k_probe),

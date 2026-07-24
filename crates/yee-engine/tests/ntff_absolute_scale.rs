@@ -84,6 +84,7 @@ fn ntff_magnitude_matches_the_analytic_hertzian_dipole() {
         }],
         ports: vec![],
         aperture_ports: vec![],
+        thin_wires: vec![],
         probes: vec![],
         slice: None,
         ntff: Some(NtffSpec {

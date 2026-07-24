@@ -65,6 +65,7 @@ fn ntff_on_engine_recovers_dipole_pattern() {
             }],
             ports: vec![],
             aperture_ports: vec![],
+            thin_wires: vec![],
             probes: vec![],
             h_probes: vec![],
         },

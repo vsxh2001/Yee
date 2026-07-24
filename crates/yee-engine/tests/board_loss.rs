@@ -174,6 +174,7 @@ fn dielectric_attenuation_matches_the_pozar_closed_form() {
                 record: false,
             },
         ],
+        thin_wires: vec![],
         probes: vec![
             mk_probe(i_a0),
             mk_probe(i_a0 + SPACING_CELLS),

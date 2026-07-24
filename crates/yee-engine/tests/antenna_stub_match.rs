@@ -172,6 +172,7 @@ fn measure(layout: &Layout) -> Measured {
             t0_steps,
             record: false,
         }],
+        thin_wires: vec![],
         probes: vec![
             mk_probe(i_p0),
             mk_probe(i_p0 + SP_CELLS),

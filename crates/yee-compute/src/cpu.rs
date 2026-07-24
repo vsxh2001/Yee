@@ -19,7 +19,7 @@ use yee_core::units::{EPS0, MU0};
 
 use crate::cpml::CpuCpmlState;
 use crate::dispersive::{CpuDispersiveState, DispersiveMap};
-use crate::drive::{Drive, EComponent, HComponent};
+use crate::drive::{Drive, EComponent, HComponent, thin_wire_l_prime};
 use crate::fields::Fields;
 use crate::materials::{Boundary, Materials};
 use crate::spec::{FdtdSpec, GradedSpacings, SpacingArrays, idx3, len3};
@@ -65,6 +65,12 @@ pub struct CpuFdtd {
     /// inner `Vec` when `AperturePort::record` is false) — FS.2a,
     /// ADR-0207.
     aperture_records: Vec<Vec<(f64, f64, f64)>>,
+    /// Per-[`crate::ThinWire`] shunt-inductor branch current state
+    /// (FS.1c, Holland–Simpson), one inner `Vec` per
+    /// [`Drive::thin_wires`] entry indexed by `k - wire.k_lo` (the feed
+    /// cell's slot, if any, stays `0.0` and unused). See
+    /// [`CpuFdtd::advance_thin_wire_currents`] for the derivation.
+    wire_current: Vec<Vec<f64>>,
     /// Per-axis primal/dual spacings the kernels divide by (FS.0b.0). The
     /// uniform constructors fill these with the scalar `spec.dx/dy/dz`, so
     /// the uniform path is bit-exact by construction (gate `compute-018`).
@@ -133,6 +139,11 @@ impl CpuFdtd {
         let probe_series = vec![Vec::new(); drive.probes.len()];
         let h_probe_series = vec![Vec::new(); drive.h_probes.len()];
         let aperture_records = vec![Vec::new(); drive.aperture_ports.len()];
+        let wire_current = drive
+            .thin_wires
+            .iter()
+            .map(|w| vec![0.0; w.k_hi - w.k_lo])
+            .collect();
         let spacings = SpacingArrays::uniform(&spec);
         Self {
             spec,
@@ -148,6 +159,7 @@ impl CpuFdtd {
             probe_series,
             h_probe_series,
             aperture_records,
+            wire_current,
             spacings,
             graded: false,
         }
@@ -234,6 +246,9 @@ impl CpuFdtd {
             let n_step = self.step as usize;
             self.update_h();
             self.boundary_h();
+            if !self.drive.thin_wires.is_empty() {
+                self.advance_thin_wire_currents();
+            }
             if !self.drive.soft_sources.is_empty() {
                 for src in &self.drive.soft_sources {
                     let flat = src.component.flat(&self.spec, src.cell);
@@ -253,6 +268,9 @@ impl CpuFdtd {
                 }
             }
             self.boundary_e();
+            if !self.drive.thin_wires.is_empty() {
+                self.apply_thin_wire_correction();
+            }
             if !self.drive.ports.is_empty() {
                 // Verbatim `LumpedRlcPort::{correct_e, update_pure_resistor}`,
                 // with the local cell sizes at the port cell (dual transverse
@@ -491,6 +509,122 @@ impl CpuFdtd {
                                     - self.fields.hx[idx3(hxd, i, j, k - 1)]);
                         }
                     }
+                }
+            }
+        }
+    }
+
+    /// Advance each [`crate::ThinWire`]'s shunt-inductor branch current
+    /// (FS.1c, Holland & Simpson 1981) using `E_z` from the END of the
+    /// previous step — the same half-step offset `H` has from `E` ("if
+    /// I_z and H are updated at the same time-step … Q_z and E are
+    /// updated a half time-step later," Liu thesis §4.2.1, after Holland
+    /// & Simpson 1981) — so this MUST run before `update_e` overwrites
+    /// `E_z` this iteration.
+    ///
+    /// # Derivation (after Holland & Simpson 1981; Liu thesis 2003, ch. 4,
+    /// eq. 4.1–4.18 — see the citation on [`crate::ThinWire`])
+    ///
+    /// Integrating Ampère's law azimuthally around an infinite wire of
+    /// radius `a` along z, then Faraday's law radially from the wire
+    /// surface (`E_z(a) = 0`, the PEC condition) out to `R`, and
+    /// substituting the quasi-static Biot–Savart/Coulomb near fields
+    /// gives (thesis eq. 4.10/4.13):
+    ///
+    /// ```text
+    /// <E_z(R)> = (μ₀/2π)·ln(R/a)·dI/dt + (1/2πε₀)·ln(R/a)·dQ/dz
+    /// ```
+    ///
+    /// Taking `R = h/2` (`h` the transverse cell size — "the inductance
+    /// per unit length a thin wire would have with respect to an
+    /// enclosing conductor half a cell removed") defines the **in-cell
+    /// inductance per unit length** [`thin_wire_l_prime`],
+    /// `L'(h/2) = (μ₀/2π)·ln(h/2a)` (thesis eq. 4.11/4.18). This crate's
+    /// walking-skeleton reduction of the full coupled field-wire system
+    /// (thesis eq. 4.15–4.17, a 1-D telegrapher line for `I`, `Q` solved
+    /// simultaneously with the 3-D fields) drops the charge/continuity
+    /// term (`dQ/dz`, the second term above): the surrounding 3-D Maxwell
+    /// grid already conserves charge on its own, so a pure lumped
+    /// inductor branch driven by the local cell's own `E_z`, plus an
+    /// open-circuit condition forcing `I = 0` at the wire's two free ends
+    /// (no further conductor for current to flow into — every finite
+    /// antenna needs this at its tips), gets within a **measured, honestly
+    /// pinned, single-digit percent** of coarse/fine grid-independence for
+    /// a z-axis-only, unjunctioned wire (`tests/thin_wire.rs`'s
+    /// `coarse_fine_resonance_consistency_and_naive_control`) — short of
+    /// what the full telegrapher-coupled system would give (dropping the
+    /// charge/continuity coupling along z is a real, not free,
+    /// simplification; tightening it is a named follow-on). Eq. 4.13 is a
+    /// *pointwise*
+    /// relation (both sides are "per unit length": `dI/dt` carries no
+    /// length scale, and `E_z/L'` is `(V/m)/(H/m) = A/s` — no `dz`
+    /// anywhere), exactly parallel to how the ordinary curl-H `E_z`
+    /// update has no `dz` in its coefficient either. So the current is a
+    /// pure leapfrog inductor charge using `L'(h/2)` directly (no implicit
+    /// solve needed, same as `H`'s own explicit update from `E`):
+    ///
+    /// ```text
+    /// I^{n+1/2} = I^{n-1/2} + (Δt / L'(h/2)) · E_z^n
+    /// ```
+    fn advance_thin_wire_currents(&mut self) {
+        let s = self.spec;
+        let dt = s.dt;
+        for (wire, current) in self.drive.thin_wires.iter().zip(&mut self.wire_current) {
+            let l_prime = thin_wire_l_prime(s.dx, wire.radius_m);
+            for k in wire.k_lo..wire.k_hi {
+                if Some(k) == wire.feed_k || k == wire.k_lo || k == wire.k_hi - 1 {
+                    // No branch: (1) the delta-gap feed is a literal gap in
+                    // the wire; (2) the wire's two free (open) ends force
+                    // I = 0 there — no further conductor for current to
+                    // flow into, the open-circuit boundary condition every
+                    // finite antenna needs at its tips.
+                    continue;
+                }
+                let ez_n = self.fields.ez[EComponent::Ez.flat(&s, (wire.i, wire.j, k))];
+                current[k - wire.k_lo] += (dt / l_prime) * ez_n;
+            }
+        }
+    }
+
+    /// Apply the thin-wire correction after the ordinary `E` half-step +
+    /// boundary phase (FS.1c): subtract each wire's just-advanced branch
+    /// current from `E_z` — this is `ε₀ ∂E_z/∂t = curl(H) − J_z` with
+    /// `J_z = I/(dx·dy)` (the Liu thesis's "approximating the current
+    /// density J by distributing the current from the wire to the
+    /// surrounding field components"), applied the same way this crate's
+    /// `ResistivePort`/`AperturePort` branches subtract from `E_z`. Also
+    /// shorts the near-wire transverse field (`E_x`/`E_y` at the wire's
+    /// own grid line, across the full wire span *including* the feed
+    /// layer — the transverse near-field collapse is a geometric effect
+    /// of the thin structure, not conditioned on where the axial gap
+    /// sits) — the coarse-grid stand-in for Holland & Simpson's
+    /// un-resolved near-singular radial field around the conductor.
+    fn apply_thin_wire_correction(&mut self) {
+        let s = self.spec;
+        let dt = s.dt;
+        let exd = s.ex_dims();
+        let eyd = s.ey_dims();
+        for (wire, current) in self.drive.thin_wires.iter().zip(&self.wire_current) {
+            let area = self.spacings.x.dual[wire.i] * self.spacings.y.dual[wire.j];
+            for k in wire.k_lo..wire.k_hi {
+                if Some(k) == wire.feed_k {
+                    continue;
+                }
+                let flat = EComponent::Ez.flat(&s, (wire.i, wire.j, k));
+                self.fields.ez[flat] -= (dt / (EPS0 * area)) * current[k - wire.k_lo];
+            }
+            for k in wire.k_lo..=wire.k_hi {
+                if wire.i >= 1 {
+                    self.fields.ex[idx3(exd, wire.i - 1, wire.j, k)] = 0.0;
+                }
+                if wire.i < exd.0 {
+                    self.fields.ex[idx3(exd, wire.i, wire.j, k)] = 0.0;
+                }
+                if wire.j >= 1 {
+                    self.fields.ey[idx3(eyd, wire.i, wire.j - 1, k)] = 0.0;
+                }
+                if wire.j < eyd.1 {
+                    self.fields.ey[idx3(eyd, wire.i, wire.j, k)] = 0.0;
                 }
             }
         }

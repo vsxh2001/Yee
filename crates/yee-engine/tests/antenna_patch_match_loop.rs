@@ -128,6 +128,7 @@ fn measure_dip(x_inset_m: f64) -> (f64, f64) {
             t0_steps,
             record: false,
         }],
+        thin_wires: vec![],
         probes: vec![
             ProbeSpec {
                 component: "ez".into(),

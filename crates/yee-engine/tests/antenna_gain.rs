@@ -125,6 +125,7 @@ fn measure_gain_dbi(layout: &Layout, label: &str) -> f64 {
             t0_steps,
             record: true,
         }],
+        thin_wires: vec![],
         probes: vec![],
         slice: None,
         ntff: Some(NtffSpec {

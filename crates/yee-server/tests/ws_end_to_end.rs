@@ -24,6 +24,7 @@ fn cavity_spec() -> JobSpec {
         }],
         ports: vec![],
         aperture_ports: vec![],
+        thin_wires: vec![],
         probes: vec![ProbeSpec {
             component: "ez".into(),
             cell: (8, 6, 6),

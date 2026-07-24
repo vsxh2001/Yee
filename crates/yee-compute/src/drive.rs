@@ -176,6 +176,81 @@ pub struct AperturePort {
     pub record: bool,
 }
 
+/// Z-directed thin-wire subcell (FS.1c) — the **Holland & Simpson (1981)
+/// in-cell-inductance** model for embedding a wire much thinner than a
+/// cell in the Yee grid without resolving its cross-section:
+///
+/// > R. Holland and L. Simpson, "Finite-Difference Analysis of EMP
+/// > Coupling to Thin Struts and Wires," *IEEE Trans. Electromagn.
+/// > Compat.*, vol. 23, no. 2, pp. 88–97, May 1981.
+///
+/// See `cpu.rs`'s thin-wire step comments for the full derivation
+/// (following the contour-path integration summarized in Y. Liu, *Use of
+/// the Thin-Strut FDTD Formalism for the Design of Coils in Biomedical
+/// Telemetry Applications*, M.S. thesis, North Carolina State University,
+/// 2003, ch. 4, itself after Holland & Simpson 1981 and K. R. Umashankar,
+/// A. Taflove, and B. Beker, "Calculation and experimental validation of
+/// induced currents on coupled wires in an arbitrary shaped cavity," *IEEE
+/// Trans. Antennas Propagat.*, vol. AP-35, no. 11, pp. 1248–1257, Nov.
+/// 1987; also summarized in Taflove & Hagness, *Computational
+/// Electrodynamics*, ch. 10, "Local Subcell Models of Fine Geometrical
+/// Features") and the discrete update equations this crate implements.
+///
+/// In short: each wire-occupied `E_z` cell carries a shunt inductor whose
+/// branch current is subtracted from the ordinary curl-H `E_z` update
+/// (the wire's "in-cell inductance," `L' = (μ₀/2π)·ln(h/2a)` per unit
+/// length for a wire of radius `a` in a cell of transverse size `h`), and
+/// the near-wire transverse field (`E_x`/`E_y` at the wire's own grid
+/// line) is forced to zero every step (the coarse-grid stand-in for the
+/// un-resolved near-singular radial field around the conductor). CPU
+/// backend only — the GPU backend rejects a drive that carries any, see
+/// [`crate::ComputeError::Unsupported`].
+#[derive(Debug, Clone)]
+pub struct ThinWire {
+    /// Wire's fixed `x` grid index (the `E_z` column it threads).
+    pub i: usize,
+    /// Wire's fixed `y` grid index (the `E_z` column it threads).
+    pub j: usize,
+    /// First `E_z` cell index (`k`) the wire occupies (inclusive).
+    pub k_lo: usize,
+    /// One past the last `E_z` cell index the wire occupies (exclusive):
+    /// the wire spans `k ∈ [k_lo, k_hi)`.
+    pub k_hi: usize,
+    /// Physical wire radius (m). Must be well under half the local
+    /// transverse cell size (`spec.dx`, assumed ≈ `spec.dy`: a square
+    /// transverse cell for the z-axis-only FS.1c scope).
+    pub radius_m: f64,
+    /// One `E_z` cell in `[k_lo, k_hi)`, if any, that is a delta-gap FEED
+    /// cell: a literal gap in the wire (no metal, no in-cell inductance),
+    /// excluded from the shunt-inductor branch and left for a normal
+    /// [`ResistivePort`]/[`AperturePort`]/[`SoftSource`] to drive (the
+    /// mom-001 delta-gap idiom).
+    pub feed_k: Option<usize>,
+}
+
+/// Holland & Simpson (1981) **in-cell inductance per unit length** (H/m)
+/// for a thin wire of physical radius `radius_m` threading a Yee cell of
+/// transverse size `h` (assumed square: `dx == dy`, the z-axis-only FS.1c
+/// scope) — "the inductance per unit length a thin wire would have with
+/// respect to an enclosing conductor half a cell removed" (`R = h/2`; Liu
+/// thesis 2003, eq. 4.11/4.18, after Holland & Simpson 1981):
+///
+/// ```text
+/// L'(h/2) = (μ₀ / 2π) · ln(h / (2·radius_m))
+/// ```
+///
+/// See `cpu.rs`'s thin-wire step comments for the full derivation, the
+/// citation, and how this feeds the discrete `E_z` update.
+///
+/// # Panics
+///
+/// Panics (via `ln` producing a non-finite value, caught by
+/// [`Drive::validate`]'s bound on `radius_m`) if `radius_m >= h/2`.
+pub(crate) fn thin_wire_l_prime(h: f64, radius_m: f64) -> f64 {
+    use yee_core::units::MU0;
+    (MU0 / (2.0 * std::f64::consts::PI)) * (h / (2.0 * radius_m)).ln()
+}
+
 /// Per-step field sample recorded after each full step.
 #[derive(Debug, Clone, Copy)]
 pub struct Probe {
@@ -263,6 +338,10 @@ pub struct Drive {
     /// CPU backend only — the GPU backend rejects a drive that carries
     /// any, see `ComputeError::Unsupported`).
     pub aperture_ports: Vec<AperturePort>,
+    /// Z-directed thin-wire subcells (FS.1c, Holland–Simpson in-cell
+    /// inductance). CPU backend only — the GPU backend rejects a drive
+    /// that carries any, see `ComputeError::Unsupported`.
+    pub thin_wires: Vec<ThinWire>,
     /// Probes recorded once per step, in order, after the ports.
     pub probes: Vec<Probe>,
     /// H-field probes (FS.4.2a) recorded once per step, alongside `probes`
@@ -306,6 +385,33 @@ impl Drive {
                 let _ = EComponent::Ez.flat(spec, cell);
             }
         }
+        for w in &self.thin_wires {
+            assert!(
+                w.k_lo < w.k_hi,
+                "ThinWire: k_lo must be < k_hi (got {} >= {})",
+                w.k_lo,
+                w.k_hi
+            );
+            assert!(
+                w.radius_m.is_finite()
+                    && w.radius_m > 0.0
+                    && w.radius_m < 0.5 * spec.dx.min(spec.dy),
+                "ThinWire: radius_m must be positive and well under half the \
+                 transverse cell size (got {} m)",
+                w.radius_m
+            );
+            if let Some(fk) = w.feed_k {
+                assert!(
+                    fk >= w.k_lo && fk < w.k_hi,
+                    "ThinWire: feed_k ({fk}) must lie within [k_lo, k_hi) = [{}, {})",
+                    w.k_lo,
+                    w.k_hi
+                );
+            }
+            for k in w.k_lo..w.k_hi {
+                let _ = EComponent::Ez.flat(spec, (w.i, w.j, k));
+            }
+        }
         for p in &self.probes {
             let _ = p.component.flat(spec, p.cell);
         }
@@ -320,6 +426,7 @@ impl Drive {
         self.soft_sources.is_empty()
             && self.ports.is_empty()
             && self.aperture_ports.is_empty()
+            && self.thin_wires.is_empty()
             && self.probes.is_empty()
             && self.h_probes.is_empty()
     }

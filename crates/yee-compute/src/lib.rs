@@ -36,6 +36,11 @@
 //! z-taper-straddling aperture ports are rejected with
 //! [`ComputeError::Unsupported`].
 //!
+//! FS.1c adds a z-directed [`ThinWire`] subcell (Holland & Simpson 1981
+//! in-cell inductance; see `ThinWire`'s doc for the full citation +
+//! derivation), CPU backend only — the GPU backend rejects a drive that
+//! carries any with [`ComputeError::Unsupported`].
+//!
 //! # Example
 //!
 //! ```
@@ -65,7 +70,8 @@ mod gpu;
 pub use cpu::CpuFdtd;
 pub use dispersive::{DispersiveMap, DispersiveMaterial};
 pub use drive::{
-    AperturePort, Drive, EComponent, HComponent, HProbe, Probe, ResistivePort, SoftSource, Waveform,
+    AperturePort, Drive, EComponent, HComponent, HProbe, Probe, ResistivePort, SoftSource,
+    ThinWire, Waveform,
 };
 pub use engine::FdtdEngine;
 pub use error::ComputeError;

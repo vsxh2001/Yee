@@ -361,6 +361,11 @@ impl GpuFdtd {
                 "aperture-port (v, i) recording (FS.2a) is not on the GPU yet",
             ));
         }
+        if !drive.thin_wires.is_empty() {
+            return Err(ComputeError::Unsupported(
+                "thin-wire subcells (FS.1c) are not on the GPU yet",
+            ));
+        }
         let field_lens = [
             len3(spec.ex_dims()),
             len3(spec.ey_dims()),

@@ -193,6 +193,7 @@ fn measure_alpha(r_s: f64) -> f64 {
                 record: false,
             },
         ],
+        thin_wires: vec![],
         probes: vec![
             mk_probe(i_a0),
             mk_probe(i_a0 + SPACING_CELLS),
