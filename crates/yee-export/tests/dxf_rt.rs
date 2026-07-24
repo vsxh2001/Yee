@@ -7,9 +7,12 @@
 //! [`crate::import::arc_vertices`][arcv]'s angle-stepping loop, not a
 //! reimplementation.
 //!
-//! Plus the full named-rejection matrix: open polylines, every
-//! unsupported entity kind, nonzero elevation, and `$INSUNITS` outside
-//! mm/inch (including missing). Instant, non-ignored.
+//! Plus the full 8-variant named-rejection matrix: open polylines, every
+//! unsupported entity kind, nonzero elevation, a missing required group
+//! code (`BadValue`), an unclosed `POLYLINE` chain, a degenerate
+//! zero-chord bulge (`BadBulge`), no closed polylines at all
+//! (`NoOutline`), and `$INSUNITS` outside mm/inch (including missing).
+//! Instant, non-ignored.
 //!
 //! [arcv]: yee_export::import
 
@@ -291,12 +294,38 @@ fn out_of_subset_inputs_are_rejected_explicitly() {
         Err(DxfImportError::NonzeroElevation)
     );
 
+    // A required group code is missing (VERTEX has no group 10 / X).
+    let missing_x = "0\nPOLYLINE\n8\n0\n70\n1\n\
+         0\nVERTEX\n8\n0\n20\n0.0\n\
+         0\nSEQEND\n";
+    assert!(
+        matches!(
+            dxf_to_outline(&dxf_file(missing_x), &DxfOptions::default()),
+            Err(DxfImportError::BadValue(ref v)) if v == "VERTEX missing 10"
+        ),
+        "VERTEX missing group 10 must be BadValue"
+    );
+
     // POLYLINE never reaching SEQEND.
     let unclosed = "0\nPOLYLINE\n8\n0\n70\n1\n\
          0\nVERTEX\n8\n0\n10\n0.0\n20\n0.0\n";
     assert_eq!(
         dxf_to_outline(&dxf_file(unclosed), &DxfOptions::default()),
         Err(DxfImportError::UnclosedPolyline)
+    );
+
+    // A degenerate (zero-length-chord) bulge segment: the first two
+    // vertices coincide, so the bulged outgoing segment has no chord.
+    let degenerate_bulge = "0\nLWPOLYLINE\n8\n0\n90\n3\n70\n1\n\
+         10\n0.0\n20\n0.0\n42\n0.5\n\
+         10\n0.0\n20\n0.0\n\
+         10\n1.0\n20\n0.0\n";
+    assert!(
+        matches!(
+            dxf_to_outline(&dxf_file(degenerate_bulge), &DxfOptions::default()),
+            Err(DxfImportError::BadBulge(_))
+        ),
+        "zero-chord bulge must be BadBulge"
     );
 
     // No closed polylines at all.

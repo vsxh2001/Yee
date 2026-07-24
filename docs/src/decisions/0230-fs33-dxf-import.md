@@ -60,9 +60,11 @@ was asked (a caller with a `Substrate` + `Vec<PortRef>` can wrap
 | `NoOutline` | the file parsed but contained zero closed polylines |
 
 Every variant is exercised in `dxf_rt.rs`'s
-`out_of_subset_inputs_are_rejected_explicitly` (or the bulge/POLYLINE
-positive-path tests for `BadBulge`/`UnclosedPolyline`'s siblings), so the
-subset boundary stays machine-checkable, not just documented prose.
+`out_of_subset_inputs_are_rejected_explicitly` — including `BadValue` (a
+`VERTEX` missing its required group 10) and `BadBulge` (a degenerate
+zero-chord bulge segment), added in the Task 2 fix round after a reviewer
+caught them declared-but-untested — so the subset boundary stays
+machine-checkable, not just documented prose.
 
 ### 3. Units decision: strict, no lenient default
 
@@ -117,9 +119,11 @@ construction (not by DXF-spec interpretation) — the formula reproduces
    `POLYLINE`/`VERTEX`/`SEQEND` fallback path, vertex-exact.
 4. `layer_filter_skips_non_matching_layers` — `DxfOptions::layer` drops
    the non-matching entity, keeps the matching one.
-5. `out_of_subset_inputs_are_rejected_explicitly` — the full rejection
-   matrix (units missing/0/2, open polyline, nonzero elevation on both
-   `LWPOLYLINE` and `VERTEX`, unclosed `POLYLINE`, no-outline, and the
+5. `out_of_subset_inputs_are_rejected_explicitly` — the full 8-variant
+   rejection matrix (units missing/0/2, open polyline, nonzero elevation
+   on both `LWPOLYLINE` and `VERTEX`, a `VERTEX` missing a required group
+   code (`BadValue`), unclosed `POLYLINE`, a degenerate zero-chord bulge
+   (`BadBulge`), no-outline, and the
    `CIRCLE`/`ARC`/`ELLIPSE`/`SPLINE`/`TEXT`/`INSERT` named-entity matrix).
 
 Geometry-only, per the spec's non-goal: the FS.3.2c twin gate
