@@ -595,6 +595,82 @@ pub fn substrate_sigma_cells(model: &MicrostripModel, tan_d: f64, f_ref_hz: f64)
         .collect()
 }
 
+/// Map an N-layer [`Stackup`]'s per-layer `loss_tangent` to per-cell
+/// conductivity (FS.4.2b, ADR-0226): σ = 2π f_ref ε₀ ε_r(layer) tan
+/// δ(layer) for every `E_z` edge inside that layer's k-band, `0`
+/// elsewhere (air, the lid plane, any plane above the stack). Re-derives
+/// the k-bands from `stackup.layers` heights and `model.dx_m` with the
+/// exact quantization [`voxelize_stackup`] used (`round(height/dx).max(1)`,
+/// contiguous bands from `k = 0`) rather than inferring layer identity
+/// from the ε value — two layers can share `ε_r`. Returns a flat
+/// `[nx+1, ny+1, nz+1]` row-major vector matching the
+/// `MaterialsSpec::sigma_cells` convention — the multilayer
+/// generalization of [`substrate_sigma_cells`].
+///
+/// All-zero `tan δ` across every layer is a provable no-op: each band's
+/// σ is `... * 0.0` exactly, so the returned vector is all-zero.
+///
+/// # Panics
+///
+/// Panics if `model` carries no ε_r map, if any layer height is not
+/// positive, or on a non-physical (negative/non-finite) `loss_tangent`
+/// or `f_ref_hz`.
+pub fn stackup_sigma_cells(model: &MicrostripModel, stackup: &Stackup, f_ref_hz: f64) -> Vec<f64> {
+    assert!(
+        f_ref_hz > 0.0 && f_ref_hz.is_finite(),
+        "f_ref_hz must be positive and finite (got {f_ref_hz})"
+    );
+    const EPS0: f64 = 8.854_187_817e-12;
+    let omega = std::f64::consts::TAU * f_ref_hz;
+    let dx = model.dx_m;
+
+    // Same k-band bookkeeping voxelize_stackup used to fill ε: contiguous
+    // cell bands from k = 0, height quantized against the model's dx.
+    // sigma_by_k[k] is the layer sigma covering that cell; entries beyond
+    // the stack (air, lid plane) are never resized in, so a plain
+    // out-of-range lookup below naturally returns 0.
+    let mut sigma_by_k = Vec::new();
+    let mut k = 0usize;
+    for layer in &stackup.layers {
+        assert!(
+            layer.height_m > 0.0,
+            "stackup layer height must be positive"
+        );
+        assert!(
+            layer.loss_tangent >= 0.0 && layer.loss_tangent.is_finite(),
+            "stackup layer loss_tangent must be finite and >= 0 (got {})",
+            layer.loss_tangent
+        );
+        let n_cells = ((layer.height_m / dx).round() as usize).max(1);
+        let sigma = omega * EPS0 * layer.eps_r * layer.loss_tangent;
+        sigma_by_k.resize(k + n_cells, sigma);
+        k += n_cells;
+    }
+
+    let eps = model
+        .grid
+        .eps_r_cells
+        .as_ref()
+        .expect("stackup_sigma_cells: model has no eps_r map");
+    // The dielectric fill (both voxelize_stackup and voxelize_microstrip)
+    // only ever writes i in 0..nx, j in 0..ny — the eps array's `nx+1`/
+    // `ny+1` shape carries one padding plane per axis (shared with the
+    // other field components' node counts) that is never touched and
+    // stays at the `1.0` (air) default. Mirror that exact footprint here
+    // so a lookup at the padding plane reads 0, matching the real ε map
+    // instead of extending the layer's σ past where its ε was ever set.
+    let (nx, ny, _) = model.dims;
+    eps.indexed_iter()
+        .map(|((ii, jj, kk), _)| {
+            if ii < nx && jj < ny {
+                sigma_by_k.get(kk).copied().unwrap_or(0.0)
+            } else {
+                0.0
+            }
+        })
+        .collect()
+}
+
 /// Punch a **via** through the substrate at grid column `(i, j)`
 /// (R.1, ADR-0194): the `E_z` edges `k = 0 .. k_top` become PEC — a ground-to-trace
 /// shorting post when `k_top` is the trace plane.
@@ -1442,12 +1518,12 @@ pub fn voxelize_stackup(
 #[cfg(test)]
 mod rf_tool_tests {
     use super::*;
-    use yee_layout::{BBox, Layout, Point2, Polygon, PortRef, Substrate};
+    use yee_layout::{BBox, Layout, Point2, Polygon, PortRef, Stackup, StackupLayer, Substrate};
 
-    fn tiny_model() -> MicrostripModel {
+    fn tiny_layout() -> Layout {
         let traces = vec![Polygon::rect(0.0, 0.0, 6.0e-3, 3.0e-3)];
         let bbox = BBox::from_polygons(&traces);
-        let layout = Layout {
+        Layout {
             substrate: Substrate {
                 eps_r: 4.4,
                 height_m: 1.6e-3,
@@ -1461,15 +1537,19 @@ mod rf_tool_tests {
                 ref_impedance_ohm: 50.0,
             }],
             bbox,
-        };
-        voxelize_microstrip(
-            &layout,
-            &VoxelOptions {
-                dx_m: 0.4e-3,
-                xy_margin_cells: 4,
-                air_above_cells: 6,
-            },
-        )
+        }
+    }
+
+    fn tiny_opts() -> VoxelOptions {
+        VoxelOptions {
+            dx_m: 0.4e-3,
+            xy_margin_cells: 4,
+            air_above_cells: 6,
+        }
+    }
+
+    fn tiny_model() -> MicrostripModel {
+        voxelize_microstrip(&tiny_layout(), &tiny_opts())
     }
 
     #[test]
@@ -1493,6 +1573,116 @@ mod rf_tool_tests {
             }
         }
         assert!(in_sub > 0, "no substrate cells found");
+    }
+
+    /// Two-layer stack: 2 cells of ε_r=2.2/tanδ=0.02 under 3 cells of
+    /// ε_r=4.4/tanδ=0.005, open top (FS.4.2b fixture).
+    fn two_layer_stack() -> Stackup {
+        Stackup {
+            layers: vec![
+                StackupLayer {
+                    eps_r: 2.2,
+                    height_m: 0.8e-3, // 2 cells @ dx = 0.4e-3
+                    loss_tangent: 0.02,
+                },
+                StackupLayer {
+                    eps_r: 4.4,
+                    height_m: 1.2e-3, // 3 cells
+                    loss_tangent: 0.005,
+                },
+            ],
+            lid: false,
+        }
+    }
+
+    #[test]
+    fn stackup_sigma_cells_matches_each_layer_band_exactly() {
+        let stack = two_layer_stack();
+        let model = voxelize_stackup(&tiny_layout(), &stack, 0, &tiny_opts());
+        let f = 5.0e9;
+        let sigma = stackup_sigma_cells(&model, &stack, f);
+        let eps = model.grid.eps_r_cells.as_ref().unwrap();
+        assert_eq!(sigma.len(), eps.len());
+
+        const EPS0: f64 = 8.854_187_817e-12;
+        let omega = std::f64::consts::TAU * f;
+        let sigma_l0 = omega * EPS0 * 2.2 * 0.02;
+        let sigma_l1 = omega * EPS0 * 4.4 * 0.005;
+        assert!(sigma_l0 > sigma_l1, "fixture drift: bands must differ");
+
+        let (nx, ny, nz) = model.dims;
+        assert_eq!(nz, 2 + 3 + 1 + 6, "fixture drift: open-top stack height");
+        let sigma3 = Array3::from_shape_vec((nx + 1, ny + 1, nz + 1), sigma).unwrap();
+        for i in 0..nx {
+            for j in 0..ny {
+                for k in 0..5 {
+                    let want = if k < 2 { sigma_l0 } else { sigma_l1 };
+                    assert!(
+                        (sigma3[(i, j, k)] - want).abs() < 1e-12,
+                        "band mismatch at k={k}: got {}, want {want}",
+                        sigma3[(i, j, k)]
+                    );
+                }
+                // Boundary k=1 (last of layer 0) / k=2 (first of layer 1)
+                // are exact, distinct band values — not blended.
+                assert!((sigma3[(i, j, 1)] - sigma_l0).abs() < 1e-12);
+                assert!((sigma3[(i, j, 2)] - sigma_l1).abs() < 1e-12);
+                // Above the stack (air + lid-less top): lossless.
+                for k in 5..=nz {
+                    assert_eq!(sigma3[(i, j, k)], 0.0, "air cell at k={k} must be lossless");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn all_zero_loss_tangent_is_a_provable_no_op() {
+        let stack = Stackup {
+            layers: vec![
+                StackupLayer {
+                    eps_r: 2.2,
+                    height_m: 0.8e-3,
+                    loss_tangent: 0.0,
+                },
+                StackupLayer {
+                    eps_r: 4.4,
+                    height_m: 1.2e-3,
+                    loss_tangent: 0.0,
+                },
+            ],
+            lid: false,
+        };
+        let model = voxelize_stackup(&tiny_layout(), &stack, 0, &tiny_opts());
+        let sigma = stackup_sigma_cells(&model, &stack, 5.0e9);
+        assert!(!sigma.is_empty());
+        assert!(sigma.iter().all(|&s| s == 0.0), "loss-off must be all-zero");
+    }
+
+    #[test]
+    fn single_layer_stackup_sigma_matches_substrate_sigma_cells() {
+        let tan_d = 0.02;
+        let f = 5.0e9;
+        let micro = tiny_model();
+        let micro_sigma = substrate_sigma_cells(&micro, tan_d, f);
+
+        let stack = Stackup {
+            layers: vec![StackupLayer {
+                eps_r: 4.4,
+                height_m: 1.6e-3,
+                loss_tangent: tan_d,
+            }],
+            lid: false,
+        };
+        let multi = voxelize_stackup(&tiny_layout(), &stack, 0, &tiny_opts());
+        let multi_sigma = stackup_sigma_cells(&multi, &stack, f);
+
+        // Same k-band formula, same input eps map (voxel-stackup-001 pins
+        // the single-layer stackup bit-identical to voxelize_microstrip):
+        // the two code paths must agree bit-for-bit, not just numerically.
+        assert_eq!(
+            micro_sigma, multi_sigma,
+            "single-layer stackup_sigma_cells must match substrate_sigma_cells exactly"
+        );
     }
 
     #[test]
